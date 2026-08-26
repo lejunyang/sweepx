@@ -1144,6 +1144,7 @@ dependencies = [
 name = "sweepx-platform-macos"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sweepx-model",
  "sweepx-platform",
 ]
@@ -1154,6 +1155,7 @@ version = "0.1.0"
 dependencies = [
  "sweepx-model",
  "sweepx-platform",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
