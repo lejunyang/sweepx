@@ -1,14 +1,20 @@
 [package]
 name = "sweepx-analysis"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Candidate analysis and explanation engine for SweepX scan results"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-sweepx-canonical = { path = "../sweepx-canonical" }
-sweepx-model = { path = "../sweepx-model" }
-sweepx-scanner = { path = "../sweepx-scanner" }
+sweepx-canonical = { version = "0.1.0", path = "../sweepx-canonical" }
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false }
 schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"

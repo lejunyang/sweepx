@@ -1,9 +1,15 @@
 [package]
 name = "sweepx-core"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Application orchestration and read-only workflows for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 libc = "0.2.189"
@@ -13,16 +19,24 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 time = { version = "0.3.44", features = ["formatting", "std"] }
-sweepx-analysis = { path = "../sweepx-analysis" }
-sweepx-catalog = { path = "../sweepx-catalog" }
-sweepx-cleaner-schema = { path = "../sweepx-cleaner-schema" }
-sweepx-cleaner-vm = { path = "../sweepx-cleaner-vm" }
-sweepx-i18n = { path = "../sweepx-i18n" }
-sweepx-model = { path = "../sweepx-model" }
-sweepx-platform = { path = "../sweepx-platform" }
-sweepx-protocol = { path = "../sweepx-protocol" }
-sweepx-scanner = { path = "../sweepx-scanner", default-features = false, features = ["platform-linux", "platform-macos", "platform-windows"] }
-sweepx-tui = { path = "../sweepx-tui" }
+sweepx-analysis = { version = "0.1.0", path = "../sweepx-analysis" }
+sweepx-catalog = { version = "0.1.0", path = "../sweepx-catalog" }
+sweepx-cleaner-schema = { version = "0.1.0", path = "../sweepx-cleaner-schema" }
+sweepx-cleaner-vm = { version = "0.1.0", path = "../sweepx-cleaner-vm" }
+sweepx-i18n = { version = "0.1.0", path = "../sweepx-i18n" }
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
+sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
+sweepx-tui = { version = "0.1.0", path = "../sweepx-tui" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-linux"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-macos"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-windows"] }
 
 [dev-dependencies]
 tempfile = "3.21.0"

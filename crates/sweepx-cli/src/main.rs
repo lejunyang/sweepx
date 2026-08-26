@@ -1,18 +1,19 @@
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sweepx_core::{
     CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, ScanRequest,
-    StatusRequest, TuiReadRequest, cancel_with_store, capabilities, cleaner_list, cleaner_show,
+    StatusRequest, cancel_with_store, capabilities, cleaner_list, cleaner_show,
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
     render_human_output, scan_with_store, serialize_json, serialize_ndjson,
-    state_dir_from_explicit_or_default, status_with_store, tui_read_from_scan_json,
-    validate_absolute_root,
+    state_dir_from_explicit_or_default, status_with_store, validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
+use sweepx_tui::{BrowserModel, run_live_browser};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FormatArg {
@@ -34,8 +35,8 @@ impl From<FormatArg> for OutputFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = "sweepx",
-    version = "0.1.0",
-    about = "Read-only SweepX CLI facade"
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Read-only disk usage scanner and interactive browser"
 )]
 struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
@@ -51,6 +52,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Scan {
+        #[arg(long)]
+        tui: bool,
         #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
         roots: Vec<OsString>,
     },
@@ -73,16 +76,6 @@ enum Commands {
     Cleaner {
         #[command(subcommand)]
         command: CleanerCommands,
-    },
-    Tui {
-        #[arg(long, value_name = "ABSOLUTE_FILE")]
-        scan_json: PathBuf,
-        #[arg(long, default_value_t = 0)]
-        page_index: usize,
-        #[arg(long, default_value_t = sweepx_core::DEFAULT_ANALYSIS_INPUT_BYTES)]
-        max_input_bytes: usize,
-        #[arg(long, default_value_t = 100_000)]
-        max_total_rows: usize,
     },
     Capabilities,
 }
@@ -107,9 +100,20 @@ fn main() -> ProcessExitCode {
     };
     let locale_resolution = detect_locale(explicit_locale);
     let context = CoreContext::new(locale_resolution);
+    let format: OutputFormat = cli.format.into();
 
     let result = match cli.command {
-        Commands::Scan { roots } => {
+        Commands::Scan { tui, roots } => {
+            if tui
+                && let Err(message) = validate_tui_environment(
+                    format,
+                    std::io::stdin().is_terminal(),
+                    std::io::stdout().is_terminal(),
+                )
+            {
+                eprintln!("{message}");
+                return ProcessExitCode::from(2);
+            }
             let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
                 Ok(value) => value,
                 Err(code) => return code,
@@ -121,7 +125,7 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
-            match store.as_ref() {
+            let scan = match store.as_ref() {
                 Some(store) => scan_with_store(
                     &context,
                     &ScanRequest {
@@ -129,8 +133,7 @@ fn main() -> ProcessExitCode {
                         state_dir: state_dir.clone(),
                     },
                     Some(store),
-                )
-                .map(RenderedResult::Scan),
+                ),
                 None => scan_with_store(
                     &context,
                     &ScanRequest {
@@ -138,9 +141,12 @@ fn main() -> ProcessExitCode {
                         state_dir: None,
                     },
                     Option::<&sweepx_core::MemorySnapshotStore>::None,
-                )
-                .map(RenderedResult::Scan),
+                ),
+            };
+            if tui {
+                return finish_tui_scan(&context, scan);
             }
+            scan.map(RenderedResult::Scan)
         }
         Commands::Explain {
             scan_json,
@@ -214,27 +220,11 @@ fn main() -> ProcessExitCode {
                     .map(RenderedResult::Cleaner)
             }
         },
-        Commands::Tui {
-            scan_json,
-            page_index,
-            max_input_bytes,
-            max_total_rows,
-        } => tui_read_from_scan_json(
-            &context,
-            &TuiReadRequest {
-                scan_json_path: scan_json,
-                page_index,
-                max_input_bytes,
-                max_total_rows,
-            },
-        )
-        .map(RenderedResult::TuiRead),
         Commands::Capabilities => Ok(RenderedResult::Capabilities(capabilities(&context))),
     };
 
     match result {
         Ok(result) => {
-            let format: OutputFormat = cli.format.into();
             let code = result.exit_code();
             print_output(&context, format, &result);
             ProcessExitCode::from(code)
@@ -242,6 +232,59 @@ fn main() -> ProcessExitCode {
         Err(error) => {
             eprintln!("{error}");
             ProcessExitCode::from(core_error_exit_code(&error) as u8)
+        }
+    }
+}
+
+fn validate_tui_environment(
+    format: OutputFormat,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<(), &'static str> {
+    if format != OutputFormat::Human {
+        return Err("--tui cannot be combined with --format json or --format ndjson");
+    }
+    if !stdin_is_terminal || !stdout_is_terminal {
+        return Err("--tui requires terminal stdin and stdout");
+    }
+    Ok(())
+}
+
+fn finish_tui_scan(
+    context: &CoreContext,
+    scan: Result<sweepx_core::ScanSuccess, sweepx_core::CoreError>,
+) -> ProcessExitCode {
+    let scan = match scan {
+        Ok(scan) => scan,
+        Err(error) => {
+            eprintln!("{error}");
+            return ProcessExitCode::from(core_error_exit_code(&error) as u8);
+        }
+    };
+    let scan_exit_code = scan.output.conservative_exit_code() as u8;
+    if scan.output.status == sweepx_protocol::OutputStatus::Unsupported {
+        println!("{}", render_human_output(context, &scan.output));
+        return ProcessExitCode::from(scan_exit_code);
+    }
+    let scan_id = scan
+        .output
+        .summary
+        .get("scanId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let model = BrowserModel::from_scan_parts(
+        context.locale(),
+        scan.output.status,
+        scan_id,
+        &scan.summary.roots,
+        &scan.summary.entries,
+        &scan.summary.aggregates,
+    );
+    match run_live_browser(model) {
+        Ok(()) => ProcessExitCode::from(scan_exit_code),
+        Err(error) => {
+            eprintln!("interactive browser failed: {error}");
+            ProcessExitCode::from(8)
         }
     }
 }
@@ -298,7 +341,6 @@ enum RenderedResult {
     Explanation(sweepx_core::ExplanationSuccess),
     Snapshot(sweepx_core::SnapshotSuccess),
     Cleaner(sweepx_core::CleanerSuccess),
-    TuiRead(sweepx_core::TuiReadSuccess),
     Capabilities(sweepx_core::CapabilitiesSuccess),
 }
 
@@ -309,7 +351,6 @@ impl RenderedResult {
             Self::Explanation(explanation) => &explanation.output,
             Self::Snapshot(snapshot) => &snapshot.output,
             Self::Cleaner(cleaner) => &cleaner.output,
-            Self::TuiRead(tui) => &tui.output,
             Self::Capabilities(capabilities) => &capabilities.output,
         }
     }
@@ -355,5 +396,22 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["sweepx", "delete"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["sweepx", "scan", "--tui", "/tmp"]),
+            Ok(Cli {
+                command: Commands::Scan { tui: true, .. },
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["sweepx", "tui", "--scan-json", "/tmp/a.json"]).is_err());
+    }
+
+    #[test]
+    fn tui_preflight_rejects_machine_formats_and_non_terminals() {
+        assert!(validate_tui_environment(OutputFormat::Human, true, true).is_ok());
+        assert!(validate_tui_environment(OutputFormat::Json, true, true).is_err());
+        assert!(validate_tui_environment(OutputFormat::Ndjson, true, true).is_err());
+        assert!(validate_tui_environment(OutputFormat::Human, false, true).is_err());
+        assert!(validate_tui_environment(OutputFormat::Human, true, false).is_err());
     }
 }

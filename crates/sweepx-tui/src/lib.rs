@@ -18,6 +18,14 @@ use sweepx_model::{ArithmeticState, CoverageState, DirectoryAggregate, ObjectTyp
 use sweepx_protocol::{OutputKind, OutputStatus};
 use thiserror::Error;
 
+mod live;
+
+pub use live::{
+    BrowserAction, BrowserControl, BrowserError, BrowserEventSource, BrowserKeyMapper,
+    BrowserModel, BrowserReducer, BrowserRow, CrosstermEventSource, DefaultBrowserKeyMapper,
+    ReadOnlyBrowserReducer, TerminalGuard, render_live_browser, run_browser_loop, run_live_browser,
+};
+
 pub const MAX_PAGE_ROWS: usize = 500;
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_TOTAL_ROWS: usize = 100_000;

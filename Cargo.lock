@@ -1049,6 +1049,7 @@ dependencies = [
  "sweepx-core",
  "sweepx-i18n",
  "sweepx-protocol",
+ "sweepx-tui",
  "tempfile",
 ]
 

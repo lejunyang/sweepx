@@ -8,7 +8,6 @@ use tempfile::TempDir;
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
-
 #[test]
 fn locale_override_beats_environment_for_human_output() {
     let temp = TempDir::new().unwrap();
@@ -41,6 +40,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
+    assert_eq!(json["summary"]["commandCount"], "7");
     assert_eq!(json["summary"]["capabilityCount"], "14");
     let commands = json["data"]["commands"].as_array().unwrap();
     let scan = commands.iter().find(|item| item["id"] == "scan").unwrap();
@@ -101,11 +101,22 @@ fn capabilities_json_uses_fixed_machine_keys() {
             .iter()
             .find(|item| {
                 item["qualificationKey"]["osFamily"] == os
-                    && item["qualificationKey"]["capability"] == "tui.read.scan_json"
+                    && item["qualificationKey"]["capability"] == "scan.tui.live"
             })
             .unwrap();
-        assert_eq!(tui["state"], "qualified");
+        assert_eq!(tui["state"], "unsupported");
     }
+
+    let linux_tui = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"] == "scan.tui.live"
+        })
+        .unwrap();
+    assert_eq!(linux_tui["state"], "degraded");
 }
 
 #[test]
@@ -241,61 +252,93 @@ fn cleaner_show_reports_incompatible_builtin_with_exit_12() {
 }
 
 #[test]
-fn tui_read_json_reports_bounded_read_only_status() {
-    let fixture = TempDir::new().unwrap();
-    let scan_json = fixture.path().join("scan.json");
-    fs::write(&scan_json, sample_scan_json()).unwrap();
+fn old_public_tui_subcommand_is_removed() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("tui")
+        .arg("--scan-json")
+        .arg("/tmp/scan.json");
+    cmd.assert().code(2);
+}
 
+#[test]
+fn live_tui_rejects_json_before_validating_or_scanning_roots() {
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
         .arg("--format")
         .arg("json")
-        .arg("tui")
-        .arg("--scan-json")
-        .arg(&scan_json);
+        .arg("scan")
+        .arg("--tui")
+        .arg("relative-root");
+    let output = cmd.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--tui cannot be combined"));
+    assert!(!stderr.contains("scan root must be absolute"));
+}
 
+#[test]
+fn live_tui_rejects_non_terminal_streams_before_scanning() {
+    let fixture = TempDir::new().unwrap();
+    let missing_root = fixture.path().join("missing");
+    let state_dir = fixture.path().join("state");
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg("--tui")
+        .arg(&missing_root);
+    let output = cmd.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("requires terminal stdin and stdout"));
+    assert!(!state_dir.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scan_defaults_to_a_human_readable_file_table() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("LANG", "en_US.UTF-8")
+        .arg("scan")
+        .arg(&root);
     let output = cmd.assert().get_output().stdout.clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["kind"], "status.result");
-    assert_eq!(json["summary"]["command"], "tui");
-    assert_eq!(json["data"]["mode"], "read_only");
-    assert_eq!(json["data"]["readOnly"], true);
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("Path"));
+    assert!(text.contains("Reclaimable"));
+    assert!(text.contains("visible.txt"));
+    assert!(!text.trim_start().starts_with('{'));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn tui_rejects_zero_limits() {
+fn default_scan_table_is_bounded() {
     let fixture = TempDir::new().unwrap();
-    let scan_json = fixture.path().join("scan.json");
-    fs::write(&scan_json, sample_scan_json()).unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    for index in 0..45 {
+        fs::write(root.join(format!("file-{index:02}.txt")), b"data").unwrap();
+    }
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
-        .arg("tui")
-        .arg("--scan-json")
-        .arg(&scan_json)
-        .arg("--max-total-rows")
-        .arg("0");
+        .env("LANG", "en_US.UTF-8")
+        .arg("--state-dir")
+        .arg(fixture.path().join("state"))
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
-    let output = cmd.assert().get_output().stderr.clone();
-    let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("analysis input must be a positive bounded byte limit"));
-}
-
-#[test]
-fn tui_rejects_invalid_kind_input() {
-    let fixture = TempDir::new().unwrap();
-    let scan_json = fixture.path().join("scan.json");
-    fs::write(&scan_json, sample_non_scan_json()).unwrap();
-
-    let mut cmd = cli_command();
-    cmd.current_dir(cli_crate_dir())
-        .arg("tui")
-        .arg("--scan-json")
-        .arg(&scan_json);
-
-    let output = cmd.assert().get_output().stderr.clone();
-    let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("expected scan.result input"));
+    assert!(stdout.contains("Status: ok"));
+    assert!(stdout.contains("more rows omitted"));
+    assert!(stdout.lines().count() < 50);
 }
 
 #[test]
@@ -595,35 +638,6 @@ fn sample_scan_json() -> String {
             }],
             "boundaries": []
         },
-        "warnings": [],
-        "errors": []
-    }))
-    .unwrap()
-}
-
-fn sample_non_scan_json() -> String {
-    serde_json::to_string(&json!({
-        "schema": "sweepx.output/v1",
-        "kind": "capabilities.result",
-        "requestId": "req-1",
-        "operationId": "op-1",
-        "generatedAt": "2026-08-26T00:00:00Z",
-        "status": "ok",
-        "exitCode": 0,
-        "compat": {
-            "coreVersion": "0.1.0",
-            "scannerSemanticsVersion": 1,
-            "safetyPolicyVersion": 1,
-            "platformAdapter": {
-                "id": "linux",
-                "version": "0.1.0"
-            },
-            "cleanerSetDigest": "sha256:test",
-            "requiredFeatures": [],
-            "extensions": []
-        },
-        "summary": {},
-        "data": {},
         "warnings": [],
         "errors": []
     }))

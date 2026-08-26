@@ -21,19 +21,24 @@ use sweepx_model::{
     CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
     OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
-use sweepx_platform::{BoundaryKind, BoundaryRecord, CancellationToken, ScanRoot};
+use sweepx_platform::{BoundaryKind, BoundaryRecord};
 use sweepx_protocol::{
     CompatSnapshot, EventCheckpoint, EventEnvelope, EventPhase, EventType, ExitCode,
     OutputEnvelope, OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage,
 };
-use sweepx_scanner::{ProgressEvent, ScanError, ScanSummary, Scanner, ScannerOptions};
+pub use sweepx_scanner::ScanSummary;
+use sweepx_scanner::{ProgressEvent, ScanError};
 use sweepx_tui::{LoadLimits as TuiLoadLimits, ViewModel, ViewModelError};
 use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
+use sweepx_platform::{CancellationToken, ScanRoot};
+#[cfg(target_os = "linux")]
 use sweepx_scanner::HostPlatformScanner;
+#[cfg(target_os = "linux")]
+use sweepx_scanner::{Scanner, ScannerOptions};
 
 pub const CORE_VERSION: &str = "0.1.0";
 pub const SCANNER_SEMANTICS_VERSION: u32 = 1;
@@ -42,6 +47,7 @@ pub const STREAM_ID_PREFIX: &str = "stream-p1";
 const SNAPSHOT_SCHEMA: &str = "sweepx.operation-snapshot/v1";
 const OPERATION_ID_MAX_LEN: usize = 128;
 pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -238,6 +244,9 @@ pub struct ScanSuccess {
     pub output: OutputEnvelope,
     pub events: Vec<EventEnvelope>,
     pub snapshot: OperationSnapshot,
+    /// The typed, in-memory result of this scan. Interactive clients must use
+    /// this snapshot instead of round-tripping through exported JSON.
+    pub summary: ScanSummary,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -452,13 +461,15 @@ pub fn scan_with_store<S: SnapshotStore>(
     if request.roots.is_empty() {
         return Err(CoreError::MissingRoots);
     }
+    if let Some(path) = request.roots.iter().find(|path| !path.is_absolute()) {
+        return Err(CoreError::NonAbsoluteRoot(path.clone()));
+    }
+
+    #[cfg(target_os = "linux")]
     let roots: Vec<ScanRoot> = request
         .roots
         .iter()
         .map(|path| {
-            if !path.is_absolute() {
-                return Err(CoreError::NonAbsoluteRoot(path.clone()));
-            }
             ScanRoot::new(path.clone()).map_err(|_| CoreError::NonAbsoluteRoot(path.clone()))
         })
         .collect::<Result<_, _>>()?;
@@ -488,6 +499,13 @@ pub fn scan_with_store<S: SnapshotStore>(
             output,
             events,
             snapshot,
+            summary: ScanSummary {
+                roots: Vec::new(),
+                entries: Vec::new(),
+                aggregates: Vec::new(),
+                boundaries: Vec::new(),
+                progress: Vec::new(),
+            },
         });
     }
 
@@ -573,6 +591,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             output,
             events,
             snapshot,
+            summary,
         })
     }
 }
@@ -650,7 +669,6 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         ),
         command_record("cleaner.list", cleaner_state, cleaner_reason),
         command_record("cleaner.show", cleaner_state, cleaner_reason),
-        command_record("tui", CapabilityState::Qualified, "TUI_READ_PATH_SUPPORTED"),
         command_record(
             "capabilities",
             CapabilityState::Qualified,
@@ -678,9 +696,9 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         ),
         capability_record(
             "linux",
-            "tui.read.scan_json",
-            CapabilityState::Qualified,
-            "TUI_READ_PATH_SUPPORTED",
+            "scan.tui.live",
+            CapabilityState::Degraded,
+            "LINUX_LIVE_TUI_DEVELOPMENT",
         ),
         capability_record(
             "linux",
@@ -714,9 +732,9 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         ),
         capability_record(
             "macos",
-            "tui.read.scan_json",
-            CapabilityState::Qualified,
-            "TUI_READ_PATH_SUPPORTED",
+            "scan.tui.live",
+            CapabilityState::Unsupported,
+            "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
         ),
         capability_record(
             "windows",
@@ -738,9 +756,9 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         ),
         capability_record(
             "windows",
-            "tui.read.scan_json",
-            CapabilityState::Qualified,
-            "TUI_READ_PATH_SUPPORTED",
+            "scan.tui.live",
+            CapabilityState::Unsupported,
+            "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
         ),
     ];
     output.summary = json!({
@@ -964,6 +982,9 @@ pub fn tui_read_from_scan_json(
 }
 
 pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> String {
+    if output.kind == OutputKind::ScanResult {
+        return render_human_scan_output(context, output, DEFAULT_HUMAN_SCAN_ROWS);
+    }
     let catalog = Catalog::new(context.locale());
     if output.kind == OutputKind::ExplanationResult {
         let count = output
@@ -1055,7 +1076,7 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
             .and_then(json_decimal_to_usize)
             .unwrap_or(output.errors.len()),
         status: status_label(output.status),
-        capabilities: "scan, explain, status, cancel, cleaner, tui, capabilities",
+        capabilities: "scan (--tui), explain, status, cancel, cleaner, capabilities",
         detail: output
             .errors
             .first()
@@ -1099,6 +1120,149 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
         catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
     ]
     .join("\n")
+}
+
+fn render_human_scan_output(
+    context: &CoreContext,
+    output: &OutputEnvelope,
+    max_rows: usize,
+) -> String {
+    let catalog = Catalog::new(context.locale());
+    let mut lines = vec![
+        format!(
+            "{}: scan",
+            catalog.render(MessageKey::LabelCommand, &MessageArgs::default())
+        ),
+        format!(
+            "{}: {}",
+            catalog.render(MessageKey::LabelLocale, &MessageArgs::default()),
+            context.locale().as_bcp47()
+        ),
+    ];
+    let status = status_label(output.status);
+    lines.push(match context.locale() {
+        Locale::ZhCn => format!("状态: {status}"),
+        Locale::EnUs => format!("Status: {status}"),
+    });
+    let aggregates: BTreeMap<&str, &Value> = output
+        .data
+        .get("aggregates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|aggregate| {
+            aggregate
+                .get("directoryIdentity")
+                .and_then(Value::as_str)
+                .map(|identity| (identity, aggregate))
+        })
+        .collect();
+    let items = output
+        .data
+        .get("roots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            output
+                .data
+                .get("entries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .fold(BTreeMap::<&str, &Value>::new(), |mut items, item| {
+            if let Some(path) = item.get("displayPath").and_then(Value::as_str) {
+                items.entry(path).or_insert(item);
+            }
+            items
+        })
+        .into_values()
+        .collect::<Vec<_>>();
+    let headings = match context.locale() {
+        Locale::ZhCn => ("路径", "类型", "可回收", "覆盖"),
+        Locale::EnUs => ("Path", "Type", "Reclaimable", "Coverage"),
+    };
+    lines.push(format!(
+        "{:<56}  {:<10}  {:>14}  {}",
+        headings.0, headings.1, headings.2, headings.3
+    ));
+    lines.push("-".repeat(100));
+    for item in items.iter().take(max_rows) {
+        let path = item
+            .get("displayPath")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let kind = item
+            .get("objectType")
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        let aggregate = aggregates.get(path).copied();
+        let reclaimable = aggregate
+            .and_then(|value| value.get("potentiallyReclaimableBytes"))
+            .or_else(|| item.get("reclaimableEstimate"))
+            .or_else(|| item.get("logicalBytes"))
+            .map(render_human_evidence_value)
+            .unwrap_or_else(|| "unknown".to_string());
+        let coverage = aggregate
+            .and_then(|value| value.get("coverage"))
+            .or_else(|| item.get("coverage"))
+            .and_then(|value| value.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "{:<56}  {:<10}  {:>14}  {}",
+            truncate_display(path, 56),
+            kind,
+            reclaimable,
+            coverage
+        ));
+    }
+    if items.len() > max_rows {
+        lines.push(match context.locale() {
+            Locale::ZhCn => format!(
+                "… 另有 {} 行未显示；使用 --format json 获取机器输出。",
+                items.len() - max_rows
+            ),
+            Locale::EnUs => format!(
+                "… {} more rows omitted; use --format json for machine output.",
+                items.len() - max_rows
+            ),
+        });
+    }
+    lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
+    lines.join("\n")
+}
+
+fn render_human_evidence_value(value: &Value) -> String {
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match state {
+        "known" => value
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        "lower_bound" => format!(
+            ">= {}",
+            value
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        other => other.to_string(),
+    }
+}
+
+fn truncate_display(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", value.chars().skip(count - keep).collect::<String>())
 }
 
 pub fn serialize_json(output: &OutputEnvelope) -> String {
@@ -1830,6 +1994,7 @@ fn unsupported_scan_output(
     output
 }
 
+#[cfg(target_os = "linux")]
 fn scan_status(summary: &ScanSummary) -> OutputStatus {
     if scan_error_count(summary) > 0 || scan_partial_boundary_count(summary) > 0 {
         OutputStatus::Partial
@@ -1838,6 +2003,7 @@ fn scan_status(summary: &ScanSummary) -> OutputStatus {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn scan_error_count(summary: &ScanSummary) -> u128 {
     summary
         .progress
@@ -1846,6 +2012,7 @@ fn scan_error_count(summary: &ScanSummary) -> u128 {
         .count() as u128
 }
 
+#[cfg(target_os = "linux")]
 fn scan_partial_boundary_count(summary: &ScanSummary) -> u128 {
     summary
         .boundaries
@@ -2044,6 +2211,12 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "TUI_READ_PATH_SUPPORTED" => {
             "TUI validates a bounded scan.result input and stays read-only."
+        }
+        "LINUX_LIVE_TUI_DEVELOPMENT" => {
+            "The in-process read-only TUI browses the completed live Linux scan snapshot."
+        }
+        "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER" => {
+            "The live TUI is unavailable because the host scanner is not implemented."
         }
         _ => "Capability state is intentionally conservative.",
     }
@@ -2442,6 +2615,43 @@ mod tests {
         let rendered = render_human_output(&context, &output);
         assert!(rendered.contains("语言"));
         assert!(!rendered.contains("Locale"));
+    }
+
+    #[test]
+    fn human_scan_output_joins_aggregate_and_deduplicates_directory_row() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let mut output = OutputEnvelope::new(
+            OutputKind::ScanResult,
+            RequestId::new("req"),
+            OperationId::new("op"),
+            timestamp_now(),
+            OutputStatus::Ok,
+            ExitCode::Completed,
+            compat_snapshot("linux"),
+        );
+        let entry = json!({
+            "displayPath": "/tmp/root",
+            "objectType": "directory",
+            "reclaimableEstimate": {"state": "known", "value": "0"},
+            "coverage": {"state": "incomplete"}
+        });
+        output.data = json!({
+            "roots": [entry.clone()],
+            "entries": [entry],
+            "aggregates": [{
+                "directoryIdentity": "/tmp/root",
+                "potentiallyReclaimableBytes": {"state": "known", "value": "4096"},
+                "coverage": {"state": "complete"}
+            }]
+        });
+
+        let rendered = render_human_output(&context, &output);
+        assert_eq!(rendered.matches("/tmp/root").count(), 1);
+        assert!(rendered.contains("4096"));
+        assert!(rendered.contains("complete"));
     }
 
     #[test]
