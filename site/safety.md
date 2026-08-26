@@ -59,6 +59,22 @@ P3 libraries 把以下 simulation-only 对象保持为不同类型：
 
 因此 P3 能验证 replay、binding、fencing、audit 与 fault-handling 逻辑，但不能验证真实 Trash、恢复性、释放空间或 TOCTOU 收口。
 
+## P4a.2 失败关闭资格记录
+
+P4a.2 增加的是 typed/validated capability qualification record 合同，不是 mutation 实现。它把 mutation 拆成五个独立单元：
+
+| Capability cell | Linux | macOS | Windows |
+|---|---|---|---|
+| `trash.local.file` | disabled | disabled | disabled |
+| `trash.local.directory` | disabled | disabled | disabled |
+| `permanent.local.file` | disabled | disabled | disabled |
+| `permanent.local.directory` | disabled | disabled | disabled |
+| `permanent.local.link` | disabled | disabled | disabled |
+
+验证器拒绝把 `fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 用作 mutation 资格。未来只有 evidence class 为 `real_os_qualification`、有效性为 `current`，且完整匹配 Core/version、policy 与 adapter digest、OS build、arch、filesystem/version、volume、provider/backend、ordinary-user profile 和精确 capability 的 tuple，才可能使单个单元合格。
+
+这只是失败关闭的 registry substrate，不是运行时 registry 服务。当前没有合格 mutation 记录、native adapter、mutation command 或 approval UI。
+
 ## 未来 mutation 的不可谈判约束
 
 下列内容是未来发布门槛，不是当前能力声明：

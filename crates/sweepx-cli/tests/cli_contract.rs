@@ -1,8 +1,12 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
+use sweepx_protocol::{
+    CapabilityCell, CapabilityRecordV1, CapabilityState, EvidenceClass, OsFamily,
+};
 use tempfile::TempDir;
 
 fn cli_command() -> Command {
@@ -41,8 +45,12 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
     assert_eq!(json["summary"]["commandCount"], "7");
-    assert_eq!(json["summary"]["capabilityCount"], "14");
+    assert_eq!(json["summary"]["capabilityCount"], "28");
     let commands = json["data"]["commands"].as_array().unwrap();
+    assert!(commands.iter().all(|command| command["mutating"] == false));
+    assert!(commands.iter().all(|command| {
+        !matches!(command["id"].as_str(), Some("plan" | "approve" | "execute"))
+    }));
     let scan = commands.iter().find(|item| item["id"] == "scan").unwrap();
     assert_eq!(scan["state"], "degraded");
     let cancel = commands.iter().find(|item| item["id"] == "cancel").unwrap();
@@ -117,6 +125,109 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_tui["state"], "degraded");
+
+    let capability_values = json["data"]["capabilities"].as_array().unwrap();
+    let records = capability_values
+        .iter()
+        .map(|value| {
+            let record: CapabilityRecordV1 = serde_json::from_value(value.clone()).unwrap();
+            if record.state == CapabilityState::Qualified {
+                record.validate_at(&record.recorded_at).unwrap();
+            } else {
+                record.validate().unwrap();
+            }
+            record
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        json["summary"]["capabilityCount"],
+        records.len().to_string()
+    );
+
+    let unique_keys = records
+        .iter()
+        .map(|record| serde_json::to_string(&record.qualification_key).unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(unique_keys.len(), records.len());
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.is_qualified_mutation_at(&record.recorded_at))
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| { record.qualification_key.capability.as_str() != "mutation.local.any" })
+    );
+
+    let mutation_cells = [
+        (
+            CapabilityCell::TRASH_LOCAL_FILE,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+        ),
+        (
+            CapabilityCell::TRASH_LOCAL_DIRECTORY,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+        ),
+        (
+            CapabilityCell::PERMANENT_LOCAL_FILE,
+            "PERMANENT_QUALIFICATION_ABSENT",
+        ),
+        (
+            CapabilityCell::PERMANENT_LOCAL_DIRECTORY,
+            "PERMANENT_QUALIFICATION_ABSENT",
+        ),
+        (
+            CapabilityCell::PERMANENT_LOCAL_LINK,
+            "PERMANENT_QUALIFICATION_ABSENT",
+        ),
+    ];
+    for os_family in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
+        for (capability, reason_code) in mutation_cells {
+            let matches = records
+                .iter()
+                .filter(|record| {
+                    record.qualification_key.os_family == os_family
+                        && record.qualification_key.capability.as_str() == capability
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing or duplicate {os_family:?}/{capability}"
+            );
+            let record = matches[0];
+            assert_eq!(record.state, CapabilityState::Disabled);
+            assert_eq!(record.reason_code, reason_code);
+            assert!(matches!(
+                record.evidence.evidence_class,
+                EvidenceClass::FixtureConformanceOnly | EvidenceClass::Incomplete
+            ));
+        }
+    }
+
+    let linux_trash_file = records
+        .iter()
+        .find(|record| {
+            record.qualification_key.os_family == OsFamily::Linux
+                && record.qualification_key.capability.as_str() == CapabilityCell::TRASH_LOCAL_FILE
+        })
+        .unwrap();
+    assert_eq!(
+        linux_trash_file.evidence.evidence_class,
+        EvidenceClass::FixtureConformanceOnly
+    );
+    assert!(
+        records
+            .iter()
+            .filter(|record| {
+                record.qualification_key.capability.is_mutation()
+                    && !(record.qualification_key.os_family == OsFamily::Linux
+                        && record.qualification_key.capability.as_str()
+                            == CapabilityCell::TRASH_LOCAL_FILE)
+            })
+            .all(|record| record.evidence.evidence_class == EvidenceClass::Incomplete)
+    );
 }
 
 #[test]

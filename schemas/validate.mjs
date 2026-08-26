@@ -86,6 +86,143 @@ for (const { schemaId, file } of validations) {
   });
 }
 
+const capabilityValidator = ajv.getSchema(
+  "https://sweepx.dev/schemas/capability-record/v1"
+);
+if (!capabilityValidator) {
+  throw new Error("Missing compiled capability-record schema");
+}
+
+const digest =
+  "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const validQualifiedCapability = {
+  schema: "sweepx.capability-record/v1",
+  recordedAt: "2026-08-27T06:00:00Z",
+  qualificationKey: {
+    scope: "platform",
+    coreVersion: "0.9.0-beta.1",
+    scannerSemanticsVersion: 2,
+    safetyPolicyDigest: digest,
+    adapterId: "linux-gio-trash",
+    adapterDigest: digest,
+    osFamily: "linux",
+    osBuild: "6.12.10-arch1-1",
+    arch: "x86_64",
+    filesystem: "ext4",
+    filesystemVersion: "1.0-feature-set",
+    volumeClass: "local",
+    providerOrDesktopBackend: "gio-2.84.1",
+    runtimePrivilegeProfile: "ordinary_user",
+    capability: "trash.local.file"
+  },
+  state: "qualified",
+  reasonCode: "TEST_ONLY_SCHEMA_FIXTURE",
+  evidence: {
+    bundleDigest: digest,
+    evidenceClass: "real_os_qualification",
+    reviewedBy: ["schema-test"],
+    limitations: ["synthetic schema fixture only"],
+    invalidatesOn: ["adapter-digest-change"],
+    validity: {
+      status: "current",
+      validFrom: "2026-08-27T00:00:00Z",
+      expiresAt: "2026-08-28T00:00:00Z"
+    }
+  }
+};
+
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const qualifiedSchemaCases = [
+  {
+    name: "valid exact platform tuple",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "valid exact cleaner tuple",
+    expected: true,
+    mutate(record) {
+      record.qualificationKey.scope = "cleaner";
+      record.qualificationKey.cleanerId = "org.sweepx.test-cleaner";
+      record.qualificationKey.cleanerVersion = "1.2.3";
+    }
+  },
+  {
+    name: "missing evidence provenance",
+    expected: false,
+    mutate(record) {
+      delete record.evidence.evidenceClass;
+    }
+  },
+  {
+    name: "unknown destructive cell with development evidence",
+    expected: false,
+    mutate(record) {
+      record.qualificationKey.capability = "delete.local.file";
+      record.evidence.evidenceClass = "development_snapshot";
+    }
+  },
+  {
+    name: "repeated placeholder digest",
+    expected: false,
+    mutate(record) {
+      record.qualificationKey.adapterDigest = `sha256:${"0".repeat(64)}`;
+    }
+  },
+  {
+    name: "glob-bearing exact tuple",
+    expected: false,
+    mutate(record) {
+      record.qualificationKey.osBuild = "6.*";
+    }
+  },
+  {
+    name: "platform scope with cleaner identity",
+    expected: false,
+    mutate(record) {
+      record.qualificationKey.cleanerId = "org.sweepx.test-cleaner";
+      record.qualificationKey.cleanerVersion = "1.2.3";
+    }
+  },
+  {
+    name: "cleaner scope missing full identity",
+    expected: false,
+    mutate(record) {
+      record.qualificationKey.scope = "cleaner";
+      record.qualificationKey.cleanerId = "org.sweepx.test-cleaner";
+    }
+  },
+  {
+    name: "legacy duplicate expiry field",
+    expected: false,
+    mutate(record) {
+      record.evidence.expiresAt = "2026-08-29T00:00:00Z";
+    }
+  },
+  {
+    name: "strong qualification missing expiry",
+    expected: false,
+    mutate(record) {
+      delete record.evidence.validity.expiresAt;
+    }
+  }
+];
+
+for (const testCase of qualifiedSchemaCases) {
+  const record = clone(validQualifiedCapability);
+  testCase.mutate(record);
+  const ok = capabilityValidator(record);
+  if (ok !== testCase.expected) {
+    failed = true;
+    console.log(`FAIL capability schema case: ${testCase.name}`);
+    for (const error of capabilityValidator.errors ?? []) {
+      console.log(`  ${error.instancePath || "/"} ${error.message}`);
+    }
+  } else {
+    console.log(`PASS capability schema case: ${testCase.name}`);
+  }
+}
+
 for (const result of results) {
   if (result.ok) {
     console.log(`PASS ${result.file} -> ${result.schemaId}`);

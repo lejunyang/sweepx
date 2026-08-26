@@ -17,7 +17,7 @@ title: 路线图
 | P1 scanner CLI | Linux read-only scan degraded；status snapshot 可用 | macOS/Windows scanner unsupported；live cancel disabled；三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现 | 没有 CLI wiring、可信 HumanApproval broker、native path、真实 revalidation 或 platform adapter；阶段尚未资格化 |
-| P4a 资格底座 | Linux `cfg(test)` disposable fixture、一次性绑定、durable intent 与 fake adapter 结果分类 | 没有 GIO/native Trash 调用，不开放产品 mutation capability |
+| P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |
 | P4+ mutation | 无公开能力 | Trash、Permanent 与发布资格全部是未来工作 |
 | 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
 
@@ -60,6 +60,8 @@ title: 路线图
 6. CLI/TUI/Agent/Cleaner 对相同身份、风险与结果保持一致。
 
 当前没有进入这一步。
+
+P4a.2 只完成了失败关闭的 qualification registry 合同。`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link` 在三个 OS family 上仍全部 disabled。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 和 `mismatched` evidence 永远不能资格化 mutation；未来也只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，单个 cell 才可能合格。
 
 ## 未来命令仍然只是提案
 

@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sweepx.dev/schemas/capability-record/v1",
   "title": "SweepX Capability Record v1",
+  "$comment": "This schema validates record structure only. It never grants qualified authority: consumers must call the clock-aware Rust CapabilityRecordV1::validate_at with a trusted RFC 3339 evaluation time to enforce temporal ordering and expiry.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,9 +21,249 @@
       "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
     },
     "qualificationKey": {
+      "$ref": "#/$defs/qualificationKey"
+    },
+    "state": {
+      "$ref": "#/$defs/capabilityState"
+    },
+    "reasonCode": {
+      "$ref": "#/$defs/boundedString"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "qualified"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "qualificationKey": {
+            "properties": {
+              "safetyPolicyDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "adapterDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              }
+            }
+          },
+          "evidence": {
+            "required": [
+              "validity"
+            ],
+            "properties": {
+              "bundleDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "evidenceClass": {
+                "enum": [
+                  "development_snapshot",
+                  "real_os_qualification"
+                ]
+              },
+              "validity": {
+                "required": [
+                  "validFrom"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "current"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "qualified"
+          },
+          "qualificationKey": {
+            "properties": {
+              "capability": {
+                "not": {
+                  "enum": [
+                    "scan.local.directory",
+                    "analysis.explain.scan_json",
+                    "catalog.cleaner.read",
+                    "scan.tui.live",
+                    "operation.cancel"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "capability"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "qualificationKey"
+        ]
+      },
+      "then": {
+        "properties": {
+          "qualificationKey": {
+            "required": [
+              "filesystemVersion",
+              "providerOrDesktopBackend"
+            ],
+            "properties": {
+              "coreVersion": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "safetyPolicyDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "adapterId": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "adapterDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "osBuild": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "arch": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "filesystem": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "filesystemVersion": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "volumeClass": {
+                "const": "local"
+              },
+              "providerOrDesktopBackend": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "runtimePrivilegeProfile": {
+                "const": "ordinary_user"
+              },
+              "cleanerId": {
+                "$ref": "#/$defs/exactTupleString"
+              },
+              "cleanerVersion": {
+                "$ref": "#/$defs/exactTupleString"
+              }
+            }
+          },
+          "evidence": {
+            "required": [
+              "evidenceClass",
+              "validity"
+            ],
+            "properties": {
+              "bundleDigest": {
+                "$ref": "#/$defs/sha256Digest"
+              },
+              "evidenceClass": {
+                "const": "real_os_qualification"
+              },
+              "validity": {
+                "required": [
+                  "validFrom",
+                  "expiresAt"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "current"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "boundedString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "exactTupleString": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/boundedString"
+        },
+        {
+          "not": {
+            "pattern": "(^\\*$|^[Nn]/[Aa]$|(^|[^A-Za-z0-9])([Aa][Nn][Yy]|[Dd][Ee][Vv]|[Dd][Ee][Vv][Ee][Ll][Oo][Pp][Mm][Ee][Nn][Tt]|[Ff][Aa][Kk][Ee]|[Ii][Nn][Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee]|[Nn][Oo][Nn][Ee]|[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]|[Ss][Tt][Aa][Ll][Ee]|[Tt][Bb][Dd]|[Uu][Nn][Kk][Nn][Oo][Ww][Nn]|[Uu][Nn][Qq][Uu][Aa][Ll][Ii][Ff][Ii][Ee][Dd]|[Uu][Nn][Vv][Ee][Rr][Ss][Ii][Oo][Nn][Ee][Dd]|[Nn][Aa])([^A-Za-z0-9]|$)|\\s)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[*?\\[\\]{}]"
+          }
+        }
+      ]
+    },
+    "sha256Digest": {
+      "type": "string",
+      "allOf": [
+        {
+          "pattern": "^sha256:[0-9A-Fa-f]{64}$"
+        },
+        {
+          "not": {
+            "pattern": "^sha256:(0{64}|1{64}|2{64}|3{64}|4{64}|5{64}|6{64}|7{64}|8{64}|9{64}|[Aa]{64}|[Bb]{64}|[Cc]{64}|[Dd]{64}|[Ee]{64}|[Ff]{64})$"
+          }
+        }
+      ]
+    },
+    "capabilityCell": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$",
+      "examples": [
+        "scan.local.directory",
+        "trash.local.file",
+        "trash.local.directory",
+        "permanent.local.file",
+        "permanent.local.directory",
+        "permanent.local.link"
+      ]
+    },
+    "capabilityState": {
+      "type": "string",
+      "enum": [
+        "qualified",
+        "degraded",
+        "report_only",
+        "unsupported",
+        "disabled"
+      ]
+    },
+    "qualificationKey": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "scope",
         "coreVersion",
         "scannerSemanticsVersion",
         "safetyPolicyDigest",
@@ -37,21 +278,28 @@
         "capability"
       ],
       "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "platform",
+            "cleaner"
+          ]
+        },
         "coreVersion": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "scannerSemanticsVersion": {
           "type": "integer",
           "minimum": 1
         },
         "safetyPolicyDigest": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "adapterId": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "adapterDigest": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "osFamily": {
           "type": "string",
@@ -62,19 +310,22 @@
           ]
         },
         "osBuild": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "arch": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "filesystem": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
+        },
+        "filesystemVersion": {
+          "$ref": "#/$defs/boundedString"
         },
         "volumeClass": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "providerOrDesktopBackend": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "runtimePrivilegeProfile": {
           "type": "string",
@@ -85,67 +336,222 @@
           ]
         },
         "cleanerId": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "cleanerVersion": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
         },
         "capability": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/capabilityCell"
         }
-      }
-    },
-    "state": {
-      "type": "string",
-      "enum": [
-        "qualified",
-        "degraded",
-        "report_only",
-        "unsupported",
-        "disabled"
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "platform"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "cleanerId"
+                  ]
+                },
+                {
+                  "required": [
+                    "cleanerVersion"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "cleaner"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "required": [
+              "cleanerId",
+              "cleanerVersion"
+            ]
+          }
+        }
       ]
     },
-    "reasonCode": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    "evidenceClass": {
+      "type": "string",
+      "enum": [
+        "development_snapshot",
+        "fixture_conformance_only",
+        "real_os_qualification",
+        "fake",
+        "placeholder",
+        "incomplete",
+        "stale",
+        "mismatched"
+      ]
     },
-    "reason": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "current",
+            "stale",
+            "revoked",
+            "invalidated"
+          ]
+        },
+        "validFrom": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "expiresAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "invalidatedAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "invalidationReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "current"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "invalidatedAt"
+                  ]
+                },
+                {
+                  "required": [
+                    "invalidationReason"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "stale"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "invalidationReason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "revoked",
+                  "invalidated"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "invalidatedAt",
+              "invalidationReason"
+            ]
+          }
+        }
+      ]
     },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "bundleDigest",
+        "evidenceClass",
         "reviewedBy",
         "limitations",
         "invalidatesOn"
       ],
       "properties": {
         "bundleDigest": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          "$ref": "#/$defs/boundedString"
+        },
+        "evidenceClass": {
+          "$ref": "#/$defs/evidenceClass"
         },
         "reviewedBy": {
           "type": "array",
           "items": {
-            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            "$ref": "#/$defs/boundedString"
           },
-          "minItems": 1
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
         },
         "limitations": {
           "type": "array",
           "items": {
-            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
-          }
+            "$ref": "#/$defs/boundedString"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
         },
         "invalidatesOn": {
           "type": "array",
           "items": {
-            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            "$ref": "#/$defs/boundedString"
           },
-          "minItems": 1
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
         },
-        "expiresAt": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        "validity": {
+          "$ref": "#/$defs/validity"
         }
       }
     }

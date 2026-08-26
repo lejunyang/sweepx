@@ -19,6 +19,7 @@
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；要求终端 stdin/stdout |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
+| P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
 | P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；不是阶段资格声明，没有 CLI 接线或 native target mutation |
 | 真实清理 | **不可用** | Trash、Permanent、管理器 mutation 与 destructive Agent workflow 均未实现 |
 
@@ -118,6 +119,8 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 8. **硬保护不可绕过。** 根目录、系统区域、home/profile 根、SweepX state、受保护 anchor 及其包含关系在未来 mutation model 中必须失败关闭。
 
 P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit persistence 仅支持 Unix，使用私有 snapshot + anchor 检测意外回滚/损坏；它不能抵抗同一用户同时回滚并重算两者，也不是未来 native mutation 的发布级存储。
+
+P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前它们在 Linux、macOS、Windows 上全部为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。当前没有这样的合格记录，也没有 native adapter、mutation command 或 approval UI。
 
 ## Agent 权限边界
 

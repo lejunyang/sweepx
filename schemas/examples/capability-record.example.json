@@ -2,6 +2,7 @@
   "schema": "sweepx.capability-record/v1",
   "recordedAt": "2026-08-26T06:00:00Z",
   "qualificationKey": {
+    "scope": "platform",
     "coreVersion": "0.0.0-p0",
     "scannerSemanticsVersion": 1,
     "safetyPolicyDigest": "sha256:policy-p0",
@@ -11,7 +12,9 @@
     "osBuild": "TBD",
     "arch": "x86_64",
     "filesystem": "ext4",
+    "filesystemVersion": "not-qualified-development-snapshot",
     "volumeClass": "local",
+    "providerOrDesktopBackend": "not-observed",
     "runtimePrivilegeProfile": "ordinary_user",
     "capability": "trash.local.file"
   },
@@ -20,6 +23,7 @@
   "reason": "P0-P3 contract baseline does not permit native mutation.",
   "evidence": {
     "bundleDigest": "sha256:evidence-p0",
+    "evidenceClass": "development_snapshot",
     "reviewedBy": [
       "schema-baseline"
     ],
@@ -31,6 +35,10 @@
       "safety-policy-digest-change",
       "adapter-digest-change",
       "phase-advance-to-p4"
-    ]
+    ],
+    "validity": {
+      "status": "stale",
+      "invalidationReason": "Development evidence is not a product qualification."
+    }
   }
 }

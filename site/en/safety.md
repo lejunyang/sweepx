@@ -59,6 +59,22 @@ The critical restrictions are:
 
 P3 can therefore test replay, binding, fencing, audit, and fault-handling logic. It cannot validate real Trash behavior, recoverability, reclaimed capacity, or closure of native TOCTOU windows.
 
+## P4a.2 fail-closed qualification records
+
+P4a.2 adds a typed, validated capability-qualification record contract, not a mutation implementation. It separates mutation into five independent cells:
+
+| Capability cell | Linux | macOS | Windows |
+|---|---|---|---|
+| `trash.local.file` | disabled | disabled | disabled |
+| `trash.local.directory` | disabled | disabled | disabled |
+| `permanent.local.file` | disabled | disabled | disabled |
+| `permanent.local.directory` | disabled | disabled | disabled |
+| `permanent.local.link` | disabled | disabled | disabled |
+
+Validation rejects `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence as mutation qualification. A single cell could qualify later only when the evidence class is `real_os_qualification`, validity is `current`, and the complete tuple exactly matches Core/version, policy and adapter digests, OS build, architecture, filesystem/version, volume, provider/backend, ordinary-user profile, and capability.
+
+This is only a fail-closed registry substrate, not a live registry service. There is no qualified mutation record, native adapter, mutation command, or approval UI today.
+
 ## Non-negotiable gates for future mutation
 
 The following are future release gates, not present capability claims:

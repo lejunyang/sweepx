@@ -28,6 +28,12 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 语言解析会依次考虑显式 override、locale 环境与系统 locale，无法识别时回退到 `en-US`。机器字段和值不翻译。
 
+### P4a.2 资格记录不是新命令
+
+协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。这五个单元在 Linux、macOS、Windows 上当前全部为 `disabled`。
+
+这些记录只是失败关闭的 qualification registry substrate；`sweepx capabilities` 没有因此获得 mutation 权限，也没有新增运行时 registry 服务。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前不存在这样的记录，也没有 native adapter、mutation command 或 approval UI。
+
 ## 安装
 
 正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。

@@ -23,8 +23,11 @@ use sweepx_model::{
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
 use sweepx_protocol::{
-    CompatSnapshot, EventCheckpoint, EventEnvelope, EventPhase, EventType, ExitCode,
-    OutputEnvelope, OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage,
+    CapabilityCell, CapabilityEvidence, CapabilityRecordV1, CompatSnapshot, EventCheckpoint,
+    EventEnvelope, EventPhase, EventType, EvidenceClass, ExitCode, OsFamily, OutputEnvelope,
+    OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage, QualificationKey,
+    QualificationScope, QualificationValidity, QualificationValidityStatus,
+    RuntimePrivilegeProfile,
 };
 pub use sweepx_scanner::ScanSummary;
 use sweepx_scanner::{ProgressEvent, ScanError};
@@ -648,6 +651,8 @@ pub fn cancel_with_store<S: SnapshotStore>(
 
 pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
     let ids = fresh_operation_ids("capabilities", &[]);
+    let recorded_at = timestamp_now();
+    let qualification_expires_at = timestamp_after(&recorded_at, time::Duration::hours(24));
     let current_os = current_os_family();
     let cleaner_catalog = load_builtin_cleaners();
     let cleaner_digest = cleaner_set_digest();
@@ -671,7 +676,7 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         OutputKind::CapabilitiesResult,
         ids.request_id,
         ids.operation_id,
-        timestamp_now(),
+        recorded_at.clone(),
         OutputStatus::Partial,
         ExitCode::Partial,
         compat_snapshot(current_os),
@@ -707,90 +712,241 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
     ];
     let capabilities = vec![
         capability_record(
-            "linux",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
             "scan.local.directory",
             CapabilityState::Degraded,
             "LINUX_SCANNER_DEVELOPMENT",
         ),
         capability_record(
-            "linux",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
             "analysis.explain.scan_json",
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
         ),
         capability_record(
-            "linux",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
             "catalog.cleaner.read",
             cleaner_state,
             cleaner_reason,
         ),
         capability_record(
-            "linux",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
             "scan.tui.live",
             CapabilityState::Degraded,
             "LINUX_LIVE_TUI_DEVELOPMENT",
         ),
         capability_record(
-            "linux",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
             "operation.cancel",
             CapabilityState::Disabled,
             "CANCEL_LIVE_REGISTRY_ABSENT",
         ),
         capability_record(
-            "linux",
-            "mutation.local.any",
-            CapabilityState::Disabled,
-            "MUTATION_UNAVAILABLE",
-        ),
-        capability_record(
-            "macos",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "scan.local.directory",
             CapabilityState::Unsupported,
             "STUB_COMPILATION_ONLY",
         ),
         capability_record(
-            "macos",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "analysis.explain.scan_json",
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
         ),
         capability_record(
-            "macos",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "catalog.cleaner.read",
             cleaner_state,
             cleaner_reason,
         ),
         capability_record(
-            "macos",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "scan.tui.live",
             CapabilityState::Unsupported,
             "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
         ),
         capability_record(
-            "windows",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
             "scan.local.directory",
             CapabilityState::Unsupported,
             "STUB_COMPILATION_ONLY",
         ),
         capability_record(
-            "windows",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
             "analysis.explain.scan_json",
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
         ),
         capability_record(
-            "windows",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
             "catalog.cleaner.read",
             cleaner_state,
             cleaner_reason,
         ),
         capability_record(
-            "windows",
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
             "scan.tui.live",
             CapabilityState::Unsupported,
             "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::TRASH_LOCAL_FILE,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::FixtureConformanceOnly,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::TRASH_LOCAL_DIRECTORY,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::PERMANENT_LOCAL_FILE,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::PERMANENT_LOCAL_DIRECTORY,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::PERMANENT_LOCAL_LINK,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::TRASH_LOCAL_FILE,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::TRASH_LOCAL_DIRECTORY,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::PERMANENT_LOCAL_FILE,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::PERMANENT_LOCAL_DIRECTORY,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::PERMANENT_LOCAL_LINK,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::TRASH_LOCAL_FILE,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::TRASH_LOCAL_DIRECTORY,
+            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::PERMANENT_LOCAL_FILE,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::PERMANENT_LOCAL_DIRECTORY,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
+        ),
+        mutation_capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::PERMANENT_LOCAL_LINK,
+            "PERMANENT_QUALIFICATION_ABSENT",
+            EvidenceClass::Incomplete,
         ),
     ];
+    for capability in &capabilities {
+        if capability.state == CapabilityState::Qualified {
+            capability
+                .validate_at(&recorded_at)
+                .expect("qualified capability records must validate before emission");
+        } else {
+            capability
+                .validate()
+                .expect("non-qualified capability records must validate before emission");
+        }
+    }
     output.summary = json!({
         "commandCount": DecimalU128::new(commands.len() as u128),
         "capabilityCount": DecimalU128::new(capabilities.len() as u128),
@@ -2230,46 +2386,129 @@ fn command_record(id: &str, state: CapabilityState, reason_code: &str) -> Value 
 }
 
 fn capability_record(
-    os_family: &str,
+    recorded_at: &str,
+    qualification_expires_at: &str,
+    os_family: OsFamily,
     capability: &str,
     state: CapabilityState,
     reason_code: &str,
-) -> Value {
-    json!({
-        "schema": "sweepx.capability-record/v1",
-        "recordedAt": timestamp_now(),
-        "qualificationKey": {
-            "coreVersion": CORE_VERSION,
-            "scannerSemanticsVersion": SCANNER_SEMANTICS_VERSION,
-            "safetyPolicyDigest": "sha256:p1-read-only-policy",
-            "adapterId": os_family,
-            "adapterDigest": format!("sha256:{}-adapter", os_family),
-            "osFamily": os_family,
-            "osBuild": "development",
-            "arch": std::env::consts::ARCH,
-            "filesystem": "local",
-            "volumeClass": "local",
-            "runtimePrivilegeProfile": "ordinary_user",
-            "capability": capability
+) -> CapabilityRecordV1 {
+    let os_family_name = os_family_name(os_family);
+    let qualified = state == CapabilityState::Qualified;
+    let qualification_key = QualificationKey {
+        scope: QualificationScope::Platform,
+        core_version: CORE_VERSION.to_string(),
+        scanner_semantics_version: SCANNER_SEMANTICS_VERSION,
+        safety_policy_digest: if qualified {
+            sha256_label("p1-read-only-policy")
+        } else {
+            "sha256:p1-read-only-policy".to_string()
         },
-        "state": capability_state_name(state),
-        "reasonCode": reason_code,
-        "reason": capability_reason(reason_code),
-        "evidence": {
-            "bundleDigest": format!("sha256:{}:{}:{}", os_family, capability, reason_code),
-            "reviewedBy": ["p1-core-cli"],
-            "limitations": [
-                "read-only CLI only",
-                "no destructive commands",
-                "no background daemon"
-            ],
-            "invalidatesOn": [
-                "platform-adapter-change",
-                "policy-change",
-                "future-mutation-implementation"
-            ]
-        }
-    })
+        adapter_id: os_family_name.to_string(),
+        adapter_digest: if qualified {
+            sha256_label(&format!("{os_family_name}-read-only-adapter"))
+        } else {
+            format!("sha256:{os_family_name}-adapter")
+        },
+        os_family,
+        os_build: if qualified {
+            "platform-independent-read-only-contract-v1".to_string()
+        } else {
+            "development".to_string()
+        },
+        arch: std::env::consts::ARCH.to_string(),
+        filesystem: "local".to_string(),
+        filesystem_version: None,
+        volume_class: "local".to_string(),
+        provider_or_desktop_backend: None,
+        runtime_privilege_profile: RuntimePrivilegeProfile::OrdinaryUser,
+        cleaner_id: None,
+        cleaner_version: None,
+        capability: CapabilityCell::new(capability)
+            .expect("built-in capability cells must be valid"),
+    };
+    let evidence = CapabilityEvidence {
+        bundle_digest: if qualified {
+            sha256_label(&format!(
+                "{os_family_name}:{capability}:{reason_code}:development-snapshot"
+            ))
+        } else {
+            format!("sha256:{os_family_name}:{capability}:{reason_code}")
+        },
+        evidence_class: EvidenceClass::DevelopmentSnapshot,
+        reviewed_by: vec!["p1-core-cli".to_string()],
+        limitations: vec![
+            "read-only CLI only".to_string(),
+            "no destructive commands".to_string(),
+            "no background daemon".to_string(),
+        ],
+        invalidates_on: vec![
+            "platform-adapter-change".to_string(),
+            "policy-change".to_string(),
+            "future-mutation-implementation".to_string(),
+        ],
+        validity: qualified.then(|| QualificationValidity {
+            status: QualificationValidityStatus::Current,
+            valid_from: Some(recorded_at.to_string()),
+            expires_at: Some(qualification_expires_at.to_string()),
+            invalidated_at: None,
+            invalidation_reason: None,
+        }),
+    };
+    let mut record =
+        CapabilityRecordV1::new(recorded_at, qualification_key, state, reason_code, evidence);
+    record.reason = Some(capability_reason(reason_code).to_string());
+    record
+}
+
+fn mutation_capability_record(
+    recorded_at: &str,
+    qualification_expires_at: &str,
+    os_family: OsFamily,
+    capability: &str,
+    reason_code: &str,
+    evidence_class: EvidenceClass,
+) -> CapabilityRecordV1 {
+    let mut record = capability_record(
+        recorded_at,
+        qualification_expires_at,
+        os_family,
+        capability,
+        CapabilityState::Disabled,
+        reason_code,
+    );
+    record.evidence.evidence_class = evidence_class;
+    record.evidence.reviewed_by = vec!["p4a-capability-integration".to_string()];
+    record.evidence.limitations = match evidence_class {
+        EvidenceClass::FixtureConformanceOnly => vec![
+            "fixture-only fake-adapter evidence is not product qualification".to_string(),
+            "no native Trash adapter is exposed".to_string(),
+            "no destructive commands are exposed".to_string(),
+        ],
+        _ => vec![
+            "real-OS qualification evidence is incomplete".to_string(),
+            "no native mutation adapter is exposed".to_string(),
+            "no destructive commands are exposed".to_string(),
+        ],
+    };
+    record.evidence.invalidates_on = vec![
+        "real-os-qualification-added".to_string(),
+        "platform-adapter-change".to_string(),
+        "safety-policy-change".to_string(),
+    ];
+    record
+}
+
+fn os_family_name(os_family: OsFamily) -> &'static str {
+    match os_family {
+        OsFamily::Windows => "windows",
+        OsFamily::Macos => "macos",
+        OsFamily::Linux => "linux",
+    }
+}
+
+fn sha256_label(label: &str) -> String {
+    format!("sha256:{}", digest_hex(label))
 }
 
 fn capability_state_name(state: CapabilityState) -> &'static str {
@@ -2290,8 +2529,11 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "STUB_COMPILATION_ONLY" => {
             "Platform support is currently limited to stub compilation only."
         }
-        "MUTATION_UNAVAILABLE" => {
-            "Mutation commands and adapters are intentionally unavailable in P1."
+        "NATIVE_TRASH_QUALIFICATION_ABSENT" => {
+            "Native Trash is disabled because real-OS qualification is absent for this exact capability cell."
+        }
+        "PERMANENT_QUALIFICATION_ABSENT" => {
+            "Permanent deletion is disabled because independent qualification is absent for this exact capability cell."
         }
         "CANCEL_LIVE_REGISTRY_ABSENT" => {
             "Cancel is disabled because P1 does not maintain a live in-process operation registry."
@@ -2535,6 +2777,15 @@ fn timestamp_now() -> String {
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
         .replace_nanosecond(nanos)
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339 formatting available")
+}
+
+fn timestamp_after(timestamp: &str, duration: time::Duration) -> String {
+    time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+        .expect("internally generated timestamp must parse")
+        .checked_add(duration)
+        .expect("capability validity timestamp must remain representable")
         .format(&time::format_description::well_known::Rfc3339)
         .expect("rfc3339 formatting available")
 }

@@ -28,6 +28,12 @@ Global options:
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
+### P4a.2 qualification records are not a new command
+
+The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. All five cells are currently `disabled` on Linux, macOS, and Windows.
+
+These records are only a fail-closed qualification-registry substrate; they give `sweepx capabilities` no mutation authority and add no live registry service. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. No such record, native adapter, mutation command, or approval UI exists today.
+
 ## Install
 
 A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.
