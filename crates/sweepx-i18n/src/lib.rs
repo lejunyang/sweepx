@@ -179,7 +179,12 @@ where
             }
         }
 
-        if let Some(locale) = self.system.system_locale().as_deref().and_then(parse_locale) {
+        if let Some(locale) = self
+            .system
+            .system_locale()
+            .as_deref()
+            .and_then(parse_locale)
+        {
             return LocaleResolution::new(locale, LocaleSource::System);
         }
 
@@ -277,7 +282,11 @@ fn render_en_us(key: MessageKey, args: &MessageArgs<'_>) -> String {
             "SweepX is a safety-first CLI for scanning storage and planning cleanup.".to_string()
         }
         MessageKey::ScanStart => {
-            format!("Starting scan for {command} at {root}.", command = args.command, root = args.root)
+            format!(
+                "Starting scan for {command} at {root}.",
+                command = args.command,
+                root = args.root
+            )
         }
         MessageKey::ScanCompleted => format!(
             "Scan completed for {root}: {items} items, {errors} errors.",
@@ -292,10 +301,7 @@ fn render_en_us(key: MessageKey, args: &MessageArgs<'_>) -> String {
             errors = args.errors
         ),
         MessageKey::ErrorGeneric => format!("Operation failed: {detail}.", detail = args.detail),
-        MessageKey::StatusSummary => format!(
-            "Current status: {status}.",
-            status = args.status
-        ),
+        MessageKey::StatusSummary => format!("Current status: {status}.", status = args.status),
         MessageKey::CancelAccepted => format!(
             "Cancellation accepted for operation {detail}.",
             detail = args.detail
@@ -341,14 +347,14 @@ fn render_zh_cn(key: MessageKey, args: &MessageArgs<'_>) -> String {
         ),
         MessageKey::ErrorGeneric => format!("操作失败：{detail}。", detail = args.detail),
         MessageKey::StatusSummary => format!("当前状态：{status}。", status = args.status),
-        MessageKey::CancelAccepted => format!("已接受操作 {detail} 的取消请求。", detail = args.detail),
+        MessageKey::CancelAccepted => {
+            format!("已接受操作 {detail} 的取消请求。", detail = args.detail)
+        }
         MessageKey::CapabilitiesSummary => format!(
             "可用能力：{capabilities}。",
             capabilities = args.capabilities
         ),
-        MessageKey::SafetyReadOnlyNotice => {
-            "只读模式不会修改文件、权限或系统设置。".to_string()
-        }
+        MessageKey::SafetyReadOnlyNotice => "只读模式不会修改文件、权限或系统设置。".to_string(),
         MessageKey::LabelCommand => "命令".to_string(),
         MessageKey::LabelLocale => "语言".to_string(),
         MessageKey::LabelStatus => "状态".to_string(),
@@ -431,7 +437,14 @@ mod tests {
             assert_eq!(raw.parse::<Locale>().unwrap(), Locale::ZhCn, "{raw}");
         }
 
-        for raw in ["en-US", "en_us", "en", "EN.UTF-8", "en-US.UTF-8", "en_POSIX"] {
+        for raw in [
+            "en-US",
+            "en_us",
+            "en",
+            "EN.UTF-8",
+            "en-US.UTF-8",
+            "en_POSIX",
+        ] {
             assert_eq!(raw.parse::<Locale>().unwrap(), Locale::EnUs, "{raw}");
         }
     }
@@ -479,10 +492,7 @@ mod tests {
     #[test]
     fn lc_messages_is_used_when_lc_all_is_missing() {
         let resolver = LocaleResolver::new(
-            TestEnv::with_many(&[
-                ("LC_MESSAGES", "zh_CN.UTF-8"),
-                ("LANG", "en_US.UTF-8"),
-            ]),
+            TestEnv::with_many(&[("LC_MESSAGES", "zh_CN.UTF-8"), ("LANG", "en_US.UTF-8")]),
             TestSystemLocale::new(Some("en_US")),
         );
 
@@ -493,8 +503,10 @@ mod tests {
 
     #[test]
     fn lang_is_used_when_higher_priority_envs_are_absent() {
-        let resolver =
-            LocaleResolver::new(TestEnv::with("LANG", "zh_CN.UTF-8"), TestSystemLocale::new(Some("en_US")));
+        let resolver = LocaleResolver::new(
+            TestEnv::with("LANG", "zh_CN.UTF-8"),
+            TestSystemLocale::new(Some("en_US")),
+        );
 
         let resolved = resolver.resolve(None);
         assert_eq!(resolved.locale(), Locale::ZhCn);
