@@ -313,6 +313,8 @@ fn scan_defaults_to_a_human_readable_file_table() {
     assert!(text.contains("Path"));
     assert!(text.contains("Reclaimable"));
     assert!(text.contains("visible.txt"));
+    assert!(text.contains("Summary: 1 roots, 1 entries"));
+    assert!(text.contains("0 boundaries, 0 errors"));
     assert!(!text.trim_start().starts_with('{'));
 }
 
@@ -489,6 +491,49 @@ fn scan_json_persists_snapshot_for_status_lookup() {
     assert_eq!(status_json["data"]["operationId"], operation_id);
     assert_eq!(status_json["data"]["command"], "scan");
     assert_eq!(status_json["data"]["canCancel"], false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn duplicate_and_overlapping_roots_are_scanned_once() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    let child = root.join("child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(child.join("one.txt"), b"one").unwrap();
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(fixture.path().join("state"))
+        .arg("scan")
+        .arg(&child)
+        .arg(&root)
+        .arg(&root);
+    let output = scan.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["summary"]["rootCount"], "1");
+    assert_eq!(json["data"]["roots"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["data"]["roots"][0]["displayPath"],
+        root.to_string_lossy().as_ref()
+    );
+    let paths = json["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["displayPath"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == child.join("one.txt").to_string_lossy())
+            .count(),
+        1
+    );
 }
 
 #[test]

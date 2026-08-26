@@ -13,7 +13,7 @@ use sweepx_core::{
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
-use sweepx_tui::{BrowserModel, run_live_browser};
+use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FormatArg {
@@ -261,30 +261,54 @@ fn finish_tui_scan(
             return ProcessExitCode::from(core_error_exit_code(&error) as u8);
         }
     };
-    let scan_exit_code = scan.output.conservative_exit_code() as u8;
-    if scan.output.status == sweepx_protocol::OutputStatus::Unsupported {
-        println!("{}", render_human_output(context, &scan.output));
-        return ProcessExitCode::from(scan_exit_code);
-    }
-    let scan_id = scan
-        .output
-        .summary
-        .get("scanId")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let model = BrowserModel::from_scan_parts(
-        context.locale(),
-        scan.output.status,
+    // Keep only the bounded terminal report and move the typed rows into the
+    // browser. The large JSON/event/snapshot copies are dropped here, before
+    // entering the alternate screen.
+    let human_output = render_human_output(context, &scan.output);
+    let unsupported = scan.output.status == sweepx_protocol::OutputStatus::Unsupported;
+    let sweepx_core::TuiScanParts {
+        status,
+        exit_code,
         scan_id,
-        &scan.summary.roots,
-        &scan.summary.entries,
-        &scan.summary.aggregates,
+        summary,
+    } = scan.into_tui_parts();
+    if unsupported {
+        println!("{human_output}");
+        return ProcessExitCode::from(exit_code);
+    }
+    let sweepx_core::ScanSummary {
+        roots,
+        entries,
+        aggregates,
+        ..
+    } = summary;
+    let model = BrowserModel::from_owned_scan_parts(
+        context.locale(),
+        status,
+        scan_id,
+        roots,
+        entries,
+        aggregates,
     );
-    match run_live_browser(model) {
-        Ok(()) => ProcessExitCode::from(scan_exit_code),
+    let browser_result = run_live_browser(model);
+    // The browser restores the terminal before returning, so this report
+    // remains visible even though the interactive view used the alternate
+    // screen.
+    println!("{human_output}");
+    match browser_result {
+        Ok(browser_exit) => ProcessExitCode::from(tui_exit_code(exit_code, browser_exit)),
         Err(error) => {
             eprintln!("interactive browser failed: {error}");
             ProcessExitCode::from(8)
+        }
+    }
+}
+
+fn tui_exit_code(scan_exit_code: u8, browser_exit: BrowserExit) -> u8 {
+    match browser_exit {
+        BrowserExit::Quit => scan_exit_code,
+        BrowserExit::Terminated { signal } => {
+            signal.map_or(1, |signal| 128u8.saturating_add(signal))
         }
     }
 }
@@ -413,5 +437,18 @@ mod tests {
         assert!(validate_tui_environment(OutputFormat::Ndjson, true, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, false, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, true, false).is_err());
+    }
+
+    #[test]
+    fn tui_exit_preserves_scan_status_except_for_process_signals() {
+        assert_eq!(tui_exit_code(4, BrowserExit::Quit), 4);
+        assert_eq!(
+            tui_exit_code(4, BrowserExit::Terminated { signal: Some(15) }),
+            143
+        );
+        assert_eq!(
+            tui_exit_code(4, BrowserExit::Terminated { signal: None }),
+            1
+        );
     }
 }

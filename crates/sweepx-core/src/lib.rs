@@ -249,6 +249,39 @@ pub struct ScanSuccess {
     pub summary: ScanSummary,
 }
 
+impl ScanSuccess {
+    /// Split an interactive result into the small values needed after the TUI
+    /// exits and the owned scan rows consumed by the browser. This releases
+    /// the JSON envelope and retained event stream before terminal setup.
+    /// During the scan itself, the typed summary and protocol JSON coexist;
+    /// that construction-time peak is bounded by the scanner's resource
+    /// limits. The interactive phase does not add another full row copy.
+    pub fn into_tui_parts(self) -> TuiScanParts {
+        let exit_code = self.output.conservative_exit_code() as u8;
+        let status = self.output.status;
+        let scan_id = self
+            .output
+            .summary
+            .get("scanId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        TuiScanParts {
+            status,
+            exit_code,
+            scan_id,
+            summary: self.summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuiScanParts {
+    pub status: OutputStatus,
+    pub exit_code: u8,
+    pub scan_id: Option<String>,
+    pub summary: ScanSummary,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilitiesSuccess {
     pub output: OutputEnvelope,
@@ -458,30 +491,27 @@ pub fn scan_with_store<S: SnapshotStore>(
     request: &ScanRequest,
     store: Option<&S>,
 ) -> Result<ScanSuccess, CoreError> {
-    if request.roots.is_empty() {
+    let normalized_roots = normalize_scan_roots(&request.roots)?;
+    if normalized_roots.is_empty() {
         return Err(CoreError::MissingRoots);
-    }
-    if let Some(path) = request.roots.iter().find(|path| !path.is_absolute()) {
-        return Err(CoreError::NonAbsoluteRoot(path.clone()));
     }
 
     #[cfg(target_os = "linux")]
-    let roots: Vec<ScanRoot> = request
-        .roots
+    let roots: Vec<ScanRoot> = normalized_roots
         .iter()
         .map(|path| {
             ScanRoot::new(path.clone()).map_err(|_| CoreError::NonAbsoluteRoot(path.clone()))
         })
         .collect::<Result<_, _>>()?;
 
-    let ids = fresh_operation_ids("scan", &request.roots);
+    let ids = fresh_operation_ids("scan", &normalized_roots);
     let started_at = timestamp_now();
     let monotonic = Instant::now();
 
     #[cfg(not(target_os = "linux"))]
     {
-        let output = unsupported_scan_output(context, &request.roots, &ids, &started_at);
-        let snapshot = snapshot_from_output(&output, "scan", context.locale(), &request.roots);
+        let output = unsupported_scan_output(context, &normalized_roots, &ids, &started_at);
+        let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
         if let Some(store) = store {
             store.save(&snapshot)?;
         }
@@ -489,7 +519,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
             &ids.operation_id,
             &output.compat,
-            &request.roots,
+            &normalized_roots,
             None,
             &output,
             &started_at,
@@ -540,7 +570,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         );
         output.summary = json!({
             "scanId": scan_id,
-            "rootCount": DecimalU128::new(request.roots.len() as u128),
+            "rootCount": DecimalU128::new(normalized_roots.len() as u128),
             "entryCount": DecimalU128::new(summary.entries.len() as u128),
             "aggregateCount": DecimalU128::new(summary.aggregates.len() as u128),
             "boundaryCount": DecimalU128::new(summary.boundaries.len() as u128),
@@ -571,7 +601,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             ));
         }
 
-        let snapshot = snapshot_from_output(&output, "scan", context.locale(), &request.roots);
+        let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
         if let Some(store) = store {
             store.save(&snapshot)?;
         }
@@ -580,7 +610,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
             &ids.operation_id,
             &compat,
-            &request.roots,
+            &normalized_roots,
             Some(&summary),
             &output,
             &started_at,
@@ -1144,6 +1174,41 @@ fn render_human_scan_output(
         Locale::ZhCn => format!("状态: {status}"),
         Locale::EnUs => format!("Status: {status}"),
     });
+    let root_count = output
+        .summary
+        .get("rootCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(0);
+    let entry_count = output
+        .summary
+        .get("entryCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(0);
+    let aggregate_count = output
+        .summary
+        .get("aggregateCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(0);
+    let boundary_count = output
+        .summary
+        .get("boundaryCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(0);
+    let error_count = output
+        .summary
+        .get("errorCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(output.errors.len());
+    lines.push(match context.locale() {
+        Locale::ZhCn => format!(
+            "摘要: 根目录 {root_count}，条目 {entry_count}，目录汇总 {aggregate_count}，边界 {boundary_count}，错误 {error_count}"
+        ),
+        Locale::EnUs => format!(
+            "Summary: {root_count} roots, {entry_count} entries, {aggregate_count} directory aggregates, {boundary_count} boundaries, {error_count} errors"
+        ),
+    });
+    append_human_protocol_messages(context.locale(), &mut lines, "warning", &output.warnings);
+    append_human_protocol_messages(context.locale(), &mut lines, "error", &output.errors);
     let aggregates: BTreeMap<&str, &Value> = output
         .data
         .get("aggregates")
@@ -1232,6 +1297,29 @@ fn render_human_scan_output(
     }
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
     lines.join("\n")
+}
+
+fn append_human_protocol_messages(
+    locale: Locale,
+    lines: &mut Vec<String>,
+    kind: &str,
+    messages: &[ProtocolMessage],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let label = match (locale, kind) {
+        (Locale::ZhCn, "warning") => "警告",
+        (Locale::ZhCn, _) => "错误",
+        (Locale::EnUs, "warning") => "Warnings",
+        (Locale::EnUs, _) => "Errors",
+    };
+    let codes = messages
+        .iter()
+        .map(|message| sanitize_terminal_text(&message.code))
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(format!("{label}: {codes}"));
 }
 
 fn sanitize_terminal_text(value: &str) -> String {
@@ -2489,6 +2577,50 @@ pub fn validate_absolute_root(path: &OsStr) -> Result<PathBuf, CoreError> {
     }
 }
 
+fn normalize_scan_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, CoreError> {
+    if roots.is_empty() {
+        return Err(CoreError::MissingRoots);
+    }
+    if let Some(path) = roots.iter().find(|path| !path.is_absolute()) {
+        return Err(CoreError::NonAbsoluteRoot(path.clone()));
+    }
+
+    // Normalize only syntactic separators and `.` components. Never
+    // canonicalize or collapse `..`: doing so could follow an ancestor
+    // symlink before the scanner's no-follow admission checks run.
+    let mut normalized = roots
+        .iter()
+        .map(|root| root.components().collect::<PathBuf>())
+        .collect::<Vec<_>>();
+    normalized.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    normalized.dedup();
+
+    let mut retained = Vec::<PathBuf>::new();
+    for root in normalized {
+        let contains_parent = root
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+        if !contains_parent
+            && retained.iter().any(|ancestor| {
+                !ancestor
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+                    && root.starts_with(ancestor)
+            })
+        {
+            continue;
+        }
+        retained.push(root);
+    }
+    retained.sort();
+    Ok(retained)
+}
+
 fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
@@ -2610,6 +2742,78 @@ mod tests {
     }
 
     #[test]
+    fn scan_roots_are_deduplicated_and_ancestor_order_is_stable() {
+        let forward = normalize_scan_roots(&[
+            PathBuf::from("/tmp/root/child"),
+            PathBuf::from("/tmp/root"),
+            PathBuf::from("/tmp/root"),
+            PathBuf::from("/tmp/root2"),
+        ])
+        .unwrap();
+        let reverse = normalize_scan_roots(&[
+            PathBuf::from("/tmp/root2"),
+            PathBuf::from("/tmp/root"),
+            PathBuf::from("/tmp/root/child"),
+        ])
+        .unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            [PathBuf::from("/tmp/root"), PathBuf::from("/tmp/root2")]
+        );
+    }
+
+    #[test]
+    fn scan_root_normalization_removes_dot_but_does_not_collapse_parent() {
+        let normalized = normalize_scan_roots(&[
+            PathBuf::from("/tmp/./root/"),
+            PathBuf::from("/tmp/root"),
+            PathBuf::from("/tmp/link/../root"),
+        ])
+        .unwrap();
+        assert_eq!(
+            normalized,
+            [
+                PathBuf::from("/tmp/link/../root"),
+                PathBuf::from("/tmp/root")
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_success_tui_parts_keep_only_small_metadata_and_owned_summary() {
+        let output = OutputEnvelope::new(
+            OutputKind::ScanResult,
+            RequestId::new("req"),
+            OperationId::new("op"),
+            timestamp_now(),
+            OutputStatus::Partial,
+            ExitCode::Partial,
+            compat_snapshot("linux"),
+        );
+        let mut output = output;
+        output.summary = json!({"scanId": "scan-owned"});
+        output.data = json!({"large": ["discarded"]});
+        let success = ScanSuccess {
+            output,
+            events: Vec::new(),
+            snapshot: OperationSnapshot::not_found("unused", Locale::EnUs),
+            summary: ScanSummary {
+                roots: Vec::new(),
+                entries: Vec::new(),
+                aggregates: Vec::new(),
+                boundaries: Vec::new(),
+                progress: Vec::new(),
+            },
+        };
+
+        let parts = success.into_tui_parts();
+        assert_eq!(parts.status, OutputStatus::Partial);
+        assert_eq!(parts.exit_code, ExitCode::Partial as u8);
+        assert_eq!(parts.scan_id.as_deref(), Some("scan-owned"));
+    }
+
+    #[test]
     fn human_output_uses_selected_locale_only() {
         let context = CoreContext::new(LocaleResolution::new(
             Locale::ZhCn,
@@ -2641,8 +2845,8 @@ mod tests {
             RequestId::new("req"),
             OperationId::new("op"),
             timestamp_now(),
-            OutputStatus::Ok,
-            ExitCode::Completed,
+            OutputStatus::Partial,
+            ExitCode::Partial,
             compat_snapshot("linux"),
         );
         let entry = json!({
@@ -2660,11 +2864,38 @@ mod tests {
                 "coverage": {"state": "complete"}
             }]
         });
+        output.summary = json!({
+            "rootCount": "1",
+            "entryCount": "1",
+            "aggregateCount": "1",
+            "boundaryCount": "2",
+            "errorCount": "3"
+        });
+        output.warnings.push(protocol_error(
+            "scan.partial",
+            "scan",
+            "scan.partial",
+            false,
+            [("scanId", "scan-1".to_string())],
+        ));
+        output.errors.push(protocol_error(
+            "scan.example_error",
+            "scan",
+            "scan.example_error",
+            false,
+            [],
+        ));
 
         let rendered = render_human_output(&context, &output);
         assert_eq!(rendered.matches("/tmp/root").count(), 1);
+        assert!(rendered.contains("Status: partial"));
         assert!(rendered.contains("4096"));
         assert!(rendered.contains("complete"));
+        assert!(rendered.contains(
+            "Summary: 1 roots, 1 entries, 1 directory aggregates, 2 boundaries, 3 errors"
+        ));
+        assert!(rendered.contains("Warnings: scan.partial"));
+        assert!(rendered.contains("Errors: scan.example_error"));
     }
 
     #[test]
