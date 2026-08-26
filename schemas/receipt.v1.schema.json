@@ -106,6 +106,8 @@
       "required": [
         "entryCount",
         "logicalBytes",
+        "apparentLogicalBytes",
+        "uniqueLogicalBytes",
         "allocatedBytes"
       ],
       "properties": {
@@ -113,6 +115,12 @@
           "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
         },
         "logicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "apparentLogicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "uniqueLogicalBytes": {
           "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
         },
         "allocatedBytes": {

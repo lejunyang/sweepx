@@ -56,6 +56,14 @@
       "state": "known",
       "value": "5"
     },
+    "apparentLogicalBytes": {
+      "state": "known",
+      "value": "5"
+    },
+    "uniqueLogicalBytes": {
+      "state": "known",
+      "value": "5"
+    },
     "allocatedBytes": {
       "state": "lower_bound",
       "value": "5",

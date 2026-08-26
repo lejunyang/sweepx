@@ -4,6 +4,15 @@ members = [
   "crates/sweepx-canonical",
   "crates/sweepx-protocol",
   "crates/sweepx-i18n",
+  "crates/sweepx-platform",
+  "crates/sweepx-platform-linux",
+  "crates/sweepx-platform-macos",
+  "crates/sweepx-platform-windows",
+  "crates/sweepx-scanner",
+  "crates/sweepx-cache",
+  "crates/sweepx-fixtures",
+  "crates/sweepx-core",
+  "crates/sweepx-cli",
 ]
 resolver = "2"
 

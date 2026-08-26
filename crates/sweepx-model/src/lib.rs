@@ -147,7 +147,9 @@ pub enum EvidenceState {
 pub type ByteValue = EvidenceValue<DecimalU128>;
 pub type CountValue = EvidenceValue<DecimalU128>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasonCode {
     Overflow,

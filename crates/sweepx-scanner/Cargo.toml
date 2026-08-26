@@ -1,0 +1,23 @@
+[package]
+name = "sweepx-scanner"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98.0"
+
+[dependencies]
+sweepx-model = { path = "../sweepx-model" }
+sweepx-platform = { path = "../sweepx-platform" }
+sweepx-platform-linux = { path = "../sweepx-platform-linux", optional = true }
+sweepx-platform-macos = { path = "../sweepx-platform-macos", optional = true }
+sweepx-platform-windows = { path = "../sweepx-platform-windows", optional = true }
+thiserror = "2.0.16"
+
+[dev-dependencies]
+tempfile = "3.21.0"
+
+[features]
+default = ["platform-linux"]
+platform-linux = ["dep:sweepx-platform-linux"]
+platform-macos = ["dep:sweepx-platform-macos"]
+platform-windows = ["dep:sweepx-platform-windows"]
