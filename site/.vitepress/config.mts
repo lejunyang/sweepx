@@ -5,7 +5,7 @@ const zhGuide = [
   { text: "Cleaner 概念", link: "/cleaners" },
   { text: "Agent 权限边界", link: "/agents" },
   { text: "安全边界", link: "/safety" },
-  { text: "CLI 草案", link: "/cli" },
+  { text: "CLI 与 TUI", link: "/cli" },
   { text: "架构", link: "/architecture" },
   { text: "路线图", link: "/roadmap" },
 ];
@@ -24,7 +24,7 @@ export default defineConfig({
   base: process.env.SITE_BASE ?? "/",
   title: "SweepX",
   description:
-    "SweepX documentation site for the bilingual design snapshot. Current implementation remains under development.",
+    "Bilingual documentation for the safety-first SweepX disk analysis tool.",
   cleanUrls: true,
   lastUpdated: true,
   head: [
@@ -87,8 +87,8 @@ export default defineConfig({
     socialLinks: [],
     footer: {
       message:
-        "Design snapshot only. Destructive features are under development and remain unavailable or unqualified.",
-      copyright: "Copyright © 2026 SweepX design snapshot",
+        "Development documentation. Destructive features remain unavailable or unqualified.",
+      copyright: "Copyright © 2026 SweepX",
     },
     nav: [
       { text: "首页", link: "/" },
@@ -116,7 +116,7 @@ export default defineConfig({
             { text: "安全边界", link: "/safety" },
             { text: "Cleaner 概念", link: "/cleaners" },
             { text: "Agent 权限边界", link: "/agents" },
-            { text: "CLI 草案", link: "/cli" },
+            { text: "CLI 与 TUI", link: "/cli" },
             { text: "架构", link: "/architecture" },
             { text: "路线图", link: "/roadmap" },
           ],
@@ -174,7 +174,7 @@ export default defineConfig({
                 { text: "安全边界", link: "/safety" },
                 { text: "Cleaner 概念", link: "/cleaners" },
                 { text: "Agent 权限边界", link: "/agents" },
-                { text: "CLI 草案", link: "/cli" },
+                { text: "CLI 与 TUI", link: "/cli" },
                 { text: "架构", link: "/architecture" },
                 { text: "路线图", link: "/roadmap" },
               ],

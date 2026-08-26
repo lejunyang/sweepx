@@ -21,9 +21,9 @@ hero:
 
 features:
   - title: Runnable, but read-only
-    details: Linux has a degraded development scanner. Explanation, status snapshots, Cleaner metadata, and bounded TUI views run today. macOS and Windows scanning remains an unsupported stub.
+    details: Linux has a degraded development scanner. The default terminal table and `scan --tui` file manager run today. macOS and Windows scanning remains an unsupported stub.
   - title: Evidence never becomes authority
-    details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Viewing a report, explanation, or TUI never creates deletion authority.
+    details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Reports and explanations create no deletion authority; the live TUI likewise exposes navigation only.
   - title: Mutation remains sealed off
     details: There is no plan, approve, or execute CLI, no native Trash/Permanent adapter, and no implementation that deletes target files.
 ---
@@ -41,10 +41,11 @@ features:
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |
 | Cleaner | read-only metadata list/show with compatibility gates |
-| CLI/TUI | bounded input and read-only viewing |
+| CLI/TUI | one `sweepx` entry point; terminal table by default, directory browser via `scan --tui` |
 | Trash / Permanent | absent |
 
 The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. JSON and NDJSON machine fields do not change with the display language.
+Release automation builds five target archives, checksums, installers, and this GitHub Pages site. No stable release has been published yet.
 
 ## Read by question
 

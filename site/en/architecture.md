@@ -13,12 +13,13 @@ absolute roots
   -> platform backend
   -> scanner + model aggregates/boundaries
   -> Core output envelope
-  -> human | JSON | NDJSON
+  -> bounded human table | explicit JSON | explicit NDJSON
+  -> optional in-process file-manager TUI
   -> durable terminal snapshot (optional state directory)
 
 bounded scan.result JSON
   -> imported provenance downgrade
-  -> report-only explanation or read-only TUI view
+  -> report-only explanation
 ```
 
 Linux connects a real scanner backend. macOS and Windows currently provide stubs, so Core returns unsupported scan output instead of simulating success.
@@ -39,7 +40,7 @@ CLI scan currently completes synchronously and, when a state directory is enable
 
 ## Import is an explicit trust boundary
 
-Core does not preserve live authority merely because scan JSON uses the project schema. After parsing, entry/aggregate provenance becomes stale preview and coverage becomes incomplete/not revalidated. Analyzer may explain it but cannot promote it to an executable candidate. TUI likewise retains only a bounded view.
+Core does not preserve live authority merely because scan JSON uses the project schema. After parsing, entry/aggregate provenance becomes stale preview and coverage becomes incomplete/not revalidated. Analyzer may explain it but cannot promote it to an executable candidate. The current TUI does not import that JSON; it browses the typed summary from the current live scan.
 
 ## Why P3 is not a real executor
 

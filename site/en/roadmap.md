@@ -15,9 +15,10 @@ The roadmap defines capability and evidence gates, not dates. Code may land befo
 |---|---|---|
 | P0 contracts/models | Workspace, schemas, fixtures, safety types, and extensive tests exist | The complete evidence bundle and every acceptance gate have not been declared complete |
 | P1 scanner CLI | Linux read-only scan is degraded; status snapshot works | macOS/Windows scanning unsupported; live cancel disabled; three-platform/resource gates open |
-| P2 analysis/TUI/Cleaner | Bounded explain, read-only TUI, and metadata-only Cleaner run | Imported input is report-only; signing/sandbox/full cross-surface qualification open |
+| P2 analysis/TUI/Cleaner | Bounded explain, live directory browsing through `scan --tui`, and metadata-only Cleaner run | Imported explain input is report-only; signing/sandbox/full cross-surface qualification open |
 | P3 plan/audit/simulation | Immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed fake executor are implemented | No CLI wiring, trusted HumanApproval broker, native path, real revalidation, or platform adapter; the phase is not qualified |
 | P4+ mutation | None | Trash, Permanent, and release qualification are all future work |
+| Release engineering | CI, Pages, five target archives/checksums, Unix/Windows installers, and ordered crates.io publication exist | No stable release yet; signing, SBOM, and provenance gates remain open |
 
 ## Phase targets
 

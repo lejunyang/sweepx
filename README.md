@@ -7,24 +7,47 @@
 
 ## 当前实现状态
 
-状态截点：2026-08-26。以下描述来自当前代码与测试，不是发布或跨平台资格声明。
+状态截点：2026-08-27。以下描述来自当前代码与测试，不是发布或跨平台资格声明。
 
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
-| Rust workspace | 可构建的多 crate 工作区 | 开发版，未提供安装包或稳定性承诺 |
+| Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
 | `sweepx scan` | **Linux：degraded** 的同步、只读目录扫描 | macOS/Windows 目前只编译 stub，扫描返回 unsupported；未完成三平台发布资格 |
 | `sweepx status` | 读取已持久化的 operation snapshot | 不是后台任务监控，也不表示扫描仍在运行 |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
-| `sweepx tui` / `sweepx-tui` | 校验或浏览有界的 `scan.result` JSON | 仅查看与导航，不产生计划、授权或文件变更 |
+| `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；要求终端 stdin/stdout |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；不是阶段资格声明，没有 CLI 接线或 native target mutation |
 | 真实清理 | **不可用** | Trash、Permanent、管理器 mutation 与 destructive Agent workflow 均未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
 
-## 从仓库运行只读能力
+## 安装
+
+发布页会提供一个统一的 `sweepx` 二进制。安装器下载与当前平台匹配的归档，校验 `SHA256SUMS`，并拒绝包含额外文件的归档。
+
+Linux / macOS：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/lejunyang/sweepx/main/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
+```
+
+也可以从 GitHub Release 下载对应的 `.tar.gz` / `.zip` 与 `SHA256SUMS` 后手工校验。当前构建矩阵包含 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64；**二进制存在不等于对应平台的扫描能力已合格**，具体以 `sweepx capabilities` 为准。
+
+### 发布门禁
+
+普通 push/PR 会运行 Rust、schema、站点、安装器和 native CLI CI；`main` 上的文档会独立部署 GitHub Pages。只有 HEAD commit message 包含字面量 `[publish]` 时，才会发布二进制和 crates.io 包。GitHub Release 与 Pages 使用仓库自带的 `GITHUB_TOKEN`；crates.io 需要在受保护的 `crates-io` environment 中配置 `CARGO_REGISTRY_TOKEN`。完整步骤见 [RELEASING.md](RELEASING.md)。
+
+## 运行只读能力
 
 需要仓库声明的 Rust toolchain。下列命令只展示当前存在的接口；请始终使用你明确选择的绝对路径。
 
@@ -32,11 +55,17 @@ CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择�
 # 查看当前能力矩阵
 cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
-# Linux 上执行开发版只读扫描，并保存机器可读结果
+# Linux 上执行开发版只读扫描；默认直接显示有界终端表格
 cargo run -p sweepx-cli -- \
-  --format json \
   --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root > /absolute/path/to/scan.json
+  scan /absolute/path/to/root
+
+# 扫描后进入文件管理器式 TUI（Enter/Right 进入，Esc/Backspace/Left 返回）
+cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
+
+# 仅在脚本或集成需要时显式请求 JSON
+cargo run -p sweepx-cli -- \
+  --format json scan /absolute/path/to/root > /absolute/path/to/scan.json
 
 # 读取扫描结束时保存的 snapshot
 cargo run -p sweepx-cli -- \
@@ -53,14 +82,9 @@ cargo run -p sweepx-cli -- \
 cargo run -p sweepx-cli -- --format json cleaner list
 cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
-# 校验 TUI 的只读输入，或启动独立的只读终端界面
-cargo run -p sweepx-cli -- \
-  --format json \
-  tui --scan-json /absolute/path/to/scan.json
-cargo run -p sweepx-tui -- /absolute/path/to/scan.json --locale zh-CN
 ```
 
-`scan` 接受一个或多个绝对根路径。全局输出格式为 `human`、`json` 或 `ndjson`。`explain` 和 `tui` 默认最多读取 8 MiB 输入，分别可用 `--max-input-bytes` 调整；CLI 的 TUI 校验路径还支持 `--page-index` 和 `--max-total-rows`。这些上限用于拒绝过大的导入数据，而不是放宽执行权限。
+`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 与 `ndjson` 是显式机器格式。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
 
 ### `status` 与 `cancel` 的诚实语义
 
@@ -68,7 +92,7 @@ cargo run -p sweepx-tui -- /absolute/path/to/scan.json --locale zh-CN
 
 ### 导入 JSON 永远不是执行依据
 
-`explain --scan-json` 和 TUI 会接受符合 `scan.result` 合同的有界 JSON。导入时，路径证据会被标记为 stale preview，coverage 被降级为 incomplete/not revalidated，因此解释只能用于报告。它不会创建可执行候选、计划、授权或 permit。
+`explain --scan-json` 会接受符合 `scan.result` 合同的有界 JSON。导入时，路径证据会被标记为 stale preview，coverage 被降级为 incomplete/not revalidated，因此解释只能用于报告。它不会创建可执行候选、计划、授权或 permit。`scan --tui` 不走导入路径，而是只读浏览本次 live scan 的 typed 结果。
 
 ## Cleaner 概念
 
@@ -132,9 +156,9 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 ## 平台与发布边界
 
 - Linux scanner 已实现为 development-grade/degraded，只能依据当前测试理解，不能据此宣称生产资格或完整文件系统覆盖。
-- macOS 与 Windows scanner 目前是 compilation-only stub；跨平台的 explain、Cleaner metadata 和 TUI 输入处理不等于这些平台已有 live scanner。
+- macOS 与 Windows scanner 目前是 compilation-only stub；跨平台的 explain、Cleaner metadata 和终端 UI 不等于这些平台已有 live scanner。
 - P4 的 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图。
-- 没有安装包、签名发行物、SBOM 发布链或稳定支持承诺。
+- 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流；尚未实际发布稳定版本，也没有签名、SBOM、provenance 或稳定支持承诺。
 
 ## 文档导航
 
@@ -142,6 +166,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - [总体设计](DESIGN.md)：端到端架构、信任边界与关键决策。
 - [Cleaner Catalog](docs/CLEANER-CATALOG.md)：生态证据、风险与 report-only 边界。
 - [路线图](docs/ROADMAP.md)：当前实现快照、阶段目标、测试矩阵与发布门槛。
+- [发布指南](RELEASING.md)：版本、提交消息门禁、token、产物与失败恢复。
 - [扫描/缓存架构](docs/architecture/scanner-and-cache.md)、[安全删除架构](docs/architecture/safety-and-deletion.md)与[CLI/TUI/Cleaner 架构](docs/architecture/cli-tui-and-plugins.md)。
 
 ## 已知缺口

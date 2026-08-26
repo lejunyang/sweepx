@@ -16,10 +16,10 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有�
 - `status` 读取已持久化的终态 snapshot；`cancel` 因没有 live operation registry 而标记为 `disabled`。
 - `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
-- CLI 的 `tui` 子命令校验并摘要有界输入；`sweepx-tui` 提供只读的分页、pane 和行导航。
+- `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式只读浏览器，可进入和返回目录，不需要 JSON 中间文件。
 - P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；没有可信 HumanApproval broker。
 
-这些是代码和测试覆盖到的开发能力，不是安装包、生产支持或三平台资格声明。
+这些是代码和测试覆盖到的开发能力。仓库已有跨平台归档、安装器和发布自动化，但尚未发布稳定版本，也不是生产支持或三平台扫描资格声明。
 
 ## 产品定位
 

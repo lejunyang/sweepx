@@ -13,12 +13,13 @@ absolute roots
   -> platform backend
   -> scanner + model aggregates/boundaries
   -> Core output envelope
-  -> human | JSON | NDJSON
+  -> bounded human table | explicit JSON | explicit NDJSON
+  -> optional in-process file-manager TUI
   -> durable terminal snapshot (optional state directory)
 
 bounded scan.result JSON
   -> imported provenance downgrade
-  -> report-only explanation or read-only TUI view
+  -> report-only explanation
 ```
 
 Linux 连接了实际 scanner backend。macOS/Windows backend 目前只提供 stub，因此 Core 会返回 unsupported scan output，而不是模拟成功。
@@ -39,7 +40,7 @@ CLI scan 当前同步完成，并在启用 state directory 时保存 terminal sn
 
 ## 导入是明确的信任边界
 
-Core 不会因为 scan JSON 带有本项目 schema 就保留它的 live 权威。解析之后，entry/aggregate provenance 被改为 stale preview，coverage 变为 incomplete/not revalidated。Analyzer 可以据此解释，但不能把它升级为 executable candidate。TUI 同样只展示有界页面。
+Core 不会因为 scan JSON 带有本项目 schema 就保留它的 live 权威。解析之后，entry/aggregate provenance 被改为 stale preview，coverage 变为 incomplete/not revalidated。Analyzer 可以据此解释，但不能把它升级为 executable candidate。当前 TUI 不导入这类 JSON，而是直接浏览本次 live scan 的 typed summary。
 
 ## P3 为什么不算真实 executor
 

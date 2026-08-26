@@ -4,7 +4,7 @@ title: CLI and read-only scanning
 
 # CLI and read-only scanning
 
-The current `sweepx` binary is a runnable development-grade read-only CLI. It exposes `scan`, `explain`, `status`, `cancel`, `cleaner`, `tui`, and `capabilities`; it exposes no mutation subcommand.
+The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cleaner`, and `capabilities`; `scan --tui` enters the interactive browser after scanning. There is no separate TUI command or binary and no mutation subcommand.
 
 > [!CAUTION]
 > `plan`, `approve`, `execute`, Trash, Permanent, and `--dangerously-delete` are not part of the current CLI. Treat those names as roadmap proposals wherever they appear.
@@ -14,7 +14,7 @@ The current `sweepx` binary is a runnable development-grade read-only CLI. It ex
 Run from the repository root:
 
 ```bash
-cargo build -p sweepx-cli -p sweepx-tui
+cargo build -p sweepx-cli
 cargo run -p sweepx-cli -- --locale en-US capabilities
 ```
 
@@ -28,20 +28,44 @@ Global options:
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
+## Install
+
+A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/lejunyang/sweepx/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
+```
+
+Release infrastructure does not mean a stable release already exists. Check GitHub Releases and `sweepx capabilities` before installing.
+
+Normal pushes and pull requests run Rust, schema, site, installer, and native-CLI CI. GitHub Pages deploys independently when `main` changes. Binary and crates.io publication run only when the HEAD commit message contains the literal `[publish]` marker. GitHub Release and Pages need no extra token; crates.io requires `CARGO_REGISTRY_TOKEN` in a protected `crates-io` environment.
+
 ## Read-only Linux scan
 
 ```bash
 cargo run -p sweepx-cli -- \
-  --format json \
   --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root > /absolute/path/to/scan.json
+  scan /absolute/path/to/root
 ```
 
 - You may provide multiple roots, but every root must be absolute.
+- The default writes a bounded 40-row file table directly to the terminal; no JSON file is required.
 - The scan runs synchronously, is metadata-only and no-follow, and reports mount/link/resource boundaries and errors.
 - The current Linux capability is `degraded`, not release qualification.
 - macOS and Windows backends are unsupported stubs; compilation is not scanning support.
 - `ndjson` emits an event stream ending in a terminal event; it does not imply a background daemon.
+
+Request machine output explicitly for scripts and integrations:
+
+```bash
+sweepx --format json scan /absolute/path/to/root > scan.json
+sweepx --format ndjson scan /absolute/path/to/root > events.ndjson
+```
 
 ## Status snapshots and cancellation
 
@@ -89,27 +113,16 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` reports packages and compatibility. `show` exposes full manifest/rule metadata only when the Core version range matches; incompatibility uses a dedicated fail-closed exit. Neither command performs a file action described by a rule. See [Cleaner concepts](/en/cleaners).
 
-## Bounded read-only TUI
-
-The CLI can validate input and pagination first:
+## File-manager-style read-only TUI
 
 ```bash
-cargo run -p sweepx-cli -- \
-  --format json \
-  tui \
-  --scan-json /absolute/path/to/scan.json \
-  --page-index 0 \
-  --max-input-bytes 8388608 \
-  --max-total-rows 100000
+cargo run -p sweepx-cli -- --locale en-US \
+  scan --tui /absolute/path/to/root [/another/absolute/root]
 ```
 
-The separate binary provides the interactive view:
+The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, and `q` or `Ctrl-C` to quit. Symlinks and reparse points are visible but cannot be entered.
 
-```bash
-cargo run -p sweepx-tui -- /absolute/path/to/scan.json --locale en-US
-```
-
-Keys include `Tab` / `Shift-Tab` for panes, arrows or `j`/`k` for rows, `PageUp`/`PageDown` for pages, and `q` to quit. Its action type contains navigation only and is marked non-destructive in code.
+`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences.
 
 ## Commands that do not exist today
 

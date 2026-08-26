@@ -4,7 +4,7 @@ title: CLI 与只读扫描
 
 # CLI 与只读扫描
 
-当前 `sweepx` 是可运行的开发版只读 CLI。它提供 `scan`、`explain`、`status`、`cancel`、`cleaner`、`tui` 和 `capabilities`；没有任何 mutation 子命令。
+当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cleaner` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览，没有独立的 TUI 命令或二进制，也没有任何 mutation 子命令。
 
 > [!CAUTION]
 > `plan`、`approve`、`execute`、Trash、Permanent 和 `--dangerously-delete` 都不是当前 CLI。看到这些名称时，应将它们理解为路线图提案。
@@ -14,7 +14,7 @@ title: CLI 与只读扫描
 在仓库根目录运行：
 
 ```bash
-cargo build -p sweepx-cli -p sweepx-tui
+cargo build -p sweepx-cli
 cargo run -p sweepx-cli -- --locale zh-CN capabilities
 ```
 
@@ -28,20 +28,44 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 语言解析会依次考虑显式 override、locale 环境与系统 locale，无法识别时回退到 `en-US`。机器字段和值不翻译。
 
+## 安装
+
+正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/lejunyang/sweepx/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
+```
+
+目前有发布基础设施不代表已经发布稳定版本；安装前应核对 GitHub Release 和 `sweepx capabilities`。
+
+普通 push/PR 会运行 Rust、schema、站点、安装器和 native CLI CI；GitHub Pages 在 `main` 更新时独立部署。只有 HEAD commit message 含字面量 `[publish]` 时，二进制与 crates.io 发布任务才运行。GitHub Release 和 Pages 不需要额外 token；crates.io 需要在受保护的 `crates-io` environment 中配置 `CARGO_REGISTRY_TOKEN`。
+
 ## Linux 只读扫描
 
 ```bash
 cargo run -p sweepx-cli -- \
-  --format json \
   --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root > /absolute/path/to/scan.json
+  scan /absolute/path/to/root
 ```
 
 - 可以传入多个根，但每个根都必须是绝对路径。
+- 默认直接向终端输出有界的 40 行文件表；不要求 JSON 文件。
 - 扫描同步运行，metadata-only、no-follow，并把挂载/链接/资源边界与错误写进结果。
 - 当前 Linux capability 是 `degraded`，不是发布资格。
 - macOS/Windows backend 目前是 unsupported stub；能编译不等于能扫描。
 - `ndjson` 用于事件流，并以 terminal event 结束；这不意味着存在后台 daemon。
+
+只有脚本和系统集成才需要显式机器输出：
+
+```bash
+sweepx --format json scan /absolute/path/to/root > scan.json
+sweepx --format ndjson scan /absolute/path/to/root > events.ndjson
+```
 
 ## 状态快照与取消
 
@@ -89,27 +113,16 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` 展示 package 与兼容性。`show` 只有在 Core 版本范围匹配时才展示完整 manifest/rules；不兼容时使用专门的兼容性错误退出。两者都不执行规则指向的文件动作。详见 [Cleaner 概念](/cleaners)。
 
-## 有界只读 TUI
-
-CLI 可先验证输入和分页：
+## 文件管理器式只读 TUI
 
 ```bash
-cargo run -p sweepx-cli -- \
-  --format json \
-  tui \
-  --scan-json /absolute/path/to/scan.json \
-  --page-index 0 \
-  --max-input-bytes 8388608 \
-  --max-total-rows 100000
+cargo run -p sweepx-cli -- --locale zh-CN \
+  scan --tui /absolute/path/to/root [/another/absolute/root]
 ```
 
-交互式界面由独立二进制提供：
+TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`q` 或 `Ctrl-C` 退出。symlink 和 reparse point 只显示而不可进入。
 
-```bash
-cargo run -p sweepx-tui -- /absolute/path/to/scan.json --locale zh-CN
-```
-
-键位包括 `Tab` / `Shift-Tab` 切 pane，方向键或 `j`/`k` 切行，`PageUp`/`PageDown` 翻页，`q` 退出。动作类型只有 navigation，代码将其标记为 non-destructive。
+`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。
 
 ## 当前不存在的命令
 

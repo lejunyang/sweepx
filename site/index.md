@@ -21,9 +21,9 @@ hero:
 
 features:
   - title: 可运行，但只读
-    details: Linux 上已有 degraded 的开发版扫描器；解释、状态快照、Cleaner 元数据和有界 TUI 可运行。macOS/Windows 扫描仍是 unsupported stub。
+    details: Linux 上已有 degraded 的开发版扫描器；默认终端表格和 `scan --tui` 文件管理器可运行。macOS/Windows 扫描仍是 unsupported stub。
   - title: 证据不会变成授权
-    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。查看报告、解释候选或浏览 TUI 都不会产生删除权限。
+    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。查看报告或解释候选不会产生删除权限；live TUI 同样只有导航能力。
   - title: 破坏性路径仍封闭
     details: 当前没有 plan、approve、execute CLI，没有 native Trash/Permanent adapter，也没有任何删除目标文件的实现。
 ---
@@ -41,10 +41,11 @@ features:
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门 |
-| CLI/TUI | 有界输入与只读查看 |
+| CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览 |
 | Trash / Permanent | 不存在 |
 
 CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。JSON/NDJSON 的机器字段不会因语言变化。
+发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；稳定 release 尚未发布。
 
 ## 按你的问题阅读
 

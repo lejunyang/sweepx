@@ -1,6 +1,6 @@
 # SweepX implementation, verification, and release roadmap
 
-Status: implementation and release roadmap, 2026-08-26. SweepX now has a runnable development-grade read-only Rust CLI/TUI surface, but it does not authorize cleanup, delete or move a target file, request elevation, run a package-manager cleanup, or change a browser or enterprise policy. Destructive tests described below remain future release work and must use disposable synthetic fixtures or explicitly provisioned test machines, never user data.
+Status: implementation and release roadmap, 2026-08-27. SweepX now has a runnable development-grade read-only Rust CLI/TUI surface and cross-platform distribution automation, but it does not authorize cleanup, delete or move a target file, request elevation, run a package-manager cleanup, or change a browser or enterprise policy. Destructive tests described below remain future release work and must use disposable synthetic fixtures or explicitly provisioned test machines, never user data.
 
 This roadmap turns the architecture in [DESIGN.md](../DESIGN.md) and the cleaner inventory in [CLEANER-CATALOG.md](CLEANER-CATALOG.md) into independently releasable increments. Product positioning and the documentation entry point are in [README.md](../README.md).
 
@@ -12,8 +12,9 @@ The phase table below describes target gates, not claims that a phase is qualifi
 - `status` reads a durable terminal snapshot. `cancel` exists so it can return an honest disposition, but cancellation is **disabled** because there is no live in-process operation registry.
 - `explain` reads a bounded absolute-path `scan.result` JSON file. Imported provenance is deliberately downgraded to stale/incomplete, so resulting candidates are non-executable/report-only.
 - `cleaner list` and compatibility-gated `cleaner show` report built-in Cleaner metadata and rules only. They do not run a cleaner or an ecosystem command.
-- The CLI `tui` path validates and summarizes bounded scan JSON, while the `sweepx-tui` binary provides bounded read-only navigation. Neither surface creates a plan or mutation authority.
+- The sole `sweepx` binary renders a bounded human table by default. `sweepx scan --tui` consumes the same live typed scan result and provides read-only directory enter/back navigation without an intermediate JSON file.
 - Human output supports auto-detected `zh-CN` and `en-US`, with an explicit `--locale` override. Machine schema keys and protocol values remain stable.
+- CI tests the workspace, schemas, site, installers, and native CLI builds. Release automation builds five target archives and checksums, and gates both binary and crates.io publication on the literal marker in the HEAD commit message. GitHub Pages deploys independently on normal `main` pushes.
 - P3 libraries now model immutable plans, explicitly simulation-only authorization, Unix-only durable audit/recovery state, and a sealed deterministic fake executor. There is no CLI `plan`, `approve`, or `execute` command, the executor accepts no native path, and there is no native filesystem mutation adapter. The snapshot/anchor pair detects accidental rollback and partial corruption; it is not release-qualified native audit storage and cannot resist coordinated same-user rollback/rehashing.
 
 There is no current Trash or Permanent capability. No test result for a read-only unit should be promoted into a broader product, platform, or destructive qualification claim.

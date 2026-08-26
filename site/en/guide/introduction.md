@@ -16,10 +16,10 @@ SweepX is a safety-first Rust disk-analysis project. The current repository has 
 - `status` reads a persisted terminal snapshot. `cancel` is `disabled` because there is no live operation registry.
 - `explain` analyzes bounded `scan.result` JSON, but imported data is downgraded to stale/incomplete provenance and candidates remain report-only.
 - Built-in Cleaners support metadata-only list/show and fail closed on Core-version incompatibility.
-- The CLI `tui` command validates and summarizes bounded input; `sweepx-tui` provides read-only page, pane, and row navigation.
+- `sweepx scan --tui` opens a file-manager-style, read-only browser in the same binary after scanning. It enters and leaves directories without an intermediate JSON file.
 - P3 implements immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed deterministic simulated executor as library APIs; there is no trusted HumanApproval broker.
 
-Those are code- and test-backed development capabilities, not installation, production-support, or three-platform qualification claims.
+Those are code- and test-backed development capabilities. The repository now has cross-platform archives, installers, and release automation, but no stable release, production support, or three-platform scan qualification.
 
 ## Product position
 
