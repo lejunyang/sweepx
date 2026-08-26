@@ -1212,7 +1212,7 @@ fn render_human_scan_output(
             .unwrap_or("unknown");
         lines.push(format!(
             "{:<56}  {:<10}  {:>14}  {}",
-            truncate_display(path, 56),
+            truncate_display(&sanitize_terminal_text(path), 56),
             kind,
             reclaimable,
             coverage
@@ -1232,6 +1232,19 @@ fn render_human_scan_output(
     }
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
     lines.join("\n")
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn render_human_evidence_value(value: &Value) -> String {
@@ -2652,6 +2665,38 @@ mod tests {
         assert_eq!(rendered.matches("/tmp/root").count(), 1);
         assert!(rendered.contains("4096"));
         assert!(rendered.contains("complete"));
+    }
+
+    #[test]
+    fn human_scan_output_sanitizes_terminal_control_characters() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let mut output = OutputEnvelope::new(
+            OutputKind::ScanResult,
+            RequestId::new("req"),
+            OperationId::new("op"),
+            timestamp_now(),
+            OutputStatus::Ok,
+            ExitCode::Completed,
+            compat_snapshot("linux"),
+        );
+        output.data = json!({
+            "roots": [],
+            "entries": [{
+                "displayPath": "/tmp/\u{001b}]52;c;clipboard\u{0007}",
+                "objectType": "file",
+                "reclaimableEstimate": {"state": "known", "value": "1"},
+                "coverage": {"state": "complete"}
+            }],
+            "aggregates": []
+        });
+
+        let rendered = render_human_output(&context, &output);
+        assert!(!rendered.contains('\u{001b}'));
+        assert!(!rendered.contains('\u{0007}'));
+        assert!(rendered.contains('\u{fffd}'));
     }
 
     #[test]

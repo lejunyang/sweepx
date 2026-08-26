@@ -38,9 +38,9 @@ impl BrowserRow {
             aggregate: aggregate.cloned(),
             root,
             label: if root {
-                entry.display_path.clone()
+                sanitize_terminal_text(&entry.display_path)
             } else {
-                display_basename(&entry.display_path)
+                sanitize_terminal_text(&display_basename(&entry.display_path))
             },
         }
     }
@@ -208,7 +208,11 @@ impl BrowserModel {
 
     pub fn breadcrumbs(&self) -> Vec<String> {
         std::iter::once(virtual_roots_label(self.locale).to_string())
-            .chain(self.levels.iter().map(|level| level.directory.clone()))
+            .chain(
+                self.levels
+                    .iter()
+                    .map(|level| sanitize_terminal_text(&level.directory)),
+            )
             .collect()
     }
 
@@ -602,6 +606,19 @@ fn display_basename(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(&cleaned)
         .to_string()
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn virtual_roots_label(locale: Locale) -> &'static str {
@@ -1006,5 +1023,28 @@ mod tests {
             .map(BrowserRow::display_path)
             .collect::<Vec<_>>();
         assert_eq!(paths, ["C:\\file", "C:\\dir"]);
+    }
+
+    #[test]
+    fn terminal_control_characters_are_sanitized_in_labels_and_breadcrumbs() {
+        let malicious = "/root/\u{1b}]52;c;clipboard\u{7}";
+        let mut model = BrowserModel::from_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            None,
+            &[entry(malicious, ObjectType::Directory)],
+            &[],
+            &[],
+        );
+
+        assert!(!model.visible_rows()[0].label().contains('\u{1b}'));
+        assert!(!model.visible_rows()[0].label().contains('\u{7}'));
+        model.enter_selected();
+        assert!(
+            model
+                .breadcrumbs()
+                .iter()
+                .all(|part| !part.chars().any(char::is_control))
+        );
     }
 }
