@@ -4,54 +4,61 @@ title: 路线图
 
 # 路线图
 
-路线图第 4 节给出的不是发布日期，而是阶段式能力边界。它最重要的信息不是“何时上线”，而是“在什么证据条件下，哪些能力仍然不能上线”。
+路线图是能力与证据门槛，不是发布日期。代码可以先落地，阶段仍可能因为跨平台、基准、故障注入或安全证据不完整而未完成。
 
 > [!CAUTION]
-> 当前 SweepX 仍处于设计阶段。P0 到 P3 都不包含真实平台变更路径，因此任何 destructive capability 现在都不可用。
+> 当前实现横跨 P1/P2 的部分只读能力和 P3 的 library-only 模拟，但没有任何 native mutation。不能把“有 crate/测试”写成“阶段已资格化”。
 
-## 分阶段演进
+## 当前落点
 
-| 阶段 | 可见增量 | 仍然不包含什么 |
+| 轨道 | 当前证据 | 未完成边界 |
 |---|---|---|
-| P0 | 契约、schema、安全策略、fixture 与 oracle 基线 | 任何 runnable cleaner 或平台变更 |
-| P1 | 0.1 只读 scanner CLI | Cleaner 推荐、计划、审批、Trash、Permanent |
-| P2 | 0.2 explainable analysis、TUI、只读 Agent 工作流 | 计划批准、真实执行、浏览器状态删除、策略变更 |
-| P3 | 0.3 immutable planning 与 simulated execution | 任何 native Trash / Permanent call |
-| P4 | 0.9 native Trash beta，且仅限合格 tuple | Permanent、跨文件系统 Trash、远程/provider/system 路径 |
-| P5 | 1.0 普通用户稳定产品 | 任何未取得资格的能力、提权清理、广义 manager mutation |
-| P6 | post-v1 能力轨道 | 没有新 threat model 和独立证据的扩展 |
+| P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
+| P1 scanner CLI | Linux read-only scan degraded；status snapshot 可用 | macOS/Windows scanner unsupported；live cancel disabled；三平台/资源 gate 未闭合 |
+| P2 analysis/TUI/Cleaner | bounded explain、只读 TUI、metadata-only Cleaner 可运行 | imported input report-only；签名/沙箱/完整跨表面资格未闭合 |
+| P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现 | 没有 CLI wiring、可信 HumanApproval broker、native path、真实 revalidation 或 platform adapter；阶段尚未资格化 |
+| P4+ mutation | 无 | Trash、Permanent 与发布资格全部是未来工作 |
 
-## 关键判断
+## 阶段目标
 
-这条路线图直接决定了当前站点必须怎么写：
+| 阶段 | 目标增量 | 明确不包含 |
+|---|---|---|
+| P0 | 契约、schema、安全策略、fixture/oracle 基线 | mutation 与性能宣传 |
+| P1 | 三平台合格的只读 scanner CLI | Cleaner 执行、计划、Trash/Permanent |
+| P2 | 可解释分析、有界 TUI、只读 Agent 与 catalog reporting | 审批或真实执行 |
+| P3 | immutable plan/authorization、durable audit、deterministic simulation | native Trash/Permanent、用户文件执行、public execution CLI |
+| P4 | 仅对精确合格 tuple 开放 native Trash beta | Permanent、跨文件系统/remote/provider/system mutation |
+| P5 | 三平台普通用户稳定产品 | 未资格能力、提权清理与广义 manager mutation |
+| P6 | 单独 threat model 下的 post-v1 轨道 | 无独立证据的扩张 |
 
-- 现在还没有进入 P4 的资格化 native Trash beta。
-- 因此 destructive features 不能被描述为 beta-ready，更不能被表述为可执行。
-- Permanent 更晚，且只有在独立 capability cell 被证明后才可能出现。
+## P3 完成标准
 
-## 第 2 节与第 4 节如何共同约束产品
+当前最接近的工作是 P3 libraries。它只有在模型和 fault-injection tests 持续证明以下内容时才能收敛：
 
-第 2 节定义安全底线，第 4 节定义阶段边界。两者叠加后的结果是：
+- plan digest 与 authorization exact binding 不能错配；
+- nonce、TTL、claim、fence 和 permit 不能 replay；
+- durable intent 在 simulated submit 前写入；
+- ambiguous outcome 进入 reconciliation；
+- cancel 不会被记成 success；
+- Trash 分支不会转成 Permanent；
+- sealed fake adapter 仍是唯一 executor adapter；
+- 对用户文件的 native mutation 始终不可能。
 
-1. 每个阶段都要继承普通用户边界、计划绑定和失败关闭语义。
-2. 阶段推进不能用“先支持功能，之后补安全”来解释。
-3. 即便某个原型能跑，只要证据和资格没完成，站点也必须把它当作 unavailable / unqualified。
+即便完成这些，也不会自动产生 `sweepx plan/approve/execute` CLI。公共接口设计、可信本地审批、真实 live revalidation 和 native adapter 是后续独立工作。
 
-## Stop-ship 规则
+## P4 之前的硬停止线
 
-路线图还列出了不能发布的条件，尤其包括：
+在第一个 native Trash test 之前，至少需要：
 
-- 任一硬保护、审批、intent、permit 或 reconcile 约束可以被绕过。
-- CLI、TUI、Cleaner API、Skill 之间出现语义分叉。
-- 错误、未知项、不完整子树被渲染成“当前为 0”或“已完成”。
-- 任何 adapter 无法证明 Trash failure 不会走到 Permanent。
+1. 精确 OS/arch/filesystem/provider capability tuple；
+2. disposable fixture 与独立 oracle；
+3. target、parent、ancestor、mount 与 descendant swap 对抗测试；
+4. native result ambiguity 与 crash reconciliation；
+5. 证明所有 Trash failure path 不会进入 Permanent；
+6. CLI/TUI/Agent/Cleaner 对相同身份、风险与结果保持一致。
 
-这些规则让路线图更接近发布门槛说明，而不是普通的 feature backlog。
+当前没有进入这一步。
 
-## 当前最诚实的产品状态
+## 未来命令仍然只是提案
 
-如果只基于现有文档，当前最准确的结论是：
-
-- SweepX 是一份安全约束清晰的设计快照。
-- read-only 和 simulated 阶段描述得较完整，但仍不是交付实现。
-- destructive features remain under development and are not available for use today.
+`plan create/show`、trusted approval、`execute` 和任何 Permanent flag 都不在当前命令树。文档只有在真实 CLI wiring 与对应 capability qualification 落地后，才能把它们从“提案”改为“可运行”。

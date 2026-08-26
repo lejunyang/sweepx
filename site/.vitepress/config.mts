@@ -2,6 +2,8 @@ import { defineConfig } from "vitepress";
 
 const zhGuide = [
   { text: "介绍", link: "/guide/introduction" },
+  { text: "Cleaner 概念", link: "/cleaners" },
+  { text: "Agent 权限边界", link: "/agents" },
   { text: "安全边界", link: "/safety" },
   { text: "CLI 草案", link: "/cli" },
   { text: "架构", link: "/architecture" },
@@ -10,6 +12,8 @@ const zhGuide = [
 
 const enGuide = [
   { text: "Introduction", link: "/en/guide/introduction" },
+  { text: "Cleaner concepts", link: "/en/cleaners" },
+  { text: "Agent boundaries", link: "/en/agents" },
   { text: "Safety", link: "/en/safety" },
   { text: "CLI", link: "/en/cli" },
   { text: "Architecture", link: "/en/architecture" },
@@ -109,6 +113,8 @@ export default defineConfig({
           text: "核心主题",
           items: [
             { text: "安全边界", link: "/safety" },
+            { text: "Cleaner 概念", link: "/cleaners" },
+            { text: "Agent 权限边界", link: "/agents" },
             { text: "CLI 草案", link: "/cli" },
             { text: "架构", link: "/architecture" },
             { text: "路线图", link: "/roadmap" },
@@ -127,6 +133,8 @@ export default defineConfig({
           text: "Core Topics",
           items: [
             { text: "Safety", link: "/en/safety" },
+            { text: "Cleaner concepts", link: "/en/cleaners" },
+            { text: "Agent boundaries", link: "/en/agents" },
             { text: "CLI", link: "/en/cli" },
             { text: "Architecture", link: "/en/architecture" },
             { text: "Roadmap", link: "/en/roadmap" },
@@ -163,6 +171,8 @@ export default defineConfig({
               text: "核心主题",
               items: [
                 { text: "安全边界", link: "/safety" },
+                { text: "Cleaner 概念", link: "/cleaners" },
+                { text: "Agent 权限边界", link: "/agents" },
                 { text: "CLI 草案", link: "/cli" },
                 { text: "架构", link: "/architecture" },
                 { text: "路线图", link: "/roadmap" },
@@ -211,6 +221,8 @@ export default defineConfig({
               text: "Core Topics",
               items: [
                 { text: "Safety", link: "/en/safety" },
+                { text: "Cleaner concepts", link: "/en/cleaners" },
+                { text: "Agent boundaries", link: "/en/agents" },
                 { text: "CLI", link: "/en/cli" },
                 { text: "Architecture", link: "/en/architecture" },
                 { text: "Roadmap", link: "/en/roadmap" },

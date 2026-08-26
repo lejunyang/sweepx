@@ -4,59 +4,64 @@ title: 架构
 
 # 架构
 
-SweepX 的架构信息在 README 中已经有一条主线：同一套安全核心同时服务 CLI、TUI 和 Agent，而不是给某个前端保留更宽松的 mutation path。
+SweepX 以共享的协议与安全类型为中心，把已经可运行的只读路径和仍在 library 层的模拟 mutation model 分开。
 
-## 一条受约束的状态流
-
-README 用一条状态流概括未来实现：
+## 当前数据流
 
 ```text
-scan -> explain -> immutable plan -> explicit execution authorization -> live revalidation
+absolute roots
+  -> platform backend
+  -> scanner + model aggregates/boundaries
+  -> Core output envelope
+  -> human | JSON | NDJSON
+  -> durable terminal snapshot (optional state directory)
+
+bounded scan.result JSON
+  -> imported provenance downgrade
+  -> report-only explanation or read-only TUI view
+```
+
+Linux 连接了实际 scanner backend。macOS/Windows backend 目前只提供 stub，因此 Core 会返回 unsupported scan output，而不是模拟成功。
+
+## Crate 职责
+
+| 层 | 代表 crate | 当前职责 |
+|---|---|---|
+| 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |
+| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | platform boundary、Linux 只读遍历、聚合与状态 |
+| 分析与 Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | candidate/explanation、声明式规则、内置 package |
+| 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
+| P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
+
+## 状态与取消
+
+CLI scan 当前同步完成，并在启用 state directory 时保存 terminal snapshot。`status` 是 snapshot lookup，而不是连接后台 worker。`cancel` 没有 live registry 可操作，因此只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+
+## 导入是明确的信任边界
+
+Core 不会因为 scan JSON 带有本项目 schema 就保留它的 live 权威。解析之后，entry/aggregate provenance 被改为 stale preview，coverage 变为 incomplete/not revalidated。Analyzer 可以据此解释，但不能把它升级为 executable candidate。TUI 同样只展示有界页面。
+
+## P3 为什么不算真实 executor
+
+P3 的库分层有意让 native mutation 无处接入：
+
+- plan 通过 canonical digest 固定内容；
+- authorization 精确绑定 plan 与 action set；
+- audit store 负责 durable claim、intent、outcome 和 reconciliation；
+- permit 与 revalidation observer 是 simulation-specific；
+- executor 的 request 没有 native path；
+- adapter trait sealed，唯一实现是 deterministic fake adapter。
+- audit persistence 当前仅支持 Unix；snapshot + anchor 用于检测意外回滚与部分损坏，不能抵抗同一用户同时改写两者，也不是 native mutation 的发布级存储。
+
+这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
+
+## 未来架构方向
+
+路线图的完整状态流仍是：
+
+```text
+scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-这条流的价值在于把每一步都变成可验证的状态，而不是一段模糊的“开始清理”。它要求：
-
-- 观察不等于授权。
-- 旧缓存不等于当前现场。
-- 平台调用结果不等于一定成功或一定可恢复。
-
-## 核心模块分层
-
-从现有设计文本可提炼出四层职责：
-
-| 层 | 责任 |
-|---|---|
-| Scanner | 只读、流式、no-follow 地收集目录事实与边界，并保持稀疏状态。 |
-| Analyzer | 生成 Candidate 和 Explanation，区分事实、推导、启发式与未知项。 |
-| Planner / Authorization | 产出 immutable plan，并把 HumanApproval 或 ExplicitDangerousDelete 绑定到该计划。 |
-| Execution / Audit | 在 live revalidation 通过后调用平台动作，并持久化 intent、结果、reconcile 与 audit。 |
-
-## 为什么 Agent 必须受限
-
-SweepX 的 Agent-safe 不是让 Agent 自动删除，而是明确 Agent 只能工作在受限边界内：
-
-- Agent 只能经公开、结构化的 Core API 工作。
-- Agent 可以帮助做只读扫描、解释、计划展示。
-- Agent 不能审批计划，不能代输确认，也不能调用危险删除开关。
-
-这决定了产品结构必须以 Core 为中心，而不是让某个前端单独实现一套近路。
-
-## 稀疏状态而不是全量清单
-
-README 还强调扫描状态默认是稀疏的：
-
-- 目录聚合和内存队列优先。
-- 只有达到高水位后才允许有界临时 spill。
-- 持久 cache 不保存海量普通小文件明细。
-- TUI 默认显示 top-K 与 `Others`，深入时再优先 live 展开。
-
-这意味着未来架构既要考虑大规模文件树，也要防止“为了列全量明细而让状态无限膨胀”。
-
-## 当前能确认的结论
-
-站点只对已经明确写出的设计边界负责，因此当前能诚实表达的结论是：
-
-- 架构目标是安全核心统一，而不是多前端各自实现删除。
-- destructive features are still under development。
-- 真实平台适配、审批 Broker、回收站 adapter 和崩溃恢复都还没有成为已交付实现。
+当前公共表面只覆盖前两步和只读视图；P3 在库内模拟后续状态。native platform action、approval broker 和 CLI wiring 都尚未实现。

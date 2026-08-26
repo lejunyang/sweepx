@@ -1,63 +1,77 @@
 ---
-title: Safety
+title: Safety model
 ---
 
-# Safety
+# Safety model
 
-Section 2 of the roadmap defines the safety floor as a requirement inherited by every phase, frontend, cleaner, and platform adapter. A delivery phase cannot waive it just to hit a date.
+SweepX safety currently starts with absent capabilities and explicit type boundaries: runnable surfaces are read-only, the simulated execution surface is sealed, and a real mutation surface does not exist. Future safety goals must not be written as deletion guarantees that exist today.
 
 > [!CAUTION]
-> The implementation is still under development. The constraints below describe what a future release must satisfy; they do not mean destructive features exist today.
+> There is no native Trash or Permanent implementation, platform mutation adapter, or destructive CLI. P3 tests cover deterministic simulation only and prove nothing about real file operations.
 
-## Non-negotiable floor
+## Implemented read-only boundaries
 
-| Constraint | Meaning on this site |
+| Boundary | Current behavior |
 |---|---|
-| Ordinary-user boundary | SweepX runs as the current ordinary user and does not legitimize an elevated destructive runtime. |
-| Read-only scanning | Scanning is metadata-only, no-follow, same-mount/volume, streaming, and error-visible. |
-| Type separation | Candidate, Explanation, DeletionPlan, ExecutionAuthorization, PreflightPermit, platform result, and audit record stay distinct. |
-| Exact-plan binding | Old cache, directory age, imported data, or negative process observations cannot become deletion permission. |
-| Trash-first policy | Trash failure, denial, cancellation, or ambiguity must never silently degrade to Permanent. |
-| Hard protections | Roots, system areas, home/profile roots, SweepX state, and protected anchors remain non-approvable. |
+| User-selected roots | `scan` accepts explicit absolute paths only |
+| Traversal | The Linux scanner uses metadata/no-follow semantics and records boundaries |
+| Errors and incompleteness | Permission, mount, link, and resource limits do not masquerade as empty or complete |
+| Imported input | `scan.result` JSON must use an absolute path and stay within byte/row bounds |
+| Imported trust | Provenance becomes stale preview and coverage is forced incomplete/not revalidated |
+| TUI | Actions contain navigation only; there is no select-and-execute mutation |
+| Cleaner | Metadata only, with fail-closed compatibility checks |
+| Capability language | unsupported, degraded, report_only, and disabled remain distinct |
 
-## Why destructive features must be marked unavailable
+The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. “Read-only” refers to scan targets: `scan` may write its own state snapshot under the selected state directory, and the P3 audit library may persist SweepX audit state. Neither changes a scanned target.
 
-The roadmap combines two facts:
+## Why imported reports are report-only
 
-- The safety floor cannot be weakened in any phase.
-- P0 through P3 explicitly exclude real platform mutation, and P4 is only a capability-gated native Trash beta.
+A JSON file records an earlier observation; it cannot prove that a path still names the same object. `explain` and TUI deliberately discard live authority on import:
 
-So the honest public statement today is:
+```text
+scan.result JSON
+  -> bounded parse
+  -> stale preview provenance
+  -> incomplete + not revalidated coverage
+  -> explanation / view only
+  -> no executable candidate
+```
 
-- The implementation is under development.
-- Destructive workflow is unavailable.
-- Permanent mode is not yet qualified and cannot be implied by docs.
+That blocks `old report -> current delete`. Even JSON written by a just-finished local scan crosses the import boundary as untrusted execution input.
 
-## Approval must stay separate from execution
+## P3 library-only safety model
 
-The roadmap breaks one executable action into distinct objects:
+The P3 libraries keep these simulation-only objects as separate types:
 
-1. Read-only observation produces Candidate and Explanation.
-2. Planning produces an immutable plan.
-3. Human approval or explicit dangerous authorization binds that exact plan.
-4. Execution still performs live revalidation.
-5. Platform outcomes and audit records are persisted separately.
+1. an immutable `DeletionPlan` and canonical digest;
+2. `ExecutionAuthorization` bound to the exact plan, mode, action set, user, host, and TTL;
+3. durable intent, fence, outcome, and reconciliation state;
+4. a one-shot simulated preflight permit;
+5. a deterministic simulated receipt.
 
-That structure rules out two shortcuts by design: there is no `scan -> execute` path, and there is no `Trash failed -> Permanent` fallback.
+The critical restrictions are:
 
-## Authorization semantics
+- executor requests contain identifiers and digests, not native paths;
+- the revalidation observer and fake adapter are sealed by their crates;
+- the only adapter makes no operating-system file mutation;
+- simulated Trash/Permanent are model branches and audit labels only;
+- no CLI connects user input to these library APIs.
 
-Even if a future release offers HumanApproval or `--dangerously-delete`, both must obey exact-plan binding:
+P3 can therefore test replay, binding, fencing, audit, and fault-handling logic. It cannot validate real Trash behavior, recoverability, reclaimed capacity, or closure of native TOCTOU windows.
 
-- HumanApproval binds the full canonical plan digest, mode, item set, risks, and TTL.
-- `--dangerously-delete` authorizes an existing Permanent plan only and is not proof of human identity.
-- Agents may prepare a plan but may not drive approval surfaces or invoke the danger flag.
+## Non-negotiable gates for future mutation
 
-## Communication rules
+The following are future release gates, not present capability claims:
 
-All product surfaces should preserve the same distinctions:
+- Ordinary-user operation without widening scope through UAC, `sudo`, polkit, or permission changes.
+- Candidate, Explanation, Plan, Authorization, Permit, Outcome, and Audit stay separate types.
+- Authorization binds the complete immutable plan; target, mode, risk, or action changes require new authorization.
+- Every action receives live no-follow revalidation before the platform call.
+- Roots, system areas, home/profile roots, SweepX state, and protected anchors remain non-approvable.
+- Trash failure, denial, cancellation, or ambiguity never falls through to Permanent.
+- Intent persists before submission; ambiguous submission enters reconciliation instead of guessed replay.
+- `unknown` never renders as `0`, and potentially reclaimable never becomes guaranteed freed space.
 
-- Facts, inferences, recommendations, and unknowns remain visibly separate.
-- `unknown` must not be rendered as `0`.
-- “potentially reclaimable” is not “guaranteed freed space”.
-- Missing qualification evidence means fail closed.
+## About the future Permanent proposal
+
+Design material discusses a separate Permanent R4 authorization and explicit dangerous source. That remains a model and roadmap item: the current CLI has no `--dangerously-delete` and there is no Permanent adapter. If ever introduced, it must bind an existing exact plan, cannot select extra targets or bypass protections, and cannot become a Trash fallback. It is not secure erase.

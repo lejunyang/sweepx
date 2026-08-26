@@ -4,59 +4,64 @@ title: Architecture
 
 # Architecture
 
-The architecture story already has one clear spine in the README: one safety core serves CLI, TUI, and Agent workflows. No frontend gets a looser mutation path.
+SweepX centers shared protocols and safety types while keeping the runnable read-only path separate from the mutation model that still exists only as library simulation.
 
-## A constrained state flow
-
-The design is summarized with a single lifecycle:
+## Current data flow
 
 ```text
-scan -> explain -> immutable plan -> explicit execution authorization -> live revalidation
+absolute roots
+  -> platform backend
+  -> scanner + model aggregates/boundaries
+  -> Core output envelope
+  -> human | JSON | NDJSON
+  -> durable terminal snapshot (optional state directory)
+
+bounded scan.result JSON
+  -> imported provenance downgrade
+  -> report-only explanation or read-only TUI view
+```
+
+Linux connects a real scanner backend. macOS and Windows currently provide stubs, so Core returns unsupported scan output instead of simulating success.
+
+## Crate responsibilities
+
+| Layer | Representative crates | Current responsibility |
+|---|---|---|
+| Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
+| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux read-only traversal, aggregation and state |
+| Analysis and Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
+| User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
+| P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
+
+## State and cancellation
+
+CLI scan currently completes synchronously and, when a state directory is enabled, saves a terminal snapshot. `status` is snapshot lookup, not a connection to a background worker. `cancel` has no live registry to act on and therefore returns an honest disposition; that is why its capability is disabled.
+
+## Import is an explicit trust boundary
+
+Core does not preserve live authority merely because scan JSON uses the project schema. After parsing, entry/aggregate provenance becomes stale preview and coverage becomes incomplete/not revalidated. Analyzer may explain it but cannot promote it to an executable candidate. TUI likewise retains only a bounded view.
+
+## Why P3 is not a real executor
+
+The P3 library layering deliberately leaves nowhere to plug in native mutation:
+
+- a canonical digest freezes plan content;
+- authorization binds the exact plan and action set;
+- the audit store owns durable claims, intents, outcomes, and reconciliation;
+- permits and the revalidation observer are simulation-specific;
+- executor requests contain no native path;
+- the adapter trait is sealed and its only implementation is deterministic and fake.
+- audit persistence is currently Unix-only; its snapshot plus anchor detects accidental rollback and partial corruption, but not coordinated same-user rewriting, and is not release-grade native-mutation storage.
+
+That supports state-machine and crash-semantics tests without deleting a target. The audit library performs filesystem I/O for its own state files; that is not mutation of scanned targets.
+
+## Future architecture direction
+
+The complete roadmap lifecycle remains:
+
+```text
+scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-That flow matters because it turns each step into a separate, auditable state rather than a vague “cleanup started” operation. It implies:
-
-- observation is not authorization;
-- stale cache is not the current filesystem;
-- a platform call result is not the same thing as guaranteed recovery or guaranteed free space.
-
-## Core layers
-
-Based on the current design texts, the architecture can be read as four layers:
-
-| Layer | Responsibility |
-|---|---|
-| Scanner | Gather read-only directory facts and boundaries with no-follow traversal and sparse state retention. |
-| Analyzer | Produce Candidate and Explanation while separating facts, inferences, heuristics, and unknowns. |
-| Planner / Authorization | Create immutable plans and bind HumanApproval or ExplicitDangerousDelete to that exact plan. |
-| Execution / Audit | Perform live revalidation, call the platform action, and persist intent, result, reconciliation, and audit. |
-
-## Why the Agent must remain constrained
-
-Agent-safe does not mean agent-driven deletion. It means the Agent is deliberately limited:
-
-- the Agent works through structured Core APIs only;
-- it may help with read-only scan, explanation, and plan preparation;
-- it may not approve a plan, type confirmations, or use the danger flag.
-
-That requirement makes the product architecture Core-centric by definition.
-
-## Sparse state rather than full file inventories
-
-The README also emphasizes sparse scanning state:
-
-- directory aggregation and in-memory queues come first;
-- bounded spill appears only after high-water pressure;
-- persistent cache avoids storing huge lists of ordinary small files;
-- the TUI shows top-K plus `Others` and expands via prioritized live rescans.
-
-This keeps the design focused on large trees without letting state growth become its own risk.
-
-## What can be stated honestly today
-
-The site only claims what the documents already support, so the current architecture conclusion is narrow and explicit:
-
-- the target architecture is one unified safety core;
-- destructive features remain under development;
-- real platform adapters, approval brokers, Trash executors, and crash reconciliation are not shipped implementation today.
+The public surface currently covers the first two steps and read-only views. P3 simulates later states inside libraries. Native platform actions, an approval broker, and CLI wiring are not implemented.

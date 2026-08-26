@@ -4,41 +4,44 @@ title: 介绍
 
 # 介绍
 
-SweepX 被定义为一个面向 Windows、macOS 与 Linux 的拟议跨平台 Rust CLI/TUI/Agent-safe 磁盘分析与安全清理产品，但当前仓库只交付设计与研究快照。
+SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有可运行的开发版只读 CLI/TUI，而不是只有设计文档；与此同时，它没有任何真实清理能力。
 
 > [!WARNING]
-> 这里没有可运行的 SweepX。当前没有构建产物、没有真实扫描器、没有回收站执行器，也没有可用的永久删除实现。
+> “可运行”只适用于只读或模拟表面。没有 native Trash、Permanent、`plan`、`approve` 或 `execute` CLI，也没有删除或移动目标文件的 adapter。
 
 ## 当前状态
 
-README 给出的边界很直接：
+- Linux scanner 能在用户明确选择的绝对路径上做同步、只读扫描，能力状态为 `degraded`。
+- macOS 和 Windows scanner 仍是 compilation-only stub，live scan 返回 `unsupported`。
+- `status` 读取已持久化的终态 snapshot；`cancel` 因没有 live operation registry 而标记为 `disabled`。
+- `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
+- 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
+- CLI 的 `tui` 子命令校验并摘要有界输入；`sweepx-tui` 提供只读的分页、pane 和行导航。
+- P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；没有可信 HumanApproval broker。
 
-- 交付类型是设计与研究快照，不是产品实现。
-- 可运行的 CLI、TUI、安装包和清理能力都未提供。
-- Windows、macOS、Linux 只是拟议的一等平台，尚未达到发布门槛。
-- 任何“必须”或“保证”描述的都是未来实现的验收约束，而不是现状声明。
+这些是代码和测试覆盖到的开发能力，不是安装包、生产支持或三平台资格声明。
 
 ## 产品定位
 
-SweepX 试图站在普通磁盘分析器和应用专用清理器之间：
+SweepX 位于通用磁盘分析器与应用专用 Cleaner 之间：
 
-- 通用扫描核心只回答空间在哪里，并显式保留未知项与边界。
-- 类型化 Cleaner 解释为什么某些对象可能可回收，而不是只看目录名。
-- CLI、TUI 和 Agent 共享同一套安全核心，不允许某个前端获得更宽松的删除路径。
-- 人类审批与执行授权被强制拆分，聊天中的“可以”不构成审批。
+- Scanner 回答“当前能看见的空间在哪里”，同时保留权限错误、链接、挂载边界和大小不确定性。
+- Analyzer 将事实、推导、启发式与未知项分开，而不是把目录年龄或名字当作“可安全删除”的证明。
+- Cleaner 用版本化 manifest 和声明式规则描述领域知识；当前只展示元数据，不执行脚本。
+- CLI、TUI 与未来 Agent workflow 共用同一 Core 合同，不给某个表面额外 mutation 权限。
 
-## 为什么站点反复强调“不可运行”
+## 为什么强调 development-grade
 
-因为当前最容易误导用户的点，正是把设计文档误读成产品文档。SweepX 在 README 中已经明确：
+`degraded`、`qualified`、`report_only`、`unsupported` 与 `disabled` 是能力单元的状态，不是营销等级。比如：
 
-- 扫描、回收站或永久删除能力未实现。
-- 即使未来默认使用回收站，也不能承诺一定可恢复或立即释放估算空间。
-- Permanent 属于高风险、不可逆的独立模式，绝不是普通确认流程的延伸。
+- Linux scan 已实现，但还没有满足路线图中的全部基准、故障注入和跨平台发布门槛；
+- explain/TUI 在合同测试覆盖内可用，不代表导入 JSON 可成为 live execution evidence；
+- Cleaner metadata 可读取，不代表 Cleaner 可运行；
+- P3 fake executor 的测试不证明任何真实文件系统 adapter。
 
-## 阅读建议
+## 推荐阅读顺序
 
-如果你要快速判断 SweepX 现在是否能上手，答案是否定的。更有价值的路径是：
-
-1. 先读 [安全边界](/safety)，理解哪些约束在任何阶段都不能被功能需求豁免。
-2. 再看 [CLI 草案](/cli)，理解命令面只是未来接口草图。
-3. 最后读 [路线图](/roadmap)，确认哪些能力仍停留在 P0-P3 的只读或模拟阶段。
+1. [CLI 与只读扫描](/cli)：运行当前存在的命令。
+2. [安全模型](/safety)：理解 imported/report-only 和 mutation 边界。
+3. [Cleaner 概念](/cleaners) 与 [Agent 边界](/agents)：理解两个容易被误读的扩展面。
+4. [架构](/architecture) 与 [路线图](/roadmap)：查看 crate 分层和下一阶段门槛。

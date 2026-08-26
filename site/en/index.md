@@ -3,51 +3,61 @@ layout: home
 
 hero:
   name: "SweepX"
-  text: "Safety-first disk analysis and cleanup design snapshot"
-  tagline: "This site documents a research and interface-design snapshot only. Real scanning, Trash, and permanent deletion remain under development and are unavailable or unqualified."
+  text: "See clearly before acting"
+  tagline: "A runnable development-grade, read-only disk-analysis CLI/TUI. Real cleanup does not exist yet."
   image:
     src: /mark.svg
     alt: SweepX
   actions:
     - theme: brand
-      text: Read Introduction
+      text: Get Oriented
       link: /en/guide/introduction
     - theme: alt
-      text: Safety Model
-      link: /en/safety
+      text: Run a Read-only Scan
+      link: /en/cli
     - theme: alt
       text: 中文
       link: /
 
 features:
-  - title: Honest current state
-    details: SweepX is not a released product today. The site describes future acceptance constraints, not present-day deletion capability.
-  - title: Destructive paths stay locked
-    details: Trash and permanent deletion are constrained capability tracks. They are not available in the current implementation and have not been qualified for release.
-  - title: One message across locales
-    details: Chinese is the default locale at / and English lives under /en/. Both locales carry the same safety posture, navigation, and roadmap framing.
+  - title: Runnable, but read-only
+    details: Linux has a degraded development scanner. Explanation, status snapshots, Cleaner metadata, and bounded TUI views run today. macOS and Windows scanning remains an unsupported stub.
+  - title: Evidence never becomes authority
+    details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Viewing a report, explanation, or TUI never creates deletion authority.
+  - title: Mutation remains sealed off
+    details: There is no plan, approve, or execute CLI, no native Trash/Permanent adapter, and no implementation that deletes target files.
 ---
 
-> [!WARNING]
-> **SweepX is still under development.** The repository does not ship a runnable SweepX CLI/TUI today, and no destructive workflow should be treated as available.
+> [!CAUTION]
+> **SweepX has no cleanup capability today.** P3 plan, authorization, durable-audit, and executor work is library-only deterministic simulation. The simulator accepts no native path and uses only a sealed fake adapter.
 
-## What this site is
+## What works now
 
-SweepX aims to separate observation, explanation, authorization, and platform action instead of turning a scan result directly into deletion. This site explains that design intent without overstating current implementation status.
-
-## What this site is not
-
-| Topic | Current reality |
+| Capability | Current state |
 |---|---|
-| Runnable product | Not provided |
-| Real cleanup execution | Not provided |
-| Qualified destructive feature | Not provided |
-| Production support claim | Not provided |
+| Linux directory scan | development-grade, read-only, degraded |
+| macOS / Windows scan | unsupported compilation stub |
+| `status` | reads a persisted terminal snapshot |
+| `cancel` | command exists; live cancellation is disabled |
+| `explain` | report-only analysis from bounded scan JSON |
+| Cleaner | read-only metadata list/show with compatibility gates |
+| CLI/TUI | bounded input and read-only viewing |
+| Trash / Permanent | absent |
 
-## Core takeaway
+The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. JSON and NDJSON machine fields do not change with the display language.
 
-The most important message is simple:
+## Read by question
 
-- The implementation is still under development.
-- Destructive features are unavailable.
-- Permanent mode is not qualified and must not be implied by the documentation.
+| What you want to know | Page |
+|---|---|
+| What is actually implemented | [Introduction](/en/guide/introduction) |
+| How to run current read-only commands | [CLI and read-only scanning](/en/cli) |
+| Why imported reports cannot execute | [Safety model](/en/safety) |
+| Whether a Cleaner is a rule or a script | [Cleaner concepts](/en/cleaners) |
+| What an Agent may do | [Agent boundaries](/en/agents) |
+| How the crates are layered | [Architecture](/en/architecture) |
+| Where P3 ends and future mutation begins | [Roadmap](/en/roadmap) |
+
+## One-sentence status
+
+SweepX has moved beyond pure design into a **runnable read-only development stage**, but it has not entered real cleanup. Any `plan`, `approve`, `execute`, Trash, or Permanent interface remains a future proposal, not a current command.

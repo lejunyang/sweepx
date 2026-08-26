@@ -4,54 +4,61 @@ title: Roadmap
 
 # Roadmap
 
-Section 4 of the roadmap is not a release calendar. It is a staged capability boundary that says which features still cannot ship without evidence.
+The roadmap defines capability and evidence gates, not dates. Code may land before a phase is complete because cross-platform, benchmark, fault-injection, or safety evidence is still missing.
 
 > [!CAUTION]
-> SweepX remains a design-stage project today. Phases P0 through P3 exclude real platform mutation, so destructive capability is not currently available.
+> The current implementation spans portions of P1/P2 read-only work and P3 library-only simulation, but contains no native mutation. “A crate/test exists” must not be rewritten as “the phase is qualified.”
 
-## Phase progression
+## Current position
 
-| Phase | Visible increment | What still stays out of scope |
+| Track | Current evidence | Open boundary |
 |---|---|---|
-| P0 | Contract, schemas, safety policy, fixture and oracle baseline | Any runnable cleaner or platform mutation |
-| P1 | 0.1 read-only scanner CLI | Cleaner recommendations, planning, approval, Trash, Permanent |
-| P2 | 0.2 explainable analysis, TUI, read-only Agent workflow | Plan approval, real execution, browser-state deletion, policy changes |
-| P3 | 0.3 immutable planning and simulated execution | Any native Trash or Permanent call |
-| P4 | 0.9 native Trash beta on qualified tuples only | Permanent, cross-filesystem Trash, remote/provider/system paths |
-| P5 | 1.0 stable ordinary-user product | Any unqualified capability, elevated cleaning, broad manager mutation |
-| P6 | Post-v1 capability tracks | Any expansion without a new threat model and independent evidence |
+| P0 contracts/models | Workspace, schemas, fixtures, safety types, and extensive tests exist | The complete evidence bundle and every acceptance gate have not been declared complete |
+| P1 scanner CLI | Linux read-only scan is degraded; status snapshot works | macOS/Windows scanning unsupported; live cancel disabled; three-platform/resource gates open |
+| P2 analysis/TUI/Cleaner | Bounded explain, read-only TUI, and metadata-only Cleaner run | Imported input is report-only; signing/sandbox/full cross-surface qualification open |
+| P3 plan/audit/simulation | Immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed fake executor are implemented | No CLI wiring, trusted HumanApproval broker, native path, real revalidation, or platform adapter; the phase is not qualified |
+| P4+ mutation | None | Trash, Permanent, and release qualification are all future work |
 
-## What this means right now
+## Phase targets
 
-This phase model directly controls how the site must talk about the product:
+| Phase | Target increment | Explicitly excluded |
+|---|---|---|
+| P0 | Contracts, schemas, safety policy, fixture/oracle baseline | Mutation and performance claims |
+| P1 | Qualified read-only scanner CLI on all three platforms | Cleaner execution, plans, Trash/Permanent |
+| P2 | Explainable analysis, bounded TUI, read-only Agent, catalog reporting | Approval or real execution |
+| P3 | Immutable plan/authorization, durable audit, deterministic simulation | Native Trash/Permanent, execution against user files, public execution CLI |
+| P4 | Native Trash beta on exact qualified tuples only | Permanent and cross-filesystem/remote/provider/system mutation |
+| P5 | Stable ordinary-user product on all three platforms | Unqualified capabilities, elevated cleanup, broad manager mutation |
+| P6 | Post-v1 tracks with separate threat models | Expansion without independent evidence |
 
-- SweepX has not reached the qualified native Trash beta described for P4.
-- Destructive features therefore cannot be described as beta-ready, much less available.
-- Permanent comes later and only after an independently qualified capability cell.
+## P3 completion criteria
 
-## How Sections 2 and 4 reinforce each other
+The nearest active work is P3 libraries. They converge only while model and fault-injection tests continue to prove that:
 
-Section 2 defines the safety floor. Section 4 defines the stage boundary. Together they mean:
+- plan digests and exact authorization binding cannot mismatch;
+- nonce, TTL, claim, fence, and permit cannot replay;
+- durable intent precedes simulated submission;
+- ambiguous outcomes enter reconciliation;
+- cancellation cannot become success;
+- a Trash branch cannot transition to Permanent;
+- the sealed fake adapter remains the executor's only adapter;
+- native mutation of user files remains impossible.
 
-1. Every phase inherits the ordinary-user boundary, exact-plan binding, and fail-closed behavior.
-2. A team cannot justify weaker safety by saying a feature will be “fixed later”.
-3. Even if a prototype can run, the public docs must still say unavailable or unqualified until the required evidence exists.
+Even completing those items does not automatically create a `sweepx plan/approve/execute` CLI. Public API design, trusted local approval, real live revalidation, and native adapters are separate later work.
 
-## Stop-ship rules
+## Hard stop before P4
 
-The roadmap also lists conditions that block release, especially when:
+Before the first native Trash test, the project needs at least:
 
-- any hard protection, approval, intent, permit, or reconciliation invariant can be bypassed;
-- CLI, TUI, Cleaner API, and Skill disagree on identity, risk, plan digest, or outcome semantics;
-- errors, unknowns, or incomplete subtrees are rendered as if they were complete or zero;
-- an adapter cannot prove that Trash failure never falls through to Permanent.
+1. an exact OS/architecture/filesystem/provider capability tuple;
+2. disposable fixtures and an independent oracle;
+3. target, parent, ancestor, mount, and descendant-swap adversarial tests;
+4. native-result ambiguity and crash reconciliation;
+5. proof that every Trash failure path avoids Permanent;
+6. consistent identity, risk, and outcome semantics across CLI, TUI, Agent, and Cleaner.
 
-That makes the roadmap closer to a release gate document than a generic feature backlog.
+The project has not entered that step.
 
-## Honest current status
+## Future commands remain proposals
 
-Based on the current documents, the narrow and accurate statement is:
-
-- SweepX is a design snapshot with strong safety framing.
-- Read-only and simulated phases are documented more clearly than destructive execution.
-- Destructive features remain under development and are not available for use today.
+`plan create/show`, trusted approval, `execute`, and every Permanent flag are absent from the current command tree. Documentation may promote them from “proposal” to “runnable” only after real CLI wiring and corresponding capability qualification exist.
