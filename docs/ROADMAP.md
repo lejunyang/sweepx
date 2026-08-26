@@ -15,7 +15,7 @@ The labels in this roadmap are normative:
 - **Product gate, unverified** means a proposed measurable threshold inherited from the upstream scanner architecture. It is not a measured result or a claim about a released product.
 - **Unknown** means evidence is missing, version-sensitive, or platform-dependent. Unknown never becomes zero, unused, safe, or permission to delete.
 
-The roadmap was derived from all ten upstream products:
+The roadmap was derived from all ten upstream topic artifacts:
 
 | Delivered upstream topic artifact | Roadmap use |
 |---|---|
@@ -93,7 +93,7 @@ This documentation phase itself performs no scan or external command and no real
 <a id="phase-plan"></a>
 ## 4. Phased MVP increments
 
-Each phase is useful on its own and closes with an evidence bundle. P0–P3 have no real platform mutation path. P4 and P5 may exercise native Trash or Permanent only on disposable fixtures until the relevant capability cell is qualified.
+Each phase is useful on its own and closes with an evidence bundle. P0–P3 have no real platform mutation path. P4 may exercise native Trash only on disposable fixtures; Permanent starts no earlier than an independently qualified P5 capability cell.
 
 | Phase | User-visible increment | In scope | Explicitly out of scope in this phase | Release gate and required evidence |
 |---|---|---|---|---|

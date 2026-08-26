@@ -407,7 +407,7 @@ recovery_state 至少有 PLATFORM_TRASH_REPORTED、TRASH_LOCATION_REPORTED、TRA
 
 Permanent 必须在计划创建时声明；所有 item 至少 R4；与 Trash 分批。HumanApproval 优先在 first-party native modal 展示 exact plan、`N` 个选中 item、`M` 个底层 action、path/type/risk/unknown/expiry 和“绕过回收站”，以 acknowledgement + destructive approval button 确认；只有可信 foreground TTY fallback 才键入 digest-derived challenge。ExplicitDangerousDelete 路径跳过全部确认和可选 OS reauthentication，但把相同精确字段写入 authorization/audit。审批与 execute 始终是两个动作，两种 authorization 在执行前都做同样完整复验和 hard protection。
 
-Trash 失败后若调用者另行要求 Permanent，必须回到 Candidate，创建新 Permanent plan 并重新授权。Permanent 成功不等于 secure erase：snapshot、backup、clone/reflink、cloud copy、journal、open handle 和介质都可能保留内容或空间。
+Trash 失败后若调用者另行要求 Permanent，必须从新的 live scan 重新开始，重新生成 Candidate 与 Explanation，创建新 Permanent plan 并重新授权；旧 scan、Candidate、plan、authorization 或 permit 均不得携带 authority。Permanent 成功不等于 secure erase：snapshot、backup、clone/reflink、cloud copy、journal、open handle 和介质都可能保留内容或空间。
 
 ### 9.3 事后容量
 
