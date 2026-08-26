@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use sweepx_model::{
-    ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance,
-    NativeName, ObjectType, ReasonCode, ScanId, ScannedEntry,
+    ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, EvidenceValue,
+    FieldProvenance, NativeName, ObjectType, ReasonCode, ScanId, ScannedEntry,
 };
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, EntryKind, EntryMetadata, HardLinkKey,
@@ -663,8 +663,8 @@ struct DirectoryState {
     recursive_entry_count: u128,
     apparent_logical_bytes: u128,
     unique_logical_bytes: Option<u128>,
-    allocated_bytes: Option<u128>,
-    reclaimable_bytes: Option<u128>,
+    allocated_bytes: EvidenceAccumulator,
+    reclaimable_bytes: EvidenceAccumulator,
     incomplete_reasons: BTreeSet<ReasonCode>,
     counted_hard_links: BTreeSet<HardLinkKey>,
 }
@@ -677,8 +677,8 @@ impl DirectoryState {
             recursive_entry_count: 0,
             apparent_logical_bytes: 0,
             unique_logical_bytes: Some(0),
-            allocated_bytes: Some(0),
-            reclaimable_bytes: Some(0),
+            allocated_bytes: EvidenceAccumulator::known_zero(),
+            reclaimable_bytes: EvidenceAccumulator::known_zero(),
             incomplete_reasons: BTreeSet::new(),
             counted_hard_links: BTreeSet::new(),
         }
@@ -708,16 +708,8 @@ impl DirectoryState {
             Some(value) => lower_bound_u128(value, ReasonCode::IncompleteStreamCoverage),
             None => unknown_u128(ReasonCode::UnknownIdentity),
         };
-        let allocated = match self.allocated_bytes {
-            Some(value) if complete => known_u128(value),
-            Some(value) => lower_bound_u128(value, ReasonCode::IncompleteStreamCoverage),
-            None => unknown_u128(ReasonCode::UnknownIdentity),
-        };
-        let reclaimable = match self.reclaimable_bytes {
-            Some(value) if complete => known_u128(value),
-            Some(value) => lower_bound_u128(value, ReasonCode::IncompleteStreamCoverage),
-            None => unknown_u128(ReasonCode::UnknownIdentity),
-        };
+        let allocated = self.allocated_bytes.into_value(complete);
+        let reclaimable = self.reclaimable_bytes.into_value(complete);
 
         DirectoryAggregate {
             scan_id: scan_id.clone(),
@@ -749,6 +741,109 @@ impl DirectoryState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvidenceAccumulator {
+    Known(u128),
+    LowerBound { value: u128, reason: ReasonCode },
+    Unknown { reason: ReasonCode },
+}
+
+impl EvidenceAccumulator {
+    fn known_zero() -> Self {
+        Self::Known(0)
+    }
+
+    fn add(&mut self, value: &sweepx_platform::ByteValue) {
+        let incoming = Self::from_value(value);
+        *self = match (&*self, incoming) {
+            (Self::Unknown { reason }, _) => Self::Unknown {
+                reason: reason.clone(),
+            },
+            (_, Self::Unknown { reason }) => Self::Unknown { reason },
+            (Self::Known(current), Self::Known(next)) => match current.checked_add(next) {
+                Some(value) => Self::Known(value),
+                None => Self::Unknown {
+                    reason: ReasonCode::Overflow,
+                },
+            },
+            (Self::Known(current), Self::LowerBound { value, reason }) => Self::LowerBound {
+                value: match current.checked_add(value) {
+                    Some(value) => value,
+                    None => {
+                        return *self = Self::Unknown {
+                            reason: ReasonCode::Overflow,
+                        };
+                    }
+                },
+                reason,
+            },
+            (Self::LowerBound { value, reason }, Self::Known(current)) => Self::LowerBound {
+                value: match value.checked_add(current) {
+                    Some(value) => value,
+                    None => {
+                        return *self = Self::Unknown {
+                            reason: ReasonCode::Overflow,
+                        };
+                    }
+                },
+                reason: reason.clone(),
+            },
+            (
+                Self::LowerBound {
+                    value: left_value,
+                    reason: left_reason,
+                },
+                Self::LowerBound {
+                    value: right_value,
+                    reason,
+                },
+            ) => Self::LowerBound {
+                value: match left_value.checked_add(right_value) {
+                    Some(value) => value,
+                    None => {
+                        return *self = Self::Unknown {
+                            reason: ReasonCode::Overflow,
+                        };
+                    }
+                },
+                reason: combine_reasons(left_reason, &reason),
+            },
+        };
+    }
+
+    fn into_value(self, complete: bool) -> sweepx_platform::ByteValue {
+        match self {
+            Self::Known(value) if complete => known_u128(value),
+            Self::Known(value) => lower_bound_u128(value, ReasonCode::IncompleteStreamCoverage),
+            Self::LowerBound { value, reason } => lower_bound_u128(value, reason),
+            Self::Unknown { reason } => unknown_u128(reason),
+        }
+    }
+
+    fn from_value(value: &sweepx_platform::ByteValue) -> Self {
+        match value {
+            EvidenceValue::Known { value } => Self::Known(value.0),
+            EvidenceValue::LowerBound { value, reason } => Self::LowerBound {
+                value: value.0,
+                reason: reason.clone(),
+            },
+            EvidenceValue::Unknown { reason }
+            | EvidenceValue::Unsupported { reason }
+            | EvidenceValue::NotChecked { reason } => Self::Unknown {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+fn combine_reasons(left: &ReasonCode, right: &ReasonCode) -> ReasonCode {
+    if left == right {
+        left.clone()
+    } else {
+        ReasonCode::UnknownIdentity
+    }
+}
+
 fn propagate_directory_entry(states: &mut BTreeMap<PathBuf, DirectoryState>, path: &Path) {
     for ancestor in ancestors_for_entry(path) {
         if let Some(state) = states.get_mut(&ancestor) {
@@ -766,7 +861,6 @@ fn propagate_file_entry(
     metadata: &EntryMetadata,
 ) {
     let logical = extract_known_u128(&metadata.logical_bytes).unwrap_or(0);
-    let allocated = extract_known_u128(&metadata.allocated_bytes).unwrap_or(0);
     let has_multiple_links = matches!(
         &metadata.hard_link_count,
         sweepx_model::EvidenceValue::Known { value } if value.0 > 1
@@ -784,18 +878,24 @@ fn propagate_file_entry(
                 Some(key) => {
                     if state.counted_hard_links.insert(key.clone()) {
                         add_option_u128(&mut state.unique_logical_bytes, logical);
-                        add_option_u128(&mut state.allocated_bytes, allocated);
+                        state.allocated_bytes.add(&metadata.allocated_bytes);
                     }
                     if has_multiple_links {
-                        state.reclaimable_bytes = None;
+                        state.reclaimable_bytes = EvidenceAccumulator::Unknown {
+                            reason: ReasonCode::UnknownIdentity,
+                        };
                     } else if state.counted_hard_links.contains(key) {
-                        add_option_u128(&mut state.reclaimable_bytes, allocated);
+                        state.reclaimable_bytes.add(&metadata.allocated_bytes);
                     }
                 }
                 None => {
                     state.unique_logical_bytes = None;
-                    state.allocated_bytes = None;
-                    state.reclaimable_bytes = None;
+                    state.allocated_bytes = EvidenceAccumulator::Unknown {
+                        reason: ReasonCode::UnknownIdentity,
+                    };
+                    state.reclaimable_bytes = EvidenceAccumulator::Unknown {
+                        reason: ReasonCode::UnknownIdentity,
+                    };
                 }
             }
         }
@@ -959,9 +1059,11 @@ fn native_basename_for_path(path: &Path) -> NativeName {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use super::*;
+    use sweepx_platform::{DirectoryEntryRecord, EntryIdentity, FilesystemIdentity, MountIdentity};
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     fn linux_scanner(options: ScannerOptions) -> Scanner<HostPlatformScanner> {
@@ -1203,5 +1305,239 @@ mod tests {
                 .incomplete_reasons
                 .contains(&ReasonCode::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn aggregate_preserves_lower_bound_allocated_and_reclaimable() {
+        let root = PathBuf::from("/root");
+        let file = root.join("file.bin");
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![DirectoryEntryRecord {
+                    path: file.clone(),
+                    file_name: NativeName::windows_utf16(
+                        "file.bin".encode_utf16().collect::<Vec<_>>(),
+                    ),
+                }],
+                BTreeMap::from([(
+                    file.clone(),
+                    WalkEntry::File(EntryMetadata {
+                        path: file.clone(),
+                        file_name: NativeName::windows_utf16(
+                            "file.bin".encode_utf16().collect::<Vec<_>>(),
+                        ),
+                        kind: EntryKind::File,
+                        logical_bytes: known_u128(7),
+                        allocated_bytes: lower_bound_u128(11, ReasonCode::UnknownLayout),
+                        hard_link_count: known_count(1),
+                        fingerprint: "fp".to_string(),
+                        identity: Some(EntryIdentity {
+                            device: 1,
+                            inode: 2,
+                        }),
+                        filesystem_identity: Some(FilesystemIdentity { device: 1 }),
+                        mount_identity: Some(MountIdentity { value: 1 }),
+                        hard_link_key: Some(HardLinkKey {
+                            device: 1,
+                            inode: 2,
+                        }),
+                    }),
+                )]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert_eq!(
+            aggregate.filesystem_reported_allocated_bytes,
+            lower_bound_u128(11, ReasonCode::UnknownLayout)
+        );
+        assert_eq!(
+            aggregate.potentially_reclaimable_bytes,
+            lower_bound_u128(11, ReasonCode::UnknownLayout)
+        );
+    }
+
+    #[test]
+    fn aggregate_propagates_unknown_allocated_and_reclaimable_reason() {
+        let root = PathBuf::from("/root");
+        let file = root.join("file.bin");
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![DirectoryEntryRecord {
+                    path: file.clone(),
+                    file_name: NativeName::windows_utf16(
+                        "file.bin".encode_utf16().collect::<Vec<_>>(),
+                    ),
+                }],
+                BTreeMap::from([(
+                    file.clone(),
+                    WalkEntry::File(EntryMetadata {
+                        path: file.clone(),
+                        file_name: NativeName::windows_utf16(
+                            "file.bin".encode_utf16().collect::<Vec<_>>(),
+                        ),
+                        kind: EntryKind::File,
+                        logical_bytes: known_u128(7),
+                        allocated_bytes: unknown_u128(ReasonCode::UnknownLayout),
+                        hard_link_count: known_count(1),
+                        fingerprint: "fp".to_string(),
+                        identity: Some(EntryIdentity {
+                            device: 1,
+                            inode: 2,
+                        }),
+                        filesystem_identity: Some(FilesystemIdentity { device: 1 }),
+                        mount_identity: Some(MountIdentity { value: 1 }),
+                        hard_link_key: Some(HardLinkKey {
+                            device: 1,
+                            inode: 2,
+                        }),
+                    }),
+                )]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert_eq!(
+            aggregate.filesystem_reported_allocated_bytes,
+            unknown_u128(ReasonCode::UnknownLayout)
+        );
+        assert_eq!(
+            aggregate.potentially_reclaimable_bytes,
+            unknown_u128(ReasonCode::UnknownLayout)
+        );
+    }
+
+    #[test]
+    fn aggregate_overflow_becomes_unknown_instead_of_wrapping() {
+        let mut accumulator = EvidenceAccumulator::Known(u128::MAX);
+        accumulator.add(&known_u128(1));
+        assert_eq!(
+            accumulator.into_value(true),
+            unknown_u128(ReasonCode::Overflow)
+        );
+
+        let mut lower = EvidenceAccumulator::LowerBound {
+            value: u128::MAX,
+            reason: ReasonCode::UnknownLayout,
+        };
+        lower.add(&known_u128(1));
+        assert_eq!(lower.into_value(true), unknown_u128(ReasonCode::Overflow));
+    }
+
+    #[derive(Debug)]
+    struct FakePlatform {
+        root_metadata: EntryMetadata,
+        entries: Vec<DirectoryEntryRecord>,
+        walk_entries: BTreeMap<PathBuf, WalkEntry>,
+    }
+
+    impl FakePlatform {
+        fn new(
+            root: PathBuf,
+            entries: Vec<DirectoryEntryRecord>,
+            walk_entries: BTreeMap<PathBuf, WalkEntry>,
+        ) -> Self {
+            Self {
+                root_metadata: EntryMetadata {
+                    path: root.clone(),
+                    file_name: NativeName::windows_utf16("root".encode_utf16().collect::<Vec<_>>()),
+                    kind: EntryKind::Directory,
+                    logical_bytes: known_u128(0),
+                    allocated_bytes: known_u128(0),
+                    hard_link_count: known_count(1),
+                    fingerprint: "root".to_string(),
+                    identity: Some(EntryIdentity {
+                        device: 1,
+                        inode: 1,
+                    }),
+                    filesystem_identity: Some(FilesystemIdentity { device: 1 }),
+                    mount_identity: Some(MountIdentity { value: 1 }),
+                    hard_link_key: None,
+                },
+                entries,
+                walk_entries,
+            }
+        }
+    }
+
+    impl PlatformScanner for FakePlatform {
+        fn platform_name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            cancel: &CancellationToken,
+        ) -> Result<RootAdmission, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            Ok(RootAdmission {
+                root: root.clone(),
+                metadata: self.root_metadata.clone(),
+            })
+        }
+
+        fn read_dir_entries(
+            &self,
+            _path: &Path,
+            cancel: &CancellationToken,
+            _max_entries: usize,
+        ) -> Result<Vec<DirectoryEntryRecord>, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            Ok(self.entries.clone())
+        }
+
+        fn stat_entry(
+            &self,
+            path: &Path,
+            _file_name: NativeName,
+            cancel: &CancellationToken,
+        ) -> Result<WalkEntry, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            self.walk_entries
+                .get(path)
+                .cloned()
+                .ok_or_else(|| PlatformError::Unsupported("missing fake entry".to_string()))
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            Ok(true)
+        }
     }
 }
