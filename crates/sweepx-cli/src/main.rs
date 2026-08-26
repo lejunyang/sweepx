@@ -4,10 +4,11 @@ use std::process::ExitCode as ProcessExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sweepx_core::{
-    CancelRequest, CoreContext, OutputFormat, ScanRequest, StatusRequest, cancel_with_store,
-    capabilities, durable_store, parse_locale_override, render_human_output, scan_with_store,
-    serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
-    validate_absolute_root,
+    CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, ScanRequest,
+    StatusRequest, TuiReadRequest, cancel_with_store, capabilities, cleaner_list, cleaner_show,
+    durable_store, explain_from_scan_json, parse_locale_override, render_human_output,
+    scan_with_store, serialize_json, serialize_ndjson, state_dir_from_explicit_or_default,
+    status_with_store, tui_read_from_scan_json, validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
@@ -52,6 +53,14 @@ enum Commands {
         #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
         roots: Vec<OsString>,
     },
+    Explain {
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        scan_json: PathBuf,
+        #[arg(long)]
+        candidate_id: Option<String>,
+        #[arg(long, default_value_t = sweepx_core::DEFAULT_ANALYSIS_INPUT_BYTES)]
+        max_input_bytes: usize,
+    },
     Status {
         #[arg(long)]
         operation_id: String,
@@ -60,7 +69,27 @@ enum Commands {
         #[arg(long)]
         operation_id: String,
     },
+    Cleaner {
+        #[command(subcommand)]
+        command: CleanerCommands,
+    },
+    Tui {
+        #[arg(long, value_name = "ABSOLUTE_FILE")]
+        scan_json: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        page_index: usize,
+        #[arg(long, default_value_t = sweepx_core::DEFAULT_ANALYSIS_INPUT_BYTES)]
+        max_input_bytes: usize,
+        #[arg(long, default_value_t = 100_000)]
+        max_total_rows: usize,
+    },
     Capabilities,
+}
+
+#[derive(Debug, Subcommand)]
+enum CleanerCommands {
+    List,
+    Show { cleaner_ref: String },
 }
 
 fn main() -> ProcessExitCode {
@@ -122,6 +151,19 @@ fn main() -> ProcessExitCode {
                 .map(RenderedResult::Scan),
             }
         }
+        Commands::Explain {
+            scan_json,
+            candidate_id,
+            max_input_bytes,
+        } => explain_from_scan_json(
+            &context,
+            &ExplainRequest {
+                scan_json_path: scan_json,
+                candidate_id,
+                max_input_bytes,
+            },
+        )
+        .map(RenderedResult::Explanation),
         Commands::Status { operation_id } => match store.as_ref() {
             Some(store) => status_with_store(
                 &context,
@@ -162,6 +204,28 @@ fn main() -> ProcessExitCode {
             )
             .map(RenderedResult::Snapshot),
         },
+        Commands::Cleaner { command } => match command {
+            CleanerCommands::List => cleaner_list(&context).map(RenderedResult::Cleaner),
+            CleanerCommands::Show { cleaner_ref } => {
+                cleaner_show(&context, &CleanerShowRequest { cleaner_ref })
+                    .map(RenderedResult::Cleaner)
+            }
+        },
+        Commands::Tui {
+            scan_json,
+            page_index,
+            max_input_bytes,
+            max_total_rows,
+        } => tui_read_from_scan_json(
+            &context,
+            &TuiReadRequest {
+                scan_json_path: scan_json,
+                page_index,
+                max_input_bytes,
+                max_total_rows,
+            },
+        )
+        .map(RenderedResult::TuiRead),
         Commands::Capabilities => Ok(RenderedResult::Capabilities(capabilities(&context))),
     };
 
@@ -208,7 +272,10 @@ fn print_output(context: &CoreContext, format: OutputFormat, result: &RenderedRe
 
 enum RenderedResult {
     Scan(sweepx_core::ScanSuccess),
+    Explanation(sweepx_core::ExplanationSuccess),
     Snapshot(sweepx_core::SnapshotSuccess),
+    Cleaner(sweepx_core::CleanerSuccess),
+    TuiRead(sweepx_core::TuiReadSuccess),
     Capabilities(sweepx_core::CapabilitiesSuccess),
 }
 
@@ -216,7 +283,10 @@ impl RenderedResult {
     fn output(&self) -> &OutputEnvelope {
         match self {
             Self::Scan(scan) => &scan.output,
+            Self::Explanation(explanation) => &explanation.output,
             Self::Snapshot(snapshot) => &snapshot.output,
+            Self::Cleaner(cleaner) => &cleaner.output,
+            Self::TuiRead(tui) => &tui.output,
             Self::Capabilities(capabilities) => &capabilities.output,
         }
     }
@@ -249,6 +319,15 @@ mod tests {
             Cli::try_parse_from(["sweepx", "capabilities"]),
             Ok(Cli {
                 command: Commands::Capabilities,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sweepx", "cleaner", "list"]),
+            Ok(Cli {
+                command: Commands::Cleaner {
+                    command: CleanerCommands::List
+                },
                 ..
             })
         ));

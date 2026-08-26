@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn cli_command() -> Command {
@@ -41,10 +41,16 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["data"]["commands"][0]["id"], "scan");
-    assert_eq!(json["data"]["commands"][0]["state"], "degraded");
-    assert_eq!(json["data"]["commands"][2]["id"], "cancel");
-    assert_eq!(json["data"]["commands"][2]["state"], "disabled");
+    let commands = json["data"]["commands"].as_array().unwrap();
+    let scan = commands.iter().find(|item| item["id"] == "scan").unwrap();
+    assert_eq!(scan["state"], "degraded");
+    let cancel = commands.iter().find(|item| item["id"] == "cancel").unwrap();
+    assert_eq!(cancel["state"], "disabled");
+    let explain = commands
+        .iter()
+        .find(|item| item["id"] == "explain")
+        .unwrap();
+    assert_eq!(explain["state"], "qualified");
     let linux_scan = json["data"]["capabilities"]
         .as_array()
         .unwrap()
@@ -55,6 +61,209 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_scan["state"], "degraded");
+    let explain_capability = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["qualificationKey"]["capability"] == "analysis.explain.scan_json")
+        .unwrap();
+    assert_eq!(explain_capability["state"], "qualified");
+}
+
+#[test]
+fn explain_scan_json_returns_explanation_result() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("explain")
+        .arg("--scan-json")
+        .arg(&scan_json);
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "explanation.result");
+    assert_eq!(json["summary"]["inputMode"], "scan_json");
+    assert_eq!(
+        json["data"]["explanations"][0]["candidate"]["path"]["displayPath"],
+        "/tmp/demo"
+    );
+}
+
+#[test]
+fn explain_human_output_respects_selected_locale() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("LANG", "en_US.UTF-8")
+        .arg("--locale")
+        .arg("zh-CN")
+        .arg("explain")
+        .arg("--scan-json")
+        .arg(&scan_json);
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("已从扫描"));
+    assert!(!text.contains("Generated"));
+}
+
+#[test]
+fn explain_rejects_relative_scan_json_path() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("explain")
+        .arg("--scan-json")
+        .arg("relative.json");
+
+    let output = cmd.assert().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("analysis input path must be absolute"));
+}
+
+#[test]
+fn explain_rejects_zero_input_limit() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("explain")
+        .arg("--scan-json")
+        .arg(&scan_json)
+        .arg("--max-input-bytes")
+        .arg("0");
+
+    let output = cmd.assert().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("analysis input must be a positive bounded byte limit"));
+}
+
+#[test]
+fn explain_rejects_oversize_input() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("explain")
+        .arg("--scan-json")
+        .arg(&scan_json)
+        .arg("--max-input-bytes")
+        .arg("16");
+
+    let output = cmd.assert().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("analysis input exceeds byte limit"));
+}
+
+#[test]
+fn cleaner_list_json_uses_cleaner_result_contract() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("cleaner")
+        .arg("list");
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "cleaner.result");
+    assert_eq!(json["summary"]["command"], "cleaner.list");
+    assert_eq!(json["data"]["cleaners"][0]["id"], "org.sweepx.cargo-target");
+}
+
+#[test]
+fn cleaner_show_json_includes_manifest_and_vm_check() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("cleaner")
+        .arg("show")
+        .arg("org.sweepx.chromium-rebuildable-cache");
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "cleaner.result");
+    assert_eq!(json["summary"]["command"], "cleaner.show");
+    assert_eq!(
+        json["data"]["cleaner"]["manifest"]["id"],
+        "org.sweepx.chromium-rebuildable-cache"
+    );
+    assert_eq!(
+        json["data"]["cleaner"]["rules"][0]["vmCheck"]["context"],
+        "synthetic_read_only_contract_check"
+    );
+}
+
+#[test]
+fn tui_read_json_reports_bounded_read_only_status() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("tui")
+        .arg("--scan-json")
+        .arg(&scan_json);
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "status.result");
+    assert_eq!(json["summary"]["command"], "tui");
+    assert_eq!(json["data"]["mode"], "read_only");
+    assert_eq!(json["data"]["readOnly"], true);
+}
+
+#[test]
+fn tui_rejects_zero_limits() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("tui")
+        .arg("--scan-json")
+        .arg(&scan_json)
+        .arg("--max-total-rows")
+        .arg("0");
+
+    let output = cmd.assert().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("analysis input must be a positive bounded byte limit"));
+}
+
+#[test]
+fn tui_rejects_invalid_kind_input() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    fs::write(&scan_json, sample_non_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("tui")
+        .arg("--scan-json")
+        .arg(&scan_json);
+
+    let output = cmd.assert().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("expected scan.result input"));
 }
 
 #[cfg(target_os = "linux")]
@@ -205,4 +414,147 @@ fn symlink_boundary_does_not_force_partial_scan() {
 
 fn cli_crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn sample_scan_json() -> String {
+    serde_json::to_string(&json!({
+        "schema": "sweepx.output/v1",
+        "kind": "scan.result",
+        "requestId": "req-1",
+        "operationId": "op-1",
+        "generatedAt": "2026-08-26T00:00:00Z",
+        "status": "ok",
+        "exitCode": 0,
+        "compat": {
+            "coreVersion": "0.1.0",
+            "scannerSemanticsVersion": 1,
+            "safetyPolicyVersion": 1,
+            "platformAdapter": {
+                "id": "linux",
+                "version": "0.1.0"
+            },
+            "cleanerSetDigest": "sha256:test",
+            "requiredFeatures": [],
+            "extensions": []
+        },
+        "summary": {
+            "scanId": "scan-1"
+        },
+        "data": {
+            "scanId": "scan-1",
+            "roots": [],
+            "entries": [{
+                "scanId": "scan-1",
+                "displayPath": "/tmp/demo",
+                "nativeBasename": {
+                    "kind": "unix_bytes_base64_url",
+                    "value": "ZGVtbw"
+                },
+                "objectType": "directory",
+                "logicalBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "allocatedBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "reclaimableEstimate": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "metadataFingerprint": "fp-1",
+                "coverage": {
+                    "state": "complete",
+                    "complete": true,
+                    "incompleteReasons": [],
+                    "detailsLost": false,
+                    "provenance": {
+                        "kind": "live_observation",
+                        "observed_at": "2026-08-26T00:00:00Z",
+                        "method": "native_api"
+                    }
+                },
+                "provenance": {
+                    "kind": "live_observation",
+                    "observed_at": "2026-08-26T00:00:00Z",
+                    "method": "native_api"
+                }
+            }],
+            "aggregates": [{
+                "scanId": "scan-1",
+                "directoryIdentity": "/tmp/demo",
+                "revision": "1",
+                "apparentLogicalBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "uniqueLogicalBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "filesystemReportedAllocatedBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "potentiallyReclaimableBytes": {
+                    "state": "known",
+                    "value": "42"
+                },
+                "directChildCount": {
+                    "state": "known",
+                    "value": "1"
+                },
+                "recursiveEntryCount": {
+                    "state": "known",
+                    "value": "1"
+                },
+                "coverage": {
+                    "state": "complete",
+                    "complete": true,
+                    "incompleteReasons": [],
+                    "detailsLost": false,
+                    "provenance": {
+                        "kind": "live_observation",
+                        "observed_at": "2026-08-26T00:00:00Z",
+                        "method": "native_api"
+                    }
+                },
+                "arithmeticState": "exact"
+            }],
+            "boundaries": []
+        },
+        "warnings": [],
+        "errors": []
+    }))
+    .unwrap()
+}
+
+fn sample_non_scan_json() -> String {
+    serde_json::to_string(&json!({
+        "schema": "sweepx.output/v1",
+        "kind": "capabilities.result",
+        "requestId": "req-1",
+        "operationId": "op-1",
+        "generatedAt": "2026-08-26T00:00:00Z",
+        "status": "ok",
+        "exitCode": 0,
+        "compat": {
+            "coreVersion": "0.1.0",
+            "scannerSemanticsVersion": 1,
+            "safetyPolicyVersion": 1,
+            "platformAdapter": {
+                "id": "linux",
+                "version": "0.1.0"
+            },
+            "cleanerSetDigest": "sha256:test",
+            "requiredFeatures": [],
+            "extensions": []
+        },
+        "summary": {},
+        "data": {},
+        "warnings": [],
+        "errors": []
+    }))
+    .unwrap()
 }

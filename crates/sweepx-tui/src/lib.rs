@@ -4,6 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table, Tabs, Wrap};
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde_json::Value;
 use std::cell::Cell as FlagCell;
 use std::cmp::min;
 use std::fmt;
@@ -687,7 +688,7 @@ impl<'de> Visitor<'de> for SummaryVisitor<'_> {
         A: MapAccess<'de>,
     {
         while let Some(key) = map.next_key::<String>()? {
-            if key == "scanId" {
+            if key == "scanId" || key == "scan_id" {
                 *self.scan_id = map.next_value()?;
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -731,7 +732,7 @@ impl<'de> Visitor<'de> for DataVisitor<'_> {
     {
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "scanId" => self.builder.data_scan_id = map.next_value()?,
+                "scanId" | "scan_id" => self.builder.data_scan_id = map.next_value()?,
                 "roots" => map.next_value_seed(EntryArraySeed {
                     builder: self.builder,
                     kind: ArraySection::Roots,
@@ -793,7 +794,8 @@ impl<'de> Visitor<'de> for EntryArrayVisitor<'_> {
     where
         A: SeqAccess<'de>,
     {
-        while let Some(item) = seq.next_element::<ScannedEntry>()? {
+        while let Some(item) = seq.next_element::<Value>()? {
+            let item = parse_scanned_entry_value(item).map_err(de::Error::custom)?;
             let result = match self.kind {
                 ArraySection::Roots => self.builder.push_root(item),
                 ArraySection::Entries => self.builder.push_entry(item),
@@ -839,7 +841,8 @@ impl<'de> Visitor<'de> for AggregateArrayVisitor<'_> {
     where
         A: SeqAccess<'de>,
     {
-        while let Some(item) = seq.next_element::<DirectoryAggregate>()? {
+        while let Some(item) = seq.next_element::<Value>()? {
+            let item = parse_directory_aggregate_value(item).map_err(de::Error::custom)?;
             if let Err(limit_error) = self.builder.push_aggregate(item) {
                 self.builder.limit_error = Some(limit_error);
                 return Err(de::Error::custom("row resource limit exceeded"));
@@ -847,6 +850,41 @@ impl<'de> Visitor<'de> for AggregateArrayVisitor<'_> {
         }
         Ok(())
     }
+}
+
+fn parse_scanned_entry_value(value: Value) -> Result<ScannedEntry, serde_json::Error> {
+    serde_json::from_value(decamelize_json_keys(value))
+}
+
+fn parse_directory_aggregate_value(value: Value) -> Result<DirectoryAggregate, serde_json::Error> {
+    serde_json::from_value(decamelize_json_keys(value))
+}
+
+fn decamelize_json_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (to_snake_case(&key), decamelize_json_keys(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(decamelize_json_keys).collect()),
+        other => other,
+    }
+}
+
+fn to_snake_case(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 4);
+    for (index, ch) in input.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 impl VirtualRow {
@@ -1269,10 +1307,12 @@ mod tests {
 
     fn output_json_with_entries(count: usize) -> String {
         let entries = (0..count)
-            .map(|index| serde_json::to_value(entry(format!("/tmp/{index}"))).unwrap())
+            .map(|index| {
+                camelize_json_keys(serde_json::to_value(entry(format!("/tmp/{index}"))).unwrap())
+            })
             .collect::<Vec<_>>();
-        let root = serde_json::to_value(entry("/tmp".to_string())).unwrap();
-        let aggregate = serde_json::to_value(aggregate()).unwrap();
+        let root = camelize_json_keys(serde_json::to_value(entry("/tmp".to_string())).unwrap());
+        let aggregate = camelize_json_keys(serde_json::to_value(aggregate()).unwrap());
 
         serde_json::to_string(&json!({
             "schema": sweepx_protocol::OUTPUT_SCHEMA,
@@ -1310,6 +1350,49 @@ mod tests {
         .unwrap()
     }
 
+    fn output_json_with_entries_snake_case(count: usize) -> String {
+        let entries = (0..count)
+            .map(|index| serde_json::to_value(entry(format!("/tmp/{index}"))).unwrap())
+            .collect::<Vec<_>>();
+        let root = serde_json::to_value(entry("/tmp".to_string())).unwrap();
+        let aggregate = serde_json::to_value(aggregate()).unwrap();
+
+        serde_json::to_string(&json!({
+            "schema": sweepx_protocol::OUTPUT_SCHEMA,
+            "kind": "scan.result",
+            "requestId": "req-1",
+            "operationId": "op-1",
+            "generatedAt": "2026-08-26T00:00:00Z",
+            "status": "partial",
+            "exitCode": 4,
+            "compat": {
+                "coreVersion": "0.1.0",
+                "scannerSemanticsVersion": 1,
+                "safetyPolicyVersion": 1,
+                "platformAdapter": {
+                    "id": "linux",
+                    "version": "0.1.0"
+                },
+                "cleanerSetDigest": "sha256:test",
+                "requiredFeatures": [],
+                "extensions": []
+            },
+            "summary": {
+                "scan_id": "scan-1"
+            },
+            "data": {
+                "scan_id": "scan-1",
+                "roots": [root],
+                "entries": entries,
+                "aggregates": [aggregate],
+                "boundaries": []
+            },
+            "warnings": [],
+            "errors": []
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn paging_is_limited_to_five_hundred_rows_and_retains_only_one_page() {
         let json = output_json_with_entries(1200);
@@ -1327,6 +1410,41 @@ mod tests {
         assert_eq!(view.loaded_page_index(), 1);
         assert_eq!(view.page_window().start, 500);
         assert_eq!(view.page_window().end, 1000);
+    }
+
+    #[test]
+    fn recursively_camel_case_cli_payload_is_accepted() {
+        let json = output_json_with_entries(3);
+        let view = ViewModel::from_reader(
+            Cursor::new(json.as_bytes()),
+            Locale::EnUs,
+            0,
+            LoadLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(view.scan_id(), Some("scan-1"));
+        assert_eq!(view.root_count(), 1);
+        assert_eq!(view.entry_count(), 3);
+        assert_eq!(view.aggregate_count(), 1);
+        assert_eq!(view.row_count(), 5);
+        assert_eq!(view.retained_row_count(), 5);
+    }
+
+    #[test]
+    fn snake_case_payload_remains_accepted() {
+        let json = output_json_with_entries_snake_case(2);
+        let view = ViewModel::from_reader(
+            Cursor::new(json.as_bytes()),
+            Locale::EnUs,
+            0,
+            LoadLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(view.scan_id(), Some("scan-1"));
+        assert_eq!(view.root_count(), 1);
+        assert_eq!(view.entry_count(), 2);
+        assert_eq!(view.aggregate_count(), 1);
+        assert_eq!(view.row_count(), 4);
     }
 
     #[test]
@@ -1471,5 +1589,37 @@ mod tests {
             }
             other => panic!("expected total row limit error, got {other:?}"),
         }
+    }
+
+    fn camelize_json_keys(value: Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (to_camel_case(&key), camelize_json_keys(value)))
+                    .collect(),
+            ),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(camelize_json_keys).collect())
+            }
+            other => other,
+        }
+    }
+
+    fn to_camel_case(input: &str) -> String {
+        let mut result = String::with_capacity(input.len());
+        let mut uppercase_next = false;
+        for ch in input.chars() {
+            if ch == '_' {
+                uppercase_next = true;
+                continue;
+            }
+            if uppercase_next {
+                result.extend(ch.to_uppercase());
+                uppercase_next = false;
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 }

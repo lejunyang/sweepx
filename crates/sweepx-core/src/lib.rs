@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,14 +9,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sweepx_analysis::{
+    DirectoryAggregateLink, build_candidates_from_summary_with_links,
+    build_explanation_from_candidate,
+};
+use sweepx_catalog::{BUILT_INS, BuiltInCleaner};
+use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
-use sweepx_model::{CapabilityState, DecimalU128, OperationId, RequestId, ScanId};
-use sweepx_platform::{BoundaryKind, CancellationToken, ScanRoot};
+use sweepx_model::{
+    CapabilityState, DecimalU128, ObjectType, OperationId, RequestId, ScanId, ScannedEntry,
+};
+use sweepx_platform::{BoundaryKind, BoundaryRecord, CancellationToken, ScanRoot};
 use sweepx_protocol::{
     CompatSnapshot, EventCheckpoint, EventEnvelope, EventPhase, EventType, ExitCode,
     OutputEnvelope, OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage,
 };
 use sweepx_scanner::{ProgressEvent, ScanError, ScanSummary, Scanner, ScannerOptions};
+use sweepx_tui::{LoadLimits as TuiLoadLimits, ViewModel, ViewModelError};
 use thiserror::Error;
 
 #[cfg(unix)]
@@ -31,6 +40,7 @@ pub const CLEANER_SET_DIGEST: &str = "sha256:p1-read-only-no-cleaners";
 pub const STREAM_ID_PREFIX: &str = "stream-p1";
 const SNAPSHOT_SCHEMA: &str = "sweepx.operation-snapshot/v1";
 const OPERATION_ID_MAX_LEN: usize = 128;
+pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -202,6 +212,26 @@ pub struct CancelRequest {
     pub state_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainRequest {
+    pub scan_json_path: PathBuf,
+    pub candidate_id: Option<String>,
+    pub max_input_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanerShowRequest {
+    pub cleaner_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiReadRequest {
+    pub scan_json_path: PathBuf,
+    pub page_index: usize,
+    pub max_input_bytes: usize,
+    pub max_total_rows: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanSuccess {
     pub output: OutputEnvelope,
@@ -220,6 +250,21 @@ pub struct SnapshotSuccess {
     pub snapshot: Option<OperationSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplanationSuccess {
+    pub output: OutputEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CleanerSuccess {
+    pub output: OutputEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuiReadSuccess {
+    pub output: OutputEnvelope,
+}
+
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("scan root must be absolute: {0}")]
@@ -232,6 +277,30 @@ pub enum CoreError {
     Scan(#[from] ScanError),
     #[error("state persistence failed: {0}")]
     State(#[from] StateError),
+    #[error("analysis input must be a positive bounded byte limit")]
+    InvalidAnalysisInputLimit,
+    #[error("analysis input path must be absolute: {0}")]
+    NonAbsoluteAnalysisInput(PathBuf),
+    #[error("analysis input exceeds byte limit: limit={limit}, observed={observed}")]
+    AnalysisInputTooLarge { limit: usize, observed: usize },
+    #[error("analysis input json is invalid: {0}")]
+    AnalysisInputJson(#[from] serde_json::Error),
+    #[error("analysis build failed: {0}")]
+    AnalysisBuild(#[from] sweepx_analysis::BuildError),
+    #[error("candidate not found in analysis input: {0}")]
+    CandidateNotFound(String),
+    #[error("cleaner catalog failed: {0}")]
+    Catalog(#[from] sweepx_catalog::CatalogError),
+    #[error("cleaner rule evaluation failed: {0}")]
+    CleanerVm(#[from] sweepx_cleaner_vm::VmError),
+    #[error("cleaner reference is invalid: {0}")]
+    InvalidCleanerRef(String),
+    #[error("unsupported tui input: {0}")]
+    TuiInput(String),
+    #[error("tui read failed: {0}")]
+    TuiRead(String),
+    #[error("tui view-model load failed: {0}")]
+    TuiViewModel(String),
 }
 
 #[derive(Debug, Error)]
@@ -538,6 +607,11 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             "LINUX_SCANNER_DEVELOPMENT",
         ),
         command_record(
+            "explain",
+            CapabilityState::Qualified,
+            "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
+        ),
+        command_record(
             "status",
             CapabilityState::Qualified,
             "STATUS_SNAPSHOT_SUPPORTED",
@@ -547,6 +621,17 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             CapabilityState::Disabled,
             "CANCEL_LIVE_REGISTRY_ABSENT",
         ),
+        command_record(
+            "cleaner.list",
+            CapabilityState::Qualified,
+            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
+        ),
+        command_record(
+            "cleaner.show",
+            CapabilityState::Qualified,
+            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
+        ),
+        command_record("tui", CapabilityState::Qualified, "TUI_READ_PATH_SUPPORTED"),
         command_record(
             "capabilities",
             CapabilityState::Qualified,
@@ -559,6 +644,24 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             "scan.local.directory",
             CapabilityState::Degraded,
             "LINUX_SCANNER_DEVELOPMENT",
+        ),
+        capability_record(
+            "linux",
+            "analysis.explain.scan_json",
+            CapabilityState::Qualified,
+            "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
+        ),
+        capability_record(
+            "linux",
+            "catalog.cleaner.read",
+            CapabilityState::Qualified,
+            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
+        ),
+        capability_record(
+            "linux",
+            "tui.read.scan_json",
+            CapabilityState::Qualified,
+            "TUI_READ_PATH_SUPPORTED",
         ),
         capability_record(
             "linux",
@@ -604,8 +707,252 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
     CapabilitiesSuccess { output }
 }
 
+pub fn explain_from_scan_json(
+    _context: &CoreContext,
+    request: &ExplainRequest,
+) -> Result<ExplanationSuccess, CoreError> {
+    let input = read_scan_input_from_path(&request.scan_json_path, request.max_input_bytes)?;
+    let summary = scan_summary_from_input(&input);
+    let links = directory_links(&summary);
+    let candidates = build_candidates_from_summary_with_links(&summary, &links, true)?;
+
+    let selected = if let Some(candidate_id) = request.candidate_id.as_deref() {
+        candidates
+            .into_iter()
+            .filter(|candidate| candidate.candidate_id.to_string() == candidate_id)
+            .collect::<Vec<_>>()
+    } else {
+        candidates
+    };
+
+    if let Some(candidate_id) = request.candidate_id.as_ref()
+        && selected.is_empty()
+    {
+        return Err(CoreError::CandidateNotFound(candidate_id.clone()));
+    }
+
+    let explanations = selected
+        .iter()
+        .map(build_explanation_from_candidate)
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids = fresh_operation_ids("explain", std::slice::from_ref(&request.scan_json_path));
+    let mut output = OutputEnvelope::new(
+        OutputKind::ExplanationResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Ok,
+        ExitCode::Completed,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "scanId": input.scan_id.clone(),
+        "candidateCount": DecimalU128::new(summary.entries.len() as u128),
+        "selectedCandidateCount": DecimalU128::new(explanations.len() as u128),
+        "inputMode": "scan_json",
+    });
+    output.data = json!({
+        "scanId": input.scan_id.clone(),
+        "inputPath": request.scan_json_path.display().to_string(),
+        "inputMode": "scan_json",
+        "explanations": explanations.iter().zip(selected.iter()).map(|(explanation, candidate)| json!({
+            "candidate": camelize_json_keys(serde_json::to_value(candidate).expect("candidate serializable")),
+            "explanation": camelize_json_keys(serde_json::to_value(explanation).expect("explanation serializable")),
+        })).collect::<Vec<_>>(),
+    });
+    Ok(ExplanationSuccess { output })
+}
+
+pub fn cleaner_list(_context: &CoreContext) -> Result<CleanerSuccess, CoreError> {
+    let ids = fresh_operation_ids("cleaner-list", &[]);
+    let cleaners = BUILT_INS
+        .iter()
+        .map(cleaner_list_entry)
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    let mut output = OutputEnvelope::new(
+        OutputKind::CleanerResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Ok,
+        ExitCode::Completed,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "command": "cleaner.list",
+        "cleanerCount": DecimalU128::new(cleaners.len() as u128),
+    });
+    output.data = json!({
+        "command": "cleaner.list",
+        "cleaners": cleaners,
+    });
+    Ok(CleanerSuccess { output })
+}
+
+pub fn cleaner_show(
+    _context: &CoreContext,
+    request: &CleanerShowRequest,
+) -> Result<CleanerSuccess, CoreError> {
+    let (id, version) = parse_cleaner_ref(&request.cleaner_ref)?;
+    let built_in = BUILT_INS
+        .iter()
+        .find(|cleaner| {
+            cleaner
+                .load()
+                .ok()
+                .map(|package| {
+                    package.manifest.id == id
+                        && version
+                            .as_ref()
+                            .map(|expected| expected == &package.manifest.version)
+                            .unwrap_or(true)
+                })
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| CoreError::InvalidCleanerRef(request.cleaner_ref.clone()))?;
+    let entry = cleaner_show_entry(built_in)?;
+    let ids = fresh_operation_ids("cleaner-show", &[]);
+    let mut output = OutputEnvelope::new(
+        OutputKind::CleanerResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Ok,
+        ExitCode::Completed,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "command": "cleaner.show",
+        "cleanerId": entry["manifest"]["id"].clone(),
+        "ruleCount": DecimalU128::new(entry["rules"].as_array().map(|items| items.len()).unwrap_or(0) as u128),
+    });
+    output.data = json!({
+        "command": "cleaner.show",
+        "cleaner": entry,
+    });
+    Ok(CleanerSuccess { output })
+}
+
+pub fn tui_read_from_scan_json(
+    context: &CoreContext,
+    request: &TuiReadRequest,
+) -> Result<TuiReadSuccess, CoreError> {
+    if !request.scan_json_path.is_absolute() {
+        return Err(CoreError::NonAbsoluteAnalysisInput(
+            request.scan_json_path.clone(),
+        ));
+    }
+    if request.max_input_bytes == 0 || request.max_total_rows == 0 {
+        return Err(CoreError::InvalidAnalysisInputLimit);
+    }
+    let view = ViewModel::from_path(
+        &request.scan_json_path,
+        context.locale(),
+        request.page_index,
+        TuiLoadLimits {
+            max_input_bytes: request.max_input_bytes,
+            max_total_rows: request.max_total_rows,
+        },
+    )
+    .map_err(map_tui_view_model_error)?;
+    let ids = fresh_operation_ids("tui-read", std::slice::from_ref(&request.scan_json_path));
+    let mut output = OutputEnvelope::new(
+        OutputKind::StatusResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Ok,
+        ExitCode::Completed,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "command": "tui",
+        "scanId": view.scan_id(),
+        "loadedPageIndex": DecimalU128::new(view.loaded_page_index() as u128),
+        "pageCount": DecimalU128::new(view.page_count() as u128),
+        "totalRows": DecimalU128::new(view.row_count() as u128),
+        "readOnly": true,
+    });
+    output.data = json!({
+        "command": "tui",
+        "mode": "read_only",
+        "scanId": view.scan_id(),
+        "inputPath": request.scan_json_path.display().to_string(),
+        "loadedPageIndex": DecimalU128::new(view.loaded_page_index() as u128),
+        "pageCount": DecimalU128::new(view.page_count() as u128),
+        "totalRows": DecimalU128::new(view.row_count() as u128),
+        "status": status_label(view.status()),
+        "title": view.title(),
+        "readOnly": true,
+    });
+    Ok(TuiReadSuccess { output })
+}
+
 pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> String {
     let catalog = Catalog::new(context.locale());
+    if output.kind == OutputKind::ExplanationResult {
+        let count = output
+            .summary
+            .get("selectedCandidateCount")
+            .and_then(json_decimal_to_usize)
+            .unwrap_or(0);
+        let scan_id = output
+            .summary
+            .get("scanId")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let detail = match context.locale() {
+            Locale::ZhCn => format!("已从扫描 {scan_id} 生成 {count} 条解释。"),
+            Locale::EnUs => format!("Generated {count} explanations from scan {scan_id}."),
+        };
+        return [
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelCommand, &MessageArgs::default()),
+                "explain"
+            ),
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelLocale, &MessageArgs::default()),
+                context.locale().as_bcp47()
+            ),
+            detail,
+            catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
+        ]
+        .join("\n");
+    }
+    if output.kind == OutputKind::CleanerResult {
+        let count = output
+            .summary
+            .get("cleanerCount")
+            .or_else(|| output.summary.get("ruleCount"))
+            .and_then(json_decimal_to_usize)
+            .unwrap_or(0);
+        let command = output
+            .summary
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("cleaner");
+        let detail = match context.locale() {
+            Locale::ZhCn => format!("只读 Cleaner 输出已就绪: {command} ({count})."),
+            Locale::EnUs => format!("Read-only cleaner output ready: {command} ({count})."),
+        };
+        return [
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelCommand, &MessageArgs::default()),
+                command
+            ),
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelLocale, &MessageArgs::default()),
+                context.locale().as_bcp47()
+            ),
+            detail,
+            catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
+        ]
+        .join("\n");
+    }
     let summary_key = match output.kind {
         OutputKind::ScanResult => {
             if output.status == OutputStatus::Ok {
@@ -633,13 +980,34 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
             .and_then(json_decimal_to_usize)
             .unwrap_or(output.errors.len()),
         status: status_label(output.status),
-        capabilities: "scan, status, cancel, capabilities",
+        capabilities: "scan, explain, status, cancel, cleaner, tui, capabilities",
         detail: output
             .errors
             .first()
             .map(|item| item.code.as_str())
             .unwrap_or("ok"),
     };
+    if output.summary.get("command").and_then(Value::as_str) == Some("tui") {
+        let detail = match context.locale() {
+            Locale::ZhCn => "TUI 只读输入已校验。".to_string(),
+            Locale::EnUs => "TUI read-only input validated.".to_string(),
+        };
+        return [
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelCommand, &MessageArgs::default()),
+                "tui"
+            ),
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelLocale, &MessageArgs::default()),
+                context.locale().as_bcp47()
+            ),
+            detail,
+            catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
+        ]
+        .join("\n");
+    }
 
     [
         format!(
@@ -669,6 +1037,336 @@ pub fn serialize_ndjson(events: &[EventEnvelope]) -> String {
         out.push('\n');
     }
     out
+}
+
+struct ScanInputEnvelope {
+    scan_id: Option<ScanId>,
+    roots: Vec<ScannedEntry>,
+    entries: Vec<ScannedEntry>,
+    aggregates: Vec<sweepx_model::DirectoryAggregate>,
+    boundaries: Vec<BoundaryRecord>,
+}
+
+fn read_scan_input_from_path(
+    path: &Path,
+    max_input_bytes: usize,
+) -> Result<ScanInputEnvelope, CoreError> {
+    let envelope = read_json_value_from_path(path, max_input_bytes)?;
+    parse_scan_input_from_value(envelope)
+}
+
+fn read_json_value_from_path(path: &Path, max_input_bytes: usize) -> Result<Value, CoreError> {
+    if !path.is_absolute() {
+        return Err(CoreError::NonAbsoluteAnalysisInput(path.to_path_buf()));
+    }
+    if max_input_bytes == 0 {
+        return Err(CoreError::InvalidAnalysisInputLimit);
+    }
+
+    let file = File::open(path).map_err(StateError::from)?;
+    let mut reader = io::BufReader::new(file);
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).map_err(StateError::from)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len() + read > max_input_bytes {
+            return Err(CoreError::AnalysisInputTooLarge {
+                limit: max_input_bytes,
+                observed: bytes.len() + read,
+            });
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+
+    serde_json::from_slice(&bytes).map_err(CoreError::from)
+}
+
+fn parse_scan_input_from_value(envelope: Value) -> Result<ScanInputEnvelope, CoreError> {
+    let kind: OutputKind = serde_json::from_value(
+        envelope
+            .get("kind")
+            .cloned()
+            .ok_or_else(|| CoreError::TuiInput("missing kind".to_string()))?,
+    )?;
+    if kind != OutputKind::ScanResult {
+        return Err(CoreError::TuiInput(format!(
+            "expected scan.result input, got {:?}",
+            kind
+        )));
+    }
+    let summary = envelope
+        .get("summary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::TuiInput("missing summary".to_string()))?;
+    let data = envelope
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::TuiInput("missing data".to_string()))?;
+
+    let scan_id = data
+        .get("scanId")
+        .cloned()
+        .or_else(|| summary.get("scanId").cloned())
+        .map(serde_json::from_value)
+        .transpose()?;
+
+    let roots: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
+        data.get("roots").cloned().unwrap_or_else(|| json!([])),
+    ))?;
+    let entries: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
+        data.get("entries").cloned().unwrap_or_else(|| json!([])),
+    ))?;
+    let aggregates: Vec<sweepx_model::DirectoryAggregate> = serde_json::from_value(
+        decamelize_json_keys(data.get("aggregates").cloned().unwrap_or_else(|| json!([]))),
+    )?;
+    let boundaries = parse_boundaries(data.get("boundaries"))?;
+
+    Ok(ScanInputEnvelope {
+        scan_id,
+        roots,
+        entries,
+        aggregates,
+        boundaries,
+    })
+}
+
+fn scan_summary_from_input(input: &ScanInputEnvelope) -> ScanSummary {
+    ScanSummary {
+        roots: input.roots.clone(),
+        entries: input.entries.clone(),
+        aggregates: input.aggregates.clone(),
+        boundaries: input.boundaries.clone(),
+        progress: Vec::new(),
+    }
+}
+
+fn directory_links(summary: &ScanSummary) -> Vec<DirectoryAggregateLink<'_>> {
+    summary
+        .entries
+        .iter()
+        .filter(|entry| entry.object_type == ObjectType::Directory)
+        .filter_map(|entry| {
+            summary
+                .aggregates
+                .iter()
+                .find(|aggregate| aggregate.directory_identity == entry.display_path)
+                .map(|aggregate| DirectoryAggregateLink {
+                    entry,
+                    directory_identity: aggregate.directory_identity.as_str(),
+                })
+        })
+        .collect()
+}
+
+fn parse_boundaries(value: Option<&Value>) -> Result<Vec<BoundaryRecord>, CoreError> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut boundaries = Vec::with_capacity(items.len());
+    for item in items {
+        let reason = item
+            .get("reason")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or(sweepx_model::ReasonCode::Unknown);
+        boundaries.push(BoundaryRecord {
+            path: PathBuf::from(item.get("path").and_then(Value::as_str).unwrap_or_default()),
+            kind: boundary_kind_from_str(item.get("kind").and_then(Value::as_str)),
+            reason,
+            detail: item
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown boundary from imported scan.result")
+                .to_string(),
+        });
+    }
+    Ok(boundaries)
+}
+
+fn boundary_kind_from_str(kind: Option<&str>) -> BoundaryKind {
+    match kind {
+        Some("root_symlink") => BoundaryKind::RootSymlink,
+        Some("symlink") => BoundaryKind::Symlink,
+        Some("reparse_point") => BoundaryKind::ReparsePoint,
+        Some("mount") => BoundaryKind::Mount,
+        Some("resource_limit") => BoundaryKind::ResourceLimit,
+        Some("cancelled") => BoundaryKind::Cancelled,
+        Some("other_filesystem") => BoundaryKind::OtherFilesystem,
+        _ => BoundaryKind::ResourceLimit,
+    }
+}
+
+fn decamelize_json_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (to_snake_case(&key), decamelize_json_keys(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(decamelize_json_keys).collect()),
+        other => other,
+    }
+}
+
+fn to_snake_case(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 4);
+    for (index, ch) in input.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn map_tui_view_model_error(error: ViewModelError) -> CoreError {
+    match error {
+        ViewModelError::UnsupportedOutputKind(kind) => {
+            CoreError::TuiInput(format!("expected scan.result input, got {kind:?}"))
+        }
+        ViewModelError::ResourceLimit {
+            kind,
+            limit,
+            observed,
+        } => CoreError::TuiRead(format!(
+            "resource limit exceeded for {kind}: limit={limit}, observed={observed}"
+        )),
+        ViewModelError::Io(source) => CoreError::State(StateError::Io(source)),
+        ViewModelError::Json { source } => CoreError::AnalysisInputJson(source),
+        ViewModelError::MissingStatus => {
+            CoreError::TuiViewModel("missing scan status in input".to_string())
+        }
+    }
+}
+
+fn cleaner_list_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
+    let package = cleaner.load()?;
+    Ok(json!({
+        "id": package.manifest.id,
+        "version": package.manifest.version,
+        "description": package.manifest.description,
+        "publisher": package.manifest.publisher,
+        "packageDigest": package.manifest.package_digest,
+        "riskFloor": package.manifest.risk_floor,
+        "supportedActions": package.manifest.supported_actions,
+        "platforms": package.manifest.platforms,
+        "unknownVersionBehavior": package.manifest.target_versions.unknown,
+        "ruleCount": DecimalU128::new(package.rules.len() as u128),
+    }))
+}
+
+fn cleaner_show_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
+    let package = cleaner.load()?;
+    let rules = package
+        .rules
+        .iter()
+        .map(|(path, rule)| cleaner_rule_entry(rule, path))
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    Ok(json!({
+        "manifest": package.manifest,
+        "rules": rules,
+    }))
+}
+
+fn cleaner_rule_entry(
+    rule: &sweepx_cleaner_schema::CleanerRule,
+    path: &str,
+) -> Result<Value, CoreError> {
+    let evaluation = evaluate_rule(rule, &synthetic_cleaner_context())?;
+    Ok(json!({
+        "path": path,
+        "rule": rule,
+        "vmCheck": {
+            "factState": eval_state_label(evaluation.fact_state),
+            "inferenceState": eval_state_label(evaluation.inference_state),
+            "resolvedRisk": evaluation.resolved_risk.to_string().to_lowercase(),
+            "reportOnly": evaluation.report_only,
+            "context": "synthetic_read_only_contract_check",
+        }
+    }))
+}
+
+fn synthetic_cleaner_context() -> EvaluationContext {
+    EvaluationContext::new()
+        .insert("coverage.complete", sweepx_cleaner_vm::VmValue::Bool(true))
+        .insert(
+            "candidate.relativePath",
+            sweepx_cleaner_vm::VmValue::String("target".to_string()),
+        )
+        .insert(
+            "candidate.relativeComponents",
+            sweepx_cleaner_vm::VmValue::StringList(vec!["Cache".to_string()]),
+        )
+        .insert(
+            "cargo.targetDir",
+            sweepx_cleaner_vm::VmValue::String("target".to_string()),
+        )
+        .insert(
+            "cargo.targetShape",
+            sweepx_cleaner_vm::VmValue::String("recognized_generated_structure".to_string()),
+        )
+        .insert(
+            "cargo.workspaceId",
+            sweepx_cleaner_vm::VmValue::String("workspace-1".to_string()),
+        )
+        .insert(
+            "exclusiveReclaimableBytes",
+            sweepx_cleaner_vm::VmValue::String("known".to_string()),
+        )
+        .insert(
+            "objectType",
+            sweepx_cleaner_vm::VmValue::String("Directory".to_string()),
+        )
+        .insert(
+            "sharing.state",
+            sweepx_cleaner_vm::VmValue::String("private".to_string()),
+        )
+        .insert(
+            "activity.state",
+            sweepx_cleaner_vm::VmValue::String("inactive".to_string()),
+        )
+        .insert(
+            "browser.profileStillness",
+            sweepx_cleaner_vm::VmValue::String("verified".to_string()),
+        )
+        .insert(
+            "browser.storageClass",
+            sweepx_cleaner_vm::VmValue::String("rebuildable_http_or_code_cache".to_string()),
+        )
+        .insert(
+            "browser.runningState",
+            sweepx_cleaner_vm::VmValue::String("stopped".to_string()),
+        )
+}
+
+fn parse_cleaner_ref(raw: &str) -> Result<(String, Option<String>), CoreError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::InvalidCleanerRef(raw.to_string()));
+    }
+    match trimmed.split_once('@') {
+        Some((id, version)) if !id.is_empty() && !version.is_empty() => {
+            Ok((id.to_string(), Some(version.to_string())))
+        }
+        Some(_) => Err(CoreError::InvalidCleanerRef(raw.to_string())),
+        None => Ok((trimmed.to_string(), None)),
+    }
+}
+
+fn eval_state_label(state: sweepx_cleaner_vm::EvalState) -> &'static str {
+    match state {
+        sweepx_cleaner_vm::EvalState::Known(true) => "known_true",
+        sweepx_cleaner_vm::EvalState::Known(false) => "known_false",
+        sweepx_cleaner_vm::EvalState::Unknown => "unknown",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1137,6 +1835,15 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "STATUS_SNAPSHOT_SUPPORTED" => "Status reads durable snapshots only.",
         "CAPABILITIES_REPORT_SUPPORTED" => "Capabilities reports the current read-only surface.",
+        "EXPLAIN_FROM_SCAN_JSON_SUPPORTED" => {
+            "Explain reads a bounded scan.result envelope and returns read-only analysis."
+        }
+        "BUILTIN_CLEANER_REPORTING_SUPPORTED" => {
+            "Built-in cleaner list and show commands report catalog metadata only."
+        }
+        "TUI_READ_PATH_SUPPORTED" => {
+            "TUI validates a bounded scan.result input and stays read-only."
+        }
         _ => "Capability state is intentionally conservative.",
     }
 }
@@ -1601,5 +2308,158 @@ mod tests {
             first.operation_id.to_string(),
             second.operation_id.to_string()
         );
+    }
+
+    #[test]
+    fn cleaner_ref_parser_accepts_plain_and_versioned_ids() {
+        let plain = parse_cleaner_ref("org.sweepx.cargo-target").unwrap();
+        assert_eq!(plain.0, "org.sweepx.cargo-target");
+        assert_eq!(plain.1, None);
+
+        let versioned = parse_cleaner_ref("org.sweepx.cargo-target@1.2.3").unwrap();
+        assert_eq!(versioned.0, "org.sweepx.cargo-target");
+        assert_eq!(versioned.1.as_deref(), Some("1.2.3"));
+        assert!(parse_cleaner_ref("@1.2.3").is_err());
+    }
+
+    #[test]
+    fn synthetic_cleaner_context_supports_rule_evaluation() {
+        for cleaner in BUILT_INS {
+            let package = cleaner.load().unwrap();
+            for (_, rule) in &package.rules {
+                let evaluation = evaluate_rule(rule, &synthetic_cleaner_context()).unwrap();
+                assert!(matches!(
+                    evaluation.fact_state,
+                    sweepx_cleaner_vm::EvalState::Known(_) | sweepx_cleaner_vm::EvalState::Unknown
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn directory_links_join_directory_entries_to_matching_aggregates() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("scan.json");
+        fs::write(&path, sample_scan_json()).unwrap();
+        let input = read_scan_input_from_path(&path, DEFAULT_ANALYSIS_INPUT_BYTES).unwrap();
+        let summary = scan_summary_from_input(&input);
+        let links = directory_links(&summary);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].entry.display_path, "/tmp/demo");
+        assert_eq!(links[0].directory_identity, "/tmp/demo");
+    }
+
+    fn sample_scan_json() -> String {
+        serde_json::to_string(&json!({
+            "schema": "sweepx.output/v1",
+            "kind": "scan.result",
+            "requestId": "req-1",
+            "operationId": "op-1",
+            "generatedAt": "2026-08-26T00:00:00Z",
+            "status": "ok",
+            "exitCode": 0,
+            "compat": {
+                "coreVersion": "0.1.0",
+                "scannerSemanticsVersion": 1,
+                "safetyPolicyVersion": 1,
+                "platformAdapter": {
+                    "id": "linux",
+                    "version": "0.1.0"
+                },
+                "cleanerSetDigest": "sha256:test",
+                "requiredFeatures": [],
+                "extensions": []
+            },
+            "summary": {
+                "scanId": "scan-1"
+            },
+            "data": {
+                "scanId": "scan-1",
+                "roots": [],
+                "entries": [{
+                    "scanId": "scan-1",
+                    "displayPath": "/tmp/demo",
+                    "nativeBasename": {
+                        "kind": "unix_bytes_base64_url",
+                        "value": "ZGVtbw"
+                    },
+                    "objectType": "directory",
+                    "logicalBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "allocatedBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "reclaimableEstimate": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "metadataFingerprint": "fp-1",
+                    "coverage": {
+                        "state": "complete",
+                        "complete": true,
+                        "incompleteReasons": [],
+                        "detailsLost": false,
+                        "provenance": {
+                            "kind": "live_observation",
+                            "observed_at": "2026-08-26T00:00:00Z",
+                            "method": "native_api"
+                        }
+                    },
+                    "provenance": {
+                        "kind": "live_observation",
+                        "observed_at": "2026-08-26T00:00:00Z",
+                        "method": "native_api"
+                    }
+                }],
+                "aggregates": [{
+                    "scanId": "scan-1",
+                    "directoryIdentity": "/tmp/demo",
+                    "revision": "1",
+                    "apparentLogicalBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "uniqueLogicalBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "filesystemReportedAllocatedBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "potentiallyReclaimableBytes": {
+                        "state": "known",
+                        "value": "42"
+                    },
+                    "directChildCount": {
+                        "state": "known",
+                        "value": "1"
+                    },
+                    "recursiveEntryCount": {
+                        "state": "known",
+                        "value": "1"
+                    },
+                    "coverage": {
+                        "state": "complete",
+                        "complete": true,
+                        "incompleteReasons": [],
+                        "detailsLost": false,
+                        "provenance": {
+                            "kind": "live_observation",
+                            "observed_at": "2026-08-26T00:00:00Z",
+                            "method": "native_api"
+                        }
+                    },
+                    "arithmeticState": "exact"
+                }],
+                "boundaries": []
+            },
+            "warnings": [],
+            "errors": []
+        }))
+        .unwrap()
     }
 }

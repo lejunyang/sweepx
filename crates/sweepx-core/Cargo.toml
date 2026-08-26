@@ -12,11 +12,16 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 time = { version = "0.3.44", features = ["formatting", "std"] }
+sweepx-analysis = { path = "../sweepx-analysis" }
+sweepx-catalog = { path = "../sweepx-catalog" }
+sweepx-cleaner-schema = { path = "../sweepx-cleaner-schema" }
+sweepx-cleaner-vm = { path = "../sweepx-cleaner-vm" }
 sweepx-i18n = { path = "../sweepx-i18n" }
 sweepx-model = { path = "../sweepx-model" }
 sweepx-platform = { path = "../sweepx-platform" }
 sweepx-protocol = { path = "../sweepx-protocol" }
 sweepx-scanner = { path = "../sweepx-scanner", default-features = false, features = ["platform-linux", "platform-macos", "platform-windows"] }
+sweepx-tui = { path = "../sweepx-tui" }
 
 [dev-dependencies]
 tempfile = "3.21.0"
