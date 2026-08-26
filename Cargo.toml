@@ -3,6 +3,7 @@ members = [
   "crates/sweepx-model",
   "crates/sweepx-canonical",
   "crates/sweepx-protocol",
+  "crates/sweepx-i18n",
 ]
 resolver = "2"
 
