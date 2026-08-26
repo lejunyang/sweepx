@@ -27,6 +27,8 @@
         "coreVersion",
         "scannerSemanticsVersion",
         "safetyPolicyVersion",
+        "platformAdapter",
+        "cleanerSetDigest",
         "requiredFeatures",
         "extensions"
       ],
@@ -41,6 +43,25 @@
         "safetyPolicyVersion": {
           "type": "integer",
           "minimum": 1
+        },
+        "platformAdapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "version": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        "cleanerSetDigest": {
+          "$ref": "#/$defs/nonEmptyString"
         },
         "requiredFeatures": {
           "type": "array",
@@ -247,8 +268,11 @@
         "messageKey": {
           "$ref": "#/$defs/nonEmptyString"
         },
-        "parameters": {
+        "params": {
           "type": "object"
+        },
+        "retryable": {
+          "type": "boolean"
         },
         "phase": {
           "$ref": "#/$defs/eventPhase"
@@ -258,14 +282,6 @@
         },
         "nativeCode": {
           "$ref": "#/$defs/nonEmptyString"
-        },
-        "retryability": {
-          "type": "string",
-          "enum": [
-            "retryable",
-            "not_retryable",
-            "unknown"
-          ]
         },
         "observedAt": {
           "$ref": "#/$defs/rfc3339Timestamp"

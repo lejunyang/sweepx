@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
-use sweepx_model::{OperationId, RequestId};
+use sweepx_model::{DecimalU128, OperationId, RequestId};
 
 pub const OUTPUT_SCHEMA: &str = "sweepx.output/v1";
 pub const EVENT_SCHEMA: &str = "sweepx.event/v1";
@@ -56,7 +56,7 @@ pub enum OutputStatus {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ExitCode {
     Completed = 0,
@@ -106,6 +106,21 @@ impl<'de> Deserialize<'de> for ExitCode {
                 "unknown sweepx exit code: {value}"
             ))),
         }
+    }
+}
+
+impl JsonSchema for ExitCode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ExitCode".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        json!({
+            "type": "integer",
+            "enum": [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        })
+        .try_into()
+        .expect("valid exit-code schema")
     }
 }
 
@@ -210,7 +225,7 @@ pub struct ProtocolMessage {
     pub class: String,
     pub message_key: String,
     pub retryable: bool,
-    pub parameters: BTreeMap<String, String>,
+    pub params: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -377,10 +392,10 @@ pub struct EventEnvelope {
     pub schema: String,
     pub stream_id: String,
     pub operation_id: OperationId,
-    pub sequence: String,
+    pub sequence: DecimalU128,
     pub cursor: String,
     pub emitted_at: String,
-    pub monotonic_offset_ns: String,
+    pub monotonic_offset_ns: DecimalU128,
     pub r#type: EventType,
     pub phase: EventPhase,
     pub payload: Value,
@@ -392,7 +407,7 @@ pub struct EventEnvelope {
 #[serde(rename_all = "camelCase")]
 pub struct EventCheckpoint {
     pub durable: bool,
-    pub last_durable_sequence: String,
+    pub last_durable_sequence: DecimalU128,
 }
 
 impl EventEnvelope {
@@ -488,17 +503,17 @@ mod tests {
             schema: EVENT_SCHEMA.to_string(),
             stream_id: "stream-1".to_string(),
             operation_id: OperationId::new("op-1"),
-            sequence: "42".to_string(),
+            sequence: DecimalU128::new(42),
             cursor: "cursor".to_string(),
             emitted_at: "2026-08-26T00:00:00Z".to_string(),
-            monotonic_offset_ns: "1234".to_string(),
+            monotonic_offset_ns: DecimalU128::new(1234),
             r#type: EventType::OperationTerminal,
             phase: EventPhase::Audit,
             payload: json!({ "status": "ok" }),
             terminal: true,
             checkpoint: EventCheckpoint {
                 durable: true,
-                last_durable_sequence: "42".to_string(),
+                last_durable_sequence: DecimalU128::new(42),
             },
         };
         assert!(terminal.is_terminal_type());

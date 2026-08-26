@@ -10,6 +10,11 @@
     "coreVersion": "0.0.0-p0",
     "scannerSemanticsVersion": 1,
     "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "p0-contract-only",
+      "version": "0.0.0-p0"
+    },
+    "cleanerSetDigest": "sha256:p0-no-cleaners",
     "requiredFeatures": [],
     "extensions": []
   },
