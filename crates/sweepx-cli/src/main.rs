@@ -6,9 +6,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use sweepx_core::{
     CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, ScanRequest,
     StatusRequest, TuiReadRequest, cancel_with_store, capabilities, cleaner_list, cleaner_show,
-    durable_store, explain_from_scan_json, parse_locale_override, render_human_output,
-    scan_with_store, serialize_json, serialize_ndjson, state_dir_from_explicit_or_default,
-    status_with_store, tui_read_from_scan_json, validate_absolute_root,
+    core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
+    render_human_output, scan_with_store, serialize_json, serialize_ndjson,
+    state_dir_from_explicit_or_default, status_with_store, tui_read_from_scan_json,
+    validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
@@ -106,23 +107,13 @@ fn main() -> ProcessExitCode {
     };
     let locale_resolution = detect_locale(explicit_locale);
     let context = CoreContext::new(locale_resolution);
-    let state_dir = match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{error}");
-            return ProcessExitCode::from(2);
-        }
-    };
-    let store = match durable_store(state_dir.as_deref()) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{error}");
-            return ProcessExitCode::from(2);
-        }
-    };
 
     let result = match cli.command {
         Commands::Scan { roots } => {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
             let roots = match normalize_roots(&roots) {
                 Ok(roots) => roots,
                 Err(error) => {
@@ -164,46 +155,58 @@ fn main() -> ProcessExitCode {
             },
         )
         .map(RenderedResult::Explanation),
-        Commands::Status { operation_id } => match store.as_ref() {
-            Some(store) => status_with_store(
-                &context,
-                &StatusRequest {
-                    operation_id,
-                    state_dir: state_dir.clone(),
-                },
-                Some(store),
-            )
-            .map(RenderedResult::Snapshot),
-            None => status_with_store(
-                &context,
-                &StatusRequest {
-                    operation_id,
-                    state_dir: None,
-                },
-                Option::<&sweepx_core::MemorySnapshotStore>::None,
-            )
-            .map(RenderedResult::Snapshot),
-        },
-        Commands::Cancel { operation_id } => match store.as_ref() {
-            Some(store) => cancel_with_store(
-                &context,
-                &CancelRequest {
-                    operation_id,
-                    state_dir: state_dir.clone(),
-                },
-                Some(store),
-            )
-            .map(RenderedResult::Snapshot),
-            None => cancel_with_store(
-                &context,
-                &CancelRequest {
-                    operation_id,
-                    state_dir: None,
-                },
-                Option::<&sweepx_core::MemorySnapshotStore>::None,
-            )
-            .map(RenderedResult::Snapshot),
-        },
+        Commands::Status { operation_id } => {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
+            match store.as_ref() {
+                Some(store) => status_with_store(
+                    &context,
+                    &StatusRequest {
+                        operation_id,
+                        state_dir: state_dir.clone(),
+                    },
+                    Some(store),
+                )
+                .map(RenderedResult::Snapshot),
+                None => status_with_store(
+                    &context,
+                    &StatusRequest {
+                        operation_id,
+                        state_dir: None,
+                    },
+                    Option::<&sweepx_core::MemorySnapshotStore>::None,
+                )
+                .map(RenderedResult::Snapshot),
+            }
+        }
+        Commands::Cancel { operation_id } => {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+                Ok(value) => value,
+                Err(code) => return code,
+            };
+            match store.as_ref() {
+                Some(store) => cancel_with_store(
+                    &context,
+                    &CancelRequest {
+                        operation_id,
+                        state_dir: state_dir.clone(),
+                    },
+                    Some(store),
+                )
+                .map(RenderedResult::Snapshot),
+                None => cancel_with_store(
+                    &context,
+                    &CancelRequest {
+                        operation_id,
+                        state_dir: None,
+                    },
+                    Option::<&sweepx_core::MemorySnapshotStore>::None,
+                )
+                .map(RenderedResult::Snapshot),
+            }
+        }
         Commands::Cleaner { command } => match command {
             CleanerCommands::List => cleaner_list(&context).map(RenderedResult::Cleaner),
             CleanerCommands::Show { cleaner_ref } => {
@@ -238,9 +241,29 @@ fn main() -> ProcessExitCode {
         }
         Err(error) => {
             eprintln!("{error}");
-            ProcessExitCode::from(8)
+            ProcessExitCode::from(core_error_exit_code(&error) as u8)
         }
     }
+}
+
+fn resolve_state_store(
+    explicit: Option<&std::path::Path>,
+) -> Result<(Option<PathBuf>, Option<sweepx_core::DurableSnapshotStore>), ProcessExitCode> {
+    let state_dir = match state_dir_from_explicit_or_default(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return Err(ProcessExitCode::from(2));
+        }
+    };
+    let store = match durable_store(state_dir.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return Err(ProcessExitCode::from(2));
+        }
+    };
+    Ok((state_dir, store))
 }
 
 fn normalize_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {

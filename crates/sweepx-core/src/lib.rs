@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -13,11 +14,12 @@ use sweepx_analysis::{
     DirectoryAggregateLink, build_candidates_from_summary_with_links,
     build_explanation_from_candidate,
 };
-use sweepx_catalog::{BUILT_INS, BuiltInCleaner};
+use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
 use sweepx_model::{
-    CapabilityState, DecimalU128, ObjectType, OperationId, RequestId, ScanId, ScannedEntry,
+    CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
+    OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord, CancellationToken, ScanRoot};
 use sweepx_protocol::{
@@ -36,7 +38,6 @@ use sweepx_scanner::HostPlatformScanner;
 pub const CORE_VERSION: &str = "0.1.0";
 pub const SCANNER_SEMANTICS_VERSION: u32 = 1;
 pub const SAFETY_POLICY_VERSION: u32 = 1;
-pub const CLEANER_SET_DIGEST: &str = "sha256:p1-read-only-no-cleaners";
 pub const STREAM_ID_PREFIX: &str = "stream-p1";
 const SNAPSHOT_SCHEMA: &str = "sweepx.operation-snapshot/v1";
 const OPERATION_ID_MAX_LEN: usize = 128;
@@ -295,6 +296,14 @@ pub enum CoreError {
     CleanerVm(#[from] sweepx_cleaner_vm::VmError),
     #[error("cleaner reference is invalid: {0}")]
     InvalidCleanerRef(String),
+    #[error(
+        "cleaner is incompatible with this core: {cleaner_ref} requires {required_core}, current={current_core}"
+    )]
+    CleanerCompat {
+        cleaner_ref: String,
+        required_core: String,
+        current_core: String,
+    },
     #[error("unsupported tui input: {0}")]
     TuiInput(String),
     #[error("tui read failed: {0}")]
@@ -591,6 +600,24 @@ pub fn cancel_with_store<S: SnapshotStore>(
 pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
     let ids = fresh_operation_ids("capabilities", &[]);
     let current_os = current_os_family();
+    let cleaner_catalog = load_builtin_cleaners();
+    let cleaner_digest = cleaner_set_digest();
+    let cleaner_state = match (&cleaner_catalog, &cleaner_digest) {
+        (_, Err(_)) => CapabilityState::Degraded,
+        (Ok(cleaners), Ok(_)) if cleaners.iter().any(|cleaner| !cleaner.compatible) => {
+            CapabilityState::ReportOnly
+        }
+        (Ok(_), Ok(_)) => CapabilityState::Qualified,
+        (Err(_), _) => CapabilityState::Degraded,
+    };
+    let cleaner_reason = match (&cleaner_catalog, &cleaner_digest) {
+        (_, Err(_)) => "BUILTIN_CLEANER_REPORTING_DEGRADED",
+        (Ok(cleaners), Ok(_)) if cleaners.iter().any(|cleaner| !cleaner.compatible) => {
+            "BUILTIN_CLEANER_COMPAT_PARTIAL"
+        }
+        (Ok(_), Ok(_)) => "BUILTIN_CLEANER_REPORTING_SUPPORTED",
+        (Err(_), _) => "BUILTIN_CLEANER_REPORTING_DEGRADED",
+    };
     let mut output = OutputEnvelope::new(
         OutputKind::CapabilitiesResult,
         ids.request_id,
@@ -621,16 +648,8 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             CapabilityState::Disabled,
             "CANCEL_LIVE_REGISTRY_ABSENT",
         ),
-        command_record(
-            "cleaner.list",
-            CapabilityState::Qualified,
-            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
-        ),
-        command_record(
-            "cleaner.show",
-            CapabilityState::Qualified,
-            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
-        ),
+        command_record("cleaner.list", cleaner_state, cleaner_reason),
+        command_record("cleaner.show", cleaner_state, cleaner_reason),
         command_record("tui", CapabilityState::Qualified, "TUI_READ_PATH_SUPPORTED"),
         command_record(
             "capabilities",
@@ -654,8 +673,8 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         capability_record(
             "linux",
             "catalog.cleaner.read",
-            CapabilityState::Qualified,
-            "BUILTIN_CLEANER_REPORTING_SUPPORTED",
+            cleaner_state,
+            cleaner_reason,
         ),
         capability_record(
             "linux",
@@ -691,7 +710,8 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
     output.summary = json!({
         "commandCount": DecimalU128::new(commands.len() as u128),
         "capabilityCount": DecimalU128::new(capabilities.len() as u128),
-        "currentPlatform": current_os
+        "currentPlatform": current_os,
+        "cleanerSetDigest": cleaner_digest.unwrap_or_else(|_| "sha256:unavailable".to_string()),
     });
     output.data = json!({
         "commands": commands,
@@ -765,27 +785,44 @@ pub fn explain_from_scan_json(
 
 pub fn cleaner_list(_context: &CoreContext) -> Result<CleanerSuccess, CoreError> {
     let ids = fresh_operation_ids("cleaner-list", &[]);
-    let cleaners = BUILT_INS
+    let cleaners = load_builtin_cleaners()?;
+    let list = cleaners.iter().map(cleaner_list_entry).collect::<Vec<_>>();
+    let incompatible_count = cleaners
         .iter()
-        .map(cleaner_list_entry)
-        .collect::<Result<Vec<_>, CoreError>>()?;
+        .filter(|cleaner| !cleaner.compatible)
+        .count();
+    let status = if incompatible_count > 0 {
+        OutputStatus::Partial
+    } else {
+        OutputStatus::Ok
+    };
     let mut output = OutputEnvelope::new(
         OutputKind::CleanerResult,
         ids.request_id,
         ids.operation_id,
         timestamp_now(),
-        OutputStatus::Ok,
+        status,
         ExitCode::Completed,
         compat_snapshot(current_os_family()),
     );
     output.summary = json!({
         "command": "cleaner.list",
-        "cleanerCount": DecimalU128::new(cleaners.len() as u128),
+        "cleanerCount": DecimalU128::new(list.len() as u128),
+        "incompatibleCleanerCount": DecimalU128::new(incompatible_count as u128),
     });
     output.data = json!({
         "command": "cleaner.list",
-        "cleaners": cleaners,
+        "cleaners": list,
     });
+    if incompatible_count > 0 {
+        output.warnings.push(protocol_error(
+            "cleaner.catalog.compat.partial",
+            "cleaner",
+            "cleaner.catalog.compat.partial",
+            false,
+            [("currentCore", CORE_VERSION.to_string())],
+        ));
+    }
     Ok(CleanerSuccess { output })
 }
 
@@ -794,23 +831,25 @@ pub fn cleaner_show(
     request: &CleanerShowRequest,
 ) -> Result<CleanerSuccess, CoreError> {
     let (id, version) = parse_cleaner_ref(&request.cleaner_ref)?;
-    let built_in = BUILT_INS
+    let cleaners = load_builtin_cleaners()?;
+    let cleaner = cleaners
         .iter()
         .find(|cleaner| {
-            cleaner
-                .load()
-                .ok()
-                .map(|package| {
-                    package.manifest.id == id
-                        && version
-                            .as_ref()
-                            .map(|expected| expected == &package.manifest.version)
-                            .unwrap_or(true)
-                })
-                .unwrap_or(false)
+            cleaner.package.manifest.id == id
+                && version
+                    .as_ref()
+                    .map(|expected| expected == &cleaner.package.manifest.version)
+                    .unwrap_or(true)
         })
         .ok_or_else(|| CoreError::InvalidCleanerRef(request.cleaner_ref.clone()))?;
-    let entry = cleaner_show_entry(built_in)?;
+    if !cleaner.compatible {
+        return Err(CoreError::CleanerCompat {
+            cleaner_ref: request.cleaner_ref.clone(),
+            required_core: cleaner.package.manifest.requires.core.clone(),
+            current_core: CORE_VERSION.to_string(),
+        });
+    }
+    let entry = cleaner_show_entry(cleaner)?;
     let ids = fresh_operation_ids("cleaner-show", &[]);
     let mut output = OutputEnvelope::new(
         OutputKind::CleanerResult,
@@ -1113,15 +1152,18 @@ fn parse_scan_input_from_value(envelope: Value) -> Result<ScanInputEnvelope, Cor
         .map(serde_json::from_value)
         .transpose()?;
 
-    let roots: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
+    let mut roots: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
         data.get("roots").cloned().unwrap_or_else(|| json!([])),
     ))?;
-    let entries: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
+    let mut entries: Vec<ScannedEntry> = serde_json::from_value(decamelize_json_keys(
         data.get("entries").cloned().unwrap_or_else(|| json!([])),
     ))?;
-    let aggregates: Vec<sweepx_model::DirectoryAggregate> = serde_json::from_value(
+    let mut aggregates: Vec<sweepx_model::DirectoryAggregate> = serde_json::from_value(
         decamelize_json_keys(data.get("aggregates").cloned().unwrap_or_else(|| json!([]))),
     )?;
+    roots.iter_mut().for_each(downgrade_imported_entry);
+    entries.iter_mut().for_each(downgrade_imported_entry);
+    aggregates.iter_mut().for_each(downgrade_imported_aggregate);
     let boundaries = parse_boundaries(data.get("boundaries"))?;
 
     Ok(ScanInputEnvelope {
@@ -1247,9 +1289,45 @@ fn map_tui_view_model_error(error: ViewModelError) -> CoreError {
     }
 }
 
-fn cleaner_list_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
-    let package = cleaner.load()?;
-    Ok(json!({
+fn imported_preview_provenance() -> FieldProvenance {
+    FieldProvenance::StalePreview {
+        observed_at: "1970-01-01T00:00:00Z".to_string(),
+    }
+}
+
+fn downgrade_imported_entry(entry: &mut ScannedEntry) {
+    entry.provenance = imported_preview_provenance();
+    downgrade_imported_coverage(&mut entry.coverage);
+}
+
+fn downgrade_imported_aggregate(aggregate: &mut sweepx_model::DirectoryAggregate) {
+    downgrade_imported_coverage(&mut aggregate.coverage);
+}
+
+fn downgrade_imported_coverage(coverage: &mut Coverage) {
+    coverage.state = CoverageState::Incomplete;
+    coverage.complete = false;
+    coverage.details_lost = false;
+    coverage.provenance = imported_preview_provenance();
+    if !coverage
+        .incomplete_reasons
+        .contains(&ReasonCode::IncompleteStreamCoverage)
+    {
+        coverage
+            .incomplete_reasons
+            .push(ReasonCode::IncompleteStreamCoverage);
+    }
+    if !coverage
+        .incomplete_reasons
+        .contains(&ReasonCode::NotRevalidated)
+    {
+        coverage.incomplete_reasons.push(ReasonCode::NotRevalidated);
+    }
+}
+
+fn cleaner_list_entry(cleaner: &LoadedBuiltInCleaner) -> Value {
+    let package = &cleaner.package;
+    json!({
         "id": package.manifest.id,
         "version": package.manifest.version,
         "description": package.manifest.description,
@@ -1260,11 +1338,12 @@ fn cleaner_list_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
         "platforms": package.manifest.platforms,
         "unknownVersionBehavior": package.manifest.target_versions.unknown,
         "ruleCount": DecimalU128::new(package.rules.len() as u128),
-    }))
+        "compatibility": cleaner_compatibility_json(cleaner),
+    })
 }
 
-fn cleaner_show_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
-    let package = cleaner.load()?;
+fn cleaner_show_entry(cleaner: &LoadedBuiltInCleaner) -> Result<Value, CoreError> {
+    let package = &cleaner.package;
     let rules = package
         .rules
         .iter()
@@ -1272,6 +1351,7 @@ fn cleaner_show_entry(cleaner: &BuiltInCleaner) -> Result<Value, CoreError> {
         .collect::<Result<Vec<_>, CoreError>>()?;
     Ok(json!({
         "manifest": package.manifest,
+        "compatibility": cleaner_compatibility_json(cleaner),
         "rules": rules,
     }))
 }
@@ -1742,6 +1822,84 @@ fn is_non_partial_boundary(kind: &BoundaryKind) -> bool {
     matches!(kind, BoundaryKind::Symlink | BoundaryKind::RootSymlink)
 }
 
+#[derive(Debug, Clone)]
+struct LoadedBuiltInCleaner {
+    package: LoadedCleanerPackage,
+    compatible: bool,
+}
+
+fn load_builtin_cleaners() -> Result<Vec<LoadedBuiltInCleaner>, CoreError> {
+    BUILT_INS
+        .iter()
+        .map(|cleaner| {
+            let package = cleaner.load()?;
+            let compatible = cleaner_is_core_compatible(&package)?;
+            Ok(LoadedBuiltInCleaner {
+                package,
+                compatible,
+            })
+        })
+        .collect()
+}
+
+fn cleaner_is_core_compatible(package: &LoadedCleanerPackage) -> Result<bool, CoreError> {
+    let current_core = Version::parse(CORE_VERSION).map_err(|_| CoreError::CleanerCompat {
+        cleaner_ref: package.manifest.id.clone(),
+        required_core: package.manifest.requires.core.clone(),
+        current_core: CORE_VERSION.to_string(),
+    })?;
+    let required = VersionReq::parse(&package.manifest.requires.core).map_err(|_| {
+        CoreError::CleanerCompat {
+            cleaner_ref: package.manifest.id.clone(),
+            required_core: package.manifest.requires.core.clone(),
+            current_core: CORE_VERSION.to_string(),
+        }
+    })?;
+    Ok(required.matches(&current_core))
+}
+
+fn cleaner_set_digest() -> Result<String, CoreError> {
+    let mut records = load_builtin_cleaners()?
+        .into_iter()
+        .map(|cleaner| {
+            json!({
+                "id": cleaner.package.manifest.id,
+                "version": cleaner.package.manifest.version,
+                "packageDigest": cleaner.package.manifest.package_digest,
+            })
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        let left_key = (
+            left["id"].as_str().unwrap_or_default(),
+            left["version"].as_str().unwrap_or_default(),
+            left["packageDigest"].as_str().unwrap_or_default(),
+        );
+        let right_key = (
+            right["id"].as_str().unwrap_or_default(),
+            right["version"].as_str().unwrap_or_default(),
+            right["packageDigest"].as_str().unwrap_or_default(),
+        );
+        left_key.cmp(&right_key)
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(b"sweepx.cleaner-set-digest.v1\0");
+    hasher.update(
+        serde_json::to_vec(&records)
+            .expect("cleaner set digest records should serialize to canonical array"),
+    );
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn cleaner_compatibility_json(cleaner: &LoadedBuiltInCleaner) -> Value {
+    json!({
+        "state": if cleaner.compatible { "compatible" } else { "incompatible" },
+        "currentCore": CORE_VERSION,
+        "requiresCore": cleaner.package.manifest.requires.core,
+        "reportOnly": !cleaner.compatible,
+    })
+}
+
 fn compat_snapshot(platform_adapter_id: &str) -> CompatSnapshot {
     CompatSnapshot {
         core_version: CORE_VERSION.to_string(),
@@ -1751,7 +1909,8 @@ fn compat_snapshot(platform_adapter_id: &str) -> CompatSnapshot {
             id: platform_adapter_id.to_string(),
             version: CORE_VERSION.to_string(),
         },
-        cleaner_set_digest: CLEANER_SET_DIGEST.to_string(),
+        cleaner_set_digest: cleaner_set_digest()
+            .unwrap_or_else(|_| "sha256:unavailable".to_string()),
         required_features: Vec::new(),
         extensions: Vec::new(),
     }
@@ -1838,6 +1997,12 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "EXPLAIN_FROM_SCAN_JSON_SUPPORTED" => {
             "Explain reads a bounded scan.result envelope and returns read-only analysis."
         }
+        "BUILTIN_CLEANER_COMPAT_PARTIAL" => {
+            "Built-in cleaner metadata is readable, but one or more cleaners are incompatible with this core version."
+        }
+        "BUILTIN_CLEANER_REPORTING_DEGRADED" => {
+            "Built-in cleaner reporting is currently degraded because the cleaner catalog could not be loaded."
+        }
         "BUILTIN_CLEANER_REPORTING_SUPPORTED" => {
             "Built-in cleaner list and show commands report catalog metadata only."
         }
@@ -1894,6 +2059,29 @@ fn protocol_error<const N: usize>(
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
             .collect(),
+    }
+}
+
+pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
+    match error {
+        CoreError::NonAbsoluteRoot(_)
+        | CoreError::MissingRoots
+        | CoreError::InvalidOperationId(_)
+        | CoreError::InvalidAnalysisInputLimit
+        | CoreError::NonAbsoluteAnalysisInput(_)
+        | CoreError::AnalysisInputTooLarge { .. }
+        | CoreError::AnalysisInputJson(_)
+        | CoreError::CandidateNotFound(_)
+        | CoreError::InvalidCleanerRef(_)
+        | CoreError::TuiInput(_) => ExitCode::UsageError,
+        CoreError::CleanerCompat { .. } => ExitCode::CleanerTrustOrCompat,
+        CoreError::State(_) => ExitCode::StateIntegrityUnavailable,
+        CoreError::Scan(_)
+        | CoreError::AnalysisBuild(_)
+        | CoreError::Catalog(_)
+        | CoreError::CleanerVm(_)
+        | CoreError::TuiRead(_)
+        | CoreError::TuiViewModel(_) => ExitCode::OperationFailed,
     }
 }
 
@@ -2334,6 +2522,75 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn imported_scan_input_downgrades_live_provenance_and_forces_report_only_candidates() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("scan.json");
+        fs::write(&path, sample_scan_json()).unwrap();
+
+        let input = read_scan_input_from_path(&path, DEFAULT_ANALYSIS_INPUT_BYTES).unwrap();
+        assert!(matches!(
+            input.entries[0].provenance,
+            FieldProvenance::StalePreview { .. }
+        ));
+        assert!(matches!(
+            input.entries[0].coverage.provenance,
+            FieldProvenance::StalePreview { .. }
+        ));
+        assert!(!input.entries[0].coverage.complete);
+        assert!(
+            input.entries[0]
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::NotRevalidated)
+        );
+
+        let summary = scan_summary_from_input(&input);
+        let links = directory_links(&summary);
+        let candidates = build_candidates_from_summary_with_links(&summary, &links, true).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].source_state,
+            sweepx_analysis::CandidateSourceState::Stale
+        );
+        assert_ne!(
+            candidates[0].eligibility.executable,
+            sweepx_analysis::ExecutableEligibility::Executable
+        );
+        assert!(
+            candidates[0]
+                .eligibility
+                .reasons
+                .contains(&ReasonCode::NotRevalidated)
+        );
+    }
+
+    #[test]
+    fn cleaner_show_rejects_incompatible_builtin_with_compat_exit_code() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let error = cleaner_show(
+            &context,
+            &CleanerShowRequest {
+                cleaner_ref: "org.sweepx.cargo-target".to_string(),
+            },
+        )
+        .expect_err("incompatible cleaner should fail");
+
+        assert!(matches!(error, CoreError::CleanerCompat { .. }));
+        assert_eq!(core_error_exit_code(&error), ExitCode::CleanerTrustOrCompat);
+    }
+
+    #[test]
+    fn deterministic_cleaner_set_digest_is_stable() {
+        let first = cleaner_set_digest().unwrap();
+        let second = cleaner_set_digest().unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("sha256:"));
     }
 
     #[test]

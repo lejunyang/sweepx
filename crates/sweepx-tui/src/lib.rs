@@ -7,6 +7,7 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use serde_json::Value;
 use std::cell::Cell as FlagCell;
 use std::cmp::min;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
@@ -515,7 +516,8 @@ struct StreamingViewModelBuilder {
     entry_count: usize,
     aggregate_count: usize,
     total_rows: usize,
-    retained_rows: Vec<VirtualRow>,
+    requested_rows: Vec<VirtualRow>,
+    trailing_rows: VecDeque<VirtualRow>,
     limit_error: Option<LimitError>,
 }
 
@@ -533,12 +535,13 @@ impl StreamingViewModelBuilder {
             entry_count: 0,
             aggregate_count: 0,
             total_rows: 0,
-            retained_rows: Vec::with_capacity(MAX_PAGE_ROWS),
+            requested_rows: Vec::with_capacity(MAX_PAGE_ROWS),
+            trailing_rows: VecDeque::with_capacity(MAX_PAGE_ROWS),
             limit_error: None,
         }
     }
 
-    fn target_start(&self) -> usize {
+    fn requested_page_start(&self) -> usize {
         self.requested_page_index.saturating_mul(MAX_PAGE_ROWS)
     }
 
@@ -567,13 +570,19 @@ impl StreamingViewModelBuilder {
             });
         }
 
-        let start = self.target_start();
-        let end = start.saturating_add(MAX_PAGE_ROWS);
         let current_index = self.total_rows;
         self.total_rows = observed;
-        if current_index >= start && current_index < end {
-            self.retained_rows.push(row);
+
+        let requested_start = self.requested_page_start();
+        let requested_end = requested_start.saturating_add(MAX_PAGE_ROWS);
+        if current_index >= requested_start && current_index < requested_end {
+            self.requested_rows.push(row.clone());
         }
+
+        if self.trailing_rows.len() == MAX_PAGE_ROWS {
+            self.trailing_rows.pop_front();
+        }
+        self.trailing_rows.push_back(row);
         Ok(())
     }
 
@@ -589,6 +598,18 @@ impl StreamingViewModelBuilder {
             .map(|id| format!("SweepX TUI | {id}"))
             .unwrap_or_else(|| "SweepX TUI".to_string());
 
+        let max_page = if self.total_rows == 0 {
+            0
+        } else {
+            self.total_rows.div_ceil(MAX_PAGE_ROWS).saturating_sub(1)
+        };
+        let effective_page_index = min(self.requested_page_index, max_page);
+        let retained_rows = if effective_page_index == self.requested_page_index {
+            self.requested_rows
+        } else {
+            self.trailing_rows.into_iter().collect()
+        };
+
         Ok(ViewModel {
             locale: self.locale,
             revision: 0,
@@ -599,8 +620,8 @@ impl StreamingViewModelBuilder {
             entry_count: self.entry_count,
             aggregate_count: self.aggregate_count,
             total_rows: self.total_rows,
-            loaded_page_index: self.requested_page_index,
-            rows: self.retained_rows,
+            loaded_page_index: effective_page_index,
+            rows: retained_rows,
             limits: self.limits,
         })
     }
@@ -1410,6 +1431,63 @@ mod tests {
         assert_eq!(view.loaded_page_index(), 1);
         assert_eq!(view.page_window().start, 500);
         assert_eq!(view.page_window().end, 1000);
+    }
+
+    #[test]
+    fn far_requested_page_does_not_scale_retention_with_page_index() {
+        let json = output_json_with_entries(99_998);
+        let view = ViewModel::from_reader(
+            Cursor::new(json.as_bytes()),
+            Locale::EnUs,
+            100,
+            LoadLimits {
+                max_input_bytes: 64 * 1024 * 1024,
+                max_total_rows: DEFAULT_MAX_TOTAL_ROWS,
+            },
+        )
+        .unwrap();
+        assert_eq!(view.row_count(), 100_000);
+        assert_eq!(view.loaded_page_index(), 100);
+        assert_eq!(view.retained_row_count(), 500);
+        assert!(view.retained_row_count() <= 500);
+        assert_eq!(view.page_window().start, 50_000);
+        assert_eq!(view.page_window().end, 50_500);
+    }
+
+    #[test]
+    fn huge_requested_page_is_clamped_to_last_nonempty_page() {
+        let json = output_json_with_entries(10);
+        let view = ViewModel::from_reader(
+            Cursor::new(json.as_bytes()),
+            Locale::EnUs,
+            9999,
+            LoadLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(view.page_count(), 1);
+        assert_eq!(view.loaded_page_index(), 0);
+        assert_eq!(view.retained_row_count(), 12);
+        assert_eq!(view.page_window().page_index, 0);
+        assert_eq!(view.page_window().start, 0);
+        assert_eq!(view.page_window().end, 12);
+    }
+
+    #[test]
+    fn huge_requested_page_on_empty_input_stays_on_page_zero() {
+        let json = output_json_with_entries(0);
+        let view = ViewModel::from_reader(
+            Cursor::new(json.as_bytes()),
+            Locale::EnUs,
+            9999,
+            LoadLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(view.page_count(), 1);
+        assert_eq!(view.loaded_page_index(), 0);
+        assert_eq!(view.retained_row_count(), 2);
+        assert_eq!(view.page_window().page_index, 0);
+        assert_eq!(view.page_window().start, 0);
+        assert_eq!(view.page_window().end, 2);
     }
 
     #[test]

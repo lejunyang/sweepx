@@ -182,30 +182,24 @@ fn cleaner_list_json_uses_cleaner_result_contract() {
     assert_eq!(json["kind"], "cleaner.result");
     assert_eq!(json["summary"]["command"], "cleaner.list");
     assert_eq!(json["data"]["cleaners"][0]["id"], "org.sweepx.cargo-target");
+    assert_eq!(json["status"], "partial");
+    assert_eq!(
+        json["data"]["cleaners"][0]["compatibility"]["state"],
+        "incompatible"
+    );
 }
 
 #[test]
-fn cleaner_show_json_includes_manifest_and_vm_check() {
+fn cleaner_show_reports_incompatible_builtin_with_exit_12() {
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
-        .arg("--format")
-        .arg("json")
         .arg("cleaner")
         .arg("show")
         .arg("org.sweepx.chromium-rebuildable-cache");
 
-    let output = cmd.assert().get_output().stdout.clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["kind"], "cleaner.result");
-    assert_eq!(json["summary"]["command"], "cleaner.show");
-    assert_eq!(
-        json["data"]["cleaner"]["manifest"]["id"],
-        "org.sweepx.chromium-rebuildable-cache"
-    );
-    assert_eq!(
-        json["data"]["cleaner"]["rules"][0]["vmCheck"]["context"],
-        "synthetic_read_only_contract_check"
-    );
+    let output = cmd.assert().code(12).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("cleaner is incompatible with this core"));
 }
 
 #[test]
@@ -264,6 +258,41 @@ fn tui_rejects_invalid_kind_input() {
     let output = cmd.assert().get_output().stderr.clone();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("expected scan.result input"));
+}
+
+#[test]
+fn explain_does_not_create_default_state_dir() {
+    let fixture = TempDir::new().unwrap();
+    let scan_json = fixture.path().join("scan.json");
+    let home = fixture.path().join("home");
+    fs::create_dir(&home).unwrap();
+    fs::write(&scan_json, sample_scan_json()).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("HOME", &home)
+        .env_remove("XDG_STATE_HOME")
+        .arg("explain")
+        .arg("--scan-json")
+        .arg(&scan_json);
+
+    let _ = cmd.assert();
+    assert!(!home.join(".local/state/sweepx").exists());
+}
+
+#[test]
+fn capabilities_does_not_create_explicit_state_dir() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("capabilities");
+
+    let _ = cmd.assert();
+    assert!(!state_dir.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -379,11 +408,15 @@ fn cancel_json_is_honest_for_missing_operation() {
 #[cfg(unix)]
 #[test]
 fn relative_state_dir_is_rejected() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
         .arg("--state-dir")
         .arg("relative")
-        .arg("capabilities");
+        .arg("scan")
+        .arg(root.as_os_str());
     let output = cmd.assert().get_output().stderr.clone();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("state directory must be absolute"));
