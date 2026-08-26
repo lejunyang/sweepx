@@ -701,10 +701,46 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             "STUB_COMPILATION_ONLY",
         ),
         capability_record(
+            "macos",
+            "analysis.explain.scan_json",
+            CapabilityState::Qualified,
+            "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
+        ),
+        capability_record(
+            "macos",
+            "catalog.cleaner.read",
+            cleaner_state,
+            cleaner_reason,
+        ),
+        capability_record(
+            "macos",
+            "tui.read.scan_json",
+            CapabilityState::Qualified,
+            "TUI_READ_PATH_SUPPORTED",
+        ),
+        capability_record(
             "windows",
             "scan.local.directory",
             CapabilityState::Unsupported,
             "STUB_COMPILATION_ONLY",
+        ),
+        capability_record(
+            "windows",
+            "analysis.explain.scan_json",
+            CapabilityState::Qualified,
+            "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
+        ),
+        capability_record(
+            "windows",
+            "catalog.cleaner.read",
+            cleaner_state,
+            cleaner_reason,
+        ),
+        capability_record(
+            "windows",
+            "tui.read.scan_json",
+            CapabilityState::Qualified,
+            "TUI_READ_PATH_SUPPORTED",
         ),
     ];
     output.summary = json!({

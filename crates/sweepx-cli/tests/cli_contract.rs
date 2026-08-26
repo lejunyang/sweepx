@@ -41,6 +41,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
+    assert_eq!(json["summary"]["capabilityCount"], "14");
     let commands = json["data"]["commands"].as_array().unwrap();
     let scan = commands.iter().find(|item| item["id"] == "scan").unwrap();
     assert_eq!(scan["state"], "degraded");
@@ -65,9 +66,46 @@ fn capabilities_json_uses_fixed_machine_keys() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["qualificationKey"]["capability"] == "analysis.explain.scan_json")
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"] == "analysis.explain.scan_json"
+        })
         .unwrap();
     assert_eq!(explain_capability["state"], "qualified");
+    for os in ["macos", "windows"] {
+        let explain = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "analysis.explain.scan_json"
+            })
+            .unwrap();
+        assert_eq!(explain["state"], "qualified");
+
+        let cleaner = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "catalog.cleaner.read"
+            })
+            .unwrap();
+        assert_eq!(cleaner["state"], "report_only");
+
+        let tui = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "tui.read.scan_json"
+            })
+            .unwrap();
+        assert_eq!(tui["state"], "qualified");
+    }
 }
 
 #[test]
