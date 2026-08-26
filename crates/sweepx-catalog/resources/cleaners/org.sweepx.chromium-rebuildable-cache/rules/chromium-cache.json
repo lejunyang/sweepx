@@ -1,0 +1,178 @@
+{
+  "schema": "sweepx.cleaner-rule/v1",
+  "id": "chromium-cache-v1",
+  "artifactClass": "rebuildable-browser-cache",
+  "platforms": [
+    {
+      "os": "windows",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "macos",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "linux",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  ],
+  "rootRef": {
+    "kind": "probe-verified-profile-cache-root",
+    "evidence": "chromium.profile-state.v1"
+  },
+  "discovery": {
+    "effectClass": "z0",
+    "capabilities": [
+      "filesystem.metadata.read.scoped",
+      "process.observe",
+      "browser-layout.decode:chromium@tested-range"
+    ],
+    "nativeProbeId": "chromium-profile-state-v1",
+    "semanticReadOnly": true,
+    "zeroWriteVerified": true,
+    "unknownVersionBehavior": "report_only"
+  },
+  "selectors": [
+    {
+      "kind": "exact-relative-components",
+      "values": [
+        [
+          "Cache"
+        ],
+        [
+          "Code Cache"
+        ]
+      ]
+    }
+  ],
+  "requiredEvidence": [
+    "browser.product-version-channel.v1",
+    "browser.profile-and-cache-root.v1",
+    "browser.quiescent.v1",
+    "browser.layout-supported.v1",
+    "scan.final-complete-aggregate.v1"
+  ],
+  "optionalEvidence": [
+    "browser.cache-backend.v1"
+  ],
+  "exclusionEvidence": [
+    "browser.running-or-unknown.v1",
+    "browser.application-state.v1",
+    "storage-key.hostname-only.v1",
+    "browser.unsupported-layout.v1"
+  ],
+  "grouping": "directory",
+  "analysis": {
+    "factPredicates": [
+      {
+        "op": "in",
+        "args": [
+          {
+            "field": "candidate.relativeComponents"
+          },
+          [
+            [
+              "Cache"
+            ],
+            [
+              "Code Cache"
+            ]
+          ]
+        ]
+      },
+      {
+        "op": "eq",
+        "args": [
+          {
+            "field": "browser.profileStillness"
+          },
+          "verified"
+        ]
+      }
+    ],
+    "inferencePredicates": [
+      {
+        "op": "eq",
+        "args": [
+          {
+            "field": "browser.storageClass"
+          },
+          "rebuildable_http_or_code_cache"
+        ]
+      }
+    ],
+    "unknownPolicy": "report_only"
+  },
+  "risk": {
+    "floor": "R2",
+    "monotonicRaises": [
+      {
+        "when": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "field": "browser.runningState"
+                },
+                "running"
+              ]
+            },
+            {
+              "op": "state_is",
+              "args": [
+                {
+                  "field": "browser.layout"
+                },
+                "unknown"
+              ]
+            },
+            {
+              "op": "state_is",
+              "args": [
+                {
+                  "field": "browser.attribution"
+                },
+                "unknown"
+              ]
+            }
+          ]
+        },
+        "to": "BLOCKED"
+      }
+    ]
+  },
+  "proposal": {
+    "disposition": "eligible_with_confirmation",
+    "supportedAction": "filesystemTrash",
+    "targetGranularity": "whole-verified-cache-root"
+  },
+  "recoveryRequirements": [
+    "browser can regenerate cache",
+    "profile application-state roots excluded"
+  ],
+  "activityBlockers": [
+    "browser owner process or lock/open-handle uncertainty"
+  ],
+  "sharingRules": [
+    "bind to exact product/channel/profile; never hostname-only"
+  ],
+  "explanationKeys": [
+    "browser.cache-rebuild",
+    "browser.may-redownload",
+    "browser.partition-warning"
+  ],
+  "references": [
+    "chromium-layout-adapter@tested-milestone"
+  ]
+}

@@ -1,0 +1,213 @@
+{
+  "schema": "sweepx.cleaner-rule/v1",
+  "id": "cargo-target-v1",
+  "artifactClass": "regenerable-project-output",
+  "platforms": [
+    {
+      "os": "windows",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "macos",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "linux",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  ],
+  "rootRef": {
+    "kind": "admitted-workspace",
+    "evidence": "cargo.workspace.v1"
+  },
+  "discovery": {
+    "effectClass": "z0",
+    "capabilities": [
+      "filesystem.metadata.read.scoped",
+      "config.read.scoped"
+    ],
+    "nativeProbeId": null,
+    "semanticReadOnly": true,
+    "zeroWriteVerified": true,
+    "unknownVersionBehavior": "report_only"
+  },
+  "selectors": [
+    {
+      "kind": "typed-relative-path",
+      "field": "cargo.targetDir",
+      "mustBeWithinAdmittedRoot": true
+    }
+  ],
+  "requiredEvidence": [
+    "cargo.workspace.v1",
+    "cargo.config.target-dir.v1",
+    "scan.final-complete-aggregate.v1",
+    "object.no-boundary.v1",
+    "object.not-shared.v1"
+  ],
+  "optionalEvidence": [
+    "process.cargo-family.observed.v1",
+    "project.last-build-signal.v1"
+  ],
+  "exclusionEvidence": [
+    "workspace.shared-target.v1",
+    "artifact.source-or-signing.v1",
+    "object.mount-or-provider.v1",
+    "process.cargo-family.open.v1"
+  ],
+  "grouping": "directory",
+  "analysis": {
+    "factPredicates": [
+      {
+        "op": "eq",
+        "args": [
+          {
+            "field": "cargo.targetDir"
+          },
+          {
+            "field": "candidate.relativePath"
+          }
+        ]
+      },
+      {
+        "op": "eq",
+        "args": [
+          {
+            "field": "coverage.complete"
+          },
+          true
+        ]
+      },
+      {
+        "op": "eq",
+        "args": [
+          {
+            "field": "cargo.targetShape"
+          },
+          "recognized_generated_structure"
+        ]
+      }
+    ],
+    "inferencePredicates": [
+      {
+        "op": "and",
+        "args": [
+          {
+            "op": "exists",
+            "args": [
+              {
+                "field": "cargo.workspaceId"
+              }
+            ]
+          },
+          {
+            "op": "state_is",
+            "args": [
+              {
+                "field": "exclusiveReclaimableBytes"
+              },
+              "known"
+            ]
+          }
+        ]
+      }
+    ],
+    "unknownPolicy": "report_only"
+  },
+  "risk": {
+    "floor": "R1",
+    "monotonicRaises": [
+      {
+        "when": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "field": "objectType"
+                },
+                "Directory"
+              ]
+            },
+            {
+              "op": "exists",
+              "args": [
+                {
+                  "field": "activity.recentSignal"
+                }
+              ]
+            }
+          ]
+        },
+        "to": "R2"
+      },
+      {
+        "when": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "field": "sharing.state"
+                },
+                "shared"
+              ]
+            },
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "field": "activity.state"
+                },
+                "observed_open"
+              ]
+            },
+            {
+              "op": "state_is",
+              "args": [
+                {
+                  "field": "cargo.targetShape"
+                },
+                "unknown"
+              ]
+            }
+          ]
+        },
+        "to": "R3"
+      }
+    ]
+  },
+  "proposal": {
+    "disposition": "eligible_with_confirmation",
+    "supportedAction": "filesystemTrash",
+    "targetGranularity": "closed-directory-manifest"
+  },
+  "recoveryRequirements": [
+    "workspace source and lock/config retained",
+    "toolchain available or reacquirable"
+  ],
+  "activityBlockers": [
+    "observed cargo/rustc/build-script/IDE holder"
+  ],
+  "sharingRules": [
+    "shared CARGO_TARGET_DIR => report_only"
+  ],
+  "explanationKeys": [
+    "cargo.rebuild-cost",
+    "cargo.shared-target-warning"
+  ],
+  "references": [
+    "cargo-clean-official-docs@accessed-2026-08-26"
+  ]
+}

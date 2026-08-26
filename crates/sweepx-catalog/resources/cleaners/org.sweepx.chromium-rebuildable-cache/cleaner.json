@@ -1,0 +1,94 @@
+{
+  "schema": "sweepx.cleaner-manifest/v1",
+  "id": "org.sweepx.chromium-rebuildable-cache",
+  "version": "1.0.0",
+  "description": "Chromium HTTP and Code Cache roots with application-state separation",
+  "publisher": {
+    "id": "org.sweepx",
+    "keyId": "builtin-cleaner-key-2026"
+  },
+  "packageDigest": "sha256:12c2ea41aa31d4637537c93f5848ce675ba9b1c6bc590374f3937fe790b77fcb",
+  "requires": {
+    "core": ">=1.0.0, <2.0.0",
+    "scannerSemantics": [
+      1
+    ],
+    "candidateSchema": [
+      1
+    ],
+    "ruleSchema": [
+      1
+    ],
+    "nativeProbeAbi": [
+      1
+    ]
+  },
+  "platforms": [
+    {
+      "os": "windows",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "macos",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "linux",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  ],
+  "targetVersions": {
+    "browser": ">=120.0.0 <140.0.0",
+    "unknown": "report_only"
+  },
+  "capabilities": {
+    "discover": {
+      "required": [
+        "filesystem.metadata.read.scoped",
+        "process.observe",
+        "browser-layout.decode:chromium@tested-range"
+      ],
+      "optional": []
+    },
+    "semanticQuery": [],
+    "analyze": [
+      "rule.evaluate.pure"
+    ],
+    "planProposal": [
+      "candidate.propose.filesystemTrash"
+    ],
+    "officialMutation": [],
+    "postActionVerification": [
+      "filesystem.identity.read.scoped"
+    ]
+  },
+  "roots": [],
+  "configDecoders": [],
+  "rules": [
+    {
+      "id": "chromium-cache-v1",
+      "path": "rules/chromium-cache.json",
+      "sha256": "35e6b6d2a5da4e9cbc510a1ae04a3c2dcff34806152fd76e5a583b5016333c5e"
+    }
+  ],
+  "probes": [],
+  "officialCommands": [],
+  "riskFloor": "R2",
+  "supportedActions": [
+    "report",
+    "filesystemTrash"
+  ],
+  "references": [
+    "chromium-layout-adapter@tested-milestone"
+  ],
+  "expiresAt": "2027-08-26T00:00:00Z"
+}

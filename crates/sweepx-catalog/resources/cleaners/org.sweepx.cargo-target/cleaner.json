@@ -1,0 +1,116 @@
+{
+  "schema": "sweepx.cleaner-manifest/v1",
+  "id": "org.sweepx.cargo-target",
+  "version": "1.0.0",
+  "description": "Cargo workspace target build outputs",
+  "publisher": {
+    "id": "org.sweepx",
+    "keyId": "builtin-cleaner-key-2026"
+  },
+  "packageDigest": "sha256:6a9045354099cdfadc11bcba0c4b1101df38abe35fa0b78e7fca7c8061721d7e",
+  "requires": {
+    "core": ">=1.0.0, <2.0.0",
+    "scannerSemantics": [
+      1
+    ],
+    "candidateSchema": [
+      1
+    ],
+    "ruleSchema": [
+      1
+    ],
+    "nativeProbeAbi": [
+      1
+    ]
+  },
+  "platforms": [
+    {
+      "os": "windows",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "macos",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    {
+      "os": "linux",
+      "arch": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  ],
+  "targetVersions": {
+    "cargo": ">=1.70 <2.0",
+    "unknown": "report_only"
+  },
+  "capabilities": {
+    "discover": {
+      "required": [
+        "filesystem.metadata.read.scoped",
+        "config.read.scoped"
+      ],
+      "optional": [
+        "process.observe"
+      ]
+    },
+    "semanticQuery": [],
+    "analyze": [
+      "rule.evaluate.pure"
+    ],
+    "planProposal": [
+      "candidate.propose.filesystemTrash"
+    ],
+    "officialMutation": [],
+    "postActionVerification": [
+      "filesystem.identity.read.scoped"
+    ]
+  },
+  "roots": [],
+  "configDecoders": [
+    {
+      "id": "cargo-workspace-config-v1",
+      "schema": "sweepx.config-decoder/v1",
+      "formats": [
+        "cargo-toml",
+        "cargo-lock"
+      ],
+      "allowlistedRelativeNames": [
+        "Cargo.toml",
+        "Cargo.lock",
+        ".cargo/config",
+        ".cargo/config.toml"
+      ],
+      "singleFileBytes": 4194304,
+      "totalBytes": 16777216,
+      "network": "deny",
+      "includes": "deny",
+      "credentials": "deny",
+      "outputSchema": "cargo.workspace-evidence/v1"
+    }
+  ],
+  "rules": [
+    {
+      "id": "cargo-target-v1",
+      "path": "rules/cargo-target.json",
+      "sha256": "364e73c3e666dec371582c683f499b1e0fedaf497ab829ef2a3dbbe3c6473eb3"
+    }
+  ],
+  "probes": [],
+  "officialCommands": [],
+  "riskFloor": "R1",
+  "supportedActions": [
+    "report",
+    "filesystemTrash"
+  ],
+  "references": [
+    "cargo-clean-official-docs@accessed-2026-08-26"
+  ],
+  "expiresAt": "2027-08-26T00:00:00Z"
+}

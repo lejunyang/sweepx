@@ -1,0 +1,273 @@
+use thiserror::Error;
+
+use sweepx_model::{DirectoryAggregate, EvidenceValue, ReasonCode, ScannedEntry};
+use sweepx_scanner::ScanSummary;
+
+use crate::{
+    Candidate, CandidateBuilder, Explanation, ExplanationBuilder, ExplanationClause,
+    ExplanationKind, FactPresence, InferenceStrength, UnknownImpact,
+};
+
+#[derive(Debug, Error)]
+pub enum BuildError {
+    #[error("analysis digest error: {0}")]
+    Digest(#[from] crate::AnalysisDigestError),
+}
+
+pub fn build_candidate_from_scan(
+    entry: &ScannedEntry,
+    aggregate: Option<&DirectoryAggregate>,
+    live_source_required: bool,
+) -> Result<Candidate, BuildError> {
+    let mut builder = CandidateBuilder::new(entry).live_source_required(live_source_required);
+    if let Some(aggregate) = aggregate {
+        builder = builder.with_aggregate(aggregate, &aggregate.directory_identity);
+    }
+    Ok(builder.build()?)
+}
+
+pub fn build_explanation_from_candidate(candidate: &Candidate) -> Result<Explanation, BuildError> {
+    let mut clauses = Vec::new();
+
+    clauses.push(ExplanationClause {
+        kind: ExplanationKind::Fact,
+        code: "candidate_path_display".to_string(),
+        message: format!(
+            "Display path `{}` is presentation only.",
+            candidate.path.display_path
+        ),
+        reason: None,
+        fact_presence: Some(FactPresence::Present),
+        inference_strength: None,
+        unknown_impact: None,
+    });
+
+    clauses.push(ExplanationClause {
+        kind: ExplanationKind::Inference,
+        code: "identity_binding".to_string(),
+        message: if candidate.path.stable_identity.is_some() {
+            "Stable identity is tracked separately from display path.".to_string()
+        } else {
+            "No stable identity is attached, so display path is not used as identity.".to_string()
+        },
+        reason: Some(ReasonCode::IdentityUnstable),
+        fact_presence: None,
+        inference_strength: Some(InferenceStrength::Strong),
+        unknown_impact: None,
+    });
+
+    clauses.extend(value_clause(
+        "logical_bytes",
+        "Logical bytes",
+        &candidate.logical_bytes,
+    ));
+    clauses.extend(value_clause(
+        "allocated_bytes",
+        "Allocated bytes",
+        &candidate.allocated_bytes,
+    ));
+    clauses.extend(value_clause(
+        "reclaimable_estimate",
+        "Reclaimable estimate",
+        &candidate.reclaimable_estimate,
+    ));
+
+    if !candidate.coverage.complete {
+        for reason in &candidate.coverage.incomplete_reasons {
+            clauses.push(ExplanationClause {
+                kind: ExplanationKind::Unknown,
+                code: "entry_coverage_incomplete".to_string(),
+                message: format!("Coverage is incomplete because of `{reason:?}`."),
+                reason: Some(reason.clone()),
+                fact_presence: None,
+                inference_strength: None,
+                unknown_impact: Some(UnknownImpact::RaisesToR4),
+            });
+        }
+    }
+
+    if candidate.eligibility.executable != crate::ExecutableEligibility::Executable {
+        clauses.push(ExplanationClause {
+            kind: ExplanationKind::Heuristic,
+            code: "eligibility_gate".to_string(),
+            message: format!(
+                "Executable eligibility is `{}`.",
+                match candidate.eligibility.executable {
+                    crate::ExecutableEligibility::Executable => "executable",
+                    crate::ExecutableEligibility::ReportOnly => "report_only",
+                    crate::ExecutableEligibility::Blocked => "blocked",
+                }
+            ),
+            reason: candidate.eligibility.reasons.first().cloned(),
+            fact_presence: None,
+            inference_strength: Some(InferenceStrength::Moderate),
+            unknown_impact: None,
+        });
+    }
+
+    Ok(ExplanationBuilder::new(candidate)
+        .extend_clauses(clauses)
+        .build()?)
+}
+
+pub fn build_candidates_from_summary(
+    summary: &ScanSummary,
+    live_source_required: bool,
+) -> Result<Vec<Candidate>, BuildError> {
+    build_candidates_from_summary_with_links(summary, &[], live_source_required)
+}
+
+pub fn build_candidates_from_summary_with_links(
+    summary: &ScanSummary,
+    links: &[DirectoryAggregateLink<'_>],
+    live_source_required: bool,
+) -> Result<Vec<Candidate>, BuildError> {
+    summary
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut builder =
+                CandidateBuilder::new(entry).live_source_required(live_source_required);
+            if let Some(link) = links.iter().find(|link| same_entry(entry, link.entry)) {
+                builder = match summary
+                    .aggregates
+                    .iter()
+                    .find(|aggregate| aggregate.directory_identity == link.directory_identity)
+                {
+                    Some(aggregate) => builder.with_aggregate(aggregate, link.directory_identity),
+                    None => builder.with_expected_directory_identity(link.directory_identity),
+                };
+            }
+            Ok(builder.build()?)
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryAggregateLink<'a> {
+    pub entry: &'a ScannedEntry,
+    pub directory_identity: &'a str,
+}
+
+fn value_clause(
+    code: &str,
+    label: &str,
+    value: &sweepx_model::ByteValue,
+) -> Vec<ExplanationClause> {
+    match value {
+        EvidenceValue::Known { .. } => vec![ExplanationClause {
+            kind: ExplanationKind::Fact,
+            code: code.to_string(),
+            message: format!("{label} is a known observed value."),
+            reason: None,
+            fact_presence: Some(FactPresence::Present),
+            inference_strength: None,
+            unknown_impact: None,
+        }],
+        EvidenceValue::LowerBound { reason, .. } => vec![ExplanationClause {
+            kind: ExplanationKind::Heuristic,
+            code: code.to_string(),
+            message: format!("{label} is only a lower bound."),
+            reason: Some(reason.clone()),
+            fact_presence: Some(FactPresence::Partial),
+            inference_strength: Some(InferenceStrength::Moderate),
+            unknown_impact: None,
+        }],
+        EvidenceValue::Unknown { reason }
+        | EvidenceValue::Unsupported { reason }
+        | EvidenceValue::NotChecked { reason } => vec![ExplanationClause {
+            kind: ExplanationKind::Unknown,
+            code: code.to_string(),
+            message: format!("{label} is not currently known."),
+            reason: Some(reason.clone()),
+            fact_presence: Some(FactPresence::Missing),
+            inference_strength: None,
+            unknown_impact: Some(if blocks_execution(reason) {
+                UnknownImpact::Blocks
+            } else {
+                UnknownImpact::RaisesToR4
+            }),
+        }],
+    }
+}
+
+fn blocks_execution(reason: &ReasonCode) -> bool {
+    matches!(
+        reason,
+        ReasonCode::IdentityUnstable
+            | ReasonCode::UnsupportedPlatform
+            | ReasonCode::UnsupportedFilesystem
+            | ReasonCode::AdapterCapabilityAbsent
+            | ReasonCode::StrictReadOnly
+    )
+}
+
+fn same_entry(left: &ScannedEntry, right: &ScannedEntry) -> bool {
+    std::ptr::eq(left, right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sweepx_model::{
+        Coverage, CoverageState, FieldProvenance, MethodId, NativeName, ObjectType, ScanId,
+    };
+
+    fn candidate() -> Candidate {
+        build_candidate_from_scan(
+            &ScannedEntry {
+                scan_id: ScanId::new("scan-1"),
+                display_path: "/tmp/item".to_string(),
+                native_basename: NativeName::unix(b"item".to_vec()),
+                object_type: ObjectType::File,
+                logical_bytes: EvidenceValue::Known {
+                    value: sweepx_model::DecimalU128::new(1),
+                },
+                allocated_bytes: EvidenceValue::LowerBound {
+                    value: sweepx_model::DecimalU128::new(2),
+                    reason: ReasonCode::IncompleteStreamCoverage,
+                },
+                reclaimable_estimate: EvidenceValue::Unknown {
+                    reason: ReasonCode::Unknown,
+                },
+                metadata_fingerprint: "fp-1".to_string(),
+                coverage: Coverage {
+                    state: CoverageState::Complete,
+                    complete: true,
+                    incomplete_reasons: Vec::new(),
+                    details_lost: false,
+                    provenance: FieldProvenance::LiveObservation {
+                        observed_at: "2026-08-26T00:00:00Z".to_string(),
+                        method: MethodId::NativeApi,
+                    },
+                },
+                provenance: FieldProvenance::LiveObservation {
+                    observed_at: "2026-08-26T00:00:00Z".to_string(),
+                    method: MethodId::NativeApi,
+                },
+            },
+            None,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn explanation_separates_facts_inferences_heuristics_and_unknowns() {
+        let explanation = build_explanation_from_candidate(&candidate()).unwrap();
+
+        assert!(!explanation.facts().is_empty());
+        assert!(!explanation.inferences().is_empty());
+        assert!(!explanation.heuristics().is_empty());
+        assert!(!explanation.unknowns().is_empty());
+    }
+
+    #[test]
+    fn explanation_digest_is_stable() {
+        let candidate = candidate();
+        let left = build_explanation_from_candidate(&candidate).unwrap();
+        let right = build_explanation_from_candidate(&candidate).unwrap();
+
+        assert_eq!(left.canonical_digest, right.canonical_digest);
+    }
+}

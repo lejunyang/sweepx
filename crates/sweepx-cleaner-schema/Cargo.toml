@@ -1,0 +1,17 @@
+[package]
+name = "sweepx-cleaner-schema"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98.0"
+
+[dependencies]
+schemars = { version = "1.0.4", features = ["derive"] }
+semver = { version = "1.0.27", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+
+[dev-dependencies]
+serde_json = { version = "1.0.145", features = ["preserve_order"] }

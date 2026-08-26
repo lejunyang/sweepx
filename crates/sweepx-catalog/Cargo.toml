@@ -1,0 +1,15 @@
+[package]
+name = "sweepx-catalog"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98.0"
+
+[dependencies]
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+sha2 = "0.10.9"
+sweepx-cleaner-schema = { path = "../sweepx-cleaner-schema" }
+thiserror = "2.0.16"
+
+[dev-dependencies]
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
