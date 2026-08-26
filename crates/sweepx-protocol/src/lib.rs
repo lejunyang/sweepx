@@ -9,17 +9,36 @@ pub const OUTPUT_SCHEMA: &str = "sweepx.output/v1";
 pub const EVENT_SCHEMA: &str = "sweepx.event/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum OutputKind {
+    #[serde(rename = "scan.result")]
+    #[schemars(rename = "scan.result")]
     ScanResult,
+    #[serde(rename = "explanation.result")]
+    #[schemars(rename = "explanation.result")]
     ExplanationResult,
+    #[serde(rename = "plan.result")]
+    #[schemars(rename = "plan.result")]
     PlanResult,
+    #[serde(rename = "execution.result")]
+    #[schemars(rename = "execution.result")]
     ExecutionResult,
+    #[serde(rename = "recovery.result")]
+    #[schemars(rename = "recovery.result")]
     RecoveryResult,
+    #[serde(rename = "cancel.result")]
+    #[schemars(rename = "cancel.result")]
     CancelResult,
+    #[serde(rename = "status.result")]
+    #[schemars(rename = "status.result")]
     StatusResult,
+    #[serde(rename = "capabilities.result")]
+    #[schemars(rename = "capabilities.result")]
     CapabilitiesResult,
+    #[serde(rename = "cleaner.result")]
+    #[schemars(rename = "cleaner.result")]
     CleanerResult,
+    #[serde(rename = "audit.result")]
+    #[schemars(rename = "audit.result")]
     AuditResult,
 }
 
@@ -95,17 +114,17 @@ impl ExitCode {
         match self {
             Self::Completed => 0,
             Self::UsageError => 100,
+            Self::Partial => 10,
             Self::Unsupported => 20,
-            Self::Partial => 40,
-            Self::SafetyBlocked => 80,
+            Self::OperationFailed => 30,
+            Self::OfficialCommandFailed => 40,
+            Self::CleanerTrustOrCompat => 50,
             Self::AuthorizationRequired => 60,
-            Self::StaleReplanRequired => 70,
-            Self::OperationFailed => 50,
-            Self::NeedsReconciliation => 90,
-            Self::Cancelled => 30,
-            Self::StateIntegrityUnavailable => 95,
-            Self::CleanerTrustOrCompat => 85,
-            Self::OfficialCommandFailed => 55,
+            Self::SafetyBlocked => 70,
+            Self::StaleReplanRequired => 80,
+            Self::Cancelled => 90,
+            Self::NeedsReconciliation => 95,
+            Self::StateIntegrityUnavailable => 99,
         }
     }
 
@@ -119,15 +138,25 @@ impl ExitCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CompatSnapshot {
     pub core_version: String,
     pub scanner_semantics_version: u32,
     pub safety_policy_version: u32,
+    pub platform_adapter: PlatformAdapterCompat,
+    pub cleaner_set_digest: String,
     pub required_features: Vec<String>,
     pub extensions: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlatformAdapterCompat {
+    pub id: String,
+    pub version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OutputEnvelope {
     pub schema: String,
     pub kind: OutputKind,
@@ -175,6 +204,7 @@ impl OutputEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ProtocolMessage {
     pub code: String,
     pub class: String,
@@ -197,58 +227,152 @@ pub enum EventPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum EventType {
+    #[serde(rename = "operation.started")]
+    #[schemars(rename = "operation.started")]
     OperationStarted,
+    #[serde(rename = "phase.changed")]
+    #[schemars(rename = "phase.changed")]
     PhaseChanged,
+    #[serde(rename = "scan.root.admitted")]
+    #[schemars(rename = "scan.root.admitted")]
     ScanRootAdmitted,
+    #[serde(rename = "scan.progress")]
+    #[schemars(rename = "scan.progress")]
     ScanProgress,
+    #[serde(rename = "scan.aggregate.revised")]
+    #[schemars(rename = "scan.aggregate.revised")]
     ScanAggregateRevised,
+    #[serde(rename = "scan.boundary.observed")]
+    #[schemars(rename = "scan.boundary.observed")]
     ScanBoundaryObserved,
+    #[serde(rename = "scan.error.observed")]
+    #[schemars(rename = "scan.error.observed")]
     ScanErrorObserved,
+    #[serde(rename = "scan.root.completed")]
+    #[schemars(rename = "scan.root.completed")]
     ScanRootCompleted,
+    #[serde(rename = "candidate.detected")]
+    #[schemars(rename = "candidate.detected")]
     CandidateDetected,
+    #[serde(rename = "analysis.completed")]
+    #[schemars(rename = "analysis.completed")]
     AnalysisCompleted,
+    #[serde(rename = "plan.created")]
+    #[schemars(rename = "plan.created")]
     PlanCreated,
+    #[serde(rename = "plan.rejected")]
+    #[schemars(rename = "plan.rejected")]
     PlanRejected,
+    #[serde(rename = "approval.requested")]
+    #[schemars(rename = "approval.requested")]
     ApprovalRequested,
+    #[serde(rename = "approval.granted")]
+    #[schemars(rename = "approval.granted")]
     ApprovalGranted,
+    #[serde(rename = "approval.rejected")]
+    #[schemars(rename = "approval.rejected")]
     ApprovalRejected,
+    #[serde(rename = "approval.expired")]
+    #[schemars(rename = "approval.expired")]
     ApprovalExpired,
+    #[serde(rename = "authorization.explicit_dangerous_delete")]
+    #[schemars(rename = "authorization.explicit_dangerous_delete")]
     AuthorizationExplicitDangerousDelete,
+    #[serde(rename = "revalidation.started")]
+    #[schemars(rename = "revalidation.started")]
     RevalidationStarted,
+    #[serde(rename = "revalidation.passed")]
+    #[schemars(rename = "revalidation.passed")]
     RevalidationPassed,
+    #[serde(rename = "revalidation.stale")]
+    #[schemars(rename = "revalidation.stale")]
     RevalidationStale,
+    #[serde(rename = "preflight.ready")]
+    #[schemars(rename = "preflight.ready")]
     PreflightReady,
+    #[serde(rename = "hard_protection.blocked")]
+    #[schemars(rename = "hard_protection.blocked")]
     HardProtectionBlocked,
+    #[serde(rename = "operation.cancel.requested")]
+    #[schemars(rename = "operation.cancel.requested")]
     OperationCancelRequested,
+    #[serde(rename = "operation.cancel.accepted")]
+    #[schemars(rename = "operation.cancel.accepted")]
     OperationCancelAccepted,
+    #[serde(rename = "operation.cancel.already_requested")]
+    #[schemars(rename = "operation.cancel.already_requested")]
     OperationCancelAlreadyRequested,
+    #[serde(rename = "operation.cancel.already_terminal")]
+    #[schemars(rename = "operation.cancel.already_terminal")]
     OperationCancelAlreadyTerminal,
+    #[serde(rename = "operation.cancel.too_late")]
+    #[schemars(rename = "operation.cancel.too_late")]
     OperationCancelTooLate,
+    #[serde(rename = "action.intent.durable")]
+    #[schemars(rename = "action.intent.durable")]
     ActionIntentDurable,
+    #[serde(rename = "action.platform.completed")]
+    #[schemars(rename = "action.platform.completed")]
     ActionPlatformCompleted,
+    #[serde(rename = "action.skipped")]
+    #[schemars(rename = "action.skipped")]
     ActionSkipped,
+    #[serde(rename = "action.failed_before_submit")]
+    #[schemars(rename = "action.failed_before_submit")]
     ActionFailedBeforeSubmit,
+    #[serde(rename = "action.permit.consumed")]
+    #[schemars(rename = "action.permit.consumed")]
     ActionPermitConsumed,
+    #[serde(rename = "action.reconciled")]
+    #[schemars(rename = "action.reconciled")]
     ActionReconciled,
+    #[serde(rename = "action.indeterminate")]
+    #[schemars(rename = "action.indeterminate")]
     ActionIndeterminate,
+    #[serde(rename = "item.completed")]
+    #[schemars(rename = "item.completed")]
     ItemCompleted,
+    #[serde(rename = "batch.completed")]
+    #[schemars(rename = "batch.completed")]
     BatchCompleted,
+    #[serde(rename = "batch.partial")]
+    #[schemars(rename = "batch.partial")]
     BatchPartial,
+    #[serde(rename = "batch.cancelled")]
+    #[schemars(rename = "batch.cancelled")]
     BatchCancelled,
+    #[serde(rename = "batch.needs_reconciliation")]
+    #[schemars(rename = "batch.needs_reconciliation")]
     BatchNeedsReconciliation,
+    #[serde(rename = "recovery.started")]
+    #[schemars(rename = "recovery.started")]
     RecoveryStarted,
+    #[serde(rename = "recovery.completed")]
+    #[schemars(rename = "recovery.completed")]
     RecoveryCompleted,
+    #[serde(rename = "audit.started")]
+    #[schemars(rename = "audit.started")]
     AuditStarted,
+    #[serde(rename = "audit.batch.committed")]
+    #[schemars(rename = "audit.batch.committed")]
     AuditBatchCommitted,
+    #[serde(rename = "audit.failed")]
+    #[schemars(rename = "audit.failed")]
     AuditFailed,
+    #[serde(rename = "detail.persistence.failed")]
+    #[schemars(rename = "detail.persistence.failed")]
     DetailPersistenceFailed,
+    #[serde(rename = "stream.reset_required")]
+    #[schemars(rename = "stream.reset_required")]
     StreamResetRequired,
+    #[serde(rename = "operation.terminal")]
+    #[schemars(rename = "operation.terminal")]
     OperationTerminal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EventEnvelope {
     pub schema: String,
     pub stream_id: String,
@@ -265,6 +389,7 @@ pub struct EventEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EventCheckpoint {
     pub durable: bool,
     pub last_durable_sequence: String,
@@ -301,6 +426,11 @@ mod tests {
             core_version: "0.1.0".to_string(),
             scanner_semantics_version: 1,
             safety_policy_version: 1,
+            platform_adapter: PlatformAdapterCompat {
+                id: "test".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            cleaner_set_digest: "sha256:test".to_string(),
             required_features: vec![],
             extensions: vec![],
         }
@@ -395,8 +525,43 @@ mod tests {
 
         let encoded = serde_json::to_value(envelope).unwrap();
         assert_eq!(encoded["schema"], OUTPUT_SCHEMA);
-        assert_eq!(encoded["kind"], "status_result");
+        assert_eq!(encoded["kind"], "status.result");
         assert_eq!(encoded["status"], "ok");
-        assert_eq!(encoded["exit_code"], 0);
+        assert_eq!(encoded["exitCode"], 0);
+        assert_eq!(encoded["requestId"], "req-1");
+        assert!(encoded.get("request_id").is_none());
+    }
+
+    #[test]
+    fn event_types_use_the_frozen_dotted_wire_names() {
+        assert_eq!(
+            serde_json::to_value(EventType::OperationStarted).unwrap(),
+            json!("operation.started")
+        );
+        assert_eq!(
+            serde_json::to_value(EventType::OperationTerminal).unwrap(),
+            json!("operation.terminal")
+        );
+    }
+
+    #[test]
+    fn exit_precedence_matches_the_normative_order() {
+        let order = [
+            ExitCode::StateIntegrityUnavailable,
+            ExitCode::NeedsReconciliation,
+            ExitCode::Cancelled,
+            ExitCode::StaleReplanRequired,
+            ExitCode::SafetyBlocked,
+            ExitCode::AuthorizationRequired,
+            ExitCode::CleanerTrustOrCompat,
+            ExitCode::OfficialCommandFailed,
+            ExitCode::OperationFailed,
+            ExitCode::Unsupported,
+            ExitCode::Partial,
+            ExitCode::Completed,
+        ];
+        for pair in order.windows(2) {
+            assert_eq!(pair[0].more_conservative(pair[1]), pair[0]);
+        }
     }
 }
