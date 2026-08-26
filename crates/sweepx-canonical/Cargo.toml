@@ -1,6 +1,12 @@
 [package]
 name = "sweepx-canonical"
-version = "0.1.0"
+version.workspace = true
+description = "Deterministic canonical serialization and hashing utilities for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

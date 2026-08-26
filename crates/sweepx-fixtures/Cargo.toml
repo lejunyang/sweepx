@@ -1,9 +1,15 @@
 [package]
 name = "sweepx-fixtures"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Deterministic filesystem fixtures and manifests for SweepX tests"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
@@ -11,7 +17,7 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 time = { version = "0.3.44", features = ["formatting", "parsing"] }
-sweepx-model = { path = "../sweepx-model" }
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
 
 [dev-dependencies]
 tempfile = "3.21.0"

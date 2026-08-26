@@ -1,6 +1,12 @@
 [package]
 name = "sweepx-model"
-version = "0.1.0"
+version.workspace = true
+description = "Shared data model and safety types for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

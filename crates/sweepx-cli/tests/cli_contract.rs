@@ -318,6 +318,28 @@ fn scan_defaults_to_a_human_readable_file_table() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn default_human_scan_sanitizes_terminal_controls_in_paths() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("evil\u{1b}[31mred.txt"), b"data").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("LANG", "en_US.UTF-8")
+        .arg("--state-dir")
+        .arg(fixture.path().join("state"))
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(!text.contains('\u{1b}'));
+    assert!(text.contains("evil�[31mred.txt"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn default_scan_table_is_bounded() {
     let fixture = TempDir::new().unwrap();
     let root = fixture.path().join("root");

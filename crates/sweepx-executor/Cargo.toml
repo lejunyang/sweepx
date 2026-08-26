@@ -1,14 +1,20 @@
 [package]
 name = "sweepx-executor"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Serial simulation-only execution coordinator for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-sweepx-audit = { path = "../sweepx-audit" }
-sweepx-platform = { path = "../sweepx-platform" }
-sweepx-safety = { path = "../sweepx-safety" }
+sweepx-audit = { version = "0.1.0", path = "../sweepx-audit" }
+sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
+sweepx-safety = { version = "0.1.0", path = "../sweepx-safety" }
 thiserror = "2.0.16"
 
 [dev-dependencies]

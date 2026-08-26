@@ -1,23 +1,35 @@
 [package]
 name = "sweepx-scanner"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Bounded no-follow filesystem scanning engine for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-sweepx-model = { path = "../sweepx-model" }
-sweepx-platform = { path = "../sweepx-platform" }
-sweepx-platform-linux = { path = "../sweepx-platform-linux", optional = true }
-sweepx-platform-macos = { path = "../sweepx-platform-macos", optional = true }
-sweepx-platform-windows = { path = "../sweepx-platform-windows", optional = true }
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
 thiserror = "2.0.16"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sweepx-platform-linux = { version = "0.1.0", path = "../sweepx-platform-linux", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sweepx-platform-macos = { version = "0.1.0", path = "../sweepx-platform-macos", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sweepx-platform-windows = { version = "0.1.0", path = "../sweepx-platform-windows", optional = true }
 
 [dev-dependencies]
 tempfile = "3.21.0"
 
 [features]
-default = ["platform-linux"]
+default = ["platform-linux", "platform-macos", "platform-windows"]
 platform-linux = ["dep:sweepx-platform-linux"]
 platform-macos = ["dep:sweepx-platform-macos"]
 platform-windows = ["dep:sweepx-platform-windows"]

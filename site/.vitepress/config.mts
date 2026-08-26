@@ -21,6 +21,7 @@ const enGuide = [
 ];
 
 export default defineConfig({
+  base: process.env.SITE_BASE ?? "/",
   title: "SweepX",
   description:
     "SweepX documentation site for the bilingual design snapshot. Current implementation remains under development.",

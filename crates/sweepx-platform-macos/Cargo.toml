@@ -1,10 +1,16 @@
 [package]
 name = "sweepx-platform-macos"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "macOS filesystem scanning backend for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-sweepx-platform = { path = "../sweepx-platform" }
-sweepx-model = { path = "../sweepx-model" }
+sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }

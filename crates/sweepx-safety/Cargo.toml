@@ -1,16 +1,22 @@
 [package]
 name = "sweepx-safety"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.98.0"
+version.workspace = true
+description = "Immutable plans, authorization, and preflight safety checks for SweepX"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-sweepx-audit = { path = "../sweepx-audit" }
+sweepx-audit = { version = "0.1.0", path = "../sweepx-audit" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.16"
-sweepx-canonical = { path = "../sweepx-canonical" }
+sweepx-canonical = { version = "0.1.0", path = "../sweepx-canonical" }
 
 [dev-dependencies]
 libc = "0.2.177"
