@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/policy/state-transitions/v1",
+  "title": "SweepX State Transition Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policyVersion",
+    "updatedAt",
+    "nativeMutationPhases",
+    "batch",
+    "item",
+    "invariants"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sweepx.policy.state-transitions/v1"
+    },
+    "policyVersion": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "updatedAt": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+    },
+    "nativeMutationPhases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trash",
+        "permanent"
+      ],
+      "properties": {
+        "trash": {
+          "const": "P4"
+        },
+        "permanent": {
+          "const": "P5"
+        }
+      }
+    },
+    "batch": {
+      "$ref": "#/$defs/transitionTableBatch"
+    },
+    "item": {
+      "$ref": "#/$defs/transitionTableItem"
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/invariant"
+      }
+    }
+  },
+  "$defs": {
+    "transitionTableBatch": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/batchState"
+          },
+          "to": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/batchState"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "transitionTableItem": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/itemState"
+          },
+          "to": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/itemState"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rule",
+        "severity"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "rule": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "appliesTo": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "batch",
+              "item",
+              "execution",
+              "policy"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

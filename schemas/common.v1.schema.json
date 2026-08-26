@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/common/v1",
+  "title": "SweepX Common Definitions v1",
+  "type": "object",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decimalString": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "rfc3339Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "uuidLike": {
+      "type": "string",
+      "minLength": 1
+    },
+    "compat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coreVersion",
+        "scannerSemanticsVersion",
+        "safetyPolicyVersion",
+        "requiredFeatures",
+        "extensions"
+      ],
+      "properties": {
+        "coreVersion": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "scannerSemanticsVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "safetyPolicyVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requiredFeatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "uniqueItems": true
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "taggedValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "value"
+          ],
+          "properties": {
+            "state": {
+              "const": "known"
+            },
+            "value": {
+              "$ref": "#/$defs/decimalString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "value",
+            "reason"
+          ],
+          "properties": {
+            "state": {
+              "const": "lower_bound"
+            },
+            "value": {
+              "$ref": "#/$defs/decimalString"
+            },
+            "reason": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "unknown",
+                "unsupported",
+                "not_checked"
+              ]
+            },
+            "reason": {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          }
+        }
+      ]
+    },
+    "riskTier": {
+      "type": "string",
+      "enum": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "BLOCKED"
+      ]
+    },
+    "batchState": {
+      "type": "string",
+      "enum": [
+        "DISCOVERED",
+        "EXPLAINED",
+        "PLANNED",
+        "AUTHORIZATION_PENDING",
+        "AUTHORIZED",
+        "REVALIDATING",
+        "READY",
+        "EXECUTING",
+        "COMPLETED",
+        "PARTIAL",
+        "CANCELLED",
+        "NEEDS_RECONCILIATION",
+        "REJECTED",
+        "HARD_BLOCKED",
+        "AUDITED"
+      ]
+    },
+    "itemState": {
+      "type": "string",
+      "enum": [
+        "CANDIDATE",
+        "EXPLAINED",
+        "IN_PLAN",
+        "AUTHORIZED",
+        "REVALIDATING",
+        "PREFLIGHT_READY",
+        "TRASHING",
+        "PERMANENT_DELETING",
+        "SUCCEEDED",
+        "FAILED",
+        "SKIPPED",
+        "STALE",
+        "CANCELLED",
+        "INDETERMINATE",
+        "REJECTED",
+        "HARD_BLOCKED",
+        "AUDITED"
+      ]
+    },
+    "outputStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "partial",
+        "blocked",
+        "authorization_required",
+        "stale",
+        "failed",
+        "needs_reconciliation",
+        "cancelled",
+        "unsupported"
+      ]
+    },
+    "eventPhase": {
+      "type": "string",
+      "enum": [
+        "detect",
+        "analyze",
+        "plan",
+        "authorize",
+        "revalidate",
+        "execute",
+        "reconcile",
+        "audit"
+      ]
+    },
+    "objectLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "displayPath",
+        "pathEncoding",
+        "nativeBasename",
+        "parentRecipe"
+      ],
+      "properties": {
+        "displayPath": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "pathEncoding": {
+          "type": "string",
+          "enum": [
+            "unix-bytes-base64url",
+            "windows-utf16le-base64url"
+          ]
+        },
+        "nativeBasename": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parentRecipe": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "structuredMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "class",
+        "messageKey"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "class": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "messageKey": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "phase": {
+          "$ref": "#/$defs/eventPhase"
+        },
+        "nativeDomain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "nativeCode": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "retryability": {
+          "type": "string",
+          "enum": [
+            "retryable",
+            "not_retryable",
+            "unknown"
+          ]
+        },
+        "observedAt": {
+          "$ref": "#/$defs/rfc3339Timestamp"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    }
+  }
+}

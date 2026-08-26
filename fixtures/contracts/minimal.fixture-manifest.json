@@ -1,0 +1,53 @@
+{
+  "schema": "sweepx.fixture-manifest/v1",
+  "manifestId": "fixture-p0-minimal",
+  "seed": "42",
+  "createdAt": "2026-08-26T06:00:00Z",
+  "generatorVersion": "0.0.0-p0",
+  "platformProfile": {
+    "osFamily": "cross-platform",
+    "filesystem": "generic-local",
+    "caseSensitivity": "mixed",
+    "nativeMutationPhase": "P0-none"
+  },
+  "entries": [
+    {
+      "entryId": "root-dir",
+      "path": [
+        "p0-minimal"
+      ],
+      "kind": "directory",
+      "notes": [
+        "root fixture directory"
+      ]
+    },
+    {
+      "entryId": "hello-file",
+      "path": [
+        "p0-minimal",
+        "hello.txt"
+      ],
+      "kind": "file",
+      "bytes": "5",
+      "mode": "0644",
+      "contentPattern": "ascii-seed",
+      "notes": [
+        "deterministic content is the ASCII string hello"
+      ]
+    }
+  ],
+  "expectations": {
+    "entryCount": "2",
+    "logicalBytes": {
+      "state": "known",
+      "value": "5"
+    },
+    "allocatedBytes": {
+      "state": "lower_bound",
+      "value": "5",
+      "reason": "cross_platform_block_size_unknown"
+    },
+    "requiresLiveScan": true,
+    "expectedBoundaries": []
+  }
+}

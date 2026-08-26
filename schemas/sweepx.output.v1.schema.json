@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/sweepx.output/v1",
+  "title": "SweepX Output Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kind",
+    "requestId",
+    "operationId",
+    "generatedAt",
+    "status",
+    "exitCode",
+    "compat",
+    "summary",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sweepx.output/v1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "scan.result",
+        "explanation.result",
+        "plan.result",
+        "execution.result",
+        "recovery.result",
+        "cancel.result",
+        "status.result",
+        "capabilities.result",
+        "cleaner.result",
+        "audit.result"
+      ]
+    },
+    "requestId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+    },
+    "operationId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+    },
+    "generatedAt": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+    },
+    "status": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/outputStatus"
+    },
+    "exitCode": {
+      "type": "integer",
+      "enum": [
+        0,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ]
+    },
+    "compat": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/compat"
+    },
+    "summary": {
+      "type": "object"
+    },
+    "data": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/structuredMessage"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/structuredMessage"
+      }
+    }
+  }
+}

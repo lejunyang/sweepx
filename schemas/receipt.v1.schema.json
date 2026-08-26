@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/receipt/v1",
+  "title": "SweepX Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receiptId",
+    "manifestId",
+    "generatedAt",
+    "generatorVersion",
+    "seed",
+    "status",
+    "rootPath",
+    "entries",
+    "totals"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sweepx.receipt/v1"
+    },
+    "receiptId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "manifestId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "generatedAt": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+    },
+    "generatorVersion": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "seed": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "created",
+        "verified",
+        "failed"
+      ]
+    },
+    "rootPath": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entryId",
+          "kind",
+          "path",
+          "exists",
+          "logicalBytes"
+        ],
+        "properties": {
+          "entryId": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "directory",
+              "file",
+              "symlink",
+              "special"
+            ]
+          },
+          "path": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "logicalBytes": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+          },
+          "allocatedBytes": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+          },
+          "digest": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryCount",
+        "logicalBytes",
+        "allocatedBytes"
+      ],
+      "properties": {
+        "entryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "logicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "allocatedBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/structuredMessage"
+      }
+    }
+  }
+}

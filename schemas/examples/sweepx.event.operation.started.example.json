@@ -1,0 +1,28 @@
+{
+  "schema": "sweepx.event/v1",
+  "streamId": "stream-p0-001",
+  "operationId": "op-p0-scan-001",
+  "sequence": "1",
+  "cursor": "cursor-p0-001",
+  "emittedAt": "2026-08-26T06:00:00Z",
+  "monotonicOffsetNs": "1000",
+  "type": "operation.started",
+  "phase": "detect",
+  "payload": {
+    "command": "scan",
+    "requestDigest": "sha256:req-p0-scan-001",
+    "compat": {
+      "coreVersion": "0.0.0-p0",
+      "scannerSemanticsVersion": 1,
+      "safetyPolicyVersion": 1,
+      "requiredFeatures": [],
+      "extensions": []
+    },
+    "rootCount": "1"
+  },
+  "terminal": false,
+  "checkpoint": {
+    "durable": true,
+    "lastDurableSequence": "1"
+  }
+}

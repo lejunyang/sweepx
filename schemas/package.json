@@ -1,0 +1,14 @@
+{
+  "name": "@sweepx/schemas",
+  "private": true,
+  "version": "0.0.0-p0",
+  "description": "P0 JSON Schema contracts and validation harness for SweepX.",
+  "type": "module",
+  "scripts": {
+    "validate": "/data00/home/lejunyang/.bun/bin/bun validate.mjs"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  }
+}

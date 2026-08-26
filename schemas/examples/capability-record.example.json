@@ -1,0 +1,36 @@
+{
+  "schema": "sweepx.capability-record/v1",
+  "recordedAt": "2026-08-26T06:00:00Z",
+  "qualificationKey": {
+    "coreVersion": "0.0.0-p0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyDigest": "sha256:policy-p0",
+    "adapterId": "native-trash",
+    "adapterDigest": "sha256:adapter-p0",
+    "osFamily": "linux",
+    "osBuild": "TBD",
+    "arch": "x86_64",
+    "filesystem": "ext4",
+    "volumeClass": "local",
+    "runtimePrivilegeProfile": "ordinary_user",
+    "capability": "trash.local.file"
+  },
+  "state": "report_only",
+  "reasonCode": "NATIVE_MUTATION_DISABLED_P0",
+  "reason": "P0-P3 contract baseline does not permit native mutation.",
+  "evidence": {
+    "bundleDigest": "sha256:evidence-p0",
+    "reviewedBy": [
+      "schema-baseline"
+    ],
+    "limitations": [
+      "minimum OS versions are intentionally TBD",
+      "filesystem qualification is deferred to P1 and later"
+    ],
+    "invalidatesOn": [
+      "safety-policy-digest-change",
+      "adapter-digest-change",
+      "phase-advance-to-p4"
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "scan.result",
+  "requestId": "req-p0-scan-001",
+  "operationId": "op-p0-scan-001",
+  "generatedAt": "2026-08-26T06:00:00Z",
+  "status": "ok",
+  "exitCode": 0,
+  "compat": {
+    "coreVersion": "0.0.0-p0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "scanId": "scan-p0-minimal",
+    "rootCount": "1",
+    "candidateCount": "1",
+    "batchState": "DISCOVERED"
+  },
+  "data": {
+    "roots": [
+      {
+        "rootId": "root-001",
+        "displayPath": "/fixtures/p0-minimal",
+        "logicalBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "allocatedBytes": {
+          "state": "lower_bound",
+          "value": "5",
+          "reason": "filesystem_block_rounding_unknown"
+        }
+      }
+    ]
+  },
+  "warnings": [],
+  "errors": []
+}

@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/fixture-manifest/v1",
+  "title": "SweepX Fixture Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifestId",
+    "seed",
+    "createdAt",
+    "generatorVersion",
+    "platformProfile",
+    "entries",
+    "expectations"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sweepx.fixture-manifest/v1"
+    },
+    "manifestId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "seed": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+    },
+    "createdAt": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+    },
+    "generatorVersion": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "platformProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "osFamily",
+        "filesystem",
+        "caseSensitivity",
+        "nativeMutationPhase"
+      ],
+      "properties": {
+        "osFamily": {
+          "type": "string",
+          "enum": [
+            "windows",
+            "macos",
+            "linux",
+            "cross-platform"
+          ]
+        },
+        "filesystem": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "caseSensitivity": {
+          "type": "string",
+          "enum": [
+            "case-sensitive",
+            "case-insensitive",
+            "mixed",
+            "unknown"
+          ]
+        },
+        "nativeMutationPhase": {
+          "type": "string",
+          "enum": [
+            "P0-none",
+            "P1-none",
+            "P2-none",
+            "P3-none",
+            "P4-trash-only",
+            "P5-qualified"
+          ]
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entryId",
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "entryId": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          },
+          "path": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "directory",
+              "file",
+              "symlink",
+              "special"
+            ]
+          },
+          "bytes": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+          },
+          "mode": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          },
+          "contentPattern": {
+            "type": "string",
+            "enum": [
+              "zeroes",
+              "ascii-seed",
+              "none"
+            ]
+          },
+          "linkTarget": {
+            "type": "array",
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        }
+      }
+    },
+    "expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryCount",
+        "logicalBytes",
+        "allocatedBytes",
+        "requiresLiveScan"
+      ],
+      "properties": {
+        "entryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "logicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "allocatedBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "requiresLiveScan": {
+          "type": "boolean"
+        },
+        "expectedBoundaries": {
+          "type": "array",
+          "items": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+          }
+        }
+      }
+    }
+  }
+}

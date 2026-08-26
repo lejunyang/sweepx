@@ -1,0 +1,66 @@
+{
+  "schema": "sweepx.receipt/v1",
+  "receiptId": "receipt-p0-minimal",
+  "manifestId": "fixture-p0-minimal",
+  "generatedAt": "2026-08-26T06:00:01Z",
+  "generatorVersion": "0.0.0-p0",
+  "seed": "42",
+  "status": "verified",
+  "rootPath": "/tmp/sweepx-fixtures/p0-minimal",
+  "entries": [
+    {
+      "entryId": "root-dir",
+      "kind": "directory",
+      "path": [
+        "p0-minimal"
+      ],
+      "exists": true,
+      "logicalBytes": {
+        "state": "known",
+        "value": "0"
+      },
+      "allocatedBytes": {
+        "state": "unknown",
+        "reason": "directory_allocation_platform_specific"
+      },
+      "notes": [
+        "directory placeholder only"
+      ]
+    },
+    {
+      "entryId": "hello-file",
+      "kind": "file",
+      "path": [
+        "p0-minimal",
+        "hello.txt"
+      ],
+      "exists": true,
+      "logicalBytes": {
+        "state": "known",
+        "value": "5"
+      },
+      "allocatedBytes": {
+        "state": "lower_bound",
+        "value": "5",
+        "reason": "cross_platform_block_size_unknown"
+      },
+      "digest": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      "notes": [
+        "expected content is hello"
+      ]
+    }
+  ],
+  "totals": {
+    "entryCount": "2",
+    "logicalBytes": {
+      "state": "known",
+      "value": "5"
+    },
+    "allocatedBytes": {
+      "state": "lower_bound",
+      "value": "5",
+      "reason": "cross_platform_block_size_unknown"
+    }
+  },
+  "errors": []
+}

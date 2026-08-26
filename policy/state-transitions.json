@@ -1,0 +1,292 @@
+{
+  "schema": "sweepx.policy.state-transitions/v1",
+  "policyVersion": "1.0.0-p0",
+  "updatedAt": "2026-08-26T06:00:00Z",
+  "nativeMutationPhases": {
+    "trash": "P4",
+    "permanent": "P5"
+  },
+  "batch": [
+    {
+      "from": "DISCOVERED",
+      "to": [
+        "EXPLAINED",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "EXPLAINED",
+      "to": [
+        "PLANNED",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "PLANNED",
+      "to": [
+        "AUTHORIZATION_PENDING",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "AUTHORIZATION_PENDING",
+      "to": [
+        "AUTHORIZED",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "AUTHORIZED",
+      "to": [
+        "REVALIDATING",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "REVALIDATING",
+      "to": [
+        "READY",
+        "REJECTED",
+        "HARD_BLOCKED",
+        "NEEDS_RECONCILIATION"
+      ]
+    },
+    {
+      "from": "READY",
+      "to": [
+        "EXECUTING",
+        "CANCELLED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "EXECUTING",
+      "to": [
+        "COMPLETED",
+        "PARTIAL",
+        "CANCELLED",
+        "NEEDS_RECONCILIATION"
+      ]
+    },
+    {
+      "from": "COMPLETED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "PARTIAL",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "CANCELLED",
+      "to": [
+        "AUDITED",
+        "NEEDS_RECONCILIATION"
+      ]
+    },
+    {
+      "from": "NEEDS_RECONCILIATION",
+      "to": [
+        "AUDITED",
+        "PARTIAL",
+        "COMPLETED"
+      ]
+    },
+    {
+      "from": "REJECTED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "HARD_BLOCKED",
+      "to": [
+        "AUDITED"
+      ]
+    }
+  ],
+  "item": [
+    {
+      "from": "CANDIDATE",
+      "to": [
+        "EXPLAINED",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "EXPLAINED",
+      "to": [
+        "IN_PLAN",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "IN_PLAN",
+      "to": [
+        "AUTHORIZED",
+        "REJECTED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "AUTHORIZED",
+      "to": [
+        "REVALIDATING",
+        "REJECTED",
+        "HARD_BLOCKED",
+        "STALE"
+      ]
+    },
+    {
+      "from": "REVALIDATING",
+      "to": [
+        "PREFLIGHT_READY",
+        "SKIPPED",
+        "STALE",
+        "CANCELLED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "PREFLIGHT_READY",
+      "to": [
+        "TRASHING",
+        "PERMANENT_DELETING",
+        "SKIPPED",
+        "CANCELLED",
+        "HARD_BLOCKED"
+      ]
+    },
+    {
+      "from": "TRASHING",
+      "to": [
+        "SUCCEEDED",
+        "FAILED",
+        "INDETERMINATE",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "PERMANENT_DELETING",
+      "to": [
+        "SUCCEEDED",
+        "FAILED",
+        "INDETERMINATE",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "SUCCEEDED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "FAILED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "SKIPPED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "STALE",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "CANCELLED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "INDETERMINATE",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "REJECTED",
+      "to": [
+        "AUDITED"
+      ]
+    },
+    {
+      "from": "HARD_BLOCKED",
+      "to": [
+        "AUDITED"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "id": "batch-audited-wraps-terminal",
+      "rule": "AUDITED is only reachable from a substantive batch terminal state and does not replace that recorded terminal outcome.",
+      "severity": "error",
+      "appliesTo": [
+        "batch"
+      ]
+    },
+    {
+      "id": "item-audited-wraps-terminal",
+      "rule": "AUDITED is only reachable from a substantive item terminal state and does not replace that recorded terminal outcome.",
+      "severity": "error",
+      "appliesTo": [
+        "item"
+      ]
+    },
+    {
+      "id": "no-native-mutation-through-p3",
+      "rule": "For phases P0, P1, P2, and P3, the policy must not authorize native mutation and any capability record for trash or permanent execution remains report_only, unsupported, or disabled.",
+      "severity": "error",
+      "appliesTo": [
+        "policy",
+        "execution"
+      ]
+    },
+    {
+      "id": "p4-trash-only",
+      "rule": "Phase P4 may qualify native Trash on exact platform tuples but cannot qualify Permanent; Permanent begins no earlier than an independently qualified P5 capability cell.",
+      "severity": "error",
+      "appliesTo": [
+        "policy",
+        "execution"
+      ]
+    },
+    {
+      "id": "no-direct-discovered-to-executing",
+      "rule": "No batch or item may transition directly from discovery or explanation states into execution states without immutable planning, authorization, and revalidation.",
+      "severity": "error",
+      "appliesTo": [
+        "batch",
+        "item",
+        "execution"
+      ]
+    },
+    {
+      "id": "permanent-requires-distinct-item-state",
+      "rule": "Permanent execution may only occur after PREFLIGHT_READY through the explicit PERMANENT_DELETING state and never through TRASHING.",
+      "severity": "error",
+      "appliesTo": [
+        "item",
+        "execution"
+      ]
+    }
+  ]
+}

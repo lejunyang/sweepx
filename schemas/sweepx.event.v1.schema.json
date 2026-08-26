@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sweepx.dev/schemas/sweepx.event/v1",
+  "title": "SweepX Event Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "streamId",
+    "operationId",
+    "sequence",
+    "cursor",
+    "emittedAt",
+    "monotonicOffsetNs",
+    "type",
+    "phase",
+    "payload",
+    "terminal",
+    "checkpoint"
+  ],
+  "properties": {
+    "schema": {
+      "const": "sweepx.event/v1"
+    },
+    "streamId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+    },
+    "operationId": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+    },
+    "sequence": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+    },
+    "cursor": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+    },
+    "emittedAt": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+    },
+    "monotonicOffsetNs": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "operation.started",
+        "phase.changed",
+        "scan.root.admitted",
+        "scan.progress",
+        "scan.aggregate.revised",
+        "scan.boundary.observed",
+        "scan.error.observed",
+        "scan.root.completed",
+        "candidate.detected",
+        "analysis.completed",
+        "plan.created",
+        "plan.rejected",
+        "approval.requested",
+        "approval.granted",
+        "approval.rejected",
+        "approval.expired",
+        "authorization.explicit_dangerous_delete",
+        "revalidation.started",
+        "revalidation.passed",
+        "revalidation.stale",
+        "preflight.ready",
+        "hard_protection.blocked",
+        "operation.cancel.requested",
+        "operation.cancel.accepted",
+        "operation.cancel.already_requested",
+        "operation.cancel.already_terminal",
+        "operation.cancel.too_late",
+        "action.intent.durable",
+        "action.platform.completed",
+        "action.skipped",
+        "action.failed_before_submit",
+        "action.permit.consumed",
+        "action.reconciled",
+        "action.indeterminate",
+        "item.completed",
+        "batch.completed",
+        "batch.partial",
+        "batch.cancelled",
+        "batch.needs_reconciliation",
+        "recovery.started",
+        "recovery.completed",
+        "audit.started",
+        "audit.batch.committed",
+        "audit.failed",
+        "detail.persistence.failed",
+        "stream.reset_required",
+        "operation.terminal"
+      ]
+    },
+    "phase": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/eventPhase"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "terminal": {
+      "type": "boolean"
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "durable",
+        "lastDurableSequence"
+      ],
+      "properties": {
+        "durable": {
+          "type": "boolean"
+        },
+        "lastDurableSequence": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        }
+      }
+    }
+  }
+}
