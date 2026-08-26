@@ -1,0 +1,7 @@
+interface:
+  display_name: "SweepX Safe Cleanup"
+  short_description: "Design or operate available SweepX capabilities safely"
+  default_prompt: "Use $sweepx to validate the planned CLI contract, or safely inspect storage only if compatible SweepX capabilities are installed."
+
+policy:
+  allow_implicit_invocation: true

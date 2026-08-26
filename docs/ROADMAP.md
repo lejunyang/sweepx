@@ -1,0 +1,387 @@
+# SweepX implementation, verification, and release roadmap
+
+Status: design roadmap, 2026-08-26. This document does not implement SweepX, authorize a cleanup, delete or move a real file, request elevation, run a package-manager cleanup, or change a browser or enterprise policy. Destructive tests described below are future release work and must use disposable synthetic fixtures or explicitly provisioned test machines, never user data.
+
+This roadmap turns the architecture in [DESIGN.md](../DESIGN.md) and the cleaner inventory in [CLEANER-CATALOG.md](CLEANER-CATALOG.md) into independently releasable increments. Product positioning and the documentation entry point are in [README.md](../README.md).
+
+<a id="evidence-policy"></a>
+## 1. Evidence policy and source baseline
+
+The labels in this roadmap are normative:
+
+- **Fact** means an externally documented platform or product behavior. Every network-derived fact in this file has a URL and access date.
+- **Inference** means a consequence drawn from one or more facts; it is not a vendor guarantee.
+- **Recommendation** means a SweepX design choice.
+- **Product gate, unverified** means a proposed measurable threshold inherited from the upstream scanner architecture. It is not a measured result or a claim about a released product.
+- **Unknown** means evidence is missing, version-sensitive, or platform-dependent. Unknown never becomes zero, unused, safe, or permission to delete.
+
+The roadmap was derived from all ten upstream products:
+
+| Delivered upstream topic artifact | Roadmap use |
+|---|---|
+| [Tool landscape](research/landscape.md) | Competitor patterns, MVP boundary, and the absence of a controlled cross-product performance comparison |
+| [Platform filesystem research](research/platform-filesystems.md) | Ordinary-user boundaries, identity, sizes, links, mounts, Trash, process-observation limits, and conservative degradation |
+| [System protected-files research](research/system-protected-files.md) | Dynamic pagefile/swap/hibernation/dump-backing, APFS VM/SSV/SIP, mount-root and kernel-filesystem hard protections |
+| [Developer-cache research](research/developer-caches.md) | Ecosystem coverage, Z0/Z1/Z2/M effect classes, owner semantics, reference/activity/recovery evidence, and report-only boundaries |
+| [Common-application research](research/common-application-caches.md) | Version-scoped VS Code, JetBrains, Teams, Slack, Zoom, Steam, Adobe and Spotify cache/log/residual evidence |
+| [Browser-storage research](research/browser-storage.md) | Profile discovery, partitioned storage, consistency groups, running-profile rules, and local-model policy boundaries |
+| [Scanner and cache architecture](architecture/scanner-and-cache.md) | Bounded pipeline, cache trust boundary, fixtures, benchmark method, and initial quantitative gates |
+| [Safety and deletion architecture](architecture/safety-and-deletion.md) | R1–R4/BLOCKED policy, immutable plans, approval, revalidation, adapters, audit, recovery, and platform release gates |
+| [CLI, TUI, and cleaner architecture](architecture/cli-tui-and-plugins.md) | Command and schema contracts, bounded TUI, cleaner packaging, trust, sandboxing, and cross-surface tests |
+| [SweepX Agent Skill draft](../skills/sweepx/SKILL.md) | Agent authority boundary and scan → explain → plan → human approval → execute → reconcile protocol |
+
+External facts relied on directly by this roadmap are intentionally few:
+
+- **Fact F-WIN-TRASH, accessed 2026-08-26:** Windows exposes Shell deletion through IFileOperation; operations can be aborted and callers must inspect more than a top-level return value. Sources: [IFileOperation::DeleteItem](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-deleteitem), [SetOperationFlags](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-setoperationflags), and [GetAnyOperationsAborted](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-getanyoperationsaborted).
+- **Fact F-MAC-TRASH, accessed 2026-08-26:** macOS exposes a Trash operation distinct from immediate removal through FileManager.trashItem. Sources: [FileManager.trashItem](https://developer.apple.com/documentation/foundation/filemanager/trashitem(at:resultingitemurl:)) and [FileManager.removeItem](https://developer.apple.com/documentation/foundation/filemanager/removeitem(at:)).
+- **Fact F-LINUX-TRASH, accessed 2026-08-26:** Linux has a desktop Trash specification rather than one universal filesystem syscall; GIO can report that Trash is unsupported. Sources: [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash/latest/) and [GIO File.trash](https://docs.gtk.org/gio/method.File.trash.html).
+- **Fact F-LINUX-CONTAINMENT, accessed 2026-08-26:** Linux openat2 and statx expose containment and mount-identity primitives, subject to kernel/filesystem availability. Sources: [openat2(2)](https://man7.org/linux/man-pages/man2/openat2.2.html) and [statx(2)](https://man7.org/linux/man-pages/man2/statx.2.html).
+- **Fact F-BROWSER-POLICY, accessed 2026-08-26:** current Chrome and Edge policy material documents GenAILocalFoundationalModelSettings as the supported control for blocking/removing the local foundational model on covered versions; support is version/platform scoped. Sources: [Chrome policy data](https://chromeenterprise.google/static/json/policy_templates_en-US.json) and [Edge policy](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/genailocalfoundationalmodelsettings). This fact does not authorize SweepX to change policy.
+
+All other vendor, browser, ecosystem, and competitor facts remain in the dated upstream research documents above. No performance number in this roadmap is an external fact.
+
+<a id="safety-floor"></a>
+## 2. Non-negotiable safety floor
+
+Every phase, build profile, frontend, cleaner, and platform adapter inherits these requirements. A phase cannot waive them to meet a date or benchmark.
+
+1. SweepX runs as the current ordinary user. It never requests UAC, sudo, polkit, Full Disk Access, backup privileges, Linux capabilities, ownership takeover, ACL/TCC changes, immutable/read-only flag changes, or policy changes. Destructive mode refuses an elevated runtime.
+2. Scanning is metadata-only, no-follow, same-mount/volume, error-visible, streaming, and memory-first. It aggregates without retaining one row per file, persists only a bounded sparse preview, and separately admits extra roots. Permission errors, skipped subtrees, provider state, timeouts, and unsupported identities stay visible and make affected aggregates incomplete.
+3. A live observation is not an authorization. Candidate, Explanation, immutable DeletionPlan, ExecutionAuthorization (`HumanApproval | ExplicitDangerousDelete`), short-lived one-shot PreflightPermit, platform outcome, and audit record remain distinct types and states. The explicit-dangerous variant is Permanent-only and is not evidence of human identity.
+4. Cache, imports, remote reports, stale previews, filenames, directory age, and negative process observations cannot create a candidate or permit. Ordinary small-file details are not persisted. TUI expansion may request a prioritized live rescan, but a deletion selection whose detail was discarded requires a targeted live enumeration and exact closed manifest before planning. Every planned object comes from the current local live generation; every action receives a final no-follow identity, parent, type, mount, link, containment, policy, and protection check.
+5. The default action is the native Trash/Recycle Bin operation. Trash failure, unsupported status, denial, cancellation, no-space, or ambiguity never falls back to Permanent. Trash success means only that the platform reported the operation; it does not guarantee recovery or freed capacity.
+6. Permanent, if a later capability is qualified, is an independent plan selected at plan creation, an independent R4 authorization, and a sequence of nonrecursive authorized actions. `--dangerously-delete` authorizes an existing Permanent plan but cannot select mode or targets. Permanent is never secure erase and `--permanent` is never an execution-time switch.
+7. Filesystem/volume/mount/share roots, system/recovery/device trees, the home/profile root, Trash internals, SweepX state, protected anchors/files, any ancestor containing a protected object, unknown special/reparse objects, and any real ancestor containing a .sweepx-protect entry are non-approvable. No flag, configuration, environment variable, plugin, Agent, TUI shortcut, or direct adapter call may bypass this.
+8. Batches are non-transactional. Each action has durable intent, an actual platform result, reconciliation, and an outcome. Missing is not success; submitted-but-unknown is INDETERMINATE and blocks overlapping execution until recovery.
+9. HumanApproval binds one exact plan, full canonical plan digest, mode, item/action set, per-action risk, policy/anchor/cleaner/adapter digest, user, host, workflow session, short TTL, and single-use nonce in an authenticated `ApprovalRecord`. A displayed or typed short fingerprint is only an attention check and is never the security binding. ExplicitDangerousDelete binds the same exact-plan fields, is Permanent-only, and records flag intent rather than human identity. Agents may prepare a plan but may neither invoke nor automate native-dialog, OS-verifier, or terminal approval and may never use the danger flag.
+10. Facts, inferences, recommendations, unknowns, lower bounds, and potentially reclaimable estimates remain visibly distinct. The product must not say exact disk usage, will free, unused, safe to delete, guaranteed recoverable, or guaranteed unrecoverable without a contract that v1 does not have.
+
+Before the trusted approval interaction, every surface must present the same core-produced review record:
+
+| Required field | Gate semantics |
+|---|---|
+| Plan digest, attention fingerprint, and expiry | The authenticated `ApprovalRecord` binds the full canonical plan digest. A short human-checkable fingerprint is only an attention check, never a truncated authorization binding; expired plans cannot be approved |
+| Mode | Exactly Trash or Permanent; no mixed batch and no execution-time change |
+| Exact item and action counts | Counts come from the closed plan and descendant manifests, not UI pagination |
+| Per-item and per-action risk | R1/R2/R3/R4/BLOCKED, with all monotonic raises and blockers; BLOCKED has no approval path |
+| Potentially reclaimable range | Show a conservative known/lower estimate and an upper bound only when evidence supports it; otherwise render lower..unknown, never a promised point value |
+| Evidence quality | Facts, manager facts, inferences, heuristics, stale/not-checked/unsupported fields, incomplete coverage, and the time of observations |
+| Boundaries and blockers | Links, reparse points, mounts, providers, permissions, open-process observations, shared state, missing recovery evidence, and protected anchors |
+| Recovery expectation | Platform Trash expectation, possible redownload/rebuild, application-state loss, location-known/unknown caveats, and no guarantee of capacity release |
+
+**Recommendation:** the Human Approval Broker prefers a native first-party SweepX dialog in the current local foreground session. Where that surface is unavailable but trustworthy direct local input can be established, it may fall back to a foreground terminal/TUI typed challenge. The Broker may optionally add non-elevating Windows Hello through `UserConsentVerifier` on Windows or `LocalAuthentication` on macOS as a presence/consent signal; neither grants privilege nor replaces the full-digest `ApprovalRecord`. SweepX defines no universal Linux OS-verifier equivalent in v1 and never invokes `sudo`, polkit, or another elevation prompt merely to obtain confirmation. An Agent must not open, click, drive, script, type into, or otherwise automate any of these native, OS, or terminal surfaces.
+
+<a id="scope-boundaries"></a>
+## 3. Product boundary and global out-of-scope work
+
+**Recommendation:** first-class platform support means one core contract, equivalent error/unknown semantics, active CI and real-OS qualification on Windows, macOS, and Linux. It does not mean pretending that every filesystem, browser layout, Trash provider, or holder API has equal capability. Unsupported cells degrade visibly to scan, explain, report-only, or plan export.
+
+The following remain outside the v1 release boundary unless a later roadmap explicitly changes it after a new threat model:
+
+- administrator/root scanning or cleaning, privileged MFT access, backup capabilities, setuid helpers, privileged services, cross-user cleanup, ownership/ACL/TCC changes, and automatic privilege prompts;
+- automatic policy or preference changes, including browser AI/model policies; SweepX may explain the supported administrative path and side effects but remains report-only;
+- emptying Trash, secure erase, free-space wiping, device sanitize, claims of unrecoverability, rollback of already successful batch actions, and exact freed-space promises;
+- following symlinks/reparse points, crossing a mount/volume implicitly, unbounded recursive deletion, hand-written Linux Trash fallback, and silent Trash-to-Permanent fallback;
+- automatic process termination, handle closing, daemon stopping, lock deletion, database repair, schema migration, cloud hydration, network download, or interactive package-manager execution during discovery;
+- generic deletion of SDKs, toolchains, environments, package stores, container volumes, VM/AVD state, archives, credentials, signing assets, source, local-only artifacts, browser application state, or an entire browser profile;
+- hostname-only browser deletion, raw Safari Profile deletion without a verified mapping, or direct deletion of Chrome/Edge model directories;
+- arbitrary cleaner scripts, shells, install hooks, dynamic downloads, unsigned native probes, or third-party mutation adapters;
+- using filesystem notifications to skip live v1 enumeration; notifications may only prioritize dirty work until a separately evidenced semantics revision qualifies stronger behavior.
+
+This documentation phase itself performs no scan or external command and no real deletion. Future destructive release tests are limited to generated, disposable roots whose complete contents and expected outcomes are recorded by the independent fixture oracle.
+
+<a id="phase-plan"></a>
+## 4. Phased MVP increments
+
+Each phase is useful on its own and closes with an evidence bundle. P0–P3 have no real platform mutation path. P4 and P5 may exercise native Trash or Permanent only on disposable fixtures until the relevant capability cell is qualified.
+
+| Phase | User-visible increment | In scope | Explicitly out of scope in this phase | Release gate and required evidence |
+|---|---|---|---|---|
+| **P0 — contract and harness baseline** | Reviewable schemas, safety policy, fixture generator, independent oracle, docs | Freeze v1 tagged values, state transitions, risk policy, hard-protection model, exit/event contracts, capability record schema, test bundle format, source/date lint | Runnable cleaner; platform mutation; performance claims | All 11 acceptance rows in Section 11 have an owner and evidence path; doc links resolve; schema examples validate; safety invariant/property model is executable; fixture receipts reproduce byte-for-byte from seed |
+| **P1 — 0.1 read-only scanner CLI** | scan, status, capabilities, cancel; human/JSON/NDJSON output on all three OS families | Ordinary-user root admission, no-follow metadata traversal, mount boundaries, four size states, hard-link accounting, streaming memory-first aggregates, visible errors, cancellation, compact/evict-before-spill, and bounded sparse preview state | Cleaner recommendations, TUI, plan/authorization, Trash/Permanent, content hashing, change-feed skipping | Baseline local filesystem scan cell passes on Windows/macOS/Linux; independent oracle is 100%; every resource and responsiveness gate in Section 8 passes, including spill threshold and total-state enforcement; cancellation and cache-corruption suites pass; packages run without elevation |
+| **P2 — 0.2 explainable analysis, TUI, and read-only Agent** | explain, bounded TUI, built-in catalog reporting, read-only Skill workflow | Candidate/Explanation, fact/inference/unknown separation, R1–R4/BLOCKED classification, declarative rule VM, signed package verification, Cargo-target and Chromium HTTP/code-cache reference rules, report-only coverage for the broader catalog, cursor replay/virtualized TUI, and prioritized live rescan on expansion | Plan approval or execution; third-party native probes; Z2/M commands; browser application-state deletion; SDK/container-volume mutation; policy changes | Same fixture yields the same candidate/explanation digest and risk through CLI, JSON, TUI, Cleaner API, and Skill; the 48 MiB TUI gate and sparse-preview retention tests pass; omitted detail never becomes selectable without live rescan; rules cannot lower risk or create raw paths; catalog and browser version gaps render report-only |
+| **P3 — 0.3 immutable planning and simulated execution** | plan create/show, trusted approve and explicit-dangerous authorization prototypes, audit/status/recover against a deterministic fake adapter | Canonical plan digest, targeted live closed manifests, exact counts, review record from Section 2, full-digest `ApprovalRecord`, native-dialog/typed-fallback HumanApproval, ExplicitDangerousDelete, one-shot permit, durable intent, fencing, per-action outcomes, cancellation, reconciliation, redacted audit export | Any native Trash/Permanent call; forged/imported authorization; Agent invocation or automation of any approval surface; Agent use of `--dangerously-delete`; execution against user files; official manager mutation | Model suite proves both authorization variants bind the same exact plan and protections; approval tests distinguish the full digest from the attention fingerprint; Agent evaluation refuses every approval surface and the danger flag; fault injection proves no double submit or Trash-to-Permanent transition; audit integrity failures stop before mutation |
+| **P4 — 0.9 native Trash beta** | Capability-gated Trash on qualified local filesystem tuples; unsupported tuples stay scan/plan-only | Windows IFileOperation, macOS FileManager.trashItem, Linux GIO adapters; R1/R2 local files and complete directories; R3 only where policy explicitly allows individual Trash review; outcome reconciliation | Permanent; cross-filesystem copy-to-trash; hand-written Trash; remote/provider/browser-state/system paths; manager mutation; broad public enablement | Every platform Trash row in Sections 6 and 7 passes on real OS disposable fixtures; no tested failure invokes Permanent; target/parent/ancestor/mount/descendant swaps fail closed; crash recovery never treats missing as success; beta allowlist identifies exact OS/arch/filesystem/provider tuple and evidence bundle |
+| **P5 — 1.0 stable ordinary-user product** | One core across CLI/TUI/Skill, production built-in cleaners, and Trash-first workflow on all three platforms | At least one qualified local-filesystem Trash profile per Windows, macOS, and Linux; stable output/event schemas; signed cleaner updates and revocation; packaged binaries, provenance, SBOM, upgrade/rollback tests; opt-in Permanent only for independently qualified cells | Any unqualified capability; elevated cleaning; broad manager mutations; browser site-state raw deletion; automatic browser policy change; guarantees about release bytes or recoverability | All phase gates remain green; all baseline platform profiles qualified; two release-candidate cycles have no unresolved critical/high safety defect; benchmark regressions accepted or fixed; supply-chain gates pass; docs and Skill match shipped capabilities; unsupported cells fail closed |
+| **P6 — post-v1 capability tracks** | Separately proposed additions, never implied by v1 | Possible first-party manager action adapters, version-pinned browser storage operations, cross-volume Trash design, or carefully scoped Permanent expansion | Any capability without a new threat model, independent evidence, and exact platform qualification; privileged mode is not implicitly scheduled | Each track has its own ADR, threat model, schema revision analysis, fixture extension, security review, capability allowlist, rollback plan, and human approval gate before implementation |
+
+### 4.1 Phase-wide stop-ship rules
+
+A phase does not ship when any of the following is true:
+
+- a hard protection, ordinary-user, mode-binding, approval, intent, permit, or reconciliation invariant can be bypassed from any public or internal entry point;
+- the same input produces divergent identity, risk, plan digest, or outcome semantics across CLI, TUI, Cleaner API, and Skill;
+- an error, boundary, unknown, stale preview, or incomplete subtree is rendered as zero/current/complete;
+- a performance result fails its correctness oracle, lacks a reproducible environment bundle, or meets speed targets by skipping required live validation;
+- an adapter cannot prove that a Trash failure path avoids Permanent;
+- an ambiguous submitted action can be replayed automatically, or a RESERVED intent can be treated as pending without reconciliation;
+- source/date coverage, license/provenance, signature/revocation, or release-artifact integrity evidence is missing.
+
+<a id="test-strategy"></a>
+## 5. Verification strategy
+
+Tests are layered so speed never substitutes for safety. Every destructive integration test receives a generated fixture root plus an oracle receipt; the harness rejects a path outside that root before starting the product.
+
+| Test class | Minimum coverage | Earliest required phase | Release evidence |
+|---|---|---:|---|
+| **Unit** | Tagged Known/LowerBound/Unknown/Unsupported/NotChecked values; checked u128 overflow; native-name round trip; object/mount/path keys; hard-link scope; aggregate completeness; exact top-64 plus `Others`; 32 MiB leaf retention; quota arithmetic and 75% spill threshold; risk monotonicity; protection matching; full canonical digest versus short attention fingerprint; TTL/nonce; exit precedence; cache fingerprint/invalidation/migration | P0/P1 | Per-target unit report, coverage summary, and golden digest corpus |
+| **Contract and integration** | Platform enumeration; permission-denied sibling continuation; symlink/reparse no-follow; mount boundary; sparse/compressed/ADS/reflink behavior; sparse-preview cold/rebuild; ordinary-small-file non-persistence; prioritized TUI expansion rescan; targeted live manifest before planning discarded detail; CLI JSON/NDJSON schema; event replay/cursor gap/reset; terminal exactly once; TUI pagination; Cleaner evidence join; native-dialog and typed-fallback approval; optional non-elevating OS verification; plan/authorization/audit/recovery with fake and native adapters | P1 onward | JUnit/nextest result, schema-validation report, fixture and OS capability bundle |
+| **Property and model based** | Completion-order invariance; idempotent delta application; no hard-link double count within each aggregate scope; exact retained summaries plus `Others` always reconcile; omitted detail and `Others` never become plan targets; complete never follows an unclosed/error/boundary child; unknown never lowers risk; every unlisted state transition rejected; plan edits change the full digest; short-fingerprint equality never substitutes for full-digest binding; permit is one-shot; cancellation cannot create success; Trash cannot transition to Permanent | P0 onward | Saved seeds and minimal counterexamples; model transition coverage |
+| **Concurrency and stress** | Slow consumer/cache writer/probe; queue count and byte caps; fairness across roots/volumes; deep/wide trees; compact/evict and thresholded spill transitions; preview/selection/manifest/state-directory quotas; concurrent prioritized expansion rescans; cursor churn; cancellation with quarantined calls; no deadlock, starvation, late-generation mutation, or unbounded task/thread creation | P1 onward | High-water telemetry, scheduler trace, sanitizer/loom-style run where applicable |
+| **Fuzz** | Native Unix bytes and Windows UTF-16; long paths, device names and ADS syntax; JSON/NDJSON and cursor parsers; manifest and typed-AST parser; archive canonicalization; browser/config metadata parsers; platform error mapping; direct Core/adapter call surface; state/action sequences | P0 onward | Corpus digest, crash-free duration or executions, sanitizer findings, minimized reproducers |
+| **Fault injection** | Enumerate→stat races; target/parent/ancestor/mount/descendant replacement; permission changes; provider timeout; compaction/eviction failure; attempted early spill below the 75% threshold; per-operation/global spill exhaustion; preview/selection/manifest/total-state quota exhaustion; cache/journal full, locked, corrupt, or torn; helper hang/crash/output bomb; clock jump; process suspend/resume; crash before intent, after intent sync, after platform submit, before outcome sync, and during reconcile; Trash cancel/partial/unknown | P1 for scan, P3/P4 for action | Named barrier/event trace, persisted state snapshot, expected/actual reconciliation report |
+| **Security/adversarial** | Root aliases, symlink/junction/bind/mounted-folder swap, .sweepx-protect of every object type, unreadable marker lookup, Unicode/case/normalization collisions, glob/env/config/plugin injection, elevated runtime, forged/expired/replayed HumanApproval, short-fingerprint collision/substitution, copied approval ID, native/OS/terminal approval automation attempts, `sudo`/polkit confirmation attempts, invalid/stale ExplicitDangerousDelete, Agent danger-flag attempts, stale policy/anchor/cleaner digest, audit self-deletion, sensitive-path redaction | P2 onward | Threat-case matrix signed off by Core Safety and platform owner; zero bypasses |
+| **Cleaner sandbox** | Pure rule VM cannot perform I/O or become nondeterministic; unknown policy only raises risk; probes cannot escape read handles, write, network, fork, exceed CPU/RSS/handle/output/time caps, or emit Candidate/Plan/Permit; official command identity/argv/env/no-shell/write monitor/version drift | P2 onward | Sandbox trace and negative-capability report per OS/arch |
+| **Supply chain** | Locked dependency resolution; dependency diff/license/advisory policy; build-script and binary-blob allowlist; reproducible source archive; SBOM; signed checksums/provenance; two independent release builders; cleaner package signature, expiry, revocation, rollback, same-version digest collision, zip-slip/symlink/hardlink/device/archive bomb | P2 for cleaners, P5 for binaries | Lock digest, advisory/license reports, SBOM, provenance attestations, signature verification, independent-build comparison |
+| **Privacy and wording** | No content reads or provider hydration in metadata profile; no path telemetry by default; audit export redaction; no secret-bearing environment passed to probes; lint forbidden safety claims and misleading percentages | P1 onward | Network/write trace, redaction golden, wording lint report |
+
+### 5.1 Required security properties
+
+The security suite must continuously prove these properties rather than merely exercise examples:
+
+1. For every adapter call there exists one matching unexpired permit, one durable intent, one exact plan action, and one valid `HumanApproval` or `ExplicitDangerousDelete` authorization for the same mode and per-action risk. The latter is valid only for Permanent.
+2. No public input can increase the target set after plan digesting. Display paths, translated strings, imported JSON, globs, environment values, plugin output, and stale cache never become adapter arguments.
+3. Any inability to compare current identity, parent, object domain, type, mount, link kind, descendant manifest, policy, or protected anchors prevents the action.
+4. A risk classifier and Cleaner can only hold, raise, report-only, or block; missing evidence cannot lower risk.
+5. A platform result is reported as observed. Top-level success cannot hide a failed/aborted item; absent source alone is not success; capacity delta is not the success oracle.
+6. The process remains ordinary-user throughout an action. Gaining elevation or an effective capability between planning and preflight hard-blocks execution.
+7. Sparse preview rows, `Others`, and discarded detail cannot become plan actions. Selecting discarded detail requires a targeted current live enumeration and a complete closed manifest within quota.
+8. HumanApproval is authenticated against the full canonical plan digest and sealed `ApprovalRecord`; a short displayed or typed fingerprint is only an attention check and cannot authorize a truncated or colliding digest.
+9. The Agent cannot invoke, drive, or supply input to the native dialog, optional OS verifier, or terminal challenge, and cannot invoke `--dangerously-delete`.
+
+<a id="platform-matrix"></a>
+## 6. Windows, macOS, and Linux test matrix
+
+Minimum supported OS versions are intentionally **TBD** until P0 records a support ADR and CI image availability. Each release tests the declared minimum, the previous major where still supported, and the latest stable image; architecture and filesystem cells are additive. A binary is not advertised for an OS/architecture merely because it compiles.
+
+| Area | Windows matrix | macOS matrix | Linux matrix | Pass/fallback |
+|---|---|---|---|---|
+| Build/package | x86_64 and arm64 if published; MSVC release build; clean user profile | Apple silicon and Intel while both are published; signed/notarized packaging when distribution begins | x86_64 and aarch64 if published; declared glibc baseline, plus musl only if shipped | Install, run, upgrade, downgrade rejection, uninstall, signature/provenance and no elevation; otherwise target not published |
+| Ordinary-user admission | Standard filtered token; admin-group user not elevated; DACL-denied descendants | Standard user with no new FDA; TCC-denied roots; sandbox profile if shipped | euid nonzero, empty effective/permitted/ambient capability sets; mode/ACL/LSM/hidepid variants | Denials visible, siblings continue, affected aggregate incomplete; destructive mode rejects elevated state |
+| Baseline local filesystem | NTFS mandatory; ReFS scan qualification; FAT/exFAT removable as separate cells | APFS mandatory, case-sensitive APFS cell, exFAT removable cell | ext4 mandatory; XFS and Btrfs cells; tmpfs as semantic control | Identity/size capability recorded per cell; missing fields become unknown and cannot be inferred |
+| Links and boundaries | hard links; file symlink; directory symlink; junction; mounted folder; known/unknown reparse; volume GUID and UNC aliases | hard links; symlinks; APFS volume/container boundaries; automount/network aliases | hard links; symlinks; bind/nested mount; overlay; namespace remap; openat2/statx present and absent | No-follow and same-volume are baseline; unknown directory/reparse or changed mount is boundary/BLOCKED |
+| Size semantics | logical, sparse, compressed, ADS; ReFS clone/dedup uncertainty | logical, st_blocks/Foundation allocated, sparse, compression, APFS clone/snapshot/shared-container uncertainty | logical, st_blocks, sparse, compression; FIEMAP shared/unknown/delalloc; reflink/overlay uncertainty | Oracle matches supported fields; shared/exclusive reclaimable remains unknown unless proved |
+| Provider/remote | OneDrive online-only/offline and recall attributes; SMB/UNC hostile latency | File Provider/iCloud dataless; network and automount | FUSE, NFS/SMB, overlay/provider helper, hostile mount | No unrequested hydration or content read; slow lane cannot starve local roots; unsupported remains visible |
+| Error/race/cancel | Sharing violation, long path, read-only, DACL change, reparse swap, stuck Shell call | TCC/ACL change, raw/non-normalized names, volume swap, provider timeout | EACCES/EPERM/ENOENT/ELOOP/EXDEV, LSM change, mount namespace swap, stuck FUSE | Correct native code retained; cancel and quarantine gates pass; late result cannot mutate terminal generation |
+| Cache/restart | Process kill during generation and DB transaction; ADS/link changes | Process kill; clone/provider state changes | Process kill; bind/mount/permission/hint-loss changes | Only committed generations read; corruption quarantines and cold-scans; no cached authorization |
+| Trusted approval | Native first-party foreground dialog preferred; trusted Console typed fallback; optional non-elevating Windows Hello/`UserConsentVerifier`; redirected input and session/user/token change | Native first-party foreground dialog preferred; trusted terminal/TUI typed fallback; optional non-elevating `LocalAuthentication`; redirected input and user/session change | Native first-party foreground dialog preferred where available; trusted foreground TTY typed fallback; PTY/pipe and user/session/namespace change; no universal OS verifier and no `sudo`/polkit confirmation | The sealed `ApprovalRecord` binds the full plan digest; the short fingerprint is attention-only. If trustworthy local input cannot be established, execution is disabled. Agent automation of every approval surface is rejected |
+| Trash adapter | IFileOperation item sink, aborted flag, destruction warning, unsupported/no-space, symlink/reparse entry behavior | trashItem result URL known/unknown, symlink behavior, APFS/exFAT/provider/network errors, no remove fallback | GIO local Trash, unsupported/EXDEV/headless, malicious/non-sticky Trash candidates, no unlink fallback | Every failure keeps mode Trash and reconciles source/destination. Any unprovable direct-destruction path disables Trash for that cell |
+| Permanent adapter | Exact file/link primitive and closed nonempty directory manifest, no recursive wildcard | Parent-relative nonrecursive primitive; Foundation recursive removal is not a directory shortcut | Parent-FD/openat2 containment plus nonrecursive unlinkat/rmdir sequence | Optional v1 capability; all actions R4 and separately approved. A failing cell remains unavailable without blocking scan/Trash |
+| Browser | Chrome/Edge channels and profile-root overrides; Firefox ProfD/ProfLD; running locks | Chrome/Edge/Firefox plus Safari logical Profile and File Provider constraints | Chromium/Chrome/Edge variants and XDG overrides; Firefox; sandbox packages | Only version/layout-qualified rebuildable cache can become a candidate; running/unknown layout or Safari unresolved mapping is report-only |
+| Developer/container | Native Windows managers, WSL/VM boundary, Docker Desktop virtual disk as opaque backend | Native managers, Xcode/Simulator ownership, Docker Desktop backend | Native managers, rootless/rootful owner distinction, Docker/containerd/Podman backend | Z0 default; exact owner and recovery evidence required; volume/user state and raw backend trees report-only |
+| Recovery/audit | Crash/reboot/Shell abort, file replacement, source/destination ambiguity | Crash/reboot/provider delay, unknown Trash URL | Crash/reboot/GIO ambiguity, mount disappear/reappear | RESERVED never auto-replays; old fence cannot call adapter; missing never equals success; audit failure stops mutation |
+
+No test may grant special permissions merely to make a cell pass. Existing macOS FDA, Windows administrator-group membership, or Linux namespace/capability configurations are recorded as environment facts; destructive mode must still satisfy the ordinary-user runtime policy.
+
+<a id="capability-qualification"></a>
+## 7. Platform and cleaner capability qualification
+
+Capabilities ship by allowlisted evidence tuple, not by broad OS name. The capabilities command must expose the exact state and reason.
+
+    QualificationKey = {
+      core_version, scanner_semantics, safety_policy_digest,
+      adapter_id_and_digest, os_build, arch, filesystem_and_version,
+      volume_class, provider_or_desktop_backend, runtime_privilege_profile,
+      cleaner_or_browser_id_and_full_version, capability
+    }
+
+Allowed states are:
+
+| State | Meaning | Product behavior |
+|---|---|---|
+| **qualified** | Required automated and real-OS tests passed for this exact tuple; evidence bundle is current | Capability may be enabled subject to normal plan, approval, and preflight |
+| **degraded** | Read-only operation is correct but one or more fields are unavailable or lower confidence | Return tagged unknown/lower-bound and preserve coverage; do not synthesize the field |
+| **report_only** | Discovery/explanation is useful but target identity, layout, ownership, recovery, or mutation semantics are not qualified | Show evidence and next safe action; do not create an executable item |
+| **unsupported** | Required native primitive or tested version range is absent | Return stable unsupported reason; no emulation or raw fallback |
+| **disabled** | A safety, integrity, revocation, runtime privilege, or regression gate failed | Fail closed and identify the blocking evidence bundle/test |
+
+Qualification is required independently for:
+
+- root admission and lossless native names;
+- object identity and parent binding;
+- mount/volume identity and no-follow containment;
+- logical, allocated, hard-link, provider, and holder-observation fields;
+- local file Trash, local directory Trash, Permanent file/link, and Permanent closed-directory actions;
+- trustworthy native-dialog/typed-fallback HumanApproval surface, optional non-elevating OS verification, full-digest `ApprovalRecord`, ExplicitDangerousDelete exact-plan admission, Agent refusal behavior, durable audit/fence, and source/destination reconciliation;
+- each Cleaner package/rule/probe/official command, ecosystem version, browser full version/channel/layout, and target platform.
+
+A qualification expires or is invalidated by an OS/kernel/filesystem/provider behavior change, adapter or safety-policy change, schema-major change, cleaner/probe digest or revocation change, browser/manager version outside the tested range, failed continuous test, or inability to reproduce its evidence bundle. Time alone should prompt revalidation but must not silently convert qualified to unsafe operation; stale evidence moves to report_only/disabled until refreshed.
+
+The minimum evidence bundle contains: qualification key, git revision and dirty state, dependency-lock digest, build provenance, fixture seed/manifest/oracle digest, OS image identity, test and fault traces, resource high-water marks, native return codes, adapter capability snapshot, reviewer identities, known limitations, and expiry/invalidation conditions.
+
+<a id="benchmark"></a>
+## 8. Reproducible benchmark and quantitative product gates
+
+### 8.1 Fixture
+
+The fixture generator accepts a fixed seed and versioned JSON manifest. It emits creation receipts. An independent oracle verifier must not link the scanner crate and must not derive expected values from SweepX output. It derives expected identities, boundaries, tagged sizes, errors, and completeness from the manifest, creation receipts, native platform queries, and a recorded fault-controller trace.
+
+The canonical suite contains:
+
+- deep tree of depth 4,096;
+- wide directory with 1,000,000 entries;
+- 1,000,000 and 10,000,000 small-file scales plus large files and a fixed log-normal mixed-size distribution;
+- wide parents with more than 64 heavy children, leaves immediately below/at/above 32 MiB, omitted ordinary small-file details, an `Others` reconciliation oracle, TUI expansion, and selection of discarded detail;
+- 1,000,000 hard-link identities, with all links in root and with surviving links outside root;
+- symlink cycles, Windows known/unknown reparse points, nested/bind/mounted-folder boundaries;
+- sparse and compressed files, Windows ADS, and where supported APFS/ReFS clones plus Btrfs/XFS reflinks;
+- readable siblings beside permission-denied children; enumerate-then-vanish and identity/type replacement races;
+- provider placeholders with network/download/allocated-delta monitoring;
+- slow/error calls, notification loss, cache-writer crash, journal failure, corruption, disk quota/full, compact/evict outcomes, early-spill attempts, and every spill/preview/selection/manifest/total-state limit synchronized by named barriers.
+
+### 8.2 Environment record
+
+Every run bundle records the source revision and dirty state, Rust toolchain and dependency-lock digest, release flags, OS edition/build and kernel, CPU model/core topology, RAM, storage medium/controller, filesystem/version and mount options, encryption/compression/dedup/provider state, ordinary-user profile, worker/queue/memory/spill configuration, SweepX cache state/hash, fixture seed/manifest SHA-256, and fault script/trace.
+
+OS page cache and SweepX cache are separate dimensions:
+
+- cold OS-cache runs start from a disposable VM/disk snapshot or reboot; SweepX never elevates to drop system caches;
+- warm OS-cache/empty SweepX-cache runs use a documented metadata preheat;
+- warm SweepX-preview/derived-index runs restore the exact recorded committed generation, while still doing all v1 live admission/enumeration/required metadata checks;
+- mutation, corruption, and recovery runs restore an immutable snapshot before every measured run.
+
+If page-cache state cannot be controlled, label it uncontrolled and exclude it from cold-cache claims.
+
+### 8.3 Method and artifacts
+
+1. Validate the oracle first. A performance run with any identity, error, boundary, unknown, completeness, or hard-link accounting mismatch is invalid regardless of speed.
+2. Perform one unscored warm-up followed by at least 15 independently reset runs per throughput scenario. Report median, minimum, maximum, and median absolute deviation; keep raw observations.
+3. Collect at least 200 observations for p95 latency and 1,000 for p99 latency, stratified across roots/volumes. Use nearest-rank quantiles and include a bootstrap 95% confidence interval. If sample size is insufficient, do not report or gate that percentile.
+4. Compare absolute performance only within the same fixture/environment. Cross-hardware reports are descriptive, never rankings. Regression comparison uses an approved revision on the same image and configuration.
+5. Capture wall time, entries/s, metadata operations/s, CPU user/system, I/O bytes/ops, first-result and event latency, cancellation admission and settle latency, parent plus helper private/mapped RSS, `B_scan` charged bytes, every queue high-water, compaction/eviction timing and resulting charge, spill trigger and per-operation/global bytes, sparse-preview bytes/summary count, selection and manifest bytes, total state-directory bytes, open handles, cache validation/hit/miss, DB/write amplification, error latency, and quarantined operations.
+6. Publish a machine-readable result, environment manifest, oracle result, raw sample file, aggregate report, and artifact hashes. Do not publish private user paths or browser data.
+
+### 8.4 Initial quantitative gates
+
+Every row below is a **product gate, unverified**. These numbers come from the proposed scanner/interface architecture, not an implemented SweepX measurement or an upstream-tool benchmark. MiB means 2^20 bytes. P0 gives each gate an executable check; P1 establishes the first baseline; later changes may tighten a gate but may not quietly relax it.
+
+| Gate ID | Product gate, unverified | Failure disposition |
+|---|---|---|
+| G-CORRECT | Independent correctness oracle matches 100%; no mismatch in identity, error, boundary, unknown, complete, arithmetic, or hard-link accounting | Stop release; performance result invalid |
+| G-SCAN-MEM | Per-operation tree-dependent charged scan memory `B_scan` at or below 128 MiB on the 10M/deep/wide/1M-identity suite | Compact/evict, reduce concurrency, or return visible ResourceLimit/incomplete; no unbounded fallback |
+| G-PROC-MEM | Aggregate parent plus helper private RSS at or below 384 MiB | Re-profile and lower `B_scan`/workers/helpers; do not claim the profile |
+| G-TUI-MEM | TUI tree-dependent memory at or below 48 MiB while filtering, sorting, and expanding the million-entry fixture | Keep server-side pagination/virtualization and live rescan, or fail the phase |
+| G-FIRST | On a locally responsive fixture, time-to-first-result median at or below 500 ms | Investigate scheduling; cannot skip validation to pass |
+| G-EVENT | Progress/event latency p95 at or below 250 ms; coalesced progress emitted at no more than 10 Hz per key while terminal/error/boundary events are lossless | Fix backpressure/coalescing; never drop correctness events |
+| G-CANCEL | New admission stops within p95 250 ms; cooperative logical termination occurs no later than the longest active deadline plus 1 s | Fail cancellation gate; report quarantined calls separately |
+| G-QUARANTINE | Local quarantine at most 8 per local volume and 32 globally; slow lane at most 1 per slow volume and 4 globally; a full lane fails before dispatch | Fail if a replacement worker/helper exceeds the bound or another lane starves |
+| G-SPILL | Compact/evict first; create no spill while post-compaction charge is below 75% of `B_scan` (96 MiB). Ephemeral spill is at most 192 MiB per operation and 256 MiB globally | Exhaustion becomes visible ResourceLimit/incomplete; no early spill, OOM, silent truncation, or false completeness |
+| G-PREVIEW | Sparse preview cache at most 64 MiB or 100,000 summary records, whichever limit is reached first. Retain roots/necessary ancestors, candidates, errors/boundaries, each parent's exact top-64 children plus synthetic nonselectable `Others`, and leaves at least 32 MiB; never persist ordinary small-file details | Compact/evict preview summaries or cold live-scan; never convert omitted detail or `Others` into a candidate or exact plan target |
+| G-PLAN-STATE | The global content-addressed selection store is at most 16 MiB and the global exact descendant-manifest store is at most 64 MiB; discarded detail requires a targeted live rescan and exact closed manifest | Reject/resource-limit the selection or plan instead of truncating, approximating, silently evicting active records, or planning from preview state |
+| G-STATE-DIR | Total SweepX state directory at most 512 MiB across preview cache, spill, selection, manifests, plans, cursors, approval, audit, and recovery state | Evict only disposable preview/spill state, reserve required integrity records, and stop admitting work before exceeding the cap; never discard authorization, audit, or recovery evidence |
+| G-TUI-QUERY | At most 500 rows/page, 8 cursors/operation, 32/process, and a 2 s query deadline; expansion of omitted detail schedules a prioritized live rescan and publishes a new revision | Reject/resource-limit instead of loading the tree; never present stale preview as current or selectable |
+| G-REGRESSION | Same-environment median throughput regression over 10%, or p95 first-result/cancel regression over 20%, requires written explanation and release approval | Block unreviewed regression; correctness gates remain absolute |
+| G-PREFLIGHT | One-shot permit TTL at most 2 s and execution-authorization TTL at most 5 min, with final recheck immediately before the adapter call | Any reuse, extension, or post-check wait is a security failure |
+
+There is deliberately no entries-per-second absolute target until P1 produces comparable baselines. The upstream tool-landscape product, section “Performance,” found no controlled apples-to-apples benchmark across products; claiming SweepX is fastest would be unsupported.
+
+<a id="release-gates"></a>
+## 9. Release governance
+
+### 9.1 Gate hierarchy
+
+A release candidate must satisfy all applicable layers:
+
+1. **Global safety gate:** Section 2 invariants and Section 4 stop-ship rules.
+2. **Phase gate:** the phase row in Section 4, with no skipped predecessor gate.
+3. **Platform baseline gate:** P1 scanning and core contract pass on Windows, macOS, and Linux before v1.0.
+4. **Capability gate:** each action/cleaner/browser/filesystem tuple has a current qualification from Section 7. Missing evidence disables only that capability and is shown to the user.
+5. **Correctness/performance gate:** Section 8 results are reproducible and G-CORRECT passes before any performance threshold is considered.
+6. **Security and supply-chain gate:** no open critical/high bypass; dependency, artifact, Cleaner trust, provenance, SBOM, and signing evidence is complete.
+7. **Documentation gate:** README, DESIGN, catalog, roadmap, CLI help, JSON schemas, Skill, and capabilities output describe the same shipped behavior and limitations.
+
+### 9.2 Change control
+
+The following changes require a new threat-model review, fixture/golden update, property and fuzz campaign, fault-injection run, and affected real-OS qualification: safety-schema major, plan/authorization/permit fields, risk policy, protected-anchor policy, state transition, adapter behavior, executable/official-command capability, cleaner native probe ABI, browser storage layout range, or any optimization that skips a live check.
+
+Release waivers cannot cover hard protections, ordinary-user enforcement, authorization provenance, mode binding, live revalidation, durable intent, one-shot permits, ambiguous-outcome reconciliation, or Trash-to-Permanent separation. A performance waiver must include an owner, expiry, comparison bundle, user-visible effect, and rollback; it cannot waive correctness.
+
+### 9.3 Evidence retention
+
+Store release evidence under a versioned immutable bundle such as:
+
+    artifacts/release/<version>/
+      acceptance-report.json
+      docs-link-and-source-lint.json
+      schemas-and-goldens/
+      tests/{unit,integration,property,fuzz,fault,security,supply-chain}/
+      platforms/<qualification-key>/
+      benchmarks/<environment-id>/
+      sbom/
+      provenance/
+      known-risks.md
+
+The path is a recommendation; repository policy may choose another location, but the artifact classes and hashes are required.
+
+<a id="risk-register"></a>
+## 10. Risk, evidence-gap, and conflict register
+
+### 10.1 Unresolved risks and evidence gaps
+
+| ID | Type and unresolved issue | Consequence/default | Owner | Evidence needed to close | Blocks |
+|---|---|---|---|---|---|
+| U-01 | **Evidence:** minimum supported OS/kernel/libc versions and release architectures are not selected | Do not advertise an untested target | Release owner + all platform owners | Support ADR, CI images, packaging smoke, real-OS qualification bundles | P1 target claim, P5 |
+| U-02 | **Evidence:** Windows 8+ `FOFX_RECYCLEONDELETE`, item sink, aborted result, and held-handle interaction still need proof across each volume/provider tuple | Disable Trash for any ambiguous tuple; destruction warning alone is never recycle-only enforcement | Windows adapter owner | NTFS/ReFS/FAT/exFAT/UNC/provider disposable-fixture traces, `FOFX_RECYCLEONDELETE`, `PostDeleteItem`, abort and no-permanent-fallback assertions, source/destination reconcile | P4 Windows Trash |
+| U-03 | **Evidence:** macOS trashItem symlink semantics, resulting URL, external/network/File Provider behavior, and held-parent strategy need real testing | Disable affected Trash cells; preserve report/plan | macOS adapter owner | APFS/case-sensitive APFS/exFAT/network/provider fixture traces, no-remove-fallback proof | P4 macOS Trash |
+| U-04 | **Evidence:** Linux minimum openat2/statx capability and GIO behavior across headless, EXDEV, removable, FUSE, and desktop implementations are unknown | Degrade containment fields; disable high-risk directory/Permanent or Trash cells | Linux adapter owner | Kernel/distro/filesystem matrix, mount-namespace race trace, GIO no-unlink proof | P1 enhanced fields, P4 Linux Trash |
+| U-05 | **Residual risk:** no common platform API atomically binds the final identity check to pathname-based Trash | Keep the residual risk explicit; shorten window; stale/indeterminate on contradiction | Core Safety + platform owners | Adversarial race campaign at each preflight boundary, documented remaining window, security review | P4/P5 |
+| U-06 | **Evidence:** the 128 MiB `B_scan`, 384 MiB aggregate RSS, 48 MiB TUI, 75% spill trigger, 192/256 MiB spill, 64 MiB/100,000-summary preview, 32 MiB leaf, 16 MiB selection, 64 MiB manifest, 512 MiB total-state, and latency targets are architectural budgets, not measurements | Do not make performance claims; adjust implementation profile only with evidence and explicit change control | Scanner/performance owner | P1 benchmark bundles on representative hardware and all three platforms | P1 claim, P5 regression baseline |
+| U-07 | **Evidence:** metadata APIs may hydrate or contact some cloud/provider implementations | Disable enhanced queries for provider cell; allocation/reclaimable unknown | Platform owners + privacy owner | Network/write/allocated-delta trace for each provider/version | Provider capability |
+| U-08 | **Evidence drift:** Chromium/Firefox/WebKit layouts and Chrome/Edge model components/policies evolve; Safari Profile name-to-store mapping is not a stable public contract | Unknown versions and Safari unresolved mapping stay report-only; no raw model deletion or policy change | Browser cleaner owner | Full browser version/channel fixtures, matching pinned source/official docs, quiescence and consistency-group validation | Browser candidate capability |
+| U-09 | **Evidence:** many manager query commands can start daemons, write state, or access network even when semantically read-only | Z0 remains default; Z1 only in disposable sandbox; Z2/M not automatic | Developer-cleaner owner + sandbox owner | Per-version syscall/write/network traces, fixed executable/argv/output schema, reproducible no-out-of-scope-write evidence | Each guarded query |
+| U-10 | **Design/evidence:** publisher root, revocation freshness service, offline expiry UX, and independent cleaner review process are not operationalized | Only built-ins from the release may run; third-party packages report-only/disabled | Supply-chain owner | Key ceremony/rotation ADR, signed revocation fixtures, rollback/transparency tests, incident runbook | P2 external packages, P5 updates |
+| U-11 | **Evidence:** trustworthy foreground input, native first-party dialog behavior, typed-challenge fallback, optional non-elevating Windows Hello/`UserConsentVerifier` and macOS `LocalAuthentication`, and Broker sealing/fencing differ by OS/session model; Linux has no v1 universal OS-verifier equivalent | If trustworthy input is unavailable, platform remains scan/explain/plan-only; never substitute elevation, short-fingerprint-only binding, or Agent automation | Approval broker owner + platform owners | Dialog/Console/TTY/pipe/PTY/remote/session/accessibility matrix, OS-verifier cancellation/failure tests, full-digest/fingerprint distinction, restart/replay/cross-user tests, threat review | P3/P4 execution |
+| U-12 | **Scope risk:** the catalog is broad, but a documented ecosystem is not automatically an executable Cleaner | Unsupported items may be report-only without lowering three-platform product quality | Cleaner program owner | Per-cleaner schema, owner/version matrix, reference/recovery fixtures, catalog status badge | P2 rule, P5 production rule |
+| U-13 | **Safety risk:** Permanent directory handling has a larger action/race surface and no secure-erase guarantee | Keep capability disabled until independently qualified; Trash remains default | Core Safety + platform owners | Closed-manifest mutation tests, nonrecursive primitive proof, per-action intent/outcome/recovery, R4 approval usability study | Optional P5 Permanent |
+| U-14 | **Evidence:** same-environment benchmark thresholds may not represent HDD, low-memory, VM, encrypted, remote, or provider workloads | Publish profiles and confidence, not a universal speed rank | Performance owner | Representative profile matrix, variance study, explicitly unsupported/slow profiles | Performance claims |
+| U-15 | **Privacy:** path-rich machine output and audit records can expose user/project/browser information | Private local storage and redacted export by default; no telemetry upload | Privacy/security owner | Permission tests, retention policy, redaction collision/leak tests, data-flow review | P3 audit, P5 |
+| U-16 | **Evidence drift:** common-app cache/log/reset paths and side effects vary by app version, channel, sandbox, configured root and vendor policy | Representative apps remain version-scoped; unknown versions and mixed app-data roots stay report-only | Common-app cleaner owner | Per-version vendor source, configured-root fixture, quiescence test, cache-vs-state exclusions and official-control side-effect trace | Each common-app rule |
+
+### 10.2 Cross-document conflicts and binding disposition
+
+| ID | Apparent conflict | Binding disposition | Owner and verification |
+|---|---|---|---|
+| C-01 | The specification requires a noninteractive-capable `dangerously-delete` path that skips confirmation, while Permanent must remain bound to an immutable plan | **Resolved policy:** `plan create --mode permanent` fixes targets and R4 semantics. Normal execution uses `HumanApproval`; `execute --plan-id ID --dangerously-delete` creates an auditable `ExplicitDangerousDelete` authorization without claiming human identity. It can run noninteractively but cannot select mode/targets, bypass protection/revalidation, or serve as Trash fallback. Agent Skill forbids calling it; Core safety does not rely on detecting Agents | Core Safety; state-machine/property tests, CLI golden, Agent evaluation |
+| C-02 | Browser research identifies a supported enterprise policy for removing/disabling local models, while this work forbids policy changes | **Resolved policy:** Cleaner records the policy path, applicability, and side effects as report-only. SweepX v1 never writes registry/managed preferences or browser policy | Browser owner; capability and side-effect golden |
+| C-03 | Platform research mentions a later separate Permanent choice after Trash is unavailable, while the safety design forbids a direct fallback | **Resolved policy:** the current attempt stops. A later request begins again at live scan and creates a new Permanent plan/authorization; no adapter or UI transition carries authority forward | Core Safety; fault/property test |
+| C-04 | Equal Windows/macOS/Linux support conflicts with unequal native APIs/filesystems | **Resolved policy:** all three share the same scanner, schemas, errors, safety floor, test investment, and release baseline; action capabilities are qualified per tuple and may degrade visibly | Release owner; Section 6 matrix and capability bundles |
+| C-05 | Landscape terminology recommends dry-run, while the architecture separates scan, explain, and immutable plan | **Resolved policy:** dry-run means a non-mutating preview/plan over current evidence, never a simulated permission to delete and never a manager dry-run promoted to authorization | Product/API owner; CLI docs and schema golden |
+| C-06 | Official manager semantics are often safer than raw path deletion, but manager queries/mutations may themselves write or download | **Resolved policy:** Z0 filesystem/config evidence is default; Z1 is explicit and sandboxed; Z2 is report-only in automatic scans; M requires a future first-party R4 adapter and never falls back to raw deletion | Cleaner/sandbox owner; effect-class and syscall tests |
+
+If a future document contradicts a disposition above, the stricter safety rule wins until an ADR explicitly updates the threat model, schemas, tests, and this register.
+
+<a id="acceptance-map"></a>
+## 11. Acceptance criteria traceability
+
+The table maps every canonical acceptance criterion to a concrete document/section and the verification evidence expected from the documentation or implementation program.
+
+| # | Acceptance criterion | Concrete document/section | Verification evidence |
+|---:|---|---|---|
+| 1 | Main design plus linked topical documents, with no chat-only decision | [README.md](../README.md) “Document navigation”; [DESIGN.md](../DESIGN.md) §0.2; [CLEANER-CATALOG.md](CLEANER-CATALOG.md); roadmap §§1, 11; ten topic artifacts indexed in §1 | Recursive Markdown-link check over the complete delivered documentation tree; expected-file manifest; decision/ADR index; reviewer confirms every safety decision has a repository anchor |
+| 2 | Competitor matrix covers analyzers, cleaners, developer caches, browsers, safe deletion, and TUI | [DESIGN.md](../DESIGN.md) §2; upstream docs/research/landscape.md “Traceable capability matrix” | Matrix row/category coverage lint; every factual cell has a dated source; snapshot commit/edition qualifiers retained |
+| 3 | Scanner covers filesystem semantics, concurrency/backpressure/cancel, links/mounts/errors/sizes, streaming memory-first aggregation, sparse preview/live rescan, bounded state, and benchmark | [DESIGN.md](../DESIGN.md) §7; roadmap [§5](#test-strategy), [§6](#platform-matrix), [§8](#benchmark) | Independent fixture oracle; quota/retention/live-rescan concurrency, property, and fault reports; platform capability bundles; benchmark environment/raw samples |
+| 4 | Catalog covers all named developer ecosystems with location, official action, reclaimability, activity/reference, risk, and platform differences | [CLEANER-CATALOG.md](CLEANER-CATALOG.md) §§1.6, 3, 7 | Catalog schema lint for Node/npm/pnpm/yarn/nvm, Python/pip/uv/Poetry/Conda, Rust/Cargo/rustup, Go, Java/Gradle/Maven, .NET/NuGet, Ruby, PHP/Composer, Dart/Flutter, Android, Xcode, containers, and build caches; unsupported cells explicit |
+| 5 | Browser Profile/storage/origin attribution/locking/local-model design | [CLEANER-CATALOG.md](CLEANER-CATALOG.md) §4; [DESIGN.md](../DESIGN.md) §8.2 | Version/channel fixture matrix; complete storage-key golden; running-profile and consistency-group negative tests; model-policy entry stays report-only; source freshness check |
+| 6 | Four risk tiers, Trash default, plans/revalidation, TOCTOU, process limits, hard protections, confirmation, audit, recovery | [DESIGN.md](../DESIGN.md) §§6, 9; roadmap [§2](#safety-floor), [§5](#test-strategy), [§7](#capability-qualification) | State/property model, protection/bypass matrix, platform Trash tests, crash/fence/reconcile traces, wording lint; zero hard-protection bypass |
+| 7 | CLI/TUI command tree, flags, JSON/NDJSON, exits, progress, interaction, large-tree memory, and prioritized expansion rescan | [DESIGN.md](../DESIGN.md) §11; roadmap G-TUI-MEM/G-PREVIEW/G-PLAN-STATE/G-TUI-QUERY in [§8](#benchmark) | CLI help golden, schema validation, event replay/cursor tests, exit-code table test, million-row virtual TUI resource and live-rescan trace |
+| 8 | Cleaner manifest/schema, lifecycle, versions/signatures/trust, and at least two examples | [DESIGN.md](../DESIGN.md) §12; [CLEANER-CATALOG.md](CLEANER-CATALOG.md) §§1, 7 | Manifest/rule schema tests; package canonicalization/signature/revocation suite; Cargo target and Chromium cache fixture goldens; capability-denial tests |
+| 9 | AI Skill protocol enforces scan-plan-human approval-execute, structured output, exact approval binding, and danger limits | [DESIGN.md](../DESIGN.md) §13; [README.md](../README.md) “Proposed workflow” | Skill lint/evaluation set against upstream skills/sweepx/SKILL.md; Agent cannot invoke or automate native/OS/terminal approval, forge a record, treat the attention fingerprint as the binding, or pass `--dangerously-delete`; malformed/partial/stale/reconcile scenarios produce the required stop/report behavior |
+| 10 | Rust modules/dependencies/data APIs plus tests, benchmarks, phases, and risks | [DESIGN.md](../DESIGN.md) §§3–5 and synthesis headings §§14–17; roadmap [phase plan](#phase-plan), [verification](#test-strategy), [benchmark](#benchmark), [risk register](#risk-register) | Architecture review; dependency/alternative ADRs; phase gate reports; benchmark bundles; every open risk has owner/evidence/blocking phase |
+| 11 | Every network fact has URL/access date and fact/inference/recommendation are distinct | [DESIGN.md](../DESIGN.md) §0.1 and source-bearing sections; [CLEANER-CATALOG.md](CLEANER-CATALOG.md) §§1.5, 6; roadmap [§1](#evidence-policy) | Source lint rejects an external fact without URL/date; label lint samples every section; no unlabelled numeric performance claim; manual evidence audit before release |
+
+### 11.1 Documentation completion gate
+
+The design deliverable is complete only when:
+
+- [README.md](../README.md), [DESIGN.md](../DESIGN.md), [CLEANER-CATALOG.md](CLEANER-CATALOG.md), and this roadmap mutually link without broken targets;
+- all ten upstream input paths are indexed, and their material conclusions and dated sources are carried into at least one of the four synthesis outputs;
+- the safety terminology and R1–R4/BLOCKED meanings are identical across documents;
+- every open conflict is present in Section 10 rather than silently harmonized;
+- network facts retain URL and access date, while product gates remain labelled unverified;
+- no text implies that this research run performed a scan, deletion, policy change, elevation, or release.
+
+## 12. Definition of v1 success
+
+**Recommendation:** v1 is successful when an ordinary user on each of Windows, macOS, and Linux can obtain a bounded, streaming memory-first, explainable, machine-readable live scan; inspect sparse catalog evidence in CLI/TUI/Skill with prioritized live expansion; create an immutable reviewable plan backed by a targeted live manifest whenever preview detail was discarded; and, only on an exactly qualified platform/filesystem capability, move authorized items to native Trash through full-digest HumanApproval, final revalidation, durable intent, and auditable reconciliation. Permanent additionally supports explicit `--dangerously-delete`, while the Agent surface forbids it.
+
+v1 is also successful when it says no: unsupported layouts remain report-only, incomplete scans remain incomplete, unknown reclaimability stays unknown, protected targets remain non-approvable, and a platform that has not proven safe Trash behavior exposes scan/explain/plan rather than a guessed delete path. Permanent is optional and separately qualified; its absence on a tuple is a safe capability result, not a reason to weaken Trash semantics.
