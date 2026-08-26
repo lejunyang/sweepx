@@ -1132,6 +1132,9 @@ dependencies = [
 name = "sweepx-platform-linux"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "sha2",
+ "sweepx-fixtures",
  "sweepx-model",
  "sweepx-platform",
  "tempfile",

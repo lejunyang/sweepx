@@ -17,7 +17,8 @@ The roadmap defines capability and evidence gates, not dates. Code may land befo
 | P1 scanner CLI | Linux read-only scan is degraded; status snapshot works | macOS/Windows scanning unsupported; live cancel disabled; three-platform/resource gates open |
 | P2 analysis/TUI/Cleaner | Bounded explain, live directory browsing through `scan --tui`, and metadata-only Cleaner run | Imported explain input is report-only; signing/sandbox/full cross-surface qualification open |
 | P3 plan/audit/simulation | Immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed fake executor are implemented | No CLI wiring, trusted HumanApproval broker, native path, real revalidation, or platform adapter; the phase is not qualified |
-| P4+ mutation | None | Trash, Permanent, and release qualification are all future work |
+| P4a qualification substrate | Linux `cfg(test)` disposable fixture, single-use binding, durable intent, and fake-adapter outcome classification | No GIO/native Trash call and no product mutation capability |
+| P4+ mutation | No public capability | Trash, Permanent, and release qualification remain future work |
 | Release engineering | CI, Pages, five target archives/checksums, Unix/Windows installers, and ordered crates.io publication exist | No stable release yet; signing, SBOM, and provenance gates remain open |
 
 ## Phase targets

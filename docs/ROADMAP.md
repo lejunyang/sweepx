@@ -16,6 +16,7 @@ The phase table below describes target gates, not claims that a phase is qualifi
 - Human output supports auto-detected `zh-CN` and `en-US`, with an explicit `--locale` override. Machine schema keys and protocol values remain stable.
 - CI tests the workspace, schemas, site, installers, and native CLI builds. Release automation builds five target archives and checksums, and gates both binary and crates.io publication on the literal marker in the HEAD commit message. GitHub Pages deploys independently on normal `main` pushes.
 - P3 libraries now model immutable plans, explicitly simulation-only authorization, Unix-only durable audit/recovery state, and a sealed deterministic fake executor. There is no CLI `plan`, `approve`, or `execute` command, the executor accepts no native path, and there is no native filesystem mutation adapter. The snapshot/anchor pair detects accidental rollback and partial corruption; it is not release-qualified native audit storage and cannot resist coordinated same-user rollback/rehashing.
+- A Linux-only `cfg(test)` P4a substrate now exercises single-issue disposable-fixture binding, root-anchored no-follow identity checks, durable intent-before-submit, one-shot fake adapter dispatch, and conservative reconciliation. It contains no GIO/native Trash call and does not qualify or expose any product mutation capability.
 
 There is no current Trash or Permanent capability. No test result for a read-only unit should be promoted into a broader product, platform, or destructive qualification claim.
 

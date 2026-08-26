@@ -3,11 +3,12 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use sha2::Digest;
 use sweepx_fixtures::{
-    FixtureEntryKind, FixtureError, Receipt, TaggedValue, contract_manifest_path,
-    contract_receipt_path, default_p0_p1_manifest, generate_from_contract_files,
-    generate_from_manifest, load_receipt_contract, oracle_from_contract_files,
-    oracle_from_manifest,
+    ContentPattern, FixtureEntry, FixtureEntryKind, FixtureError, LINUX_P4_TRASH_TARGET_ENTRY_ID,
+    Receipt, TaggedValue, contract_manifest_path, contract_receipt_path, default_p0_p1_manifest,
+    generate_from_contract_files, generate_from_manifest, linux_p4_trash_manifest,
+    load_receipt_contract, oracle_from_contract_files, oracle_from_manifest,
 };
 use tempfile::tempdir;
 
@@ -267,6 +268,424 @@ fn normalized_receipt_comparison_ignores_root_path_variance() {
         .receipt;
 
     assert_eq!(normalized_receipt(receipt_a), normalized_receipt(receipt_b));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_manifest_selects_one_private_path_by_entry_id() {
+    let manifest = linux_p4_trash_manifest("ext4");
+    assert_eq!(manifest.platform_profile.os_family, "linux");
+    assert_eq!(manifest.platform_profile.filesystem, "ext4");
+    assert_eq!(
+        manifest.platform_profile.native_mutation_phase,
+        "P4-trash-only"
+    );
+    assert_eq!(
+        manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == FixtureEntryKind::File)
+            .count(),
+        1
+    );
+
+    let root = tempdir().expect("tempdir");
+    let generated = generate_from_manifest(root.path(), &manifest).expect("generate");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+
+    assert_eq!(selected.entry_id(), LINUX_P4_TRASH_TARGET_ENTRY_ID);
+    assert_eq!(selected.expected_filesystem(), "ext4");
+    let authoritative_digest = selected.manifest_digest().to_string();
+    assert_eq!(generated.top_dir(), generated.fixture_dir);
+    assert!(
+        selected.matches_manifest_derived_target(&generated.fixture_dir.join("trash-target.txt"))
+    );
+    assert!(!selected.matches_manifest_derived_target(&generated.fixture_dir));
+    assert!(!selected.matches_manifest_derived_target(
+        &generated.fixture_dir.join(".").join("trash-target.txt")
+    ));
+    let debug = format!("{selected:?}");
+    assert!(!debug.contains(generated.fixture_dir.to_string_lossy().as_ref()));
+    assert!(!debug.contains("trash-target.txt"));
+    selected.verify_unchanged().expect("unchanged");
+    selected
+        .verify_source_unchanged()
+        .expect("source unchanged alias");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashTargetAlreadyIssued)
+    ));
+    let public_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&generated.manifest).unwrap())
+    );
+    assert_eq!(authoritative_digest, public_digest);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_selection_rejects_profile_mismatches() {
+    for (manifest, expected) in [
+        (
+            {
+                let mut manifest = linux_p4_trash_manifest("ext4");
+                manifest.platform_profile.os_family = "macos".into();
+                manifest
+            },
+            "os",
+        ),
+        (
+            {
+                let mut manifest = linux_p4_trash_manifest("ext4");
+                manifest.platform_profile.native_mutation_phase = "P5-qualified".into();
+                manifest
+            },
+            "phase",
+        ),
+    ] {
+        let root = tempdir().expect("tempdir");
+        let generated = generate_from_manifest(root.path(), &manifest).expect("generate");
+        let error = generated
+            .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+            .expect_err("profile mismatch");
+        match expected {
+            "os" => assert!(matches!(
+                error,
+                FixtureError::LinuxTrashOsFamilyMismatch { .. }
+            )),
+            "phase" => assert!(matches!(
+                error,
+                FixtureError::LinuxTrashMutationPhaseMismatch { .. }
+            )),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_selection_rejects_absent_duplicate_and_non_file_entry_ids() {
+    let root = tempdir().expect("tempdir");
+    let generated =
+        generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4")).expect("generate");
+    assert!(matches!(
+        generated.select_linux_trash_target("missing"),
+        Err(FixtureError::LinuxTrashEntryIdAbsent { .. })
+    ));
+    assert!(matches!(
+        generated.select_linux_trash_target("linux-trash-root"),
+        Err(FixtureError::LinuxTrashManifestTargetNotFile { .. })
+    ));
+
+    let mut duplicate = linux_p4_trash_manifest("ext4");
+    duplicate.entries.push(FixtureEntry {
+        entry_id: LINUX_P4_TRASH_TARGET_ENTRY_ID.into(),
+        path: vec!["linux-p4-trash".into(), "second.txt".into()],
+        kind: FixtureEntryKind::File,
+        bytes: Some(1u128.into()),
+        mode: Some("0644".into()),
+        content_pattern: Some(ContentPattern::Zeroes),
+        link_target: None,
+        hardlink_to: None,
+        notes: vec![],
+    });
+    let root = tempdir().expect("duplicate tempdir");
+    let generated = generate_from_manifest(root.path(), &duplicate).expect("generate duplicate");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashEntryIdDuplicate { .. })
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_selection_uses_private_generation_snapshot() {
+    let root = tempdir().expect("tempdir");
+    let authoritative_manifest = linux_p4_trash_manifest("ext4");
+    let authoritative_digest = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&authoritative_manifest).unwrap())
+    );
+    let mut generated =
+        generate_from_manifest(root.path(), &authoritative_manifest).expect("generate");
+    generated.manifest.platform_profile.os_family = "windows".into();
+    generated.manifest.entries[1].entry_id = "redirected-entry".into();
+    generated.fixture_dir = root.path().join("caller-substituted");
+
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("public diagnostic fields cannot redirect selection");
+    assert_eq!(selected.entry_id(), LINUX_P4_TRASH_TARGET_ENTRY_ID);
+    assert_eq!(selected.manifest_digest(), authoritative_digest);
+    assert!(
+        selected
+            .matches_manifest_derived_target(&root.path().join("linux-p4-trash/trash-target.txt"))
+    );
+    assert!(
+        !selected.matches_manifest_derived_target(&generated.fixture_dir.join("trash-target.txt"))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_selection_rejects_symlink_directory_and_hardlink_targets() {
+    let mut directory_manifest = linux_p4_trash_manifest("ext4");
+    directory_manifest.entries.push(FixtureEntry {
+        entry_id: "trash-directory".into(),
+        path: vec!["linux-p4-trash".into(), "trash-directory".into()],
+        kind: FixtureEntryKind::Directory,
+        bytes: None,
+        mode: None,
+        content_pattern: None,
+        link_target: None,
+        hardlink_to: None,
+        notes: vec![],
+    });
+    let root = tempdir().expect("manifest directory tempdir");
+    let generated =
+        generate_from_manifest(root.path(), &directory_manifest).expect("generate directory entry");
+    assert!(matches!(
+        generated.select_linux_trash_target("trash-directory"),
+        Err(FixtureError::LinuxTrashManifestTargetNotFile { .. })
+    ));
+
+    let mut symlink_manifest = linux_p4_trash_manifest("ext4");
+    symlink_manifest.entries.push(FixtureEntry {
+        entry_id: "trash-symlink".into(),
+        path: vec!["linux-p4-trash".into(), "trash-link".into()],
+        kind: FixtureEntryKind::Symlink,
+        bytes: None,
+        mode: None,
+        content_pattern: None,
+        link_target: Some(vec!["trash-target.txt".into()]),
+        hardlink_to: None,
+        notes: vec![],
+    });
+    let root = tempdir().expect("symlink tempdir");
+    let generated =
+        generate_from_manifest(root.path(), &symlink_manifest).expect("generate symlink");
+    assert!(matches!(
+        generated.select_linux_trash_target("trash-symlink"),
+        Err(FixtureError::LinuxTrashManifestTargetNotFile { .. })
+    ));
+
+    let mut hardlink_manifest = linux_p4_trash_manifest("ext4");
+    hardlink_manifest.entries.push(FixtureEntry {
+        entry_id: "trash-hardlink".into(),
+        path: vec!["linux-p4-trash".into(), "trash-hardlink.txt".into()],
+        kind: FixtureEntryKind::Hardlink,
+        bytes: None,
+        mode: None,
+        content_pattern: None,
+        link_target: None,
+        hardlink_to: Some(vec!["linux-p4-trash".into(), "trash-target.txt".into()]),
+        notes: vec![],
+    });
+    let root = tempdir().expect("manifest hardlink tempdir");
+    let generated =
+        generate_from_manifest(root.path(), &hardlink_manifest).expect("generate hardlink entry");
+    assert!(matches!(
+        generated.select_linux_trash_target("trash-hardlink"),
+        Err(FixtureError::LinuxTrashManifestTargetNotFile { .. })
+    ));
+
+    let root = tempdir().expect("runtime symlink tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate runtime symlink");
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt")).expect("remove target");
+    symlink(
+        "replacement",
+        generated.fixture_dir.join("trash-target.txt"),
+    )
+    .expect("replace with symlink");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashRuntimeTargetNotFile { .. })
+    ));
+
+    let root = tempdir().expect("hardlink tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate hardlink");
+    fs::hard_link(
+        generated.fixture_dir.join("trash-target.txt"),
+        generated.fixture_dir.join("extra-hardlink.txt"),
+    )
+    .expect("create hardlink");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashRuntimeTargetHasMultipleLinks { .. })
+    ));
+
+    let root = tempdir().expect("runtime directory tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate runtime directory");
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt")).expect("remove target");
+    fs::create_dir(generated.fixture_dir.join("trash-target.txt")).expect("replace with directory");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashRuntimeTargetNotFile { .. })
+    ));
+
+    let root = tempdir().expect("missing runtime target tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate missing runtime target");
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt")).expect("remove target");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_final_recheck_detects_target_sibling_and_unexpected_tree_changes() {
+    let root = tempdir().expect("preselection tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate preselection");
+    fs::write(generated.fixture_dir.join("trash-target.txt"), b"changed")
+        .expect("change before selection");
+    assert!(matches!(
+        generated.select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID),
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    ));
+
+    let root = tempdir().expect("target tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate target");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    fs::write(generated.fixture_dir.join("trash-target.txt"), b"changed").expect("change target");
+    assert!(matches!(
+        selected.verify_unchanged(),
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    ));
+
+    let mut manifest = linux_p4_trash_manifest("ext4");
+    manifest.entries.push(FixtureEntry {
+        entry_id: "sibling-file".into(),
+        path: vec!["linux-p4-trash".into(), "sibling.txt".into()],
+        kind: FixtureEntryKind::File,
+        bytes: Some(4u128.into()),
+        mode: Some("0644".into()),
+        content_pattern: Some(ContentPattern::Zeroes),
+        link_target: None,
+        hardlink_to: None,
+        notes: vec![],
+    });
+    let root = tempdir().expect("sibling tempdir");
+    let generated = generate_from_manifest(root.path(), &manifest).expect("generate sibling");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    fs::write(generated.fixture_dir.join("sibling.txt"), b"changed").expect("change sibling");
+    assert!(matches!(
+        selected.verify_unchanged(),
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    ));
+
+    let root = tempdir().expect("unexpected tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate unexpected");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    fs::write(generated.fixture_dir.join("unexpected"), b"x").expect("add entry");
+    assert!(matches!(
+        selected.verify_unchanged(),
+        Err(FixtureError::LinuxTrashUnexpectedEntry)
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_post_action_recheck_allows_only_target_removal() {
+    let mut manifest = linux_p4_trash_manifest("ext4");
+    manifest.entries.push(FixtureEntry {
+        entry_id: "sibling-file".into(),
+        path: vec!["linux-p4-trash".into(), "sibling.txt".into()],
+        kind: FixtureEntryKind::File,
+        bytes: Some(4u128.into()),
+        mode: Some("0644".into()),
+        content_pattern: Some(ContentPattern::Zeroes),
+        link_target: None,
+        hardlink_to: None,
+        notes: vec![],
+    });
+
+    let root = tempdir().expect("success tempdir");
+    let generated = generate_from_manifest(root.path(), &manifest).expect("generate success");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    assert!(matches!(
+        selected.verify_target_removed_and_rest_unchanged(),
+        Err(FixtureError::LinuxTrashTargetStillExists { .. })
+    ));
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt"))
+        .expect("remove selected target");
+    selected
+        .verify_target_removed_and_rest_unchanged()
+        .expect("only target removed");
+
+    let mut nested_manifest = linux_p4_trash_manifest("ext4");
+    nested_manifest.entries.insert(
+        1,
+        FixtureEntry {
+            entry_id: "target-parent".into(),
+            path: vec!["linux-p4-trash".into(), "nested".into()],
+            kind: FixtureEntryKind::Directory,
+            bytes: None,
+            mode: None,
+            content_pattern: None,
+            link_target: None,
+            hardlink_to: None,
+            notes: vec![],
+        },
+    );
+    nested_manifest.entries[2].path = vec![
+        "linux-p4-trash".into(),
+        "nested".into(),
+        "trash-target.txt".into(),
+    ];
+    let root = tempdir().expect("nested tempdir");
+    let generated = generate_from_manifest(root.path(), &nested_manifest).expect("generate nested");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select nested target");
+    fs::remove_file(generated.fixture_dir.join("nested/trash-target.txt"))
+        .expect("remove nested target");
+    selected
+        .verify_target_removed_and_rest_unchanged()
+        .expect("only nested target removed");
+
+    let root = tempdir().expect("changed sibling tempdir");
+    let generated = generate_from_manifest(root.path(), &manifest).expect("generate changed");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt"))
+        .expect("remove selected target");
+    fs::write(generated.fixture_dir.join("sibling.txt"), b"changed").expect("change sibling");
+    assert!(matches!(
+        selected.verify_target_removed_and_rest_unchanged(),
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    ));
+
+    let root = tempdir().expect("unexpected tempdir");
+    let generated = generate_from_manifest(root.path(), &manifest).expect("generate unexpected");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+    fs::remove_file(generated.fixture_dir.join("trash-target.txt"))
+        .expect("remove selected target");
+    fs::write(generated.fixture_dir.join("unexpected"), b"x").expect("add entry");
+    assert!(matches!(
+        selected.verify_target_removed_and_rest_unchanged(),
+        Err(FixtureError::LinuxTrashUnexpectedEntry)
+    ));
 }
 
 fn normalized_receipt(mut receipt: Receipt) -> Receipt {

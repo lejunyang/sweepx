@@ -12,6 +12,11 @@ use sweepx_platform::{
     fingerprint_for, known_count, known_u128, reason_for_io,
 };
 
+// Native mutation remains a test-only qualification concern. In particular,
+// this module is absent from normal and all-features library builds.
+#[cfg(all(test, target_os = "linux"))]
+mod trash_qualification;
+
 #[derive(Debug, Default, Clone)]
 pub struct LinuxPlatformScanner;
 

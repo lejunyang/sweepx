@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ use time::format_description::well_known::Rfc3339;
 pub const FIXTURE_MANIFEST_SCHEMA: &str = "sweepx.fixture-manifest/v1";
 pub const RECEIPT_SCHEMA: &str = "sweepx.receipt/v1";
 pub const GENERATOR_VERSION: &str = "0.1.0";
+pub const LINUX_P4_TRASH_TARGET_ENTRY_ID: &str = "trash-target-file";
 const RECEIPT_TIME_OFFSET_SECS: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,11 +181,89 @@ pub struct ReceiptError {
     pub parameters: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct GeneratedFixture {
     pub manifest: FixtureManifest,
     pub fixture_dir: PathBuf,
     pub receipt: Receipt,
+    qualification_source: GeneratedFixtureQualificationSource,
+}
+
+#[derive(Debug)]
+struct GeneratedFixtureQualificationSource {
+    manifest: FixtureManifest,
+    top_dir: PathBuf,
+    trash_target_issued: AtomicBool,
+    #[cfg(target_os = "linux")]
+    baseline: LinuxFixtureTreeBaseline,
+}
+
+/// Read-only evidence binding for one generated Linux P4 Trash fixture target.
+///
+/// The target is derived from the immutable manifest snapshot captured during
+/// generation. Callers cannot construct this value or substitute another path.
+pub struct LinuxTrashTargetQualification {
+    entry_id: String,
+    manifest_digest: String,
+    expected_filesystem: String,
+    top_dir: PathBuf,
+    target_path: PathBuf,
+    #[cfg(target_os = "linux")]
+    target_relative: PathBuf,
+    #[cfg(target_os = "linux")]
+    parent_relative: PathBuf,
+    #[cfg(target_os = "linux")]
+    root_baseline: LinuxFixtureNodeBaseline,
+    #[cfg(target_os = "linux")]
+    parent_baseline: LinuxFixtureNodeBaseline,
+    #[cfg(target_os = "linux")]
+    target_baseline: LinuxFixtureNodeBaseline,
+    #[cfg(target_os = "linux")]
+    sibling_baselines: BTreeMap<PathBuf, LinuxFixtureNodeBaseline>,
+    #[cfg(target_os = "linux")]
+    tree_baseline: LinuxFixtureTreeBaseline,
+}
+
+impl std::fmt::Debug for LinuxTrashTargetQualification {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LinuxTrashTargetQualification")
+            .field("entry_id", &self.entry_id)
+            .field("expected_filesystem", &self.expected_filesystem)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxFixtureTreeBaseline {
+    nodes: BTreeMap<PathBuf, LinuxFixtureNodeBaseline>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxFixtureNodeBaseline {
+    kind: LinuxFixtureNodeKind,
+    device: u64,
+    inode: u64,
+    mode: u32,
+    user_id: u32,
+    group_id: u32,
+    hard_link_count: u64,
+    logical_bytes: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    payload_digest: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinuxFixtureNodeKind {
+    Directory,
+    File,
+    Symlink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +320,37 @@ pub enum FixtureError {
     MixedTopLevelRoots,
     #[error("manifest entry kind is unsupported: {entry_id}")]
     UnsupportedEntryKind { entry_id: String },
+    #[error("Linux Trash fixture entry id is absent: {entry_id}")]
+    LinuxTrashEntryIdAbsent { entry_id: String },
+    #[error("Linux Trash fixture entry id is duplicated: {entry_id}")]
+    LinuxTrashEntryIdDuplicate { entry_id: String },
+    #[error("Linux Trash fixture requires osFamily=linux, found {actual}")]
+    LinuxTrashOsFamilyMismatch { actual: String },
+    #[error("Linux Trash fixture requires nativeMutationPhase=P4-trash-only, found {actual}")]
+    LinuxTrashMutationPhaseMismatch { actual: String },
+    #[error("Linux Trash fixture target must be a manifest file: {entry_id}")]
+    LinuxTrashManifestTargetNotFile { entry_id: String },
+    #[error("Linux Trash fixture target authority was already issued")]
+    LinuxTrashTargetAlreadyIssued,
+    #[error("failed to serialize immutable Linux Trash fixture manifest: {source}")]
+    LinuxTrashManifestSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Linux Trash fixture target must be strictly below its generated top directory")]
+    LinuxTrashTargetNotBelowTopDirectory,
+    #[error("Linux Trash fixture target is not a regular file at runtime: {entry_id}")]
+    LinuxTrashRuntimeTargetNotFile { entry_id: String },
+    #[error("Linux Trash fixture target must have exactly one hard link: {entry_id}")]
+    LinuxTrashRuntimeTargetHasMultipleLinks { entry_id: String },
+    #[error("Linux Trash fixture tree changed")]
+    LinuxTrashFixtureChanged,
+    #[error("Linux Trash fixture tree contains an unexpected entry")]
+    LinuxTrashUnexpectedEntry,
+    #[error("Linux Trash fixture target still exists after the Trash action: {entry_id}")]
+    LinuxTrashTargetStillExists { entry_id: String },
+    #[error("Linux Trash fixture qualification is supported only on Linux")]
+    LinuxTrashUnsupportedHost,
     #[error("oracle found entry outside fixture root: {path}")]
     OracleOutsideFixtureRoot { path: PathBuf },
     #[error("I/O failed for {path}: {source}")]
@@ -256,6 +367,265 @@ pub enum FixtureError {
     },
     #[error("timestamp format failed: {0}")]
     TimestampFormat(#[from] time::error::Format),
+}
+
+impl GeneratedFixture {
+    /// Selects exactly one manifest entry as a Linux P4 Trash test target.
+    ///
+    /// `entry_id` is the only selector. The bound target path is derived from
+    /// the generated manifest snapshot, remains private, and cannot be
+    /// replaced by callers. The platform harness must independently observe
+    /// the live filesystem and compare it with `expected_filesystem()`.
+    pub fn select_linux_trash_target(
+        &self,
+        entry_id: &str,
+    ) -> Result<LinuxTrashTargetQualification, FixtureError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = entry_id;
+            return Err(FixtureError::LinuxTrashUnsupportedHost);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let source = &self.qualification_source;
+            let profile = &source.manifest.platform_profile;
+            if profile.os_family != "linux" {
+                return Err(FixtureError::LinuxTrashOsFamilyMismatch {
+                    actual: profile.os_family.clone(),
+                });
+            }
+            if profile.native_mutation_phase != "P4-trash-only" {
+                return Err(FixtureError::LinuxTrashMutationPhaseMismatch {
+                    actual: profile.native_mutation_phase.clone(),
+                });
+            }
+            let mut matching_entries = source
+                .manifest
+                .entries
+                .iter()
+                .filter(|entry| entry.entry_id == entry_id);
+            let entry =
+                matching_entries
+                    .next()
+                    .ok_or_else(|| FixtureError::LinuxTrashEntryIdAbsent {
+                        entry_id: entry_id.to_string(),
+                    })?;
+            if matching_entries.next().is_some() {
+                return Err(FixtureError::LinuxTrashEntryIdDuplicate {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+            if entry.kind != FixtureEntryKind::File {
+                return Err(FixtureError::LinuxTrashManifestTargetNotFile {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+
+            let target_relative = entry_relative_to_top(&source.manifest, entry)?;
+            if target_relative.as_os_str().is_empty() {
+                return Err(FixtureError::LinuxTrashTargetNotBelowTopDirectory);
+            }
+            let parent_relative = target_relative
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf();
+            let target_path = source.top_dir.join(&target_relative);
+
+            let current_tree = capture_linux_fixture_tree(&source.top_dir)?;
+            let target_baseline = current_tree
+                .nodes
+                .get(&target_relative)
+                .ok_or(FixtureError::LinuxTrashFixtureChanged)?
+                .clone();
+            if target_baseline.kind != LinuxFixtureNodeKind::File {
+                return Err(FixtureError::LinuxTrashRuntimeTargetNotFile {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+            if target_baseline.hard_link_count != 1 {
+                return Err(FixtureError::LinuxTrashRuntimeTargetHasMultipleLinks {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+            compare_linux_fixture_trees(
+                &source.baseline,
+                &current_tree,
+                LinuxTreeComparison::Exact,
+            )?;
+            let root_baseline = current_tree
+                .nodes
+                .get(Path::new(""))
+                .expect("fixture tree capture includes its root")
+                .clone();
+            let parent_baseline = current_tree
+                .nodes
+                .get(&parent_relative)
+                .ok_or(FixtureError::LinuxTrashFixtureChanged)?
+                .clone();
+            if parent_baseline.kind != LinuxFixtureNodeKind::Directory {
+                return Err(FixtureError::LinuxTrashFixtureChanged);
+            }
+            let sibling_baselines = current_tree
+                .nodes
+                .iter()
+                .filter(|(relative, _)| {
+                    relative.as_path() != target_relative
+                        && relative.as_path() != parent_relative
+                        && relative.parent().unwrap_or_else(|| Path::new("")) == parent_relative
+                })
+                .map(|(relative, baseline)| (relative.clone(), baseline.clone()))
+                .collect();
+
+            source
+                .trash_target_issued
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| FixtureError::LinuxTrashTargetAlreadyIssued)?;
+            let manifest_bytes = serde_json::to_vec(&source.manifest)
+                .map_err(|source| FixtureError::LinuxTrashManifestSerialization { source })?;
+
+            Ok(LinuxTrashTargetQualification {
+                entry_id: entry_id.to_string(),
+                manifest_digest: format!("sha256:{:x}", Sha256::digest(manifest_bytes)),
+                expected_filesystem: profile.filesystem.clone(),
+                top_dir: source.top_dir.clone(),
+                target_path,
+                target_relative,
+                parent_relative,
+                root_baseline,
+                parent_baseline,
+                target_baseline,
+                sibling_baselines,
+                tree_baseline: current_tree,
+            })
+        }
+    }
+
+    /// Returns the generated top directory for non-mutating fixture setup and
+    /// diagnostics. It does not identify the selected Trash target.
+    pub fn top_dir(&self) -> &Path {
+        &self.qualification_source.top_dir
+    }
+}
+
+impl LinuxTrashTargetQualification {
+    pub fn entry_id(&self) -> &str {
+        &self.entry_id
+    }
+
+    pub fn expected_filesystem(&self) -> &str {
+        &self.expected_filesystem
+    }
+
+    /// Digest of the immutable manifest snapshot that issued this binding.
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
+    /// Checks lexical equality with the hidden manifest-derived target path.
+    ///
+    /// This performs no filesystem access or canonicalization and grants no
+    /// mutation authority. The platform harness must derive `candidate` from
+    /// the generated manifest and still perform every live qualification and
+    /// final-revalidation gate.
+    pub fn matches_manifest_derived_target(&self, candidate: &Path) -> bool {
+        candidate.as_os_str() == self.target_path.as_os_str()
+    }
+
+    pub fn verify_source_unchanged(&self) -> Result<(), FixtureError> {
+        self.verify_unchanged()
+    }
+
+    pub fn verify_unchanged(&self) -> Result<(), FixtureError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(FixtureError::LinuxTrashUnsupportedHost);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let current = capture_linux_fixture_tree(&self.top_dir)?;
+            compare_linux_fixture_trees(&self.tree_baseline, &current, LinuxTreeComparison::Exact)?;
+            self.verify_named_baselines(&current)
+        }
+    }
+
+    /// Verifies that only the selected directory entry disappeared.
+    ///
+    /// Directory timestamps and implementation-defined directory sizes that
+    /// Linux may update when removing a child are ignored only for the direct
+    /// target parent. Its identity, kind, ownership, mode, and link count must
+    /// remain unchanged; every other recorded node must match exactly.
+    pub fn verify_target_removed_and_rest_unchanged(&self) -> Result<(), FixtureError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(FixtureError::LinuxTrashUnsupportedHost);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let current = capture_linux_fixture_tree(&self.top_dir)?;
+            if current.nodes.contains_key(&self.target_relative) {
+                return Err(FixtureError::LinuxTrashTargetStillExists {
+                    entry_id: self.entry_id.clone(),
+                });
+            }
+            compare_linux_fixture_trees(
+                &self.tree_baseline,
+                &current,
+                LinuxTreeComparison::TargetRemoved {
+                    target: &self.target_relative,
+                },
+            )?;
+
+            let root = current
+                .nodes
+                .get(Path::new(""))
+                .expect("fixture tree capture includes its root");
+            if self.parent_relative.as_os_str().is_empty() {
+                compare_linux_directory_after_child_removal(&self.root_baseline, root)?;
+            } else if root != &self.root_baseline {
+                return Err(FixtureError::LinuxTrashFixtureChanged);
+            }
+            let parent = current
+                .nodes
+                .get(&self.parent_relative)
+                .ok_or(FixtureError::LinuxTrashFixtureChanged)?;
+            compare_linux_directory_after_child_removal(&self.parent_baseline, parent)?;
+            for (relative, expected) in &self.sibling_baselines {
+                let actual = current
+                    .nodes
+                    .get(relative)
+                    .ok_or(FixtureError::LinuxTrashFixtureChanged)?;
+                if actual != expected {
+                    return Err(FixtureError::LinuxTrashFixtureChanged);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_named_baselines(
+        &self,
+        current: &LinuxFixtureTreeBaseline,
+    ) -> Result<(), FixtureError> {
+        for (relative, expected) in [
+            (Path::new(""), &self.root_baseline),
+            (self.parent_relative.as_path(), &self.parent_baseline),
+            (self.target_relative.as_path(), &self.target_baseline),
+        ] {
+            if current.nodes.get(relative) != Some(expected) {
+                return Err(FixtureError::LinuxTrashFixtureChanged);
+            }
+        }
+        for (relative, expected) in &self.sibling_baselines {
+            if current.nodes.get(relative) != Some(expected) {
+                return Err(FixtureError::LinuxTrashFixtureChanged);
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn load_manifest_contract(path: impl AsRef<Path>) -> Result<FixtureManifest, FixtureError> {
@@ -345,10 +715,18 @@ pub fn generate_from_manifest(
     }
 
     let oracle = oracle_from_manifest(&fixture_root, manifest)?;
+    let qualification_source = GeneratedFixtureQualificationSource {
+        manifest: manifest.clone(),
+        top_dir: fixture_dir.clone(),
+        trash_target_issued: AtomicBool::new(false),
+        #[cfg(target_os = "linux")]
+        baseline: capture_linux_fixture_tree(&fixture_dir)?,
+    };
     Ok(GeneratedFixture {
         manifest: manifest.clone(),
         fixture_dir,
         receipt: oracle.receipt,
+        qualification_source,
     })
 }
 
@@ -626,6 +1004,54 @@ pub fn default_p0_p1_manifest() -> FixtureManifest {
     }
 }
 
+/// A minimal Linux P4 fixture with one manifest-selected regular-file target.
+pub fn linux_p4_trash_manifest(filesystem: impl Into<String>) -> FixtureManifest {
+    FixtureManifest {
+        schema: FIXTURE_MANIFEST_SCHEMA.to_string(),
+        manifest_id: "fixture-linux-p4-trash".to_string(),
+        seed: DecimalU128::new(44),
+        created_at: "2026-08-27T06:00:00Z".to_string(),
+        generator_version: GENERATOR_VERSION.to_string(),
+        platform_profile: PlatformProfile {
+            os_family: "linux".to_string(),
+            filesystem: filesystem.into(),
+            case_sensitivity: "case-sensitive".to_string(),
+            native_mutation_phase: "P4-trash-only".to_string(),
+        },
+        entries: vec![
+            FixtureEntry {
+                entry_id: "linux-trash-root".to_string(),
+                path: vec!["linux-p4-trash".to_string()],
+                kind: FixtureEntryKind::Directory,
+                bytes: None,
+                mode: None,
+                content_pattern: None,
+                link_target: None,
+                hardlink_to: None,
+                notes: vec!["disposable Linux P4 Trash fixture root".to_string()],
+            },
+            FixtureEntry {
+                entry_id: LINUX_P4_TRASH_TARGET_ENTRY_ID.to_string(),
+                path: vec!["linux-p4-trash".to_string(), "trash-target.txt".to_string()],
+                kind: FixtureEntryKind::File,
+                bytes: Some(DecimalU128::new(23)),
+                mode: Some("0644".to_string()),
+                content_pattern: Some(ContentPattern::AsciiSeed),
+                link_target: None,
+                hardlink_to: None,
+                notes: vec!["sole Linux P4 Trash target".to_string()],
+            },
+        ],
+        expectations: ManifestExpectations {
+            entry_count: DecimalU128::new(2),
+            logical_bytes: TaggedValue::known(23),
+            allocated_bytes: TaggedValue::lower_bound(23, "cross_platform_block_size_unknown"),
+            requires_live_scan: true,
+            expected_boundaries: vec!["kind:linux-p4-trash/trash-target.txt:file".to_string()],
+        },
+    }
+}
+
 pub fn is_within_fixture_root(root: &Path, candidate: &Path) -> bool {
     root.is_absolute()
         && candidate.is_absolute()
@@ -884,6 +1310,180 @@ fn resolve_existing_or_new_path(root: &Path, segments: &[String]) -> Result<Path
         return Err(FixtureError::TargetEscapesFixtureRoot { path });
     }
     Ok(path)
+}
+
+#[cfg(target_os = "linux")]
+fn entry_relative_to_top(
+    manifest: &FixtureManifest,
+    entry: &FixtureEntry,
+) -> Result<PathBuf, FixtureError> {
+    let top = manifest
+        .entries
+        .first()
+        .and_then(|candidate| candidate.path.first())
+        .ok_or(FixtureError::LinuxTrashTargetNotBelowTopDirectory)?;
+    if entry.path.first() != Some(top) || entry.path.len() < 2 {
+        return Err(FixtureError::LinuxTrashTargetNotBelowTopDirectory);
+    }
+    Ok(PathBuf::from_iter(entry.path.iter().skip(1)))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+enum LinuxTreeComparison<'a> {
+    Exact,
+    TargetRemoved { target: &'a Path },
+}
+
+#[cfg(target_os = "linux")]
+fn capture_linux_fixture_tree(top_dir: &Path) -> Result<LinuxFixtureTreeBaseline, FixtureError> {
+    let mut nodes = BTreeMap::new();
+    capture_linux_fixture_tree_inner(top_dir, top_dir, &mut nodes)?;
+    Ok(LinuxFixtureTreeBaseline { nodes })
+}
+
+#[cfg(target_os = "linux")]
+fn capture_linux_fixture_tree_inner(
+    top_dir: &Path,
+    path: &Path,
+    nodes: &mut BTreeMap<PathBuf, LinuxFixtureNodeBaseline>,
+) -> Result<(), FixtureError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| FixtureError::LinuxTrashFixtureChanged)?;
+    let relative = path
+        .strip_prefix(top_dir)
+        .map_err(|_| FixtureError::LinuxTrashFixtureChanged)?
+        .to_path_buf();
+    let baseline = linux_fixture_node_baseline(path, &metadata)?;
+    let is_directory = baseline.kind == LinuxFixtureNodeKind::Directory;
+    nodes.insert(relative, baseline);
+    if is_directory {
+        let mut children = fs::read_dir(path)
+            .map_err(|_| FixtureError::LinuxTrashFixtureChanged)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| FixtureError::LinuxTrashFixtureChanged)?;
+        children.sort_by_key(|child| child.file_name());
+        for child in children {
+            capture_linux_fixture_tree_inner(top_dir, &child.path(), nodes)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_fixture_node_baseline(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<LinuxFixtureNodeBaseline, FixtureError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_dir() {
+        LinuxFixtureNodeKind::Directory
+    } else if file_type.is_file() {
+        LinuxFixtureNodeKind::File
+    } else if file_type.is_symlink() {
+        LinuxFixtureNodeKind::Symlink
+    } else {
+        return Err(FixtureError::LinuxTrashFixtureChanged);
+    };
+    let payload_digest = match kind {
+        LinuxFixtureNodeKind::File => {
+            Some(hash_file(path).map_err(|_| FixtureError::LinuxTrashFixtureChanged)?)
+        }
+        LinuxFixtureNodeKind::Symlink => {
+            use std::os::unix::ffi::OsStrExt;
+
+            let target = fs::read_link(path).map_err(|_| FixtureError::LinuxTrashFixtureChanged)?;
+            Some(format!(
+                "sha256:{:x}",
+                Sha256::digest(target.as_os_str().as_bytes())
+            ))
+        }
+        LinuxFixtureNodeKind::Directory => None,
+    };
+    Ok(LinuxFixtureNodeBaseline {
+        kind,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        user_id: metadata.uid(),
+        group_id: metadata.gid(),
+        hard_link_count: metadata.nlink(),
+        logical_bytes: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+        payload_digest,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn compare_linux_fixture_trees(
+    expected: &LinuxFixtureTreeBaseline,
+    actual: &LinuxFixtureTreeBaseline,
+    comparison: LinuxTreeComparison<'_>,
+) -> Result<(), FixtureError> {
+    for relative in actual.nodes.keys() {
+        if !expected.nodes.contains_key(relative) {
+            return Err(FixtureError::LinuxTrashUnexpectedEntry);
+        }
+    }
+    for (relative, expected_node) in &expected.nodes {
+        if matches!(
+            comparison,
+            LinuxTreeComparison::TargetRemoved { target } if relative == target
+        ) {
+            continue;
+        }
+        let actual_node = actual
+            .nodes
+            .get(relative)
+            .ok_or(FixtureError::LinuxTrashFixtureChanged)?;
+        let matches = match comparison {
+            LinuxTreeComparison::TargetRemoved { target }
+                if target.parent().unwrap_or_else(|| Path::new("")) == relative.as_path() =>
+            {
+                linux_directory_after_child_removal_matches(expected_node, actual_node)
+            }
+            LinuxTreeComparison::Exact | LinuxTreeComparison::TargetRemoved { .. } => {
+                expected_node == actual_node
+            }
+        };
+        if !matches {
+            return Err(FixtureError::LinuxTrashFixtureChanged);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_directory_after_child_removal_matches(
+    expected: &LinuxFixtureNodeBaseline,
+    actual: &LinuxFixtureNodeBaseline,
+) -> bool {
+    expected.kind == LinuxFixtureNodeKind::Directory
+        && actual.kind == LinuxFixtureNodeKind::Directory
+        && expected.device == actual.device
+        && expected.inode == actual.inode
+        && expected.mode == actual.mode
+        && expected.user_id == actual.user_id
+        && expected.group_id == actual.group_id
+        && expected.hard_link_count == actual.hard_link_count
+        && expected.payload_digest == actual.payload_digest
+}
+
+#[cfg(target_os = "linux")]
+fn compare_linux_directory_after_child_removal(
+    expected: &LinuxFixtureNodeBaseline,
+    actual: &LinuxFixtureNodeBaseline,
+) -> Result<(), FixtureError> {
+    if linux_directory_after_child_removal_matches(expected, actual) {
+        Ok(())
+    } else {
+        Err(FixtureError::LinuxTrashFixtureChanged)
+    }
 }
 
 fn ensure_parent_exists(path: &Path) -> Result<(), FixtureError> {
