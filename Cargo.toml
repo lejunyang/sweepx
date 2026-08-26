@@ -19,6 +19,8 @@ members = [
   "crates/sweepx-catalog",
   "crates/sweepx-tui",
   "crates/sweepx-safety",
+  "crates/sweepx-audit",
+  "crates/sweepx-executor",
 ]
 resolver = "2"
 

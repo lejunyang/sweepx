@@ -7,6 +7,46 @@
 //! ```compile_fail
 //! let _auth: sweepx_safety::ExecutionAuthorization = serde_json::from_str("{}").unwrap();
 //! ```
+//!
+//! Real human and dangerous-delete authorization constructors are deliberately not public.
+//! External P3 callers can mint only the explicitly simulation-only authorization type.
+//!
+//! ```compile_fail
+//! use sweepx_safety::HumanApprovalRequest;
+//! ```
+//!
+//! ```compile_fail
+//! use sweepx_safety::PermanentAuthorizationRequest;
+//! ```
+//!
+//! ```compile_fail
+//! # fn assert_not_clone(token: sweepx_safety::ExecutionAuthorization) {
+//! let _copy = token.clone();
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! # fn assert_not_clone(token: sweepx_safety::ConsumedPreflightPermit) {
+//! let _copy = token.clone();
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! # fn assert_not_clone(proof: sweepx_safety::simulation::SimulatedRevalidationProof) {
+//! let _copy = proof.clone();
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! let _proof = sweepx_safety::simulation::SimulatedRevalidationProof {
+//!     authorization_id: String::new(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! let _action: sweepx_safety::simulation::SimulatedAction =
+//!     serde_json::from_str("{}").unwrap();
+//! ```
 
 mod authorization;
 mod permit;
@@ -16,14 +56,23 @@ mod state;
 mod time;
 
 pub use authorization::{
-    ApprovalConfirmationEvidence, AuthorizationBindError, AuthorizationClaimError,
-    AuthorizationConsumeError, AuthorizationMatchError, AuthorizationState, ExecutionAuthorization,
-    HumanApprovalRequest, PermanentAuthorizationRequest,
+    AuditBindingError, AuthorizationBindError, AuthorizationClaimError, AuthorizationConsumeError,
+    AuthorizationMatchError, AuthorizationState, ExecutionAuthorization,
 };
 pub use permit::{
-    PERMIT_TTL, PreflightPermit, PreflightPermitError, PreflightPermitRequest,
-    consume_preflight_permit, issue_preflight_permit,
+    ConsumedPermanentPreflightPermit, ConsumedPreflightPermit, ConsumedTrashPreflightPermit,
+    PERMIT_TTL, PreflightPermit, PreflightPermitError, consume_preflight_permit,
 };
+
+pub mod simulation {
+    pub use crate::authorization::SimulatedAuthorizationRequest;
+    pub use crate::permit::{
+        DeterministicRevalidationObserver, SimulatedRevalidationObserver,
+        SimulatedRevalidationProof, issue_simulated_preflight_permit,
+        verify_simulated_revalidation,
+    };
+    pub use crate::plan::SimulatedAction;
+}
 pub use plan::{
     AggregateRisk, CanonicalPlanError, DeletionMode, DeletionPlan, DeletionPlanInput,
     ExplanationDigest, ManifestDigest, PlanAction, PlanDigest, PlanFingerprint, PlanId, PlanItem,

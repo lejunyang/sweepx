@@ -1,17 +1,18 @@
 [package]
-name = "sweepx-safety"
+name = "sweepx-audit"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
 rust-version = "1.98.0"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-sweepx-audit = { path = "../sweepx-audit" }
+fs2 = "0.4.3"
+libc = "0.2.177"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+serde_jcs = "0.1.0"
+sha2 = "0.10.9"
 thiserror = "2.0.16"
-sweepx-canonical = { path = "../sweepx-canonical" }
 
 [dev-dependencies]
-libc = "0.2.177"
 tempfile = "3.21.0"

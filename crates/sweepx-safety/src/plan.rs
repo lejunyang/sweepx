@@ -10,6 +10,8 @@ use sweepx_canonical::{
 };
 
 const PLAN_SCHEMA: &str = "sweepx.plan/v1";
+const SIMULATED_SOURCE_IDENTITY_DOMAIN: &str = "sweepx.simulated-source-identity/v1";
+const SIMULATED_REVALIDATION_DOMAIN: &str = "sweepx.simulated-revalidation/v1";
 pub const PLAN_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -188,6 +190,41 @@ impl PlanItemDigest {
     }
 }
 
+/// Opaque, plan-derived input for one deterministic simulated action.
+///
+/// It contains stable identifiers and domain-separated digests only, never a native path or
+/// mutation capability. Values can be obtained only from [`DeletionPlan::ordered_simulated_actions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulatedAction {
+    item_id: String,
+    action_id: String,
+    risk_tier: RiskTier,
+    source_identity_digest: String,
+    revalidation_digest: String,
+}
+
+impl SimulatedAction {
+    pub fn item_id(&self) -> &str {
+        &self.item_id
+    }
+
+    pub fn action_id(&self) -> &str {
+        &self.action_id
+    }
+
+    pub fn risk_tier(&self) -> RiskTier {
+        self.risk_tier
+    }
+
+    pub fn source_identity_digest(&self) -> &str {
+        &self.source_identity_digest
+    }
+
+    pub fn revalidation_digest(&self) -> &str {
+        &self.revalidation_digest
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeletionPlan {
     pub(crate) schema: String,
@@ -213,34 +250,31 @@ pub struct DeletionPlan {
 }
 
 impl DeletionPlan {
+    pub fn plan_id(&self) -> &PlanId {
+        &self.plan_id
+    }
+
+    pub fn mode(&self) -> DeletionMode {
+        self.mode
+    }
+
     pub fn from_input(input: DeletionPlanInput) -> Result<Self, CanonicalPlanError> {
         if input.items.is_empty() {
             return Err(CanonicalPlanError::EmptyPlan);
         }
 
         let created_at = to_unix_millis(input.created_at)?;
-        let expires_at = created_at + PLAN_TTL.as_millis();
+        let expires_at = created_at
+            .checked_add(PLAN_TTL.as_millis())
+            .ok_or(CanonicalPlanError::InvalidTimestamp)?;
         let items = input
             .items
             .into_iter()
             .map(PlanItem::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        validate_mode_and_risk(input.mode, &items)?;
+        validate_plan_semantics(input.mode, &items)?;
 
-        let aggregate_tier = items
-            .iter()
-            .map(|item| item.risk_tier)
-            .max()
-            .expect("validated non-empty items");
-        let aggregate_risk = AggregateRisk {
-            tier: aggregate_tier,
-            factors: items
-                .iter()
-                .flat_map(|item| item.risk_factors.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        };
+        let aggregate_risk = aggregate_risk_for_items(&items);
 
         let draft = PlanDigestInput {
             schema: PLAN_SCHEMA,
@@ -306,9 +340,20 @@ impl DeletionPlan {
 
     pub fn is_expired_at(&self, now: SystemTime) -> bool {
         match to_unix_millis(now) {
-            Ok(now_ms) => now_ms > self.expires_at_unix_ms,
+            Ok(now_ms) => now_ms >= self.expires_at_unix_ms,
             Err(_) => true,
         }
+    }
+
+    pub(crate) fn is_created_after(&self, now: SystemTime) -> bool {
+        match to_unix_millis(now) {
+            Ok(now_ms) => self.created_at_unix_ms > now_ms,
+            Err(_) => true,
+        }
+    }
+
+    pub(crate) fn is_not_yet_valid_at(&self, now: SystemTime) -> bool {
+        self.is_created_after(now)
     }
 
     pub fn short_fingerprint(&self) -> PlanFingerprint {
@@ -391,7 +436,11 @@ impl DeletionPlan {
         if plan.items.is_empty() {
             return Err(CanonicalPlanError::EmptyPlan);
         }
-        validate_mode_and_risk(plan.mode, &plan.items)?;
+        validate_plan_ttl(plan.created_at_unix_ms, plan.expires_at_unix_ms)?;
+        validate_plan_semantics(plan.mode, &plan.items)?;
+        if plan.aggregate_risk != aggregate_risk_for_items(&plan.items) {
+            return Err(CanonicalPlanError::AggregateRiskMismatch);
+        }
         plan.verify_canonical_digest()?;
         Ok(plan)
     }
@@ -415,6 +464,66 @@ impl DeletionPlan {
             action_count: self.action_count(),
             descendant_manifest_digests: manifest_digests,
         }
+    }
+
+    pub fn ordered_actions(&self) -> Vec<(String, String, RiskTier)> {
+        self.items
+            .iter()
+            .flat_map(|item| {
+                item.actions.iter().map(|action| {
+                    (
+                        item.item_id.clone(),
+                        action.action_id.clone(),
+                        action.risk_tier,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Derives the canonical simulated execution sequence without accepting caller-provided
+    /// identity or revalidation digests.
+    pub fn ordered_simulated_actions(&self) -> Result<Vec<SimulatedAction>, CanonicalPlanError> {
+        self.verify_canonical_digest()?;
+        validate_plan_semantics(self.mode, &self.items)?;
+
+        self.items
+            .iter()
+            .flat_map(|item| {
+                item.actions.iter().map(move |action| {
+                    let source_identity_digest =
+                        domain_separated_digest(&SimulatedSourceIdentityInput {
+                            domain: SIMULATED_SOURCE_IDENTITY_DOMAIN,
+                            target: &item.target,
+                        })?;
+                    let revalidation_digest =
+                        domain_separated_digest(&SimulatedRevalidationInput {
+                            domain: SIMULATED_REVALIDATION_DOMAIN,
+                            plan_digest: self.canonical_digest.as_str(),
+                            source_identity_digest: &source_identity_digest,
+                            item_id: &item.item_id,
+                            action_id: &action.action_id,
+                            top_level_action_id: &item.top_level_action_id,
+                            action_manifest_digest: action.manifest_digest.as_ref(),
+                            descendant_manifest_digest: item.descendant_manifest_digest.as_ref(),
+                            risk_tier: action.risk_tier,
+                            policy_version: &self.safety_policy_version,
+                            policy_digest: &self.safety_policy_digest,
+                            protected_anchor_snapshot_digest: &self
+                                .protected_anchor_snapshot_digest,
+                            adapter_capabilities_digest: &self.adapter_capabilities_digest,
+                            cleaner_set_digest: &self.cleaner_set_digest,
+                        })?;
+                    Ok(SimulatedAction {
+                        item_id: item.item_id.clone(),
+                        action_id: action.action_id.clone(),
+                        risk_tier: action.risk_tier,
+                        source_identity_digest,
+                        revalidation_digest,
+                    })
+                })
+            })
+            .collect()
     }
 
     pub fn exact_item(&self, item_id: &str) -> Option<&PlanItem> {
@@ -475,7 +584,20 @@ impl TryFrom<PlanItemInput> for PlanItem {
                 item_id: input.item_id,
             });
         }
-
+        if !input
+            .actions
+            .iter()
+            .any(|action| action.action_id == input.top_level_action_id)
+        {
+            return Err(CanonicalPlanError::MissingTopLevelAction {
+                item_id: input.item_id,
+            });
+        }
+        if !input.subtree_complete {
+            return Err(CanonicalPlanError::IncompleteSubtree {
+                item_id: input.item_id,
+            });
+        }
         Ok(Self {
             item_id: input.item_id,
             candidate_id: input.candidate_id,
@@ -497,18 +619,51 @@ pub enum CanonicalPlanError {
     EmptyPlan,
     #[error("item {item_id} must contain at least one action")]
     ItemWithoutActions { item_id: String },
+    #[error("plan contains duplicate item id {item_id}")]
+    DuplicateItemId { item_id: String },
+    #[error("plan contains duplicate action id {action_id}")]
+    DuplicateActionId { action_id: String },
+    #[error("item {item_id} does not contain its top-level action")]
+    MissingTopLevelAction { item_id: String },
+    #[error("item {item_id} has incomplete subtree evidence")]
+    IncompleteSubtree { item_id: String },
+    #[error("permanent item {item_id} has multiple actions without a descendant manifest")]
+    MissingDescendantManifest { item_id: String },
+    #[error("trash item {item_id} must contain exactly its top-level action")]
+    InvalidTrashActionShape { item_id: String },
+    #[error("permanent item {item_id} must place its top-level action last")]
+    InvalidPermanentActionOrder { item_id: String },
     #[error("trash and permanent modes cannot be mixed")]
     MixedModes,
-    #[error("permanent mode requires every action to be R4")]
+    #[error("permanent mode requires every item and action to be R4")]
     PermanentRequiresR4,
+    #[error("item {item_id} is blocked and cannot appear in a plan")]
+    BlockedItemInPlan { item_id: String },
     #[error("blocked actions cannot appear in a plan")]
     BlockedActionInPlan,
+    #[error(
+        "item {item_id} risk {item_risk:?} is below its maximum action risk {max_action_risk:?}"
+    )]
+    ItemRiskBelowAction {
+        item_id: String,
+        item_risk: RiskTier,
+        max_action_risk: RiskTier,
+    },
+    #[error("stored aggregate risk does not match the recomputed item risks and factors")]
+    AggregateRiskMismatch,
     #[error("failed to derive canonical digest: {0}")]
     Canonical(#[from] CanonicalError),
     #[error("failed to parse plan json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("system time is outside representable unix milliseconds")]
     InvalidTimestamp,
+    #[error(
+        "plan expiry {expires_at_unix_ms} does not equal creation {created_at_unix_ms} plus the configured TTL"
+    )]
+    InvalidPlanTtl {
+        created_at_unix_ms: u128,
+        expires_at_unix_ms: u128,
+    },
     #[error("stored canonical digest does not match the recomputed digest")]
     CanonicalDigestMismatch,
     #[error("invalid field {field}: {reason}")]
@@ -536,6 +691,34 @@ struct PlanDigestInput<'a> {
     cleaner_set_digest: &'a str,
     items: &'a [PlanItem],
     aggregate_risk: &'a AggregateRisk,
+}
+
+#[derive(Serialize)]
+struct SimulatedSourceIdentityInput<'a> {
+    domain: &'static str,
+    target: &'a TargetIdentity,
+}
+
+#[derive(Serialize)]
+struct SimulatedRevalidationInput<'a> {
+    domain: &'static str,
+    plan_digest: &'a str,
+    source_identity_digest: &'a str,
+    item_id: &'a str,
+    action_id: &'a str,
+    top_level_action_id: &'a str,
+    action_manifest_digest: Option<&'a ManifestDigest>,
+    descendant_manifest_digest: Option<&'a ManifestDigest>,
+    risk_tier: RiskTier,
+    policy_version: &'a str,
+    policy_digest: &'a str,
+    protected_anchor_snapshot_digest: &'a str,
+    adapter_capabilities_digest: &'a str,
+    cleaner_set_digest: &'a str,
+}
+
+fn domain_separated_digest<T: Serialize>(value: &T) -> Result<String, CanonicalPlanError> {
+    Ok(format!("sha256:{}", plan_digest_hex(value)?))
 }
 
 fn required_string(root: &Value, field: &'static str) -> Result<String, CanonicalPlanError> {
@@ -648,12 +831,6 @@ fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
         .iter()
         .map(parse_action)
         .collect::<Result<Vec<_>, _>>()?;
-    if actions.is_empty() {
-        return Err(CanonicalPlanError::InvalidField {
-            field: "actions",
-            reason: "expected at least one action".to_string(),
-        });
-    }
     Ok(PlanItem {
         item_id: required_string(value, "item_id")?,
         candidate_id: required_string(value, "candidate_id")?,
@@ -679,17 +856,7 @@ fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
                 field: "subtree_complete",
                 reason: "expected bool".to_string(),
             })?,
-        descendant_manifest_digest: value
-            .get("descendant_manifest_digest")
-            .map(|entry| {
-                entry.as_str().map(ManifestDigest::new).ok_or_else(|| {
-                    CanonicalPlanError::InvalidField {
-                        field: "descendant_manifest_digest",
-                        reason: "expected string or null".to_string(),
-                    }
-                })
-            })
-            .transpose()?,
+        descendant_manifest_digest: optional_manifest_digest(value, "descendant_manifest_digest")?,
         actions,
     })
 }
@@ -697,37 +864,149 @@ fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
 fn parse_action(value: &Value) -> Result<PlanAction, CanonicalPlanError> {
     Ok(PlanAction {
         action_id: required_string(value, "action_id")?,
-        manifest_digest: value
-            .get("manifest_digest")
-            .map(|entry| {
-                entry.as_str().map(ManifestDigest::new).ok_or_else(|| {
-                    CanonicalPlanError::InvalidField {
-                        field: "manifest_digest",
-                        reason: "expected string or null".to_string(),
-                    }
-                })
-            })
-            .transpose()?,
+        manifest_digest: optional_manifest_digest(value, "manifest_digest")?,
         risk_tier: parse_risk_tier("risk_tier", &required_string(value, "risk_tier")?)?,
     })
 }
 
-fn validate_mode_and_risk(
+fn optional_manifest_digest(
+    root: &Value,
+    field: &'static str,
+) -> Result<Option<ManifestDigest>, CanonicalPlanError> {
+    match root.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => Ok(Some(ManifestDigest::new(raw))),
+        Some(_) => Err(CanonicalPlanError::InvalidField {
+            field,
+            reason: "expected string or null".to_string(),
+        }),
+    }
+}
+
+fn validate_plan_ttl(
+    created_at_unix_ms: u128,
+    expires_at_unix_ms: u128,
+) -> Result<(), CanonicalPlanError> {
+    let expected_expires_at = created_at_unix_ms.checked_add(PLAN_TTL.as_millis());
+    if expected_expires_at != Some(expires_at_unix_ms) {
+        return Err(CanonicalPlanError::InvalidPlanTtl {
+            created_at_unix_ms,
+            expires_at_unix_ms,
+        });
+    }
+    Ok(())
+}
+
+fn aggregate_risk_for_items(items: &[PlanItem]) -> AggregateRisk {
+    AggregateRisk {
+        tier: items
+            .iter()
+            .map(|item| item.risk_tier)
+            .max()
+            .expect("validated non-empty items"),
+        factors: items
+            .iter()
+            .flat_map(|item| item.risk_factors.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn validate_plan_semantics(
     mode: DeletionMode,
     items: &[PlanItem],
 ) -> Result<(), CanonicalPlanError> {
-    let tiers = items
-        .iter()
-        .flat_map(|item| item.actions.iter())
-        .map(|action| action.risk_tier)
-        .collect::<Vec<_>>();
+    let mut item_ids = BTreeSet::new();
+    let mut action_ids = BTreeSet::new();
 
-    if tiers.contains(&RiskTier::Blocked) {
-        return Err(CanonicalPlanError::BlockedActionInPlan);
+    for item in items {
+        if !item_ids.insert(item.item_id.as_str()) {
+            return Err(CanonicalPlanError::DuplicateItemId {
+                item_id: item.item_id.clone(),
+            });
+        }
+        for action in &item.actions {
+            if !action_ids.insert(action.action_id.as_str()) {
+                return Err(CanonicalPlanError::DuplicateActionId {
+                    action_id: action.action_id.clone(),
+                });
+            }
+        }
     }
 
-    if mode == DeletionMode::Permanent && tiers.iter().any(|tier| *tier != RiskTier::R4) {
-        return Err(CanonicalPlanError::PermanentRequiresR4);
+    for item in items {
+        if item.actions.is_empty() {
+            return Err(CanonicalPlanError::ItemWithoutActions {
+                item_id: item.item_id.clone(),
+            });
+        }
+        if item.risk_tier == RiskTier::Blocked {
+            return Err(CanonicalPlanError::BlockedItemInPlan {
+                item_id: item.item_id.clone(),
+            });
+        }
+        if item
+            .actions
+            .iter()
+            .any(|action| action.risk_tier == RiskTier::Blocked)
+        {
+            return Err(CanonicalPlanError::BlockedActionInPlan);
+        }
+        let max_action_risk = item
+            .actions
+            .iter()
+            .map(|action| action.risk_tier)
+            .max()
+            .expect("validated non-empty actions");
+        if item.risk_tier < max_action_risk {
+            return Err(CanonicalPlanError::ItemRiskBelowAction {
+                item_id: item.item_id.clone(),
+                item_risk: item.risk_tier,
+                max_action_risk,
+            });
+        }
+        if mode == DeletionMode::Permanent
+            && (item.risk_tier != RiskTier::R4
+                || item
+                    .actions
+                    .iter()
+                    .any(|action| action.risk_tier != RiskTier::R4))
+        {
+            return Err(CanonicalPlanError::PermanentRequiresR4);
+        }
+        if !item.subtree_complete {
+            return Err(CanonicalPlanError::IncompleteSubtree {
+                item_id: item.item_id.clone(),
+            });
+        }
+        let top_level_position = item
+            .actions
+            .iter()
+            .position(|action| action.action_id == item.top_level_action_id)
+            .ok_or_else(|| CanonicalPlanError::MissingTopLevelAction {
+                item_id: item.item_id.clone(),
+            })?;
+        match mode {
+            DeletionMode::Trash if item.actions.len() != 1 || top_level_position != 0 => {
+                return Err(CanonicalPlanError::InvalidTrashActionShape {
+                    item_id: item.item_id.clone(),
+                });
+            }
+            DeletionMode::Permanent if top_level_position + 1 != item.actions.len() => {
+                return Err(CanonicalPlanError::InvalidPermanentActionOrder {
+                    item_id: item.item_id.clone(),
+                });
+            }
+            DeletionMode::Permanent
+                if item.actions.len() > 1 && item.descendant_manifest_digest.is_none() =>
+            {
+                return Err(CanonicalPlanError::MissingDescendantManifest {
+                    item_id: item.item_id.clone(),
+                });
+            }
+            _ => {}
+        }
     }
 
     Ok(())
@@ -781,6 +1060,31 @@ mod tests {
         }
     }
 
+    fn additional_trash_item(item_id: &str, action_id: &str) -> PlanItemInput {
+        let mut input = base_input();
+        let mut item = input.items.pop().unwrap();
+        item.item_id = item_id.to_string();
+        item.candidate_id = format!("candidate-{item_id}");
+        item.explanation_digest = ExplanationDigest::new(format!("explain-{item_id}"));
+        item.top_level_action_id = action_id.to_string();
+        item.target = TargetIdentity::new(format!("target-{item_id}"));
+        item.actions = vec![PlanAction::new(action_id, RiskTier::R2)];
+        item
+    }
+
+    fn permanent_multi_action_input() -> DeletionPlanInput {
+        let mut input = base_input();
+        input.mode = DeletionMode::Permanent;
+        input.items[0].risk_tier = RiskTier::R4;
+        input.items[0].descendant_manifest_digest =
+            Some(ManifestDigest::new("descendant-manifest-1"));
+        input.items[0].actions = vec![
+            PlanAction::new("action-child-1", RiskTier::R4),
+            PlanAction::new("action-top-1", RiskTier::R4),
+        ];
+        input
+    }
+
     #[test]
     fn plan_edit_changes_digest() {
         let left = DeletionPlan::from_input(base_input()).unwrap();
@@ -815,6 +1119,231 @@ mod tests {
         let plan = DeletionPlan::from_input(input).unwrap();
         assert_eq!(plan.aggregate_risk.tier, RiskTier::R4);
         assert_eq!(plan.mode, DeletionMode::Permanent);
+    }
+
+    #[test]
+    fn rejects_duplicate_item_ids() {
+        let mut input = base_input();
+        input
+            .items
+            .push(additional_trash_item("item-1", "action-top-2"));
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::DuplicateItemId { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_action_ids_across_items() {
+        let mut input = base_input();
+        input
+            .items
+            .push(additional_trash_item("item-2", "action-top-1"));
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::DuplicateActionId { ref action_id }
+                if action_id == "action-top-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_action_ids_within_an_item() {
+        let mut input = base_input();
+        input.items[0]
+            .actions
+            .push(PlanAction::new("action-top-1", RiskTier::R2));
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::DuplicateActionId { ref action_id }
+                if action_id == "action-top-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_top_level_action_owned_by_another_item() {
+        let mut input = base_input();
+        input.items[0].top_level_action_id = "action-top-2".to_string();
+        input
+            .items
+            .push(additional_trash_item("item-2", "action-top-2"));
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::MissingTopLevelAction { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_incomplete_subtree_from_input() {
+        let mut input = base_input();
+        input.items[0].subtree_complete = false;
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::IncompleteSubtree { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn trash_rejects_extra_action() {
+        let mut input = base_input();
+        input.items[0]
+            .actions
+            .insert(0, PlanAction::new("action-child-1", RiskTier::R2));
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::InvalidTrashActionShape { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn permanent_rejects_top_level_action_before_descendants() {
+        let mut input = permanent_multi_action_input();
+        input.items[0].actions.swap(0, 1);
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::InvalidPermanentActionOrder { ref item_id }
+                if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn permanent_preserves_descendant_then_top_level_order() {
+        let plan = DeletionPlan::from_input(permanent_multi_action_input()).unwrap();
+        let action_ids = plan.items[0]
+            .actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(action_ids, vec!["action-child-1", "action-top-1"]);
+    }
+
+    #[test]
+    fn simulated_action_source_identity_is_stable_across_plan_and_logical_ids() {
+        let first = DeletionPlan::from_input(base_input()).unwrap();
+        let mut changed = base_input();
+        changed.plan_id = PlanId::new("different-plan-id");
+        changed.nonce = "different-plan-nonce".to_string();
+        changed.items[0].item_id = "different-item-id".to_string();
+        changed.items[0].candidate_id = "different-candidate-id".to_string();
+        changed.items[0].top_level_action_id = "different-action-id".to_string();
+        changed.items[0].actions[0] = PlanAction::new("different-action-id", RiskTier::R2);
+        let second = DeletionPlan::from_input(changed).unwrap();
+
+        let first = first.ordered_simulated_actions().unwrap();
+        let second = second.ordered_simulated_actions().unwrap();
+        assert_eq!(
+            first[0].source_identity_digest(),
+            second[0].source_identity_digest()
+        );
+        assert_ne!(
+            first[0].revalidation_digest(),
+            second[0].revalidation_digest()
+        );
+    }
+
+    #[test]
+    fn simulated_action_source_identity_distinguishes_target_but_not_logical_action_id() {
+        let original = DeletionPlan::from_input(base_input())
+            .unwrap()
+            .ordered_simulated_actions()
+            .unwrap();
+        let mut changed_target = base_input();
+        changed_target.items[0].target = TargetIdentity::new("different-target");
+        let changed_target = DeletionPlan::from_input(changed_target)
+            .unwrap()
+            .ordered_simulated_actions()
+            .unwrap();
+        let mut changed_action = base_input();
+        changed_action.items[0].top_level_action_id = "different-action".to_string();
+        changed_action.items[0].actions[0] = PlanAction::new("different-action", RiskTier::R2);
+        let changed_action = DeletionPlan::from_input(changed_action)
+            .unwrap()
+            .ordered_simulated_actions()
+            .unwrap();
+
+        assert_ne!(
+            original[0].source_identity_digest(),
+            changed_target[0].source_identity_digest()
+        );
+        assert_eq!(
+            original[0].source_identity_digest(),
+            changed_action[0].source_identity_digest()
+        );
+        assert_ne!(
+            original[0].revalidation_digest(),
+            changed_action[0].revalidation_digest()
+        );
+        assert_eq!(original[0].item_id(), "item-1");
+        assert_eq!(original[0].action_id(), "action-top-1");
+        assert_eq!(original[0].risk_tier(), RiskTier::R2);
+    }
+
+    #[test]
+    fn permanent_multi_action_rejects_missing_descendant_manifest() {
+        let mut input = permanent_multi_action_input();
+        input.items[0].descendant_manifest_digest = None;
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::MissingDescendantManifest { ref item_id }
+                if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_blocked_item_even_when_its_action_is_r1() {
+        let mut input = base_input();
+        input.items[0].risk_tier = RiskTier::Blocked;
+        input.items[0].actions[0].risk_tier = RiskTier::R1;
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::BlockedItemInPlan { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn rejects_item_risk_below_action_risk() {
+        let mut input = base_input();
+        input.items[0].risk_tier = RiskTier::R1;
+        input.items[0].actions[0].risk_tier = RiskTier::R3;
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::ItemRiskBelowAction {
+                ref item_id,
+                item_risk: RiskTier::R1,
+                max_action_risk: RiskTier::R3,
+            } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn permanent_rejects_non_r4_action_even_when_item_is_r4() {
+        let mut input = base_input();
+        input.mode = DeletionMode::Permanent;
+        input.items[0].risk_tier = RiskTier::R4;
+        input.items[0].actions[0].risk_tier = RiskTier::R3;
+
+        let error = DeletionPlan::from_input(input).unwrap_err();
+        assert!(matches!(error, CanonicalPlanError::PermanentRequiresR4));
     }
 
     #[test]
@@ -858,5 +1387,108 @@ mod tests {
 
         let error = DeletionPlan::from_validated_value(value).unwrap_err();
         assert!(matches!(error, CanonicalPlanError::CanonicalDigestMismatch));
+    }
+
+    #[test]
+    fn validated_loader_rejects_duplicate_action_ids() {
+        let mut input = base_input();
+        input
+            .items
+            .push(additional_trash_item("item-2", "action-top-2"));
+        let mut plan = DeletionPlan::from_input(input).unwrap();
+        plan.items[1].actions[0].action_id = "action-top-1".to_string();
+        plan.items[1].top_level_action_id = "action-top-1".to_string();
+        plan.canonical_digest = plan.canonical_digest_verified().unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::DuplicateActionId { ref action_id }
+                if action_id == "action-top-1"
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_incomplete_subtree() {
+        let mut plan = DeletionPlan::from_input(base_input()).unwrap();
+        plan.items[0].subtree_complete = false;
+        plan.canonical_digest = plan.canonical_digest_verified().unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::IncompleteSubtree { ref item_id } if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_missing_descendant_manifest() {
+        let mut plan = DeletionPlan::from_input(permanent_multi_action_input()).unwrap();
+        plan.items[0].descendant_manifest_digest = None;
+        plan.canonical_digest = plan.canonical_digest_verified().unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::MissingDescendantManifest { ref item_id }
+                if item_id == "item-1"
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_noncanonical_ttl() {
+        let mut plan = DeletionPlan::from_input(base_input()).unwrap();
+        plan.expires_at_unix_ms += 1;
+        plan.canonical_digest = plan.canonical_digest_verified().unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(error, CanonicalPlanError::InvalidPlanTtl { .. }));
+    }
+
+    #[test]
+    fn validated_loader_rejects_ttl_overflow() {
+        let plan = DeletionPlan::from_input(base_input()).unwrap();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["created_at_unix_ms"] = json!(u128::MAX.to_string());
+        value["expires_at_unix_ms"] = json!(u128::MAX.to_string());
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(error, CanonicalPlanError::InvalidPlanTtl { .. }));
+    }
+
+    #[test]
+    fn validated_loader_rejects_forged_aggregate_risk() {
+        let mut plan = DeletionPlan::from_input(base_input()).unwrap();
+        plan.aggregate_risk.tier = RiskTier::R1;
+        plan.canonical_digest = plan.canonical_digest_verified().unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(error, CanonicalPlanError::AggregateRiskMismatch));
+    }
+
+    #[test]
+    fn plan_expires_at_the_exact_deadline() {
+        let input = base_input();
+        let deadline = input.created_at + PLAN_TTL;
+        let plan = DeletionPlan::from_input(input).unwrap();
+
+        assert!(plan.is_expired_at(deadline));
+    }
+
+    #[test]
+    fn plan_creation_time_rejects_future_and_invalid_clock_values() {
+        let input = base_input();
+        let created_at = input.created_at;
+        let plan = DeletionPlan::from_input(input).unwrap();
+
+        assert!(plan.is_created_after(created_at - Duration::from_millis(1)));
+        assert!(!plan.is_created_after(created_at));
+        assert!(!plan.is_created_after(created_at + Duration::from_millis(1)));
+        assert!(plan.is_created_after(UNIX_EPOCH - Duration::from_millis(1)));
     }
 }
