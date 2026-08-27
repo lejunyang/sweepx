@@ -6,6 +6,7 @@ pub use detail_rescan::{
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
@@ -270,10 +271,12 @@ pub const ORDINARY_SCAN_MAX_ORDINAL: u128 = u128::MAX / 2;
 struct DirectoryTask<D> {
     ticket: u128,
     current: FrontierDirectory<D>,
+    child_directory_permits: usize,
 }
 
 struct DirectoryTaskResult<D> {
     ticket: u128,
+    child_directory_permits: usize,
     outcome: DirectoryTaskOutcome<D>,
 }
 
@@ -284,11 +287,13 @@ enum DirectoryTaskOutcome<D> {
     EnumerationIo { path: PathBuf },
     EnumerationResourceLimit { path: PathBuf, detail: String },
     Fatal(PlatformError),
+    Panicked { path: PathBuf },
 }
 
 struct PreparedDirectoryBatch<D> {
     current: FrontierDirectory<D>,
     inspected: Vec<WalkEntry<D>>,
+    opened_child_permits: usize,
     end_of_directory: bool,
     directory_limit_blocks_continuation: bool,
     terminal: Option<InspectionTerminal>,
@@ -316,11 +321,13 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     let DirectoryTask {
         ticket,
         mut current,
+        child_directory_permits,
     } = task;
     let path = current.path.clone();
     if cancel.is_cancelled() {
         return DirectoryTaskResult {
             ticket,
+            child_directory_permits,
             outcome: DirectoryTaskOutcome::Cancelled { path },
         };
     }
@@ -341,24 +348,28 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             Err(PlatformError::Cancelled) => {
                 return DirectoryTaskResult {
                     ticket,
+                    child_directory_permits,
                     outcome: DirectoryTaskOutcome::Cancelled { path },
                 };
             }
             Err(PlatformError::Io { .. }) => {
                 return DirectoryTaskResult {
                     ticket,
+                    child_directory_permits,
                     outcome: DirectoryTaskOutcome::EnumerationIo { path },
                 };
             }
             Err(PlatformError::ResourceLimit(detail)) => {
                 return DirectoryTaskResult {
                     ticket,
+                    child_directory_permits,
                     outcome: DirectoryTaskOutcome::EnumerationResourceLimit { path, detail },
                 };
             }
             Err(error) => {
                 return DirectoryTaskResult {
                     ticket,
+                    child_directory_permits,
                     outcome: DirectoryTaskOutcome::Fatal(error),
                 };
             }
@@ -366,6 +377,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     if batch.entries.is_empty() && !batch.end_of_directory {
         return DirectoryTaskResult {
             ticket,
+            child_directory_permits,
             outcome: DirectoryTaskOutcome::Fatal(PlatformError::InvalidDirectoryEntry {
                 parent: path,
                 detail: "backend returned an empty non-terminal directory batch".to_string(),
@@ -383,6 +395,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     {
         return DirectoryTaskResult {
             ticket,
+            child_directory_permits,
             outcome: DirectoryTaskOutcome::Fatal(PlatformError::InvalidDirectoryEntry {
                 parent: path,
                 detail: "backend exceeded the requested directory batch limit".to_string(),
@@ -394,6 +407,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         None => {
             return DirectoryTaskResult {
                 ticket,
+                child_directory_permits,
                 outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
                     "directory entry accounting overflow".to_string(),
                 )),
@@ -408,6 +422,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         None => {
             return DirectoryTaskResult {
                 ticket,
+                child_directory_permits,
                 outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
                     "directory byte accounting overflow".to_string(),
                 )),
@@ -421,6 +436,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             || current.consumed_bytes >= limits.max_directory_bytes);
     let mut inspected = Vec::with_capacity(batch_entries);
     let mut terminal = None;
+    let mut opened_child_permits = 0usize;
     for directory_entry in batch.entries {
         if cancel.is_cancelled() {
             terminal = Some(InspectionTerminal::Cancelled {
@@ -428,7 +444,18 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             });
             break;
         }
-        match inspect_bound_child(platform, &current.handle, &path, &directory_entry, cancel) {
+        match inspect_directory_entry(
+            platform,
+            &current.handle,
+            &path,
+            &directory_entry,
+            cancel,
+            opened_child_permits < child_directory_permits,
+        ) {
+            Ok(WalkEntry::Directory(opened)) => {
+                opened_child_permits += 1;
+                inspected.push(WalkEntry::Directory(opened));
+            }
             Ok(walk) => inspected.push(walk),
             Err(PlatformError::Cancelled) => {
                 terminal = Some(InspectionTerminal::Cancelled {
@@ -445,14 +472,35 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
 
     DirectoryTaskResult {
         ticket,
+        child_directory_permits,
         outcome: DirectoryTaskOutcome::Batch(Box::new(PreparedDirectoryBatch {
             current,
             inspected,
+            opened_child_permits,
             end_of_directory,
             directory_limit_blocks_continuation,
             terminal,
         })),
     }
+}
+
+fn inspect_directory_entry<P: PlatformScanner + ?Sized>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    directory_entry: &sweepx_platform::DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    child_directory_permit: bool,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    if !child_directory_permit {
+        return Ok(WalkEntry::Boundary(BoundaryRecord {
+            path: directory_entry.path.clone(),
+            kind: BoundaryKind::ResourceLimit,
+            reason: ReasonCode::ResourceLimit,
+            detail: "frontier limit exceeded".to_string(),
+        }));
+    }
+    inspect_bound_child(platform, parent, parent_path, directory_entry, cancel)
 }
 
 impl<P> Scanner<P>
@@ -652,13 +700,25 @@ where
                 scope.spawn(move || {
                     loop {
                         let task = {
-                            let receiver = task_rx.lock().expect("directory task mutex poisoned");
+                            let receiver = task_rx
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             receiver.recv()
                         };
                         let Ok(task) = task else {
                             break;
                         };
-                        let result = prepare_directory_task(platform, task, cancel, limits);
+                        let ticket = task.ticket;
+                        let path = task.current.path.clone();
+                        let child_directory_permits = task.child_directory_permits;
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            prepare_directory_task(platform, task, cancel, limits)
+                        }))
+                        .unwrap_or(DirectoryTaskResult {
+                            ticket,
+                            child_directory_permits,
+                            outcome: DirectoryTaskOutcome::Panicked { path },
+                        });
                         if result_tx.send(result).is_err() {
                             break;
                         }
@@ -672,7 +732,7 @@ where
                 let mut next_commit_ticket = 0u128;
                 // At most `worker_count` tickets are in flight, so this reorder buffer and both
                 // sync channels have a common, explicit bound.
-                let mut ready = BTreeMap::<u128, DirectoryTaskOutcome<P::DirectoryHandle>>::new();
+                let mut ready = BTreeMap::<u128, DirectoryTaskResult<P::DirectoryHandle>>::new();
                 let mut ticket_paths = BTreeMap::<u128, PathBuf>::new();
 
                 loop {
@@ -728,15 +788,31 @@ where
                         {
                             ready.insert(
                                 ticket,
-                                DirectoryTaskOutcome::VisitedLimit {
-                                    path: current.path.clone(),
+                                DirectoryTaskResult {
+                                    ticket,
+                                    child_directory_permits: 0,
+                                    outcome: DirectoryTaskOutcome::VisitedLimit {
+                                        path: current.path.clone(),
+                                    },
                                 },
                             );
                             continue;
                         }
 
+                        let child_directory_permits = self
+                            .options
+                            .resource_limits
+                            .max_frontier_entries
+                            .saturating_sub(active_frontier_entries)
+                            .saturating_sub(frontier.len())
+                            .min(self.options.resource_limits.max_directory_batch_entries);
+                        active_frontier_entries += child_directory_permits;
                         task_tx
-                            .send(DirectoryTask { ticket, current })
+                            .send(DirectoryTask {
+                                ticket,
+                                current,
+                                child_directory_permits,
+                            })
                             .map_err(|_| {
                                 PlatformError::Unsupported(
                                     "directory scheduler stopped unexpectedly".to_string(),
@@ -754,16 +830,21 @@ where
                                 "directory scheduler stopped unexpectedly".to_string(),
                             )
                         })?;
-                        if ready.insert(result.ticket, result.outcome).is_some() {
+                        if ready.insert(result.ticket, result).is_some() {
                             return Err(PlatformError::Unsupported(
                                 "directory scheduler returned a duplicate ticket".to_string(),
                             )
                             .into());
                         }
                     }
-                    let outcome = ready
+                    let result = ready
                         .remove(&next_commit_ticket)
                         .expect("next stable directory ticket is ready");
+                    let DirectoryTaskResult {
+                        child_directory_permits,
+                        outcome,
+                        ..
+                    } = result;
                     ticket_paths.remove(&next_commit_ticket);
                     next_commit_ticket = next_commit_ticket.checked_add(1).ok_or_else(|| {
                         PlatformError::ResourceLimit(
@@ -771,10 +852,13 @@ where
                         )
                     })?;
                     active_frontier_entries = active_frontier_entries.saturating_sub(1);
+                    active_frontier_entries =
+                        active_frontier_entries.saturating_sub(child_directory_permits);
 
                     let PreparedDirectoryBatch {
                         current,
                         inspected,
+                        mut opened_child_permits,
                         end_of_directory,
                         directory_limit_blocks_continuation,
                         terminal,
@@ -837,6 +921,13 @@ where
                             continue;
                         }
                         DirectoryTaskOutcome::Fatal(error) => return Err(error.into()),
+                        DirectoryTaskOutcome::Panicked { path } => {
+                            return Err(PlatformError::Unsupported(format!(
+                                "platform scanner panicked while scanning {}",
+                                path.display()
+                            ))
+                            .into());
+                        }
                     };
                     let path = current.path.clone();
                     let continuation_reserved =
@@ -852,6 +943,14 @@ where
                             allocate_scan_entry_id(&self.options.scan_id, next_entry_ordinal)?;
                         match walk {
                             WalkEntry::Directory(opened) => {
+                                if opened_child_permits == 0 {
+                                    return Err(PlatformError::Unsupported(
+                                        "directory worker returned an unpermitted child handle"
+                                            .to_string(),
+                                    )
+                                    .into());
+                                }
+                                opened_child_permits -= 1;
                                 let metadata = opened.metadata;
                                 let same_mount = if root_metadata.mount_identity.is_none()
                                     || metadata.mount_identity.is_none()
@@ -909,31 +1008,6 @@ where
                                         sink.push_boundary(&root_path, boundary)?;
                                         continue;
                                     }
-                                }
-
-                                if active_frontier_entries
-                                    >= self.options.resource_limits.max_frontier_entries
-                                {
-                                    let boundary = BoundaryRecord {
-                                        path: metadata.path.clone(),
-                                        kind: BoundaryKind::ResourceLimit,
-                                        reason: ReasonCode::ResourceLimit,
-                                        detail: "frontier limit exceeded".to_string(),
-                                    };
-                                    note_boundary(
-                                        &mut directory_states,
-                                        &metadata.path,
-                                        boundary.reason.clone(),
-                                    );
-                                    sink.push_progress(
-                                        &root_path,
-                                        ProgressEvent::Boundary {
-                                            path: metadata.path.clone(),
-                                            kind: boundary.kind.clone(),
-                                        },
-                                    )?;
-                                    sink.push_boundary(&root_path, boundary)?;
-                                    continue;
                                 }
 
                                 if initial_aggregate_count
@@ -1176,6 +1250,12 @@ where
                         Some(InspectionTerminal::Fatal(error)) => return Err(error.into()),
                         None => false,
                     };
+                    if opened_child_permits != 0 {
+                        return Err(PlatformError::Unsupported(
+                            "directory worker did not account for its frontier permit".to_string(),
+                        )
+                        .into());
+                    }
                     if cancelled_during_inspection {
                         break;
                     }
@@ -1897,6 +1977,38 @@ mod tests {
     }
 
     #[test]
+    fn platform_panic_completes_its_ticket_without_hanging_the_scheduler() {
+        let probe = Arc::new(SchedulerProbe::new(0));
+        let platform = SchedulingPlatform::new(8, Arc::clone(&probe))
+            .with_panic_path(PathBuf::from("/scheduler-root/dir-000"));
+        let root = platform.root.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+
+        let scan = std::thread::spawn(move || {
+            let result = Scanner::new(
+                platform,
+                ScannerOptions {
+                    max_workers: 4,
+                    ..ScannerOptions::default()
+                },
+            )
+            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
+            done_tx.send(result).unwrap();
+        });
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("scheduler hung after a platform worker panicked");
+        scan.join().unwrap();
+        assert!(matches!(
+            result,
+            Err(ScanError::Platform(PlatformError::Unsupported(detail)))
+                if detail.contains("platform scanner panicked")
+                    && detail.contains("dir-000")
+        ));
+    }
+
+    #[test]
     fn cancellation_stops_new_directory_dispatch_with_bounded_overshoot() {
         let probe = Arc::new(SchedulerProbe::new(0));
         let platform = SchedulingPlatform::new(8, Arc::clone(&probe));
@@ -2247,6 +2359,93 @@ mod tests {
                 .boundaries
                 .iter()
                 .any(|boundary| boundary.kind == BoundaryKind::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn frontier_permits_bound_live_directory_handles_before_inspection() {
+        let live_handles = Arc::new(AtomicUsize::new(0));
+        let max_live_handles = Arc::new(AtomicUsize::new(0));
+        let child_inspections = Arc::new(AtomicUsize::new(0));
+        let platform = HandleCountingPlatform::new(
+            16,
+            Arc::clone(&live_handles),
+            Arc::clone(&max_live_handles),
+            Arc::clone(&child_inspections),
+        );
+        let root = platform.root.clone();
+        let max_frontier_entries = 3;
+
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                max_workers: 8,
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(
+            max_live_handles.load(Ordering::SeqCst) <= max_frontier_entries,
+            "live directory handle high-water exceeded the frontier permit cap"
+        );
+        assert_eq!(live_handles.load(Ordering::SeqCst), 0);
+        assert_eq!(child_inspections.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            result
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.detail == "frontier limit exceeded")
+                .count(),
+            14
+        );
+    }
+
+    #[test]
+    fn root_uses_the_only_frontier_permit_before_any_child_inspection() {
+        let live_handles = Arc::new(AtomicUsize::new(0));
+        let max_live_handles = Arc::new(AtomicUsize::new(0));
+        let child_inspections = Arc::new(AtomicUsize::new(0));
+        let platform = HandleCountingPlatform::new(
+            4,
+            Arc::clone(&live_handles),
+            Arc::clone(&max_live_handles),
+            Arc::clone(&child_inspections),
+        );
+        let root = platform.root.clone();
+
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                max_workers: 4,
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries: 1,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+        .unwrap();
+
+        assert_eq!(max_live_handles.load(Ordering::SeqCst), 1);
+        assert_eq!(live_handles.load(Ordering::SeqCst), 0);
+        assert_eq!(child_inspections.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            result
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.detail == "frontier limit exceeded")
+                .count(),
+            4
         );
     }
 
@@ -3416,6 +3615,162 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct CountingDirectoryHandle {
+        path: PathBuf,
+        capability_id: u64,
+        cursor: usize,
+        live_handles: Arc<AtomicUsize>,
+    }
+
+    impl CountingDirectoryHandle {
+        fn new(
+            path: PathBuf,
+            capability_id: u64,
+            live_handles: Arc<AtomicUsize>,
+            max_live_handles: &AtomicUsize,
+        ) -> Self {
+            let live = live_handles.fetch_add(1, Ordering::SeqCst) + 1;
+            max_live_handles.fetch_max(live, Ordering::SeqCst);
+            Self {
+                path,
+                capability_id,
+                cursor: 0,
+                live_handles,
+            }
+        }
+    }
+
+    impl Drop for CountingDirectoryHandle {
+        fn drop(&mut self) {
+            self.live_handles.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug)]
+    struct HandleCountingPlatform {
+        root: PathBuf,
+        child_count: usize,
+        live_handles: Arc<AtomicUsize>,
+        max_live_handles: Arc<AtomicUsize>,
+        child_inspections: Arc<AtomicUsize>,
+    }
+
+    impl HandleCountingPlatform {
+        fn new(
+            child_count: usize,
+            live_handles: Arc<AtomicUsize>,
+            max_live_handles: Arc<AtomicUsize>,
+            child_inspections: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                root: PathBuf::from("/handle-root"),
+                child_count,
+                live_handles,
+                max_live_handles,
+                child_inspections,
+            }
+        }
+
+        fn metadata(&self, path: PathBuf, inode: u64) -> EntryMetadata {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("handle-root")
+                .to_string();
+            let mut metadata = test_metadata(path, &name, EntryKind::Directory, Some(1));
+            metadata.identity = Some(EntryIdentity::from_unix(1, inode));
+            metadata
+        }
+    }
+
+    impl PlatformScanner for HandleCountingPlatform {
+        type DirectoryHandle = CountingDirectoryHandle;
+
+        fn platform_name(&self) -> &'static str {
+            "handle-counting-fake"
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            Ok(RootAdmission::new(
+                root.clone(),
+                self.metadata(self.root.clone(), 1),
+                CountingDirectoryHandle::new(
+                    self.root.clone(),
+                    1,
+                    Arc::clone(&self.live_handles),
+                    &self.max_live_handles,
+                ),
+                root.native_absolute_path()
+                    .map_err(|error| PlatformError::RootRejected(error.to_string()))?,
+            ))
+        }
+
+        fn enumerate_children(
+            &self,
+            directory: &mut Self::DirectoryHandle,
+            _cancel: &CancellationToken,
+            _limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            if directory.cursor > 0 || directory.capability_id != 1 {
+                return Ok(DirectoryEntryBatch::complete(Vec::new()));
+            }
+            directory.cursor = 1;
+            Ok(DirectoryEntryBatch::complete(
+                (0..self.child_count)
+                    .map(|index| test_entry(&self.root, &format!("dir-{index:03}")))
+                    .collect(),
+            ))
+        }
+
+        fn inspect_child(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.child_inspections.fetch_add(1, Ordering::SeqCst);
+            child.validate_for_parent(&parent.path).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: parent.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+            let capability_id = child
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("dir-"))
+                .and_then(|index| index.parse::<u64>().ok())
+                .expect("generated handle-counting directory name")
+                + 2;
+            Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                metadata: self.metadata(child.path.clone(), capability_id),
+                handle: CountingDirectoryHandle::new(
+                    child.path.clone(),
+                    capability_id,
+                    Arc::clone(&self.live_handles),
+                    &self.max_live_handles,
+                ),
+            }))
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Debug)]
     struct SchedulerProbe {
         target_active: usize,
         active: AtomicUsize,
@@ -3530,6 +3885,7 @@ mod tests {
         root: PathBuf,
         child_count: usize,
         probe: Arc<SchedulerProbe>,
+        panic_path: Option<PathBuf>,
     }
 
     impl SchedulingPlatform {
@@ -3538,7 +3894,13 @@ mod tests {
                 root: PathBuf::from("/scheduler-root"),
                 child_count,
                 probe,
+                panic_path: None,
             }
+        }
+
+        fn with_panic_path(mut self, path: PathBuf) -> Self {
+            self.panic_path = Some(path);
+            self
         }
 
         fn metadata(&self, path: PathBuf, kind: EntryKind, inode: u64) -> EntryMetadata {
@@ -3587,6 +3949,9 @@ mod tests {
             cancel: &CancellationToken,
             _limits: DirectoryReadLimits,
         ) -> Result<DirectoryEntryBatch, PlatformError> {
+            if self.panic_path.as_deref() == Some(&directory.path) {
+                panic!("injected platform scanner panic");
+            }
             if directory.cursor > 0 {
                 return Ok(DirectoryEntryBatch::complete(Vec::new()));
             }
