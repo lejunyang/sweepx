@@ -65,6 +65,20 @@ CHINESE_NEGATION_RE = re.compile(
     r"不保证|无保证|未曾|尚未|没有|不可|不要|未|(?!仅)不)"
 )
 SENTENCE_BOUNDARY_RE = re.compile(r"[.!?;|。！？；]")
+CLAUSE_BOUNDARY_RE = re.compile(
+    r"(?:[,，:]\s*|\b)(?:but|yet|however|whereas|and)\b"
+    r"|(?:[,，:]\s*)?(?:但是|但|然而|不过|而且|并且|且)",
+    re.IGNORECASE,
+)
+CLAIM_REPORTING_VERB_RE = re.compile(
+    r"\b(?:say|says|said|claim|claims|claimed|describe|describes|described|"
+    r"call|calls|called|label|labels|labeled|promise|promises|promised|"
+    r"report|reports|reported|present|presents|presented|market|markets|marketed)\b",
+    re.IGNORECASE,
+)
+CHINESE_CLAIM_REPORTING_RE = re.compile(
+    r"(?:称|称为|声称|描述|叫作|标记|标注|承诺|保证|证明|当作|视为|报告|宣传)"
+)
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(?P<marks>#{1,6})(?:[ \t]+|$)(?P<title>.*)$")
 SETEXT_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
@@ -98,10 +112,16 @@ class Document:
 @dataclass(frozen=True)
 class MarkdownLink:
     destination: str
-    column: int
     start: int
     end: int
     is_image: bool
+
+
+@dataclass(frozen=True)
+class ReferenceDefinition:
+    destination: str
+    start: int
+    end: int
 
 
 def _is_escaped(text: str, index: int) -> bool:
@@ -131,52 +151,82 @@ def _find_label_end(text: str, opening: int) -> int | None:
     return None
 
 
-def _parse_link_at(text: str, opening: int, is_image: bool) -> MarkdownLink | None:
-    label_end = _find_label_end(text, opening)
-    if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != "(":
-        return None
+def _skip_link_whitespace(text: str, index: int) -> int | None:
+    """Skip spaces and at most one line ending inside link syntax."""
 
-    index = label_end + 2
-    while index < len(text) and text[index] in " \t":
-        index += 1
-    if index >= len(text):
-        return None
+    line_endings = 0
+    while index < len(text):
+        if text[index] in " \t":
+            index += 1
+            continue
+        if text[index] == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+            line_endings += 1
+            index += 2
+        elif text[index] == "\n":
+            line_endings += 1
+            index += 1
+        else:
+            break
+        if line_endings > 1:
+            return None
+    return index
 
+
+def _parse_destination(text: str, index: int) -> tuple[str, int] | None:
     destination_chars: list[str] = []
-    if text[index] == "<":
+    if index < len(text) and text[index] == "<":
         index += 1
         while index < len(text) and text[index] != ">":
+            if text[index] in "\r\n<":
+                return None
             if text[index] == "\\" and index + 1 < len(text):
                 index += 1
             destination_chars.append(text[index])
             index += 1
         if index >= len(text):
             return None
-        index += 1
-    else:
-        nested_parentheses = 0
-        while index < len(text):
-            char = text[index]
-            if char == "\\" and index + 1 < len(text):
-                destination_chars.append(text[index + 1])
-                index += 2
-                continue
-            if char == "(":
-                nested_parentheses += 1
-                destination_chars.append(char)
-                index += 1
-                continue
-            if char == ")":
-                if nested_parentheses == 0:
-                    break
-                nested_parentheses -= 1
-                destination_chars.append(char)
-                index += 1
-                continue
-            if char in " \t" and nested_parentheses == 0:
-                break
+        return "".join(destination_chars), index + 1
+
+    nested_parentheses = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            destination_chars.append(text[index + 1])
+            index += 2
+            continue
+        if char == "(":
+            nested_parentheses += 1
             destination_chars.append(char)
             index += 1
+            continue
+        if char == ")":
+            if nested_parentheses == 0:
+                break
+            nested_parentheses -= 1
+            destination_chars.append(char)
+            index += 1
+            continue
+        if char.isspace() and nested_parentheses == 0:
+            break
+        destination_chars.append(char)
+        index += 1
+    if nested_parentheses:
+        return None
+    return "".join(destination_chars), index
+
+
+def _parse_inline_link_at(text: str, opening: int, is_image: bool) -> MarkdownLink | None:
+    label_end = _find_label_end(text, opening)
+    if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != "(":
+        return None
+
+    index = _skip_link_whitespace(text, label_end + 2)
+    if index is None or index >= len(text):
+        return None
+    parsed_destination = _parse_destination(text, index)
+    if parsed_destination is None:
+        return None
+    destination, index = parsed_destination
 
     # A destination that ended directly on ')' has no title. Otherwise accept a
     # Markdown title delimited by quotes or parentheses, then require the link's
@@ -184,55 +234,137 @@ def _parse_link_at(text: str, opening: int, is_image: bool) -> MarkdownLink | No
     if index < len(text) and text[index] == ")":
         end = index + 1
     else:
-        while index < len(text) and text[index] in " \t":
-            index += 1
-        if index >= len(text) or text[index] not in "'\"(":
+        index = _skip_link_whitespace(text, index)
+        if index is None or index >= len(text):
             return None
-        title_open = text[index]
-        title_close = ")" if title_open == "(" else title_open
-        index += 1
-        while index < len(text):
-            if text[index] == "\\" and index + 1 < len(text):
-                index += 2
-                continue
-            if text[index] == title_close:
-                break
-            index += 1
-        if index >= len(text):
+        if text[index] == ")":
+            end = index + 1
+        elif text[index] not in "'\"(":
             return None
-        index += 1
-        while index < len(text) and text[index] in " \t":
+        else:
+            title_open = text[index]
+            title_close = ")" if title_open == "(" else title_open
             index += 1
-        if index >= len(text) or text[index] != ")":
-            return None
-        end = index + 1
+            while index < len(text):
+                if text[index] == "\\" and index + 1 < len(text):
+                    index += 2
+                    continue
+                if text[index] == title_close:
+                    break
+                index += 1
+            if index >= len(text):
+                return None
+            index = _skip_link_whitespace(text, index + 1)
+            if index is None or index >= len(text) or text[index] != ")":
+                return None
+            end = index + 1
 
     return MarkdownLink(
-        destination="".join(destination_chars),
-        column=(opening - 1 if is_image else opening) + 1,
+        destination=destination,
         start=opening - 1 if is_image else opening,
         end=end,
         is_image=is_image,
     )
 
 
-def iter_markdown_links(line: str) -> list[MarkdownLink]:
+def _normalize_reference_label(label: str) -> str:
+    label = re.sub(r"\\([!\"#$%&'()*+,./:;<=>?@\[\]\\^_`{|}~-])", r"\1", label)
+    return " ".join(html.unescape(label).split()).casefold()
+
+
+def _reference_definitions(
+    text: str,
+) -> tuple[dict[str, ReferenceDefinition], list[tuple[int, int]]]:
+    definitions: dict[str, ReferenceDefinition] = {}
+    ranges: list[tuple[int, int]] = []
+    for candidate in re.finditer(r"(?m)^ {0,3}\[", text):
+        start = candidate.start()
+        opening = candidate.end() - 1
+        label_end = _find_label_end(text, opening)
+        if label_end is None or label_end + 1 >= len(text) or text[label_end + 1] != ":":
+            continue
+        label = _normalize_reference_label(text[opening + 1 : label_end])
+        if not label:
+            continue
+        index = _skip_link_whitespace(text, label_end + 2)
+        if index is None or index >= len(text):
+            continue
+        parsed_destination = _parse_destination(text, index)
+        if parsed_destination is None:
+            continue
+        destination, destination_end = parsed_destination
+        if not destination:
+            continue
+        definition_end = text.find("\n", destination_end)
+        if definition_end < 0:
+            definition_end = len(text)
+        else:
+            definition_end += 1
+        ranges.append((start, definition_end))
+        definitions.setdefault(
+            label, ReferenceDefinition(destination, start, definition_end)
+        )
+    return definitions, ranges
+
+
+def iter_markdown_links(text: str) -> list[MarkdownLink]:
+    definitions, definition_ranges = _reference_definitions(text)
     links: list[MarkdownLink] = []
     index = 0
-    while index < len(line):
-        opening = line.find("[", index)
+    range_index = 0
+    while index < len(text):
+        while range_index < len(definition_ranges) and definition_ranges[range_index][1] <= index:
+            range_index += 1
+        if (
+            range_index < len(definition_ranges)
+            and definition_ranges[range_index][0] <= index < definition_ranges[range_index][1]
+        ):
+            index = definition_ranges[range_index][1]
+            continue
+
+        opening = text.find("[", index)
         if opening < 0:
             break
-        if _is_escaped(line, opening):
+        if range_index < len(definition_ranges) and opening >= definition_ranges[range_index][0]:
+            index = definition_ranges[range_index][1]
+            continue
+        if _is_escaped(text, opening):
             index = opening + 1
             continue
-        is_image = opening > 0 and line[opening - 1] == "!" and not _is_escaped(line, opening - 1)
-        parsed = _parse_link_at(line, opening, is_image)
-        if parsed is None:
+        is_image = opening > 0 and text[opening - 1] == "!" and not _is_escaped(text, opening - 1)
+        label_end = _find_label_end(text, opening)
+        if label_end is None:
             index = opening + 1
             continue
-        links.append(parsed)
-        index = parsed.end
+
+        parsed = _parse_inline_link_at(text, opening, is_image)
+        if parsed is not None:
+            links.append(parsed)
+            index = parsed.end
+            continue
+
+        first_label = text[opening + 1 : label_end]
+        reference_end = label_end + 1
+        reference_label = first_label
+        if reference_end < len(text) and text[reference_end] == "[":
+            second_end = _find_label_end(text, reference_end)
+            if second_end is None:
+                index = reference_end + 1
+                continue
+            explicit_label = text[reference_end + 1 : second_end]
+            reference_label = explicit_label or first_label
+            reference_end = second_end + 1
+        definition = definitions.get(_normalize_reference_label(reference_label))
+        if definition is not None:
+            links.append(
+                MarkdownLink(
+                    destination=definition.destination,
+                    start=opening - 1 if is_image else opening,
+                    end=reference_end,
+                    is_image=is_image,
+                )
+            )
+        index = reference_end
     return links
 
 
@@ -352,13 +484,15 @@ def _mask_inline_code(lines: list[str]) -> list[str]:
     return "".join(chars).split("\n")
 
 
-def _mask_images(line: str) -> str:
-    chars = list(line)
-    for link in iter_markdown_links(line):
+def _mask_images(lines: list[str]) -> list[str]:
+    text = "\n".join(lines)
+    chars = list(text)
+    for link in iter_markdown_links(text):
         if link.is_image:
             for index in range(link.start, link.end):
-                chars[index] = " "
-    return "".join(chars)
+                if chars[index] != "\n":
+                    chars[index] = " "
+    return "".join(chars).split("\n")
 
 
 def vitepress_slug(text: str) -> str:
@@ -436,7 +570,7 @@ def _read_document(path: Path, root: Path) -> tuple[Document | None, Diagnostic 
         return None, Diagnostic(relative, 1, 1, "DOC001", f"cannot read UTF-8 Markdown: {error}")
     raw_lines = text.splitlines()
     block_visible = _mask_fences_and_comments(raw_lines)
-    prose_lines = [_mask_images(line) for line in _mask_inline_code(block_visible)]
+    prose_lines = _mask_images(_mask_inline_code(block_visible))
     directive_lines = _mask_inline_code(_mask_fenced_code(raw_lines))
     return (
         Document(
@@ -546,44 +680,53 @@ def _lint_links(
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     for document in list(documents.values()):
-        for line_number, line in enumerate(document.prose_lines, start=1):
-            for link in iter_markdown_links(line):
-                if link.is_image:
-                    continue
-                target, fragment, error = _resolve_local_link(document, link.destination, root)
-                if target is None and error is None:
-                    continue
-                if error is not None:
-                    diagnostics.append(
-                        Diagnostic(
-                            document.relative_path,
-                            line_number,
-                            link.column,
-                            "LINK001",
-                            f"{error}: {link.destination!r}",
-                        )
+        text = "\n".join(document.prose_lines)
+        line_starts = [0]
+        line_starts.extend(match.end() for match in re.finditer("\n", text))
+        for link in iter_markdown_links(text):
+            if link.is_image:
+                continue
+            line_index = max(0, len(line_starts) - 1)
+            for candidate, line_start in enumerate(line_starts):
+                if line_start > link.start:
+                    line_index = candidate - 1
+                    break
+            line_number = line_index + 1
+            column = link.start - line_starts[line_index] + 1
+            target, fragment, error = _resolve_local_link(document, link.destination, root)
+            if target is None and error is None:
+                continue
+            if error is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        document.relative_path,
+                        line_number,
+                        column,
+                        "LINK001",
+                        f"{error}: {link.destination!r}",
                     )
+                )
+                continue
+            if not fragment or target is None or target.suffix.lower() not in {".md", ".markdown"}:
+                continue
+            target_document = documents.get(target.resolve())
+            if target_document is None:
+                target_document, read_error = _read_document(target, root)
+                if read_error is not None:
+                    diagnostics.append(read_error)
                     continue
-                if not fragment or target is None or target.suffix.lower() not in {".md", ".markdown"}:
-                    continue
-                target_document = documents.get(target.resolve())
-                if target_document is None:
-                    target_document, read_error = _read_document(target, root)
-                    if read_error is not None:
-                        diagnostics.append(read_error)
-                        continue
-                    assert target_document is not None
-                    documents[target.resolve()] = target_document
-                if fragment not in target_document.anchors:
-                    diagnostics.append(
-                        Diagnostic(
-                            document.relative_path,
-                            line_number,
-                            link.column,
-                            "LINK002",
-                            f"anchor #{fragment} does not exist in {target_document.relative_path}",
-                        )
+                assert target_document is not None
+                documents[target.resolve()] = target_document
+            if fragment not in target_document.anchors:
+                diagnostics.append(
+                    Diagnostic(
+                        document.relative_path,
+                        line_number,
+                        column,
+                        "LINK002",
+                        f"anchor #{fragment} does not exist in {target_document.relative_path}",
                     )
+                )
     return diagnostics
 
 
@@ -676,17 +819,73 @@ def _sentence_span(line: str, start: int, end: int) -> tuple[int, int]:
 
 def _is_negated(line: str, start: int, end: int) -> bool:
     sentence_start, sentence_end = _sentence_span(line, start, end)
-    sentence_chars = list(line[sentence_start:sentence_end])
+    sentence = line[sentence_start:sentence_end]
+    claim_offset = start - sentence_start
+    clause_start = 0
+    clause_end = len(sentence)
+    for boundary in CLAUSE_BOUNDARY_RE.finditer(sentence):
+        if boundary.end() <= claim_offset:
+            clause_start = boundary.end()
+        elif boundary.start() >= claim_offset:
+            clause_end = boundary.start()
+            break
+    clause_absolute_start = sentence_start + clause_start
+    clause_absolute_end = sentence_start + clause_end
+    clause_chars = list(line[clause_absolute_start:clause_absolute_end])
     for claim_start, claim_end, _ in _unsafe_claims(line):
-        if claim_start < sentence_start or claim_end > sentence_end:
+        if claim_start < clause_absolute_start or claim_end > clause_absolute_end:
             continue
-        for index in range(claim_start - sentence_start, claim_end - sentence_start):
-            sentence_chars[index] = " "
-    sentence_without_claims = "".join(sentence_chars)
-    return bool(
-        ENGLISH_NEGATION_RE.search(sentence_without_claims)
-        or CHINESE_NEGATION_RE.search(sentence_without_claims)
+        for index in range(
+            claim_start - clause_absolute_start, claim_end - clause_absolute_start
+        ):
+            clause_chars[index] = " "
+    clause_without_claims = "".join(clause_chars)
+    claim_start = start - clause_absolute_start
+    claim_end = end - clause_absolute_start
+    reporting_verb_before_claim = CLAIM_REPORTING_VERB_RE.search(
+        clause_without_claims[:claim_start]
     )
+    chinese_reporting_before_claim = CHINESE_CLAIM_REPORTING_RE.search(
+        clause_without_claims[:claim_start]
+    )
+
+    for negation in ENGLISH_NEGATION_RE.finditer(clause_without_claims):
+        between = (
+            clause_without_claims[negation.end() : claim_start]
+            if negation.end() <= claim_start
+            else clause_without_claims[claim_end : negation.start()]
+            if negation.start() >= claim_end
+            else ""
+        )
+        if negation.end() <= claim_start or negation.start() >= claim_end:
+            if len(re.findall(r"[A-Za-z0-9]+", between)) <= 2:
+                return True
+            if (
+                negation.end() <= claim_start
+                and reporting_verb_before_claim is not None
+                and negation.end() <= reporting_verb_before_claim.start()
+            ):
+                return True
+
+    for negation in CHINESE_NEGATION_RE.finditer(clause_without_claims):
+        between = (
+            clause_without_claims[negation.end() : claim_start]
+            if negation.end() <= claim_start
+            else clause_without_claims[claim_end : negation.start()]
+            if negation.start() >= claim_end
+            else ""
+        )
+        if negation.end() <= claim_start or negation.start() >= claim_end:
+            compact = re.sub(r"[\s,，:：'\"“”‘’()（）]+", "", between)
+            if len(compact) <= 4:
+                return True
+            if (
+                negation.end() <= claim_start
+                and chinese_reporting_before_claim is not None
+                and negation.end() <= chinese_reporting_before_claim.start()
+            ):
+                return True
+    return False
 
 
 def _lint_unsafe_claims(documents: dict[Path, Document]) -> list[Diagnostic]:

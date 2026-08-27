@@ -141,6 +141,57 @@ class LinkTests(RepositoryFixture):
 
         self.assertEqual(self.codes(), ["LINK001"])
 
+    def test_reference_style_links_resolve_full_collapsed_and_shortcut_labels(self) -> None:
+        self.write(
+            "README.md",
+            """[full reference][Target Page]
+[collapsed][]
+[shortcut]
+![ignored image][missing image]
+
+[target   page]:
+  docs/existing.md#answer
+[collapsed]: docs/missing-collapsed.md
+[shortcut]: <docs/missing shortcut.md> "title"
+[missing image]: images/missing.png
+""",
+        )
+        self.write("docs/existing.md", "# Answer\n")
+
+        diagnostics = self.lint()
+
+        self.assertEqual(
+            [(item.line, item.code) for item in diagnostics],
+            [(2, "LINK001"), (3, "LINK001")],
+        )
+        self.assertIn("missing-collapsed.md", diagnostics[0].message)
+        self.assertIn("missing shortcut.md", diagnostics[1].message)
+
+    def test_multiline_inline_links_and_reference_labels_are_checked(self) -> None:
+        self.write(
+            "README.md",
+            """[existing
+page](
+  docs/existing.md#answer
+)
+[missing](
+  docs/missing-inline.md
+)
+[reference][multi
+line]
+
+[multi line]: docs/missing-reference.md
+""",
+        )
+        self.write("docs/existing.md", "# Answer\n")
+
+        diagnostics = self.lint()
+
+        self.assertEqual(
+            [(item.line, item.code) for item in diagnostics],
+            [(5, "LINK001"), (8, "LINK001")],
+        )
+
 
 class ResearchDateTests(RepositoryFixture):
     def test_accepts_nonfuture_iso_date_with_english_or_chinese_snapshot_wording(self) -> None:
@@ -245,6 +296,31 @@ class SafetyClaimTests(RepositoryFixture):
         claims = [item for item in diagnostics if item.code == "CLAIM001"]
         self.assertEqual(len(claims), 1)
         self.assertIn("will free", claims[0].message)
+
+    def test_unrelated_negation_in_same_sentence_does_not_suppress_claim(self) -> None:
+        self.write(
+            "README.md",
+            "This does not estimate capacity, but this cache is safe to delete.\n"
+            "This does not estimate capacity and this cache is unused.\n"
+            "这不估算容量，而且这个缓存可安全删除。\n",
+        )
+
+        diagnostics = self.lint()
+
+        self.assertEqual(
+            [(item.line, item.code) for item in diagnostics],
+            [(1, "CLAIM001"), (2, "CLAIM001"), (3, "CLAIM001")],
+        )
+        self.assertIn("safe to delete", diagnostics[0].message)
+
+    def test_negation_can_scope_a_coordinated_reporting_claim(self) -> None:
+        self.write(
+            "README.md",
+            "Never convert a plan, infer authority, or describe deletion as guaranteed unrecoverable.\n"
+            "不是把目录年龄或名字当作可安全删除的证明。\n",
+        )
+
+        self.assertEqual(self.lint(), [])
 
     def test_later_same_sentence_negation_applies_without_crossing_sentence_boundary(self) -> None:
         self.write(
