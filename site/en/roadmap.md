@@ -14,7 +14,7 @@ The roadmap defines capability and evidence gates, not dates. Code may land befo
 | Track | Current evidence | Open boundary |
 |---|---|---|
 | P0 contracts/models | Workspace, schemas, fixtures, safety types, and extensive tests exist | The complete evidence bundle and every acceptance gate have not been declared complete |
-| P1 scanner CLI | Linux read-only scan is degraded; macOS handle-bound read-only scan is degraded; status snapshot works | Windows scanning stays fail-closed unsupported; live cancel disabled; three-platform/resource gates open |
+| P1 scanner CLI | Linux read-only scan is degraded; macOS handle-bound read-only scan is degraded; Unix status snapshots work | Windows scanning/durable state stay fail-closed unsupported; scan NDJSON and live cancel are disabled; three-platform/resource gates open |
 | P2 analysis/TUI/Cleaner | Bounded explain, live directory browsing through `scan --tui`, and metadata-only Cleaner run | Imported explain input is report-only; signing/sandbox/full cross-surface qualification open |
 | P3 plan/audit/simulation | Immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed fake executor are implemented; the Unix audit store now uses bundled SQLite WAL atomic transactions plus event replay | No CLI wiring, trusted HumanApproval broker, native path, real revalidation, or platform adapter; the phase is not qualified |
 | P4a qualification substrate | Linux `cfg(test)` disposable fixture; P4a.2 typed/validated qualification records and five independent mutation cells | Every cell is disabled on Linux/macOS/Windows; no native adapter, mutation command, approval UI, or product mutation capability |

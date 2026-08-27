@@ -5,11 +5,12 @@ use std::process::ExitCode as ProcessExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sweepx_core::{
-    CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, ScanRequest,
-    StatusRequest, cancel_with_store, capabilities, cleaner_list, cleaner_show,
-    core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
-    render_human_output, scan_with_store, serialize_json, serialize_ndjson,
-    state_dir_from_explicit_or_default, status_with_store, validate_absolute_root,
+    CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat,
+    SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest, cancel_with_store,
+    capabilities, cleaner_list, cleaner_show, core_error_exit_code, durable_store,
+    explain_from_scan_json, parse_locale_override, render_human_output, scan_ndjson_supported,
+    scan_with_store, serialize_json, serialize_ndjson, state_dir_from_explicit_or_default,
+    status_with_store, validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
@@ -113,6 +114,10 @@ fn main() -> ProcessExitCode {
             {
                 eprintln!("{message}");
                 return ProcessExitCode::from(2);
+            }
+            if format == OutputFormat::Ndjson && !scan_ndjson_supported() {
+                eprintln!("{SCAN_NDJSON_UNAVAILABLE_MESSAGE}");
+                return ProcessExitCode::from(3);
             }
             let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
                 Ok(value) => value,
@@ -327,17 +332,24 @@ fn resolve_state_store(
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
-            return Err(ProcessExitCode::from(2));
+            return Err(ProcessExitCode::from(state_error_exit_code(&error)));
         }
     };
     let store = match durable_store(state_dir.as_deref()) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
-            return Err(ProcessExitCode::from(2));
+            return Err(ProcessExitCode::from(state_error_exit_code(&error)));
         }
     };
     Ok((state_dir, store))
+}
+
+fn state_error_exit_code(error: &StateError) -> u8 {
+    match error {
+        StateError::DurableStateUnsupportedOnWindows => 3,
+        _ => 2,
+    }
 }
 
 fn normalize_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {
@@ -444,6 +456,20 @@ mod tests {
         assert!(validate_tui_environment(OutputFormat::Ndjson, true, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, false, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, true, false).is_err());
+    }
+
+    #[test]
+    fn default_scan_format_remains_human() {
+        let cli = Cli::try_parse_from(["sweepx", "scan", "/tmp"]).unwrap();
+        assert_eq!(cli.format, FormatArg::Human);
+    }
+
+    #[test]
+    fn unsupported_durable_state_uses_unsupported_exit_code() {
+        assert_eq!(
+            state_error_exit_code(&StateError::DurableStateUnsupportedOnWindows),
+            3
+        );
     }
 
     #[test]

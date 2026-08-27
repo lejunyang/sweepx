@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Windows durable snapshot state now fails closed until private DACL and reparse-point checks exist.
+- Scan NDJSON is rejected until a durable journal and replay path can satisfy the published terminal-event contract.
+- `status.result.data` and `cancel.result.data` now have exact published schema branches and examples.
 - Imported scan data is forced to stale, incomplete, report-only status.
 - Native filesystem mutation, Trash, permanent deletion, elevation, and
   destructive CLI commands remain unavailable.

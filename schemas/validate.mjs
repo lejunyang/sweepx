@@ -44,6 +44,14 @@ const validations = [
     file: path.join(schemaDir, "examples", "sweepx.output.scan.result.example.json")
   },
   {
+    schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
+    file: path.join(schemaDir, "examples", "sweepx.output.status.result.example.json")
+  },
+  {
+    schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
+    file: path.join(schemaDir, "examples", "sweepx.output.cancel.result.example.json")
+  },
+  {
     schemaId: "https://sweepx.dev/schemas/sweepx.event/v1",
     file: path.join(schemaDir, "examples", "sweepx.event.operation.started.example.json")
   },
@@ -232,6 +240,31 @@ const scanSchemaCases = [
     }
   },
   {
+    name: "non-root locator entry requires its direct parent identity",
+    expected: false,
+    mutate(output) {
+      delete output.data.entries[0].nativeLocator.entry.parentId;
+    }
+  },
+  {
+    name: "scan-root locator component cannot claim a parent",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.scanRoot.parentId =
+        output.data.entries[0].identity.entryId;
+    }
+  },
+  {
+    name: "non-root recipe ancestors require direct parent identity",
+    expected: false,
+    mutate(output) {
+      const root = clone(output.data.entries[0].nativeLocator.scanRoot);
+      const parent = clone(root);
+      parent.entryId = "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:3";
+      output.data.entries[0].nativeLocator.parentReopenRecipe = [root, parent];
+    }
+  },
+  {
     name: "display path is rejected as native locator entry ID",
     expected: false,
     mutate(output) {
@@ -275,6 +308,84 @@ for (const testCase of scanSchemaCases) {
     }
   } else {
     console.log(`PASS scan schema case: ${testCase.name}`);
+  }
+}
+
+const resultSchemaCases = [
+  {
+    name: "status result matches its exact data branch",
+    file: "sweepx.output.status.result.example.json",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "status result rejects unknown data fields",
+    file: "sweepx.output.status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.unknownField = true;
+    }
+  },
+  {
+    name: "status result requires its nullable count fields",
+    file: "sweepx.output.status.result.example.json",
+    expected: false,
+    mutate(output) {
+      delete output.data.entryCount;
+    }
+  },
+  {
+    name: "cancel result matches its exact data branch",
+    file: "sweepx.output.cancel.result.example.json",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "cancel result rejects unknown data fields",
+    file: "sweepx.output.cancel.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.unknownField = true;
+    }
+  },
+  {
+    name: "missing cancel result cannot carry an operation",
+    file: "sweepx.output.cancel.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "not_found";
+    }
+  },
+  {
+    name: "terminal cancel result requires an operation",
+    file: "sweepx.output.cancel.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.operation = null;
+    }
+  },
+  {
+    name: "unsupported cancel result cannot carry an operation",
+    file: "sweepx.output.cancel.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "unsupported";
+    }
+  }
+];
+
+for (const testCase of resultSchemaCases) {
+  const output = readJson(path.join(schemaDir, "examples", testCase.file));
+  testCase.mutate(output);
+  const ok = scanOutputValidator(output);
+  if (ok !== testCase.expected) {
+    failed = true;
+    console.log(`FAIL output schema case: ${testCase.name}`);
+    for (const error of scanOutputValidator.errors ?? []) {
+      console.log(`  ${error.instancePath || "/"} ${error.message}`);
+    }
+  } else {
+    console.log(`PASS output schema case: ${testCase.name}`);
   }
 }
 

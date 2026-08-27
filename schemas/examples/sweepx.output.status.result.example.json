@@ -1,0 +1,44 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "status.result",
+  "requestId": "req-status-op-scan-example",
+  "operationId": "op-status-example",
+  "generatedAt": "2026-08-27T06:05:00Z",
+  "status": "ok",
+  "exitCode": 0,
+  "compat": {
+    "coreVersion": "0.1.0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "linux",
+      "version": "0.1.0"
+    },
+    "cleanerSetDigest": "sha256:example",
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "found": true,
+    "operationId": "op-scan-example",
+    "state": "completed"
+  },
+  "data": {
+    "operationId": "op-scan-example",
+    "command": "scan",
+    "state": "completed",
+    "status": "ok",
+    "createdAt": "2026-08-27T06:00:00Z",
+    "updatedAt": "2026-08-27T06:00:04Z",
+    "locale": "en-US",
+    "scanId": "scan-example",
+    "rootCount": "1",
+    "entryCount": "4",
+    "errorCount": "0",
+    "boundaryCount": "1",
+    "terminalEventType": "operation.terminal",
+    "canCancel": false
+  },
+  "warnings": [],
+  "errors": []
+}

@@ -12,7 +12,7 @@ After the user provides an explicit scope, an Agent may:
 
 - run `capabilities` and report degraded/report-only/unsupported/disabled states;
 - run the read-only Linux scanner on user-selected absolute roots;
-- read JSON/NDJSON and explain errors, boundaries, coverage, and tagged sizes;
+- read current JSON and explain errors, boundaries, coverage, and tagged sizes; scan NDJSON is currently disabled;
 - run report-only `explain` over bounded scan JSON;
 - list or show Cleaner metadata;
 - open or summarize read-only TUI input.
@@ -32,7 +32,7 @@ The current CLI has no mutation command, and an Agent must not route around that
 
 ## Structured output and language
 
-Automation should prefer JSON/NDJSON. `--locale` changes human-facing text only; it does not change schema keys, status values, reason codes, or capability states. An Agent should preserve those stable fields through translation and summary.
+Current scan automation should use JSON; NDJSON remains disabled until durable journaling and replay exist. `--locale` changes human-facing text only; it does not change schema keys, status values, reason codes, or capability states. An Agent should preserve those stable fields through translation and summary.
 
 ## The future boundary remains narrower
 

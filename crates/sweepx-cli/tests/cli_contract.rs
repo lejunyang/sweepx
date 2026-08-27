@@ -45,7 +45,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
     assert_eq!(json["summary"]["commandCount"], "7");
-    assert_eq!(json["summary"]["capabilityCount"], "28");
+    assert_eq!(json["summary"]["capabilityCount"], "34");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert!(commands.iter().all(|command| command["mutating"] == false));
     assert!(commands.iter().all(|command| {
@@ -118,6 +118,33 @@ fn capabilities_json_uses_fixed_machine_keys() {
             "unsupported"
         };
         assert_eq!(tui["state"], expected_tui_state);
+
+        let ndjson = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "scan.ndjson.stream"
+            })
+            .unwrap();
+        assert_eq!(ndjson["state"], "disabled");
+
+        let durable_snapshot = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "operation.snapshot.durable"
+            })
+            .unwrap();
+        let expected_snapshot_state = if os == "windows" {
+            "disabled"
+        } else {
+            "qualified"
+        };
+        assert_eq!(durable_snapshot["state"], expected_snapshot_state);
     }
 
     let linux_tui = json["data"]["capabilities"]
@@ -130,6 +157,28 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_tui["state"], "degraded");
+
+    let linux_ndjson = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"] == "scan.ndjson.stream"
+        })
+        .unwrap();
+    assert_eq!(linux_ndjson["state"], "disabled");
+
+    let linux_snapshot = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"] == "operation.snapshot.durable"
+        })
+        .unwrap();
+    assert_eq!(linux_snapshot["state"], "qualified");
 
     let capability_values = json["data"]["capabilities"].as_array().unwrap();
     let records = capability_values
@@ -393,6 +442,22 @@ fn live_tui_rejects_json_before_validating_or_scanning_roots() {
 }
 
 #[test]
+fn live_tui_rejects_ndjson_as_an_invalid_tui_combination() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("scan")
+        .arg("--tui")
+        .arg("relative-root");
+    let output = cmd.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--tui cannot be combined"));
+    assert!(!stderr.contains("durable event journal"));
+    assert!(!stderr.contains("scan root must be absolute"));
+}
+
+#[test]
 fn live_tui_rejects_non_terminal_streams_before_scanning() {
     let fixture = TempDir::new().unwrap();
     let missing_root = fixture.path().join("missing");
@@ -516,16 +581,9 @@ fn capabilities_does_not_create_explicit_state_dir() {
     assert!(!state_dir.exists());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn scan_ndjson_ends_with_exactly_one_terminal_event_and_reports_symlink_boundary() {
+fn scan_ndjson_is_rejected_before_state_creation_or_root_validation() {
     let fixture = TempDir::new().unwrap();
-    let root = fixture.path().join("root");
-    fs::create_dir(&root).unwrap();
-    fs::write(root.join("file.txt"), b"1234").unwrap();
-    let symlink_path = root.join("file-link");
-    std::os::unix::fs::symlink(root.join("file.txt"), &symlink_path).unwrap();
-
     let state_dir = fixture.path().join("state");
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -534,38 +592,14 @@ fn scan_ndjson_ends_with_exactly_one_terminal_event_and_reports_symlink_boundary
         .arg("--state-dir")
         .arg(&state_dir)
         .arg("scan")
-        .arg(root.as_os_str());
+        .arg("relative-root");
 
-    let stdout = cmd.assert().get_output().stdout.clone();
-    let text = String::from_utf8(stdout).unwrap();
-    let lines: Vec<&str> = text.lines().collect();
-    assert!(!lines.is_empty());
-
-    let events: Vec<Value> = lines
-        .iter()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect();
-    let terminal_count = events
-        .iter()
-        .filter(|event| event["type"] == "operation.terminal" && event["terminal"] == true)
-        .count();
-    assert_eq!(terminal_count, 1);
-    assert_eq!(events.last().unwrap()["type"], "operation.terminal");
-    assert_eq!(events.last().unwrap()["terminal"], true);
-    assert_eq!(events.last().unwrap()["checkpoint"]["durable"], false);
-    assert_eq!(
-        events.last().unwrap()["checkpoint"]["lastDurableSequence"],
-        "0"
-    );
-
-    let boundary = events.iter().find(|event| {
-        event["type"] == "scan.boundary.observed" && event["payload"]["boundaryKind"] == "symlink"
-    });
-    assert!(boundary.is_some());
-
-    let started = &events[0];
-    assert_eq!(started["checkpoint"]["durable"], false);
-    assert_eq!(started["payload"]["resumable"], false);
+    let output = cmd.assert().code(3).get_output().clone();
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("disabled until SweepX has a durable event journal"));
+    assert!(!stderr.contains("scan root must be absolute"));
+    assert!(!state_dir.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -607,6 +641,25 @@ fn scan_json_persists_snapshot_for_status_lookup() {
     assert_eq!(status_json["data"]["operationId"], operation_id);
     assert_eq!(status_json["data"]["command"], "scan");
     assert_eq!(status_json["data"]["canCancel"], false);
+    assert_eq!(
+        sorted_object_keys(&status_json["data"]),
+        [
+            "boundaryCount",
+            "canCancel",
+            "command",
+            "createdAt",
+            "entryCount",
+            "errorCount",
+            "locale",
+            "operationId",
+            "rootCount",
+            "scanId",
+            "state",
+            "status",
+            "terminalEventType",
+            "updatedAt",
+        ]
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -667,6 +720,11 @@ fn cancel_json_is_honest_for_missing_operation() {
     assert_eq!(json["kind"], "cancel.result");
     assert_eq!(json["summary"]["disposition"], "not_found");
     assert_eq!(json["data"]["canCancel"], false);
+    assert_eq!(json["data"]["operation"], Value::Null);
+    assert_eq!(
+        sorted_object_keys(&json["data"]),
+        ["canCancel", "disposition", "operation", "operationId"]
+    );
 }
 
 #[cfg(unix)]
@@ -711,6 +769,17 @@ fn symlink_boundary_does_not_force_partial_scan() {
 
 fn cli_crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn sorted_object_keys(value: &Value) -> Vec<&str> {
+    let mut keys = value
+        .as_object()
+        .expect("value must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
 }
 
 fn sample_scan_json() -> String {

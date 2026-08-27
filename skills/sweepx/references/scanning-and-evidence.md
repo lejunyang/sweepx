@@ -38,8 +38,10 @@ Resolve ambiguity with the human before planning. Admit every additional root se
 Invoke a metadata-only scan without shell-interpolated selectors:
 
 ```sh
-sweepx scan "/absolute/user-selected/root" --format ndjson
+sweepx scan "/absolute/user-selected/root" --format json
 ```
+
+Current scan NDJSON is disabled until SweepX has a durable event journal, cursor replay, and durable terminal events. Do not retry with NDJSON or synthesize a stream from human output.
 
 Run as the current ordinary user. Do not read or hash contents, hydrate a cloud placeholder, follow a symlink/reparse point, enter an unrequested mount, acquire privilege, alter ACL/TCC/flags, kill a process, or change system settings.
 

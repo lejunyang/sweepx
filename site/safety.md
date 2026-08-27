@@ -22,7 +22,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | Cleaner | 只读 metadata，兼容性失败关闭 |
 | 能力表达 | unsupported、degraded、report_only、disabled 分开报告 |
 
-当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标；`scan` 可以在指定 state directory 写自己的终态 snapshot，P3 audit library 也可以用 Unix bundled SQLite WAL 原子事务与 event replay 写 SweepX 自己的审计状态。它们都不修改被扫描的目标。
+当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标；Unix 上的 `scan` 可以在指定 state directory 写自己的终态 snapshot，P3 audit library 也可以用 Unix bundled SQLite WAL 原子事务与 event replay 写 SweepX 自己的审计状态。Windows durable snapshot state 在私有 DACL 与 reparse-point 检查实现前保持禁用。它们都不修改被扫描的目标。
 
 ## 导入报告为什么只能 report-only
 

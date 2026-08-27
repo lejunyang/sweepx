@@ -13,7 +13,7 @@ absolute roots
   -> platform backend
   -> scanner + model aggregates/boundaries
   -> Core output envelope
-  -> bounded human table | explicit JSON | explicit NDJSON
+  -> bounded human table | explicit JSON
   -> optional in-process file-manager TUI
   -> durable terminal snapshot (optional state directory)
 
@@ -36,7 +36,7 @@ Linux 连接了实际 scanner backend。macOS 现接入 handle-bound degraded sc
 
 ## 状态与取消
 
-CLI scan 当前同步完成，并在启用 state directory 时保存 terminal snapshot。`status` 是 snapshot lookup，而不是连接后台 worker。`cancel` 没有 live registry 可操作，因此只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+CLI scan 当前同步完成，并在 Unix 上启用 state directory 时保存 terminal snapshot；Windows durable state 因缺少 current-user-private DACL 与 reparse-point 安全检查而失败关闭。`status` 是 snapshot lookup，而不是连接后台 worker。scan NDJSON 在 durable journal/replay 实现前也失败关闭。`cancel` 没有 live registry 可操作，因此只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
 
 ## 导入是明确的信任边界
 

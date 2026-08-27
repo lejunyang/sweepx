@@ -22,9 +22,9 @@ Global options:
 
 | Option | Meaning |
 |---|---|
-| `--format human|json|ndjson` | Select display or machine output; default is `human` |
+| `--format human|json|ndjson` | Select display or machine output; default is `human`; scan currently rejects `ndjson` |
 | `--locale zh-CN|en-US` | Override the auto-detected display locale |
-| `--state-dir ABSOLUTE_DIR` | Select durable snapshot storage for scan/status/cancel |
+| `--state-dir ABSOLUTE_DIR` | Select durable snapshot storage for scan/status/cancel on Unix; Windows currently fails closed |
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
@@ -65,13 +65,14 @@ cargo run -p sweepx-cli -- \
 - The current Linux capability is `degraded`, not release qualification.
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
 - The Windows backend remains fail-closed unsupported; compilation is not scanning support.
-- `ndjson` emits an event stream ending in a terminal event; it does not imply a background daemon.
+- `scan --format ndjson` currently returns unsupported before scanning or state creation. It remains disabled until the durable event journal, replay, and durable terminal event exist.
 
 Request machine output explicitly for scripts and integrations:
 
 ```bash
 sweepx --format json scan /absolute/path/to/root > scan.json
-sweepx --format ndjson scan /absolute/path/to/root > events.ndjson
+# Currently returns unsupported; it does not scan or create state
+sweepx --format ndjson scan /absolute/path/to/root
 ```
 
 ## Status snapshots and cancellation
@@ -90,7 +91,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` only reads a persisted snapshot. There is no live in-process registry, so output reports `canCancel: false` and cancellation capability is `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+`status` only reads a persisted snapshot. That durable store is currently enabled only on Unix. Windows creates no default state and rejects explicit `--state-dir` because current-user-private DACL enforcement and reparse-point checks are not implemented. There is no live in-process registry, so output reports `canCancel: false` and cancellation capability is `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
 
 ## Explain from scan JSON
 

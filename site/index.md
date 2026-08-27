@@ -38,14 +38,14 @@ features:
 | Linux 目录扫描 | development-grade、read-only、degraded |
 | macOS 目录扫描 | development-grade、read-only、handle-bound degraded |
 | Windows 扫描 | fail-closed unsupported |
-| `status` | 读取持久化的终态 snapshot |
+| `status` | Unix 上读取持久化的终态 snapshot；Windows durable state disabled |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门 |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览 |
 | Trash / Permanent | 不存在 |
 
-CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。JSON/NDJSON 的机器字段不会因语言变化。
+CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 scan 机器输出使用 JSON；NDJSON 在 durable journal/replay 完成前禁用。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；稳定 release 尚未发布。
 
 ## 按你的问题阅读

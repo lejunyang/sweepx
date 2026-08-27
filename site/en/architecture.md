@@ -13,7 +13,7 @@ absolute roots
   -> platform backend
   -> scanner + model aggregates/boundaries
   -> Core output envelope
-  -> bounded human table | explicit JSON | explicit NDJSON
+  -> bounded human table | explicit JSON
   -> optional in-process file-manager TUI
   -> durable terminal snapshot (optional state directory)
 
@@ -36,7 +36,7 @@ Linux connects a real scanner backend. macOS now exposes a handle-bound degraded
 
 ## State and cancellation
 
-CLI scan currently completes synchronously and, when a state directory is enabled, saves a terminal snapshot. `status` is snapshot lookup, not a connection to a background worker. `cancel` has no live registry to act on and therefore returns an honest disposition; that is why its capability is disabled.
+CLI scan currently completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state fails closed because current-user-private DACL enforcement and reparse-point checks are not implemented. `status` is snapshot lookup, not a connection to a background worker. Scan NDJSON also fails closed until durable journaling and replay exist. `cancel` has no live registry to act on and therefore returns an honest disposition; that is why its capability is disabled.
 
 ## Import is an explicit trust boundary
 

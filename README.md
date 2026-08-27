@@ -13,7 +13,7 @@
 |---|---|---|
 | Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
 | `sweepx scan` | **Linux：degraded**、**macOS：degraded** 的同步、只读目录扫描 | macOS 目前接入 handle-bound degraded scanner，并通过统一的 `sweepx scan` / `sweepx scan --tui` 暴露；Windows 仍 fail-closed 为 unsupported；未完成三平台发布资格 |
-| `sweepx status` | 读取已持久化的 operation snapshot | 不是后台任务监控，也不表示扫描仍在运行 |
+| `sweepx status` | Unix 上读取已持久化的 operation snapshot | Windows durable state 暂时禁用；它也不是后台任务监控，不表示扫描仍在运行 |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
@@ -85,11 +85,11 @@ cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
 ```
 
-`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 与 `ndjson` 是显式机器格式。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
+`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描和 state 创建前以 unsupported 拒绝，直到 durable event journal、replay 和 durable terminal event 都实现。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
 
 ### `status` 与 `cancel` 的诚实语义
 
-当前扫描是同步命令。`status` 读取扫描结束时写入 durable state 的快照；它不是 live progress API。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
+当前扫描是同步命令。Unix 上 `status` 读取扫描结束时写入 durable state 的快照；它不是 live progress API。Windows durable snapshot state 暂时完全禁用：当前实现尚不能同时保证 current-user-private DACL 与逐组件 reparse-point 拒绝，因此默认不创建 state，显式 `--state-dir` 也会失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
 
 ### 导入 JSON 永远不是执行依据
 

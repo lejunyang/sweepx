@@ -108,6 +108,44 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "status.result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/statusResultData"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "cancel.result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/cancelResultData"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -875,6 +913,200 @@
           }
         }
       }
+    },
+    "operationState": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "partial",
+        "failed",
+        "unsupported",
+        "not_found"
+      ]
+    },
+    "publicOperationView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "command",
+        "state",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "locale",
+        "scanId",
+        "rootCount",
+        "entryCount",
+        "errorCount",
+        "boundaryCount",
+        "terminalEventType",
+        "canCancel"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+        },
+        "command": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "state": {
+          "$ref": "#/$defs/operationState"
+        },
+        "status": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/outputStatus"
+        },
+        "createdAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "locale": {
+          "type": "string",
+          "enum": [
+            "zh-CN",
+            "en-US"
+          ]
+        },
+        "scanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rootCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "entryCount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "errorCount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "boundaryCount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "terminalEventType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canCancel": {
+          "const": false
+        }
+      }
+    },
+    "statusResultData": {
+      "$ref": "#/$defs/publicOperationView"
+    },
+    "cancelResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "disposition",
+        "canCancel",
+        "operation"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "not_found",
+            "already_terminal",
+            "unsupported"
+          ]
+        },
+        "canCancel": {
+          "const": false
+        },
+        "operation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/publicOperationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "operation": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "already_terminal"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/publicOperationView"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "unsupported"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "operation": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

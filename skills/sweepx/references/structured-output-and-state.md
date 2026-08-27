@@ -40,11 +40,15 @@ Accept exactly one JSON object on stdout for a bounded command:
 
 Allow these v1 `kind` values: `scan.result`, `explanation.result`, `plan.result`, `execution.result`, `recovery.result`, `cancel.result`, `status.result`, `capabilities.result`, `cleaner.result`, and `audit.result`. `approval.result` is an internal typed Broker response after trusted foreground input; it is not a JSON/NDJSON mode for `approve`. Allow these statuses: `ok`, `partial`, `blocked`, `authorization_required`, `stale`, `failed`, `needs_reconciliation`, `cancelled`, and `unsupported`.
 
+Validate `status.result.data` and `cancel.result.data` against their exact published branches. Status data is the complete public operation view. Cancel data contains `operationId`, `disposition`, `canCancel=false`, and nullable `operation`; `not_found` and `unsupported` require null, while `already_terminal` requires the complete view. Reject unknown data fields.
+
 Treat `/v1` as an additive-only major family. Allow unknown optional fields and preserve them when relaying signed/canonical artifacts. Reject an unknown required feature, schema major, or enum affecting identity, scope, risk, completeness, protection, action, or outcome. Never silently rewrite an immutable artifact. JSON output is not an executable plan import. Agent execution accepts only Core's internal `planId` and the Broker's opaque `approvalId`; although the product's separate `--dangerously-delete` authorization may run noninteractively, this Skill never invokes it.
 
 Record CLI/Core version, host instance, current user, scanner semantics, safety-policy version/digest, protected-anchor snapshot digest, adapter versions/capability digest, cleaner-set digest, supported output schemas/features, destructive-mode qualification, and approval/audit-store health. A missing or unreadable required value blocks mutation.
 
 ## Streaming NDJSON
+
+This section is the required consumer contract for a future durable stream. The current CLI rejects `scan --format ndjson` before scanning because it has no durable event journal or replay path. Do not consume, emulate, or reinterpret the Core's internal in-memory progress vector as NDJSON. Use bounded `--format json` for current scans.
 
 Accept one complete JSON object per line:
 

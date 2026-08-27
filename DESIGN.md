@@ -678,6 +678,8 @@ sweepx [global-options] <command>
 
 bounded 命令返回一个 `sweepx.output/v1` terminal envelope；stream 返回每行一个 `sweepx.event/v1`。sequence 为十进制字符串、严格递增；交付 at-least-once，以 `(streamId, sequence)` 去重；cursor 绑定 stream/sequence/checkpoint。cursor 过期先发 `stream.reset_required`，客户端取 status snapshot 后续读。每个 operation 恰好一个 durable `operation.terminal`。
 
+当前实现尚无满足该契约的 durable event journal 和 replay path，因此 `scan --format ndjson` 必须在 admission 前返回 unsupported，不能输出仅驻内存、checkpoint 非 durable 的伪事件流。当前 scan 机器输出只开放 bounded JSON；NDJSON 在 journal、cursor replay 与 durable terminal event 同时落地后再启用。Windows durable snapshot store 同样失败关闭，直到实现 current-user-private DACL、逐组件 reparse-point 拒绝和私有文件 ACL；默认路径不创建，显式 `--state-dir` 也拒绝。
+
 事件集合包括：operation/phase；scan root/progress/aggregate/boundary/error/completed；candidate/analysis；plan/authorization（含 human approval 与 explicit dangerous delete）；revalidation/preflight/protection；cancel；action intent/platform/skipped/permit/reconcile；item/batch/recovery/audit；detail persistence、stream reset 和 terminal。只有中间 progress、非终版 aggregate 可合并；错误、边界、incomplete reason、intent、outcome 和 terminal 不丢。`approval.*` 事件只来自 core/TUI 内部 broker stream；`authorization.explicit_dangerous_delete` 只记录 flag admission 与精确 plan digest，不泄露 record/nonce。
 
 | code | 名称 | 含义 |
@@ -970,7 +972,7 @@ scanner 正常只使用有界内存；仅当实际 charged memory 达到 75% 高
 详细里程碑、owner、退出条件和发布矩阵见 [docs/ROADMAP.md](docs/ROADMAP.md)。总体顺序：
 
 1. **M0 契约与只读骨架**：workspace、models/JCS/digest、protocol/schema golden、普通用户 capability probe、三平台 CI。
-2. **M1 有界 Scanner**：portable adapters、aggregate/cache/spill、TUI/NDJSON read-only、fixtures/oracle；无 deletion code path。
+2. **M1 有界 Scanner**：portable adapters、aggregate/cache/spill、TUI、bounded JSON、fixtures/oracle；durable journal/replay 完成后再开放 NDJSON；无 deletion code path。
 3. **M2 Cleaner 与 Catalog**：Z0 typed rules、Cargo/Chromium cache 示例、开发生态 report-only、签名/撤销/probe host。
 4. **M3 Plan/Approval/Audit dry-run**：canonical plan、Broker、hard protection、preflight simulation、crash journal；adapter 仍编译为 deny-all。
 5. **M4 Trash capability**：逐平台真实 gate 通过后按 capability 开放，默认 Trash；未通过平台保持 read-only。

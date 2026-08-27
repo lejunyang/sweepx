@@ -12,7 +12,7 @@ Agent 可以在用户提供明确范围后：
 
 - 运行 `capabilities` 并报告 degraded/report-only/unsupported/disabled 状态；
 - 在用户选择的绝对根上运行 Linux 只读扫描；
-- 读取 JSON/NDJSON，解释 error、boundary、coverage 和 tagged size；
+- 读取现有 JSON，解释 error、boundary、coverage 和 tagged size；scan NDJSON 当前禁用；
 - 对有界 scan JSON 运行 report-only `explain`；
 - 列出或展示 Cleaner 元数据；
 - 打开或摘要只读 TUI 输入。
@@ -32,7 +32,7 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 结构化输出与语言
 
-面向自动化应优先使用 JSON/NDJSON。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
+当前 scan 自动化应使用 JSON；NDJSON 要等 durable journal/replay 完成后才会开放。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
 
 ## 未来边界仍然更窄
 

@@ -223,12 +223,12 @@ sweepx [global-options] <command>
 
 | Flag | 语义与约束 |
 |---|---|
-| `--format human\|json\|ndjson` | 默认 `human`；JSON 只输出一个终态 envelope；NDJSON 只输出 event envelope。机器格式 stdout 不混入日志，诊断走 stderr。 |
+| `--format human\|json\|ndjson` | 默认 `human`；JSON 只输出一个终态 envelope；NDJSON 只输出 durable event envelope。当前 scan NDJSON 因 journal/replay 未实现而在 admission 前返回 unsupported。机器格式 stdout 不混入日志，诊断走 stderr。 |
 | `--output FILE` | 非交互命令可把选定格式写入新文件；默认 stdout。以当前用户私有权限写同目录临时文件并 no-replace 原子发布，拒绝 symlink、已存在路径和 `approve`；输出失败不重放已执行 action，结果从 audit/status 恢复。 |
 | `--locale zh-CN\|en-US` | 只影响 human 文案，不影响 enum/digest。 |
 | `--no-color`、`--quiet` | 只影响显示；不得隐藏终态 error/unknown/partial。 |
 | `--request-id UUID` | 客户端关联 ID，不参与授权；重复 ID 不使动作幂等。 |
-| `--state-dir PATH` | 只能选择当前用户私有、非 symlink 的 SweepX 状态目录；不能指向 scan target、root、Trash 或共享目录。执行时改变 state-dir 会使 plan/authorization 不可用。 |
+| `--state-dir PATH` | 只能选择当前用户私有、非 symlink/reparse 的 SweepX 状态目录；不能指向 scan target、root、Trash 或共享目录。Windows 当前因尚未实现 current-user-private DACL 与逐组件 reparse 检查而完全拒绝 durable state。执行时改变 state-dir 会使 plan/authorization 不可用。 |
 | `--after CURSOR` | `status --watch --format ndjson` 从 durable event cursor 续读；不重跑扫描或动作。 |
 
 flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失败即 exit 2，不做宽松转换。以上 flags 默认适用于所有非 `approve` 命令，例外已在表内列明；`--after` 只允许 `status --watch --format ndjson`，`--output` 与 interactive `approve` 冲突，`--quiet` 不得与 HumanApproval 合并以隐藏 exact plan 或 ApprovalSurface，`--detach` 只用于产生持久 operation ID 的 scan（未来若 execute 支持也必须复用同一 cancel/status 契约）。任何不适用或冲突组合在 admission 前返回结构化 `USAGE`，不会部分执行。
@@ -311,6 +311,8 @@ flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失
 
 `kind` 的 v1 值为 `scan.result`、`explanation.result`、`plan.result`、`execution.result`、`recovery.result`、`cancel.result`、`status.result`、`capabilities.result`、`cleaner.result`、`audit.result`。`approval.result` 仅是 Broker 在可信前台已取得人类输入后返回 opaque `approvalId` 的内部 typed response，不属于 `approve` 的 JSON/NDJSON CLI 模式；CLI `approve` 始终只接受和输出 human mode。`status` 为 `ok|partial|blocked|authorization_required|stale|failed|needs_reconciliation|cancelled|unsupported`。
 
+当前发布 schema 还固定 `status.result.data` 与 `cancel.result.data` 的完整字段集。status data 是公开 operation snapshot view；cancel data 包含 `operationId`、disposition、恒为 false 的 `canCancel` 和 nullable operation。`not_found` / `unsupported` 要求 operation 为 null，`already_terminal` 要求完整 operation view；未知 data 字段拒绝。
+
 错误合同：
 
 ```text
@@ -329,6 +331,8 @@ Error {
 机器输出默认含本机敏感路径，仅写当前用户私有 stdout/file；`audit export` 默认把 `displayPath` 和自由文本 evidence 替换为稳定的 per-export pseudonym，并保留非可逆 identity digest、risk、错误 class/native code 和 coverage。显式 `--include-sensitive-paths` 只可用于 human foreground export，需单独确认且不改变执行记录。trusted local core store 保留无损 native basename/parent recipe供复验；任何脱敏后的 JSON 都标 `redacted=true`，不可导入、不可计划、不可执行。
 
 ### 5.2 可恢复 NDJSON
+
+这是目标合同，不代表当前 CLI 已提供该能力。当前 `scan --format ndjson` 在扫描、root validation 和 state 创建之前返回 unsupported；不得把现有内存 progress vector 暴露成非 durable stream。只有 durable journal、cursor replay/reset 与 durable `operation.terminal` 同时实现并通过 contract tests 后才可启用。
 
 每一行是完整 JSON 对象，使用 `sweepx.event/v1`：
 

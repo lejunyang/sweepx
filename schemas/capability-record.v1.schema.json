@@ -103,6 +103,8 @@
                 "not": {
                   "enum": [
                     "scan.local.directory",
+                    "scan.ndjson.stream",
+                    "operation.snapshot.durable",
                     "analysis.explain.scan_json",
                     "catalog.cleaner.read",
                     "scan.tui.live",
@@ -242,6 +244,8 @@
       "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$",
       "examples": [
         "scan.local.directory",
+        "scan.ndjson.stream",
+        "operation.snapshot.durable",
         "trash.local.file",
         "trash.local.directory",
         "permanent.local.file",

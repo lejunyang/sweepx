@@ -38,14 +38,14 @@ features:
 | Linux directory scan | development-grade, read-only, degraded |
 | macOS directory scan | development-grade, read-only, handle-bound degraded |
 | Windows scan | fail-closed unsupported |
-| `status` | reads a persisted terminal snapshot |
+| `status` | reads a persisted terminal snapshot on Unix; Windows durable state is disabled |
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |
 | Cleaner | read-only metadata list/show with compatibility gates |
 | CLI/TUI | one `sweepx` entry point; terminal table by default, directory browser via `scan --tui` |
 | Trash / Permanent | absent |
 
-The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. JSON and NDJSON machine fields do not change with the display language.
+The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. Current machine scan output uses JSON; NDJSON is disabled until durable journaling and replay exist.
 Release automation builds five target archives, checksums, installers, and this GitHub Pages site. No stable release has been published yet.
 
 ## Read by question

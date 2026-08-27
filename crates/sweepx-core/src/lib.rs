@@ -53,6 +53,8 @@ const SNAPSHOT_SCHEMA: &str = "sweepx.operation-snapshot/v1";
 const OPERATION_ID_MAX_LEN: usize = 128;
 pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
+pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str =
+    "scan --format ndjson is disabled until SweepX has a durable event journal and replay support";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -367,6 +369,10 @@ pub enum CoreError {
 pub enum StateError {
     #[error("state directory must be absolute: {0}")]
     NonAbsoluteStateDir(PathBuf),
+    #[error(
+        "durable state is disabled on Windows until current-user-private ACL and reparse-point checks are implemented"
+    )]
+    DurableStateUnsupportedOnWindows,
     #[error("state directory must not be a symlink: {0}")]
     SymlinkStateDir(PathBuf),
     #[error("state directory must be a directory: {0}")]
@@ -379,6 +385,15 @@ pub enum StateError {
     Io(#[from] io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Whether the current build can safely persist operation snapshots.
+///
+/// Windows remains disabled until the store can enforce a current-user-only
+/// DACL and reject reparse points for every state-directory component and
+/// snapshot file. Returning `false` is intentional fail-closed behavior.
+pub const fn durable_state_supported() -> bool {
+    cfg!(unix)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,6 +431,9 @@ pub struct DurableSnapshotStore {
 impl DurableSnapshotStore {
     pub fn new(base_dir: impl Into<PathBuf>) -> Result<Self, StateError> {
         let base_dir = base_dir.into();
+        if !durable_state_supported() {
+            return Err(StateError::DurableStateUnsupportedOnWindows);
+        }
         validate_or_prepare_state_dir(&base_dir)?;
         Ok(Self { base_dir })
     }
@@ -489,10 +507,18 @@ impl SnapshotStore for MemorySnapshotStore {
 }
 
 pub fn durable_store(state_dir: Option<&Path>) -> Result<Option<DurableSnapshotStore>, StateError> {
+    if state_dir.is_some() && !durable_state_supported() {
+        return Err(StateError::DurableStateUnsupportedOnWindows);
+    }
+
     match state_dir {
         Some(path) => Ok(Some(DurableSnapshotStore::new(path)?)),
         None => Ok(None),
     }
+}
+
+pub const fn scan_ndjson_supported() -> bool {
+    false
 }
 
 pub fn audit_projection(store: &AuditStore) -> Result<AuditProjectionSnapshot, CoreError> {
@@ -691,6 +717,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
         }
         CleanerCatalogTrustDisposition::Trusted => "BUILTIN_CLEANER_REPORTING_SUPPORTED",
     };
+    let (status_state, status_reason) = if durable_state_supported() {
+        (CapabilityState::Qualified, "STATUS_SNAPSHOT_SUPPORTED")
+    } else {
+        (
+            CapabilityState::Disabled,
+            "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED",
+        )
+    };
     let mut output = OutputEnvelope::new(
         OutputKind::CapabilitiesResult,
         ids.request_id,
@@ -711,11 +745,7 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
         ),
-        command_record(
-            "status",
-            CapabilityState::Qualified,
-            "STATUS_SNAPSHOT_SUPPORTED",
-        ),
+        command_record("status", status_state, status_reason),
         command_record(
             "cancel",
             CapabilityState::Disabled,
@@ -737,6 +767,22 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "scan.local.directory",
             CapabilityState::Degraded,
             "LINUX_SCANNER_DEVELOPMENT",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            "scan.ndjson.stream",
+            CapabilityState::Disabled,
+            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            "operation.snapshot.durable",
+            CapabilityState::Qualified,
+            "STATUS_SNAPSHOT_SUPPORTED",
         ),
         capability_record(
             &recorded_at,
@@ -782,6 +828,22 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &recorded_at,
             &qualification_expires_at,
             OsFamily::Macos,
+            "scan.ndjson.stream",
+            CapabilityState::Disabled,
+            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            "operation.snapshot.durable",
+            CapabilityState::Qualified,
+            "STATUS_SNAPSHOT_SUPPORTED",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "analysis.explain.scan_json",
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
@@ -809,6 +871,22 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "scan.local.directory",
             CapabilityState::Unsupported,
             "STUB_COMPILATION_ONLY",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            "scan.ndjson.stream",
+            CapabilityState::Disabled,
+            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            "operation.snapshot.durable",
+            CapabilityState::Disabled,
+            "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED",
         ),
         capability_record(
             &recorded_at,
@@ -2737,7 +2815,13 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "CANCEL_LIVE_REGISTRY_ABSENT" => {
             "Cancel is disabled because P1 does not maintain a live in-process operation registry."
         }
+        "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT" => {
+            "Scan NDJSON is disabled until a durable event journal and replay path are implemented."
+        }
         "STATUS_SNAPSHOT_SUPPORTED" => "Status reads durable snapshots only.",
+        "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED" => {
+            "Durable snapshots are disabled on Windows until current-user-private ACL and reparse-point checks are implemented."
+        }
         "CAPABILITIES_REPORT_SUPPORTED" => "Capabilities reports the current read-only surface.",
         "EXPLAIN_FROM_SCAN_JSON_SUPPORTED" => {
             "Explain reads a bounded scan.result envelope and returns read-only analysis."
@@ -3014,6 +3098,12 @@ pub fn state_dir_from_explicit_or_default(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn default_state_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
 fn default_state_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -3021,6 +3111,7 @@ fn default_state_dir() -> Option<PathBuf> {
     Some(base.join("sweepx"))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -3083,6 +3174,9 @@ fn normalize_scan_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, CoreError> {
 }
 
 fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
+    if !durable_state_supported() {
+        return Err(StateError::DurableStateUnsupportedOnWindows);
+    }
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
     }
@@ -3102,6 +3196,9 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
 }
 
 fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
+    if !durable_state_supported() {
+        return Err(StateError::DurableStateUnsupportedOnWindows);
+    }
     if path.exists() {
         let meta = fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
@@ -3125,7 +3222,7 @@ fn set_private_dir_mode(path: &Path) -> Result<(), StateError> {
 
 #[cfg(not(unix))]
 fn set_private_dir_mode(_path: &Path) -> Result<(), StateError> {
-    Ok(())
+    Err(StateError::DurableStateUnsupportedOnWindows)
 }
 
 #[cfg(unix)]
@@ -3140,7 +3237,7 @@ fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
 
 #[cfg(not(unix))]
 fn ensure_private_dir(_path: &Path) -> Result<(), StateError> {
-    Ok(())
+    Err(StateError::DurableStateUnsupportedOnWindows)
 }
 
 #[cfg(unix)]
@@ -3249,6 +3346,78 @@ mod tests {
         assert!(ValidatedOperationId::parse("../etc/passwd").is_err());
         assert!(ValidatedOperationId::parse("op/123").is_err());
         assert!(ValidatedOperationId::parse("op:123").is_err());
+    }
+
+    #[test]
+    fn durable_state_support_matches_platform_security_implementation() {
+        assert_eq!(durable_state_supported(), cfg!(unix));
+    }
+
+    #[test]
+    fn scan_ndjson_remains_disabled_without_a_durable_journal() {
+        assert!(!scan_ndjson_supported());
+    }
+
+    #[test]
+    fn status_and_cancel_data_use_the_exact_public_views() {
+        let snapshot = OperationSnapshot {
+            schema: SNAPSHOT_SCHEMA.to_string(),
+            operation_id: "op-contract".to_string(),
+            request_id: "req-contract".to_string(),
+            command: "scan".to_string(),
+            state: OperationState::Completed,
+            status: OutputStatus::Ok,
+            exit_code: 0,
+            created_at: "2026-08-27T00:00:00Z".to_string(),
+            updated_at: "2026-08-27T00:00:01Z".to_string(),
+            locale: "en-US".to_string(),
+            root_paths: vec!["/tmp/root".to_string()],
+            scan_id: Some("scan-contract".to_string()),
+            terminal_event_type: Some("operation.terminal".to_string()),
+            entry_count: Some("1".to_string()),
+            error_count: Some("0".to_string()),
+            boundary_count: Some("0".to_string()),
+            error: None,
+        };
+        let expected_operation =
+            serde_json::to_value(PublicOperationView::from(&snapshot)).unwrap();
+
+        let status = status_output_from_snapshot(&snapshot.operation_id, Some(&snapshot));
+        assert_eq!(status.data, expected_operation);
+
+        let cancel = cancel_output_from_snapshot(&snapshot.operation_id, Some(&snapshot));
+        assert_eq!(cancel.data["operation"], expected_operation);
+        assert_eq!(cancel.data["disposition"], "already_terminal");
+        assert_eq!(cancel.data["canCancel"], false);
+
+        let missing = cancel_output_from_snapshot("op-missing", None);
+        assert_eq!(missing.data["operation"], Value::Null);
+        assert_eq!(missing.data["disposition"], "not_found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_store_none_does_not_create_state() {
+        assert!(durable_store(None).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_durable_store_fails_before_creating_state() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = temp.path().join("state");
+
+        assert!(matches!(
+            DurableSnapshotStore::new(&state),
+            Err(StateError::DurableStateUnsupportedOnWindows)
+        ));
+        assert!(!state.exists());
+        assert!(matches!(
+            durable_store(Some(&state)),
+            Err(StateError::DurableStateUnsupportedOnWindows)
+        ));
+        assert!(!state.exists());
+        assert!(state_dir_from_explicit_or_default(None).unwrap().is_none());
     }
 
     #[test]

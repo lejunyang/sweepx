@@ -15,8 +15,10 @@ pub const MAX_CAPABILITY_CELL_BYTES: usize = 128;
 pub const MAX_QUALIFICATION_TEXT_BYTES: usize = 512;
 pub const MAX_QUALIFICATION_REASON_BYTES: usize = 4096;
 pub const MAX_EVIDENCE_LIST_ITEMS: usize = 128;
-pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 5] = [
+pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 7] = [
     CapabilityCell::SCAN_LOCAL_DIRECTORY,
+    CapabilityCell::SCAN_NDJSON_STREAM,
+    CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
     CapabilityCell::ANALYSIS_EXPLAIN_SCAN_JSON,
     CapabilityCell::CATALOG_CLEANER_READ,
     CapabilityCell::SCAN_TUI_LIVE,
@@ -35,6 +37,8 @@ pub struct CapabilityCell(String);
 
 impl CapabilityCell {
     pub const SCAN_LOCAL_DIRECTORY: &'static str = "scan.local.directory";
+    pub const SCAN_NDJSON_STREAM: &'static str = "scan.ndjson.stream";
+    pub const OPERATION_SNAPSHOT_DURABLE: &'static str = "operation.snapshot.durable";
     pub const ANALYSIS_EXPLAIN_SCAN_JSON: &'static str = "analysis.explain.scan_json";
     pub const CATALOG_CLEANER_READ: &'static str = "catalog.cleaner.read";
     pub const SCAN_TUI_LIVE: &'static str = "scan.tui.live";
@@ -1729,6 +1733,20 @@ mod tests {
         record.qualification_key.capability =
             CapabilityCell::new(CapabilityCell::SCAN_LOCAL_DIRECTORY).unwrap();
         record.validate_qualified_at(EVALUATION_TIME).unwrap();
+    }
+
+    #[test]
+    fn disabled_stream_and_state_cells_are_classified_read_only() {
+        for capability in [
+            CapabilityCell::SCAN_NDJSON_STREAM,
+            CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
+        ] {
+            assert!(
+                !CapabilityCell::new(capability)
+                    .unwrap()
+                    .requires_strong_qualification()
+            );
+        }
     }
 
     #[test]

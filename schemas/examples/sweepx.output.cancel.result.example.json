@@ -1,0 +1,59 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "cancel.result",
+  "requestId": "req-cancel-example",
+  "operationId": "op-cancel-example",
+  "generatedAt": "2026-08-27T06:06:00Z",
+  "status": "unsupported",
+  "exitCode": 3,
+  "compat": {
+    "coreVersion": "0.1.0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "linux",
+      "version": "0.1.0"
+    },
+    "cleanerSetDigest": "sha256:example",
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "operationId": "op-scan-example",
+    "disposition": "already_terminal",
+    "canCancel": false
+  },
+  "data": {
+    "operationId": "op-scan-example",
+    "disposition": "already_terminal",
+    "canCancel": false,
+    "operation": {
+      "operationId": "op-scan-example",
+      "command": "scan",
+      "state": "completed",
+      "status": "ok",
+      "createdAt": "2026-08-27T06:00:00Z",
+      "updatedAt": "2026-08-27T06:00:04Z",
+      "locale": "en-US",
+      "scanId": "scan-example",
+      "rootCount": "1",
+      "entryCount": "4",
+      "errorCount": "0",
+      "boundaryCount": "1",
+      "terminalEventType": "operation.terminal",
+      "canCancel": false
+    }
+  },
+  "warnings": [],
+  "errors": [
+    {
+      "code": "cancel.already_terminal",
+      "class": "cancel",
+      "messageKey": "cancel.already_terminal",
+      "retryable": false,
+      "params": {
+        "operationId": "op-scan-example"
+      }
+    }
+  ]
+}
