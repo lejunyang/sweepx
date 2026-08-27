@@ -18,6 +18,17 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  docs-lint:
+    name: Lint documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run documentation linter tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+      - name: Lint repository documentation
+        run: python3 scripts/lint_docs.py
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
