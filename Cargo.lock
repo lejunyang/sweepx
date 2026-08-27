@@ -1498,6 +1498,7 @@ dependencies = [
 name = "sweepx-scanner"
 version = "0.1.0"
 dependencies = [
+ "sweepx-fixtures",
  "sweepx-model",
  "sweepx-platform",
  "sweepx-platform-linux",
