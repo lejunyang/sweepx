@@ -383,7 +383,6 @@ def _plain_heading_text(title: str) -> str:
         title = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", title)
     title = re.sub(r"<[^>]+>", "", title)
     title = re.sub(r"\\([\\`*{}\[\]()#+.!_>~-])", r"\1", title)
-    title = re.sub(r"[*_~]", "", title)
     # markdown-it passes decoded text tokens for literal entities, but text from
     # an inline HTML token is discarded. Keep the same distinction here.
     return title.strip()
@@ -602,9 +601,9 @@ def _lint_research_dates(documents: dict[Path, Document], today: dt.date) -> lis
             continue
 
         first_nonblank: list[tuple[int, str]] = []
-        for line_number, line in enumerate(document.prose_lines, start=1):
-            if line.strip():
-                first_nonblank.append((line_number, line))
+        for line_number, raw_line in enumerate(document.raw_lines, start=1):
+            if raw_line.strip():
+                first_nonblank.append((line_number, document.prose_lines[line_number - 1]))
                 if len(first_nonblank) == 10:
                     break
 
@@ -753,11 +752,23 @@ def lint_repository(root: Path, *, today: dt.date | None = None) -> tuple[list[D
     diagnostics: list[Diagnostic] = []
     paths = discover_markdown(root)
     for path in paths:
-        document, error = _read_document(path.resolve(), root)
+        resolved_path = path.resolve()
+        if not _within(resolved_path, root):
+            diagnostics.append(
+                Diagnostic(
+                    path.relative_to(root).as_posix(),
+                    1,
+                    1,
+                    "DOC002",
+                    "Markdown file resolves outside repository root",
+                )
+            )
+            continue
+        document, error = _read_document(resolved_path, root)
         if error is not None:
             diagnostics.append(error)
         elif document is not None:
-            documents[path.resolve()] = document
+            documents[resolved_path] = document
 
     # Work on a stable snapshot: link resolution may cache a target that was excluded
     # from discovery, but must not mutate the mapping during iteration.

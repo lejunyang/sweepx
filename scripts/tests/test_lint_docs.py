@@ -100,6 +100,7 @@ class LinkTests(RepositoryFixture):
 [two](docs/headings.md#_1-cafe-api-1)
 [custom](docs/headings.md#chosen)
 [entity](docs/headings.md#a-amp-b)
+[underscore](docs/headings.md#snake-case)
 """,
         )
         self.write(
@@ -108,10 +109,23 @@ class LinkTests(RepositoryFixture):
 ## 1. Café / API
 ## Any title {#chosen}
 ## A &amp; B
+## snake_case
 """,
         )
 
         self.assertEqual(self.lint(), [])
+
+    def test_symlinked_markdown_cannot_escape_repository(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside.md"
+        outside.write_text("# Secret\n", encoding="utf-8")
+        try:
+            try:
+                (self.root / "escape.md").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            self.assertEqual(self.codes(), ["DOC002"])
+        finally:
+            outside.unlink(missing_ok=True)
 
     def test_frontmatter_is_not_treated_as_a_setext_heading(self) -> None:
         self.write(
@@ -179,6 +193,20 @@ class ResearchDateTests(RepositoryFixture):
             "docs/research/code.md",
             "# Code\n`Source date: 2026-08-26`\n[Web](https://example.test)\n",
         )
+
+        self.assertEqual(self.codes(), ["DATE001"])
+
+    def test_fenced_lines_still_count_toward_the_first_ten_nonblank_lines(self) -> None:
+        content = ["# Research", "```text"]
+        content.extend(f"code {index}" for index in range(7))
+        content.extend(
+            [
+                "```",
+                "Source date: 2026-08-26",
+                "[Web](https://example.test)",
+            ]
+        )
+        self.write("docs/research/late-after-code.md", "\n".join(content))
 
         self.assertEqual(self.codes(), ["DATE001"])
 
