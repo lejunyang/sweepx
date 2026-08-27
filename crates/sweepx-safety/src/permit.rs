@@ -797,7 +797,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fixture.store.verify_integrity().unwrap().latest_sequence, 4);
-        consumed.validate_for_submit(&clock).unwrap();
+        assert!(matches!(
+            consumed.validate_for_submit(&clock),
+            Err(PreflightPermitError::AuthorityStateUnavailable)
+        ));
         assert!(matches!(
             consume_preflight_permit(&permit, &clock).unwrap_err(),
             PreflightPermitError::AlreadyConsumed

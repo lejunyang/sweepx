@@ -1,12 +1,11 @@
 // SQLite implementation.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -212,11 +211,8 @@ pub struct ClaimedExecution {
     execution_id: String,
     database_path: PathBuf,
     lock_identity: LockIdentity,
-    lock_file: File,
-    lock_held: Cell<bool>,
-    owner_pid: u32,
-    session_active: Arc<AtomicBool>,
-    mutation_lock: Arc<Mutex<()>>,
+    live_claim: Arc<LiveClaimAuthority>,
+    _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 }
 
 impl fmt::Debug for ClaimedExecution {
@@ -227,24 +223,39 @@ impl fmt::Debug for ClaimedExecution {
             .field("batch_id", &self.binding.batch_id)
             .field("fence_epoch", &self.fence_epoch)
             .field("execution_id", &self.execution_id)
-            .field("lock_held", &self.lock_held.get())
+            .field("lock_held", &self.live_claim.active.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for ClaimedExecution {
     fn drop(&mut self) {
-        if self.owner_pid == std::process::id() {
+        if self.live_claim.owner_pid == std::process::id() {
             let _guard = self
+                .live_claim
+                .coordinator
                 .mutation_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.lock_held.replace(false) {
-                let _ = FileExt::unlock(&self.lock_file);
-            }
-            self.session_active.store(false, Ordering::Release);
+            release_live_claim(&self.live_claim);
         }
     }
+}
+
+fn release_live_claim(live_claim: &LiveClaimAuthority) {
+    let file = live_claim
+        .lock_file
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(file) = file {
+        let _ = FileExt::unlock(&file);
+    }
+    live_claim.active.store(false, Ordering::Release);
+    live_claim
+        .coordinator
+        .active
+        .store(false, Ordering::Release);
 }
 
 impl ClaimedExecution {
@@ -276,7 +287,7 @@ impl ClaimedExecution {
         &self.binding
     }
     pub fn validate_current_process(&self) -> Result<(), AuditError> {
-        if self.owner_pid == std::process::id() {
+        if self.live_claim.owner_pid == std::process::id() {
             Ok(())
         } else {
             Err(AuditError::ForkedProcess)
@@ -284,13 +295,14 @@ impl ClaimedExecution {
     }
     fn lock_mutation(&self) -> Result<MutexGuard<'_, ()>, AuditError> {
         self.validate_current_process()?;
-        self.mutation_lock
+        self.live_claim
+            .coordinator
+            .mutation_lock
             .lock()
             .map_err(|_| AuditError::SessionLockPoisoned)
     }
 }
 
-#[derive(PartialEq, Eq)]
 pub struct DurableIntentToken {
     attempt_id: AttemptId,
     nonce: NonceId,
@@ -317,6 +329,70 @@ pub struct DurableIntentToken {
     user_identity: UserId,
     workflow_session: SessionId,
     creator_pid: u32,
+    live_claim: Weak<LiveClaimAuthority>,
+}
+
+impl PartialEq for DurableIntentToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempt_id == other.attempt_id
+            && self.nonce == other.nonce
+            && self.database_id == other.database_id
+            && self.execution_id == other.execution_id
+            && self.authorization_id == other.authorization_id
+            && self.authorization_source == other.authorization_source
+            && self.batch_id == other.batch_id
+            && self.plan_id == other.plan_id
+            && self.plan_digest == other.plan_digest
+            && self.item_id == other.item_id
+            && self.action_id == other.action_id
+            && self.requested_mode == other.requested_mode
+            && self.risk_tier == other.risk_tier
+            && self.source_path_hash == other.source_path_hash
+            && self.before_revalidation_digest == other.before_revalidation_digest
+            && self.fence_epoch == other.fence_epoch
+            && self.policy_version == other.policy_version
+            && self.policy_digest == other.policy_digest
+            && self.protected_anchor_snapshot_digest == other.protected_anchor_snapshot_digest
+            && self.adapter_capabilities_digest == other.adapter_capabilities_digest
+            && self.cleaner_set_digest == other.cleaner_set_digest
+            && self.host_instance_id == other.host_instance_id
+            && self.user_identity == other.user_identity
+            && self.workflow_session == other.workflow_session
+            && self.creator_pid == other.creator_pid
+    }
+}
+impl Eq for DurableIntentToken {}
+
+struct LiveClaimAuthority {
+    active: AtomicBool,
+    coordinator: Arc<SessionCoordinator>,
+    lock_file: Mutex<Option<File>>,
+    database_path: PathBuf,
+    database_id: String,
+    database_identity: FileIdentity,
+    lock_path: PathBuf,
+    lock_identity: LockIdentity,
+    execution_id: String,
+    authorization_id: AuthorizationId,
+    fence_epoch: u64,
+    owner_pid: u32,
+}
+
+#[derive(Debug)]
+struct SessionCoordinator {
+    active: AtomicBool,
+    mutation_lock: Mutex<()>,
+}
+
+impl fmt::Debug for LiveClaimAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveClaimAuthority")
+            .field("active", &self.active.load(Ordering::Acquire))
+            .field("execution_id", &self.execution_id)
+            .field("fence_epoch", &self.fence_epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for DurableIntentToken {
@@ -378,11 +454,80 @@ impl DurableIntentToken {
         self.fence_epoch
     }
     pub fn validate_current_process(&self) -> Result<(), AuditError> {
-        if self.creator_pid == std::process::id() {
-            Ok(())
-        } else {
-            Err(AuditError::ForkedProcess)
+        if self.creator_pid != std::process::id() {
+            return Err(AuditError::ForkedProcess);
         }
+        let live_claim = self
+            .live_claim
+            .upgrade()
+            .ok_or(AuditError::ClaimNotActive)?;
+        if live_claim.owner_pid != std::process::id() {
+            return Err(AuditError::ForkedProcess);
+        }
+        let _guard = live_claim
+            .coordinator
+            .mutation_lock
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        if !live_claim.active.load(Ordering::Acquire) {
+            return Err(AuditError::ClaimNotActive);
+        }
+        let lock_file = live_claim
+            .lock_file
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        let lock_file = lock_file.as_ref().ok_or(AuditError::ClaimNotActive)?;
+        validate_held_lock(lock_file, &live_claim.lock_path, &live_claim.lock_identity)?;
+        if database_file_identity(&live_claim.database_path)? != live_claim.database_identity {
+            return Err(AuditError::StoreMismatch);
+        }
+        let root = live_claim.database_path.parent().ok_or_else(|| {
+            AuditError::UnsafeStateDir(live_claim.database_path.display().to_string())
+        })?;
+        ensure_sqlite_sidecars_private(root)?;
+        let connection = open_connection(&live_claim.database_path)?;
+        if database_file_identity(&live_claim.database_path)? != live_claim.database_identity {
+            return Err(AuditError::StoreMismatch);
+        }
+        ensure_sqlite_sidecars_private(root)?;
+        let database_id: String = connection.query_row(
+            "SELECT database_id FROM store_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if database_id != live_claim.database_id {
+            return Err(AuditError::StoreMismatch);
+        }
+        verify_database(&connection)?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT a.binding_json,i.authority_json FROM authorizations a \
+                 JOIN executions e ON e.execution_id=a.current_execution_id \
+                 JOIN intents i ON i.execution_id=e.execution_id \
+                 WHERE a.authorization_id=?1 AND a.state='claimed' \
+                 AND a.current_execution_id=?2 AND a.current_fence_epoch=?3 \
+                 AND e.state='active' AND e.authorization_id=?1 AND e.fence_epoch=?3 \
+                 AND i.attempt_id=?4 AND i.authorization_id=?1 AND i.fence_epoch=?3 \
+                 AND i.terminal_state='reserved'",
+                params![
+                    live_claim.authorization_id.as_str(),
+                    live_claim.execution_id,
+                    live_claim.fence_epoch as i64,
+                    self.attempt_id.as_str(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((binding_json, authority_json)) = row else {
+            return Err(AuditError::FenceEpochMismatch);
+        };
+        let binding: AuthorizationBinding =
+            serde_json::from_str(&binding_json).map_err(AuditError::JournalDecode)?;
+        let authority: IntentAuthority =
+            serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+        validate_binding(&binding)?;
+        validate_authority_binding(&authority, &binding)?;
+        validate_token_authority(self, &authority)
     }
 }
 
@@ -806,7 +951,7 @@ pub struct IntegritySummary {
     pub latest_digest: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AuditStore {
     root: PathBuf,
     database_path: PathBuf,
@@ -815,8 +960,22 @@ pub struct AuditStore {
     lock_identity: LockIdentity,
     database_identity: FileIdentity,
     owner_pid: u32,
-    active_session: Arc<AtomicBool>,
-    active_mutation_lock: Arc<Mutex<()>>,
+    coordinator: Arc<SessionCoordinator>,
+}
+
+impl Clone for AuditStore {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            database_path: self.database_path.clone(),
+            lock_path: self.lock_path.clone(),
+            database_id: self.database_id.clone(),
+            lock_identity: self.lock_identity.clone(),
+            database_identity: self.database_identity.clone(),
+            owner_pid: self.owner_pid,
+            coordinator: Arc::clone(&self.coordinator),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -886,7 +1045,7 @@ struct IntentAuthority {
 }
 
 impl IntentAuthority {
-    fn to_token(&self) -> DurableIntentToken {
+    fn to_token(&self, live_claim: Weak<LiveClaimAuthority>) -> DurableIntentToken {
         DurableIntentToken {
             attempt_id: self.attempt_id.clone(),
             nonce: self.nonce.clone(),
@@ -913,6 +1072,7 @@ impl IntentAuthority {
             user_identity: self.user_identity.clone(),
             workflow_session: self.workflow_session.clone(),
             creator_pid: std::process::id(),
+            live_claim,
         }
     }
 }
@@ -1037,6 +1197,8 @@ impl EventPayload {
 pub enum AuditError {
     #[error("audit store is unsupported on this platform")]
     UnsupportedPlatform,
+    #[error("audit store filesystem is remote or has unsupported locality")]
+    UnsupportedFilesystem,
     #[error("state directory must be absolute")]
     StateDirNotAbsolute,
     #[error("state directory {0} contains unsafe components")]
@@ -1150,6 +1312,7 @@ impl AuditStore {
             ensure_private_state_dir(&root)?;
             let lock_path = root.join(LOCK_FILE);
             let lock_file = open_lock_file(&lock_path)?;
+            ensure_local_filesystem(&lock_file)?;
             let lock_identity = lock_identity(&lock_file, &lock_path)?;
             let database_path = root.join(DATABASE_FILE);
             let database_preexisting = database_path.exists();
@@ -1178,7 +1341,9 @@ impl AuditStore {
                 |row| row.get(0),
             )?;
             validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
-            let database_identity = database_file_identity(&database_path)?;
+            let database_file = OpenOptions::new().read(true).open(&database_path)?;
+            ensure_same_local_filesystem(&lock_file, &database_file)?;
+            let database_identity = file_identity(&database_file)?;
             FileExt::unlock(&lock_file)?;
             Ok(Self {
                 root,
@@ -1188,8 +1353,10 @@ impl AuditStore {
                 lock_identity,
                 database_identity,
                 owner_pid: std::process::id(),
-                active_session: Arc::new(AtomicBool::new(false)),
-                active_mutation_lock: Arc::new(Mutex::new(())),
+                coordinator: Arc::new(SessionCoordinator {
+                    active: AtomicBool::new(false),
+                    mutation_lock: Mutex::new(()),
+                }),
             })
         }
     }
@@ -1203,7 +1370,7 @@ impl AuditStore {
         }
         let _guard = self.short_lock()?;
         self.check_size_budget(false)?;
-        let mut connection = self.connection()?;
+        let mut connection = self.connection_locked()?;
         verify_database(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let count: i64 =
@@ -1238,6 +1405,14 @@ impl AuditStore {
         expected_plan_digest: &DigestString,
     ) -> Result<ClaimedExecution, AuditError> {
         self.ensure_process()?;
+        let _session_guard = self
+            .coordinator
+            .mutation_lock
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        if self.coordinator.active.load(Ordering::Acquire) {
+            return Err(AuditError::ConcurrentWriterDenied);
+        }
         let lock_file = self.acquire_lifetime_lock()?;
         self.claim_session(lock_file, authorization_id, expected_plan_digest, false)
     }
@@ -1248,6 +1423,14 @@ impl AuditStore {
         expected_plan_digest: &DigestString,
     ) -> Result<ClaimedExecution, AuditError> {
         self.ensure_process()?;
+        let _session_guard = self
+            .coordinator
+            .mutation_lock
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        if self.coordinator.active.load(Ordering::Acquire) {
+            return Err(AuditError::ConcurrentWriterDenied);
+        }
         let lock_file = self.acquire_lifetime_lock()?;
         self.claim_session(lock_file, authorization_id, expected_plan_digest, true)
     }
@@ -1260,7 +1443,7 @@ impl AuditStore {
         recovery: bool,
     ) -> Result<ClaimedExecution, AuditError> {
         self.check_size_budget(false)?;
-        let mut connection = self.connection()?;
+        let mut connection = self.connection_locked()?;
         verify_database(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (binding, state, current_fence, current_execution) =
@@ -1324,10 +1507,6 @@ impl AuditStore {
             }
         };
         transaction.execute(
-            "UPDATE executions SET state='superseded',ended_at_ms=?1 WHERE state='active'",
-            [now],
-        )?;
-        transaction.execute(
             "INSERT INTO executions(execution_id,authorization_id,fence_epoch,kind,state,started_at_ms) VALUES(?1,?2,?3,?4,'active',?5)",
             params![execution_id, authorization_id.as_str(), next_fence, if recovery { "recovery" } else { "execution" }, now],
         )?;
@@ -1344,7 +1523,21 @@ impl AuditStore {
         )?;
         append_event(&transaction, &payload)?;
         transaction.commit()?;
-        self.active_session.store(true, Ordering::Release);
+        let live_claim = Arc::new(LiveClaimAuthority {
+            active: AtomicBool::new(true),
+            coordinator: Arc::clone(&self.coordinator),
+            lock_file: Mutex::new(Some(lock_file)),
+            database_path: self.database_path.clone(),
+            database_id: self.database_id.clone(),
+            database_identity: self.database_identity.clone(),
+            lock_path: self.lock_path.clone(),
+            lock_identity: self.lock_identity.clone(),
+            execution_id: execution_id.clone(),
+            authorization_id: authorization_id.clone(),
+            fence_epoch: next_fence as u64,
+            owner_pid: std::process::id(),
+        });
+        self.coordinator.active.store(true, Ordering::Release);
         Ok(ClaimedExecution {
             binding,
             fence_epoch: next_fence as u64,
@@ -1352,11 +1545,8 @@ impl AuditStore {
             execution_id,
             database_path: self.database_path.clone(),
             lock_identity: self.lock_identity.clone(),
-            lock_file,
-            lock_held: Cell::new(true),
-            owner_pid: std::process::id(),
-            session_active: Arc::clone(&self.active_session),
-            mutation_lock: Arc::clone(&self.active_mutation_lock),
+            live_claim,
+            _not_sync: std::marker::PhantomData,
         })
     }
 
@@ -1386,6 +1576,14 @@ impl AuditStore {
         verify_database(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_live_claim(&transaction, claimed)?;
+        let binding_json: String = transaction.query_row(
+            "SELECT binding_json FROM authorizations WHERE authorization_id=?1",
+            [claimed.authorization_id().as_str()],
+            |row| row.get(0),
+        )?;
+        if binding_json != canonical_json(&claimed.binding)? {
+            return Err(AuditError::AuthorizationBindingMismatch);
+        }
         {
             let mut statement = transaction.prepare(
                 "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id<>?1 AND terminal_state IN ('reserved','classified_indeterminate') ORDER BY ordinal",
@@ -1498,7 +1696,9 @@ impl AuditStore {
             },
         )?;
         transaction.commit()?;
-        Ok(IntentReservation::Created(authority.to_token()))
+        Ok(IntentReservation::Created(
+            authority.to_token(Arc::downgrade(&claimed.live_claim)),
+        ))
     }
 
     pub fn record_outcome(
@@ -1507,9 +1707,10 @@ impl AuditStore {
         token: &DurableIntentToken,
         outcome: SimulatedOutcome,
     ) -> Result<(), AuditError> {
+        ensure_claim_matches_token(claimed, token)?;
+        token.validate_current_process()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
-        ensure_claim_matches_token(claimed, token)?;
         let validated = validate_outcome(token, outcome)?;
         self.check_size_budget(true)?;
         let mut connection = self.connection()?;
@@ -1645,14 +1846,14 @@ impl AuditStore {
         claimed: &ClaimedExecution,
         observer: &dyn RecoveryObserver,
     ) -> Result<Vec<RecoveryRecord>, AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.validate_claim_guard(claimed)?;
-        let connection = self.connection()?;
-        verify_database(&connection)?;
-        validate_live_claim_connection(&connection, claimed)?;
-        let (reserved, mut existing) =
-            load_recovery_candidates(&connection, claimed.authorization_id())?;
-        drop(connection);
+        let (reserved, mut existing) = {
+            let _mutation_guard = claimed.lock_mutation()?;
+            self.validate_claim_guard(claimed)?;
+            let connection = self.connection()?;
+            verify_database(&connection)?;
+            validate_live_claim_connection(&connection, claimed)?;
+            load_recovery_candidates(&connection, claimed.authorization_id())?
+        };
         let mut pending = Vec::new();
         for authority in reserved {
             let view = RecoveryIntentView {
@@ -1673,6 +1874,8 @@ impl AuditStore {
         if pending.is_empty() {
             return Ok(existing);
         }
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
         let mut connection = self.connection()?;
         verify_database(&connection)?;
@@ -1740,9 +1943,7 @@ impl AuditStore {
             ));
         };
         if state == "consumed" && fence == Some(claimed.fence_epoch as i64) {
-            if claimed.lock_held.replace(false) {
-                FileExt::unlock(&claimed.lock_file)?;
-            }
+            release_live_claim(&claimed.live_claim);
             return Ok(());
         }
         if state != "claimed"
@@ -1777,21 +1978,19 @@ impl AuditStore {
             },
         )?;
         transaction.commit()?;
-        if claimed.lock_held.replace(false) {
-            let _ = FileExt::unlock(&claimed.lock_file);
-        }
-        claimed.session_active.store(false, Ordering::Release);
+        release_live_claim(&claimed.live_claim);
         Ok(())
     }
 
     pub fn verify_integrity(&self) -> Result<IntegritySummary, AuditError> {
         self.ensure_process()?;
-        if self.active_session.load(Ordering::Acquire) {
+        if self.coordinator.active.load(Ordering::Acquire) {
             let _mutation_guard = self
-                .active_mutation_lock
+                .coordinator
+                .mutation_lock
                 .lock()
                 .map_err(|_| AuditError::SessionLockPoisoned)?;
-            if self.active_session.load(Ordering::Acquire) {
+            if self.coordinator.active.load(Ordering::Acquire) {
                 return self.integrity_summary_locked();
             }
         }
@@ -1815,15 +2014,19 @@ impl AuditStore {
     fn connection_locked(&self) -> Result<Connection, AuditError> {
         ensure_private_state_dir(&self.root)?;
         ensure_private_regular_file(&self.database_path)?;
-        if database_file_identity(&self.database_path)? != self.database_identity {
+        let database_file = OpenOptions::new().read(true).open(&self.database_path)?;
+        if file_identity(&database_file)? != self.database_identity {
             return Err(AuditError::StoreMismatch);
         }
+        ensure_local_filesystem(&database_file)?;
         ensure_sqlite_sidecars_private(&self.root)?;
         let connection = open_connection(&self.database_path)?;
         ensure_private_regular_file(&self.database_path)?;
-        if database_file_identity(&self.database_path)? != self.database_identity {
+        let reopened_database = OpenOptions::new().read(true).open(&self.database_path)?;
+        if file_identity(&reopened_database)? != self.database_identity {
             return Err(AuditError::StoreMismatch);
         }
+        ensure_same_local_filesystem(&database_file, &reopened_database)?;
         ensure_sqlite_sidecars_private(&self.root)?;
         let database_id: String = connection.query_row(
             "SELECT database_id FROM store_meta WHERE singleton=1",
@@ -1845,6 +2048,10 @@ impl AuditStore {
         file.try_lock_exclusive()
             .map_err(|_| AuditError::ConcurrentWriterDenied)?;
         self.validate_lock_path_identity(&file)?;
+        ensure_same_local_filesystem(
+            &file,
+            &OpenOptions::new().read(true).open(&self.database_path)?,
+        )?;
         ensure_sqlite_sidecars_private(&self.root)?;
         Ok(ShortStoreLock { file })
     }
@@ -1858,13 +2065,17 @@ impl AuditStore {
         file.try_lock_exclusive()
             .map_err(|_| AuditError::ConcurrentWriterDenied)?;
         self.validate_lock_path_identity(&file)?;
+        ensure_same_local_filesystem(
+            &file,
+            &OpenOptions::new().read(true).open(&self.database_path)?,
+        )?;
         ensure_sqlite_sidecars_private(&self.root)?;
         Ok(file)
     }
 
     fn validate_claim_guard(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
         claimed.validate_current_process()?;
-        if !claimed.lock_held.get() {
+        if !claimed.live_claim.active.load(Ordering::Acquire) {
             return Err(AuditError::ClaimNotActive);
         }
         if claimed.database_id != self.database_id || claimed.database_path != self.database_path {
@@ -1873,14 +2084,24 @@ impl AuditStore {
         if claimed.lock_identity != self.lock_identity {
             return Err(AuditError::LockReplaced);
         }
-        self.validate_lock_path_identity(&claimed.lock_file)?;
+        let lock_file = claimed
+            .live_claim
+            .lock_file
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        let lock_file = lock_file.as_ref().ok_or(AuditError::ClaimNotActive)?;
+        validate_held_lock(lock_file, &self.lock_path, &self.lock_identity)?;
+        ensure_same_local_filesystem(
+            lock_file,
+            &OpenOptions::new().read(true).open(&self.database_path)?,
+        )?;
         ensure_sqlite_sidecars_private(&self.root)?;
         Ok(())
     }
 
     fn validate_lock_path_identity(&self, held_file: &File) -> Result<(), AuditError> {
         let held = lock_identity(held_file, &self.lock_path)?;
-        let current = open_lock_file(&self.lock_path)?;
+        let current = open_existing_lock_file(&self.lock_path)?;
         let current_identity = lock_identity(&current, &self.lock_path)?;
         if held != self.lock_identity || current_identity != self.lock_identity {
             return Err(AuditError::LockReplaced);
@@ -1968,7 +2189,6 @@ CREATE TABLE executions(
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms>=0),
   ended_at_ms INTEGER
 ) STRICT;
-CREATE UNIQUE INDEX one_active_execution ON executions((1)) WHERE state='active';
 CREATE TABLE intents(
   attempt_id TEXT PRIMARY KEY,
   ordinal INTEGER NOT NULL UNIQUE CHECK(ordinal>0),
@@ -2084,6 +2304,73 @@ fn validate_private_directory_metadata(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn ensure_local_filesystem(file: &File) -> Result<(), AuditError> {
+    use std::os::fd::AsRawFd;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `file` owns a valid descriptor and `stat` points to writable storage.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: successful statfs initialized the structure.
+    let filesystem_type = unsafe { stat.assume_init() }.f_type as u32;
+    const KNOWN_LOCAL: &[u32] = &[
+        0x0000_ef53, // ext2/3/4
+        0x5846_5342, // XFS
+        0x9123_683e, // Btrfs
+        0xf2f5_2010, // F2FS
+    ];
+    if KNOWN_LOCAL.contains(&filesystem_type) {
+        Ok(())
+    } else {
+        Err(AuditError::UnsupportedFilesystem)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_local_filesystem(file: &File) -> Result<(), AuditError> {
+    use std::os::fd::AsRawFd;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `file` owns a valid descriptor and `stat` points to writable storage.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: successful statfs initialized the structure.
+    let stat = unsafe { stat.assume_init() };
+    let bytes = stat
+        .f_fstypename
+        .iter()
+        .map(|value| *value as u8)
+        .take_while(|value| *value != 0)
+        .collect::<Vec<_>>();
+    if stat.f_flags & libc::MNT_LOCAL as u32 != 0
+        && stat.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 == 0
+        && bytes == b"apfs"
+    {
+        Ok(())
+    } else {
+        Err(AuditError::UnsupportedFilesystem)
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn ensure_local_filesystem(_file: &File) -> Result<(), AuditError> {
+    Err(AuditError::UnsupportedPlatform)
+}
+
+fn ensure_same_local_filesystem(first: &File, second: &File) -> Result<(), AuditError> {
+    ensure_local_filesystem(first)?;
+    ensure_local_filesystem(second)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if first.metadata()?.dev() != second.metadata()?.dev() {
+            return Err(AuditError::UnsupportedFilesystem);
+        }
+    }
+    Ok(())
+}
+
 fn open_lock_file(path: &Path) -> Result<File, AuditError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && metadata.file_type().is_symlink()
@@ -2109,6 +2396,45 @@ fn open_lock_file(path: &Path) -> Result<File, AuditError> {
         .open(path)?;
     ensure_private_file_handle(&file, path)?;
     Ok(file)
+}
+
+fn open_existing_lock_file(path: &Path) -> Result<File, AuditError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(AuditError::SymlinkRejected(path.display().to_string()));
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    ensure_private_file_handle(&file, path)?;
+    Ok(file)
+}
+
+fn validate_held_lock(
+    held_file: &File,
+    path: &Path,
+    expected: &LockIdentity,
+) -> Result<(), AuditError> {
+    let probe = open_existing_lock_file(path)?;
+    if lock_identity(held_file, path)? != *expected || lock_identity(&probe, path)? != *expected {
+        return Err(AuditError::LockReplaced);
+    }
+    match probe.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&probe);
+            Err(AuditError::ClaimNotActive)
+        }
+        Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn create_private_database_file(path: &Path) -> Result<(), AuditError> {
@@ -2726,14 +3052,6 @@ fn replay_claim(
     {
         return Err(AuditError::HeadMismatch);
     }
-    for execution in projection
-        .executions
-        .values_mut()
-        .filter(|execution| execution.state == "active")
-    {
-        execution.state = "superseded".to_string();
-        execution.ended_at_ms = Some(parse_event_i64(started_at)?);
-    }
     projection.next_fence_epoch = fence;
     projection.executions.insert(
         execution_id.to_string(),
@@ -3233,6 +3551,32 @@ fn validate_intent_binding(
     Ok(())
 }
 
+fn validate_authority_binding(
+    authority: &IntentAuthority,
+    binding: &AuthorizationBinding,
+) -> Result<(), AuditError> {
+    if authority.authorization_id != binding.authorization_id
+        || authority.authorization_source != binding.authorization_source
+        || authority.batch_id != binding.batch_id
+        || authority.plan_id != binding.plan_id
+        || authority.plan_digest != binding.plan_digest
+        || authority.requested_mode != binding.requested_mode
+        || binding.item_by_action.get(&authority.action_id) != Some(&authority.item_id)
+        || binding.risk_by_action.get(&authority.action_id) != Some(&authority.risk_tier)
+        || authority.policy_version != binding.policy_version
+        || authority.policy_digest != binding.policy_digest
+        || authority.protected_anchor_snapshot_digest != binding.protected_anchor_snapshot_digest
+        || authority.adapter_capabilities_digest != binding.adapter_capabilities_digest
+        || authority.cleaner_set_digest != binding.cleaner_set_digest
+        || authority.host_instance_id != binding.host_instance_id
+        || authority.user_identity != binding.user_identity
+        || authority.workflow_session != binding.workflow_session
+    {
+        return Err(AuditError::AuthorizationBindingMismatch);
+    }
+    Ok(())
+}
+
 fn ensure_claim_matches_token(
     claimed: &ClaimedExecution,
     token: &DurableIntentToken,
@@ -3301,7 +3645,6 @@ fn validate_outcome(
     token: &DurableIntentToken,
     outcome: SimulatedOutcome,
 ) -> Result<ValidatedOutcome, AuditError> {
-    token.validate_current_process()?;
     validate_outcome_shape(token.requested_mode, &outcome)?;
     let started_at_ms = unix_ms_i64(outcome.started_at)?;
     let finished_at_ms = unix_ms_i64(outcome.finished_at)?;
@@ -4050,6 +4393,139 @@ mod tests {
         assert!(matches!(
             AuditStore::open(temp.path().join("audit")),
             Err(AuditError::SymlinkRejected(_))
+        ));
+    }
+
+    #[test]
+    fn token_requires_the_live_claim_and_current_reserved_fence() {
+        let (_temp, store) = store();
+        let binding = binding(11, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        assert!(token.validate_current_process().is_ok());
+        drop(claim);
+        assert!(matches!(
+            token.validate_current_process(),
+            Err(AuditError::ClaimNotActive)
+        ));
+    }
+
+    #[test]
+    fn token_remains_send_and_sync_while_claim_remains_send() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<DurableIntentToken>();
+        assert_sync::<DurableIntentToken>();
+        assert_send::<ClaimedExecution>();
+    }
+
+    #[test]
+    fn claim_is_not_sync() {
+        trait AmbiguousIfSync<Marker> {
+            fn marker() {}
+        }
+        struct Implemented;
+        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        impl<T: ?Sized + Sync> AmbiguousIfSync<Implemented> for T {}
+        let _ = <ClaimedExecution as AmbiguousIfSync<_>>::marker;
+    }
+
+    #[test]
+    fn token_is_spent_by_outcome_while_claim_stays_live() {
+        let (_temp, store) = store();
+        let binding = binding(12, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        assert!(token.validate_current_process().is_ok());
+        store
+            .record_outcome(&claim, &token, permanent_success())
+            .unwrap();
+        assert!(matches!(
+            token.validate_current_process(),
+            Err(AuditError::FenceEpochMismatch)
+        ));
+    }
+
+    #[test]
+    fn cloned_store_cannot_claim_while_same_process_session_is_active() {
+        let (_temp, store) = store();
+        let cloned = store.clone();
+        let binding = binding(13, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        assert!(matches!(
+            cloned.claim_recovery(&binding.authorization_id, &binding.plan_digest),
+            Err(AuditError::ConcurrentWriterDenied)
+        ));
+        drop(claim);
+        assert!(
+            cloned
+                .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn recovery_observer_runs_outside_the_claim_mutation_mutex() {
+        struct ReentrantObserver<'a> {
+            store: &'a AuditStore,
+            claim: &'a ClaimedExecution,
+        }
+        impl RecoveryObserver for ReentrantObserver<'_> {
+            fn observe(&self, _: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
+                let unresolved = self.store.unresolved_recovery_intents(self.claim)?;
+                assert_eq!(unresolved.len(), 1);
+                Ok(RecoveryObservation::Unknown)
+            }
+        }
+        let (_temp, store) = store();
+        let binding = binding(14, RequestedMode::Trash);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        reserve(&store, &claim, &binding);
+        drop(claim);
+        let recovery = store
+            .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let records = store
+            .classify_recovery(
+                &recovery,
+                &ReentrantObserver {
+                    store: &store,
+                    claim: &recovery,
+                },
+            )
+            .unwrap();
+        assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manually_unlocked_claim_cannot_validate_token() {
+        let (_temp, store) = store();
+        let binding = binding(15, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        {
+            let guard = claim.live_claim.lock_file.lock().unwrap();
+            FileExt::unlock(guard.as_ref().unwrap()).unwrap();
+        }
+        assert!(matches!(
+            token.validate_current_process(),
+            Err(AuditError::ClaimNotActive)
         ));
     }
 
