@@ -58,7 +58,32 @@
             "nativeBasename": {
               "kind": "unix_bytes_base64_url",
               "value": "cDAtbWluaW1hbA"
-            }
+            },
+            "objectType": "directory",
+            "platformFileIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049",
+                "inode": "1001"
+              }
+            },
+            "filesystemObjectDomainIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049"
+              }
+            },
+            "volumeOrMountIdentity": {
+              "state": "known",
+              "value": {
+                "value": "77"
+              }
+            },
+            "metadataFingerprint": "fixture:p0-minimal"
+          },
+          "scanRootAbsolutePath": {
+            "kind": "unix_bytes_base64_url",
+            "value": "L2ZpeHR1cmVzL3AwLW1pbmltYWw"
           },
           "parentReopenRecipe": [],
           "entry": {
@@ -66,7 +91,28 @@
             "nativeBasename": {
               "kind": "unix_bytes_base64_url",
               "value": "cDAtbWluaW1hbA"
-            }
+            },
+            "objectType": "directory",
+            "platformFileIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049",
+                "inode": "1001"
+              }
+            },
+            "filesystemObjectDomainIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049"
+              }
+            },
+            "volumeOrMountIdentity": {
+              "state": "known",
+              "value": {
+                "value": "77"
+              }
+            },
+            "metadataFingerprint": "fixture:p0-minimal"
           }
         },
         "displayPath": "/fixtures/p0-minimal",
@@ -136,7 +182,32 @@
             "nativeBasename": {
               "kind": "unix_bytes_base64_url",
               "value": "cDAtbWluaW1hbA"
-            }
+            },
+            "objectType": "directory",
+            "platformFileIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049",
+                "inode": "1001"
+              }
+            },
+            "filesystemObjectDomainIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049"
+              }
+            },
+            "volumeOrMountIdentity": {
+              "state": "known",
+              "value": {
+                "value": "77"
+              }
+            },
+            "metadataFingerprint": "fixture:p0-minimal"
+          },
+          "scanRootAbsolutePath": {
+            "kind": "unix_bytes_base64_url",
+            "value": "L2ZpeHR1cmVzL3AwLW1pbmltYWw"
           },
           "parentReopenRecipe": [
             {
@@ -144,7 +215,28 @@
               "nativeBasename": {
                 "kind": "unix_bytes_base64_url",
                 "value": "cDAtbWluaW1hbA"
-              }
+              },
+              "objectType": "directory",
+              "platformFileIdentity": {
+                "state": "known",
+                "value": {
+                  "device": "2049",
+                  "inode": "1001"
+                }
+              },
+              "filesystemObjectDomainIdentity": {
+                "state": "known",
+                "value": {
+                  "device": "2049"
+                }
+              },
+              "volumeOrMountIdentity": {
+                "state": "known",
+                "value": {
+                  "value": "77"
+                }
+              },
+              "metadataFingerprint": "fixture:p0-minimal"
             }
           ],
           "entry": {
@@ -152,7 +244,25 @@
             "nativeBasename": {
               "kind": "unix_bytes_base64_url",
               "value": "Zml4dHVyZS5iaW4"
-            }
+            },
+            "objectType": "file",
+            "platformFileIdentity": {
+              "state": "unknown",
+              "reason": "unknown_identity"
+            },
+            "filesystemObjectDomainIdentity": {
+              "state": "known",
+              "value": {
+                "device": "2049"
+              }
+            },
+            "volumeOrMountIdentity": {
+              "state": "known",
+              "value": {
+                "value": "77"
+              }
+            },
+            "metadataFingerprint": "fixture:fixture.bin"
           }
         },
         "displayPath": "/fixtures/p0-minimal/fixture.bin",

@@ -161,6 +161,14 @@ const scanSchemaCases = [
     }
   },
   {
+    name: "legacy v1 native locator without absolute root remains readable",
+    expected: true,
+    mutate(output) {
+      delete output.data.roots[0].nativeLocator.scanRootAbsolutePath;
+      delete output.data.entries[0].nativeLocator.scanRootAbsolutePath;
+    }
+  },
+  {
     name: "malformed scan entry ID is not accepted as legacy identity",
     expected: false,
     mutate(output) {
@@ -237,6 +245,20 @@ const scanSchemaCases = [
     mutate(output) {
       output.data.entries[0].nativeLocator.entry.nativeBasename.value =
         "/fixtures/p0-minimal/fixture.bin";
+    }
+  },
+  {
+    name: "padded scan root absolute path is rejected",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.scanRootAbsolutePath.value += "=";
+    }
+  },
+  {
+    name: "unknown native locator field is rejected",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.unknownField = true;
     }
   }
 ];

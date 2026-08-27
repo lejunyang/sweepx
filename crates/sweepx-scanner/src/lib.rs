@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use sweepx_model::{
     ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, EvidenceValue,
-    FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence, NativeLocatorEvidence,
-    NativeName, NativePathComponent, ObjectType, PlatformFileIdentity, ReasonCode, ScanEntryId,
-    ScanId, ScanObjectIdentity, ScannedEntry, VolumeOrMountIdentity,
+    FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence, NativeAbsolutePath,
+    NativeLocatorEvidence, NativeName, NativePathComponent, ObjectType, PlatformFileIdentity,
+    ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity, ScannedEntry, VolumeOrMountIdentity,
 };
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryReadLimits, EntryKind, EntryMetadata,
@@ -359,6 +359,7 @@ where
                     &admission.metadata,
                     root_identity.clone(),
                     native_locator_evidence(
+                        &admission.root_locator,
                         &native_path_component(&root_identity.entry_id, &admission.metadata),
                         &[],
                         &native_path_component(&root_identity.entry_id, &admission.metadata),
@@ -392,6 +393,7 @@ where
     ) -> Result<(), ScanError> {
         let RootAdmission {
             root,
+            root_locator,
             metadata: root_metadata,
             directory,
         } = admission;
@@ -737,6 +739,7 @@ where
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
+                                &root_locator,
                                 &native_path_component(&root_identity.entry_id, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
@@ -780,6 +783,7 @@ where
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
+                                &root_locator,
                                 &native_path_component(&root_identity.entry_id, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
@@ -834,6 +838,7 @@ where
                                 &metadata,
                                 identity.clone(),
                                 native_locator_evidence(
+                                    &root_locator,
                                     &native_path_component(&root_identity.entry_id, &root_metadata),
                                     &current.parent_recipe_with_self(),
                                     &native_component,
@@ -1343,12 +1348,14 @@ fn scan_object_identity(
 }
 
 fn native_locator_evidence(
+    root_absolute_path: &NativeAbsolutePath,
     root_component: &NativePathComponent,
     parent_reopen_recipe: &[NativePathComponent],
     entry_component: &NativePathComponent,
 ) -> NativeLocatorEvidence {
     NativeLocatorEvidence {
         scan_root: root_component.clone(),
+        scan_root_absolute_path: Some(root_absolute_path.clone()),
         parent_reopen_recipe: parent_reopen_recipe.to_vec(),
         entry: entry_component.clone(),
     }
@@ -1567,6 +1574,10 @@ mod tests {
         ));
         let root_locator = result.roots[0].validated_native_locator().unwrap().unwrap();
         assert_eq!(root_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(
+            root_locator.scan_root_absolute_path.clone().unwrap(),
+            NativeAbsolutePath::from_path(&root).unwrap()
+        );
         assert!(root_locator.parent_reopen_recipe.is_empty());
         assert_eq!(root_locator.entry.entry_id, root_identity.entry_id);
         assert_eq!(root_locator.entry.native_basename, test_native_name("root"));
@@ -1587,6 +1598,10 @@ mod tests {
         );
         let sub_locator = sub_entry.validated_native_locator().unwrap().unwrap();
         assert_eq!(sub_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(
+            sub_locator.scan_root_absolute_path.clone().unwrap(),
+            NativeAbsolutePath::from_path(&root).unwrap()
+        );
         assert_eq!(
             sub_locator
                 .parent_reopen_recipe
@@ -1614,6 +1629,10 @@ mod tests {
         let beta_identity = beta_entry.identity.as_ref().unwrap();
         let beta_locator = beta_entry.validated_native_locator().unwrap().unwrap();
         assert_eq!(beta_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(
+            beta_locator.scan_root_absolute_path.clone().unwrap(),
+            NativeAbsolutePath::from_path(&root).unwrap()
+        );
         assert_eq!(
             beta_locator
                 .parent_reopen_recipe
@@ -2799,9 +2818,12 @@ mod tests {
             if root.path == self.cancelled_root {
                 return Err(PlatformError::Cancelled);
             }
-            Ok(RootAdmission {
-                root: root.clone(),
-                metadata: test_metadata(
+            let root_locator = root
+                .native_absolute_path()
+                .map_err(|error| PlatformError::RootRejected(error.to_string()))?;
+            Ok(RootAdmission::new(
+                root.clone(),
+                test_metadata(
                     root.path.clone(),
                     root.path
                         .file_name()
@@ -2810,12 +2832,13 @@ mod tests {
                     EntryKind::Directory,
                     Some(1),
                 ),
-                directory: FakeDirectoryHandle {
+                FakeDirectoryHandle {
                     path: root.path.clone(),
                     capability_id: 1,
                     cursor: 0,
                 },
-            })
+                root_locator,
+            ))
         }
 
         fn enumerate_children(
@@ -2971,15 +2994,19 @@ mod tests {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
-            Ok(RootAdmission {
-                root: root.clone(),
-                metadata: self.root_metadata.clone(),
-                directory: FakeDirectoryHandle {
+            let root_locator = root
+                .native_absolute_path()
+                .map_err(|error| PlatformError::RootRejected(error.to_string()))?;
+            Ok(RootAdmission::new(
+                root.clone(),
+                self.root_metadata.clone(),
+                FakeDirectoryHandle {
                     path: self.root_metadata.path.clone(),
                     capability_id: 1,
                     cursor: 0,
                 },
-            })
+                root_locator,
+            ))
         }
 
         fn enumerate_children(

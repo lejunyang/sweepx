@@ -325,6 +325,336 @@ impl JsonSchema for NativeName {
     }
 }
 
+/// Maximum lossless storage used for one absolute native path.
+///
+/// The limit is measured in native encoded bytes: raw bytes on Unix and UTF-16LE bytes on
+/// Windows. It matches the scanner's documented 64 KiB native-path representation bound.
+pub const MAX_NATIVE_ABSOLUTE_PATH_BYTES: usize = 64 * 1024;
+const MAX_NATIVE_ABSOLUTE_PATH_BASE64_LEN: usize = (MAX_NATIVE_ABSOLUTE_PATH_BYTES / 3) * 4
+    + match MAX_NATIVE_ABSOLUTE_PATH_BYTES % 3 {
+        0 => 0,
+        1 => 2,
+        _ => 3,
+    };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeAbsolutePathKind {
+    UnixBytesBase64Url,
+    WindowsUtf16LeBase64Url,
+}
+
+/// A lossless, platform-tagged absolute path captured at scan-root admission.
+///
+/// This value deliberately does not normalize path bytes/code units. Cross-platform reports can
+/// deserialize either representation, while callers that intend to use it on the local host must
+/// additionally call [`Self::validate_for_current_platform`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NativeAbsolutePath {
+    UnixBytes(Vec<u8>),
+    WindowsUtf16(Vec<u16>),
+}
+
+impl NativeAbsolutePath {
+    pub fn unix(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::UnixBytes(bytes.into())
+    }
+
+    pub fn windows_utf16(units: impl Into<Vec<u16>>) -> Self {
+        Self::WindowsUtf16(units.into())
+    }
+
+    pub fn kind(&self) -> NativeAbsolutePathKind {
+        match self {
+            Self::UnixBytes(_) => NativeAbsolutePathKind::UnixBytesBase64Url,
+            Self::WindowsUtf16(_) => NativeAbsolutePathKind::WindowsUtf16LeBase64Url,
+        }
+    }
+
+    pub fn encoded_value(&self) -> String {
+        match self {
+            Self::UnixBytes(bytes) => URL_SAFE_NO_PAD.encode(bytes),
+            Self::WindowsUtf16(units) => {
+                let mut bytes = Vec::with_capacity(units.len().saturating_mul(2));
+                for unit in units {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                URL_SAFE_NO_PAD.encode(bytes)
+            }
+        }
+    }
+
+    pub fn native_byte_len(&self) -> Result<usize, NativeAbsolutePathError> {
+        match self {
+            Self::UnixBytes(bytes) => Ok(bytes.len()),
+            Self::WindowsUtf16(units) => {
+                units
+                    .len()
+                    .checked_mul(2)
+                    .ok_or(NativeAbsolutePathError::TooLong {
+                        actual_bytes: usize::MAX,
+                        max_bytes: MAX_NATIVE_ABSOLUTE_PATH_BYTES,
+                    })
+            }
+        }
+    }
+
+    pub fn validate_size(&self) -> Result<(), NativeAbsolutePathError> {
+        let actual_bytes = self.native_byte_len()?;
+        if actual_bytes > MAX_NATIVE_ABSOLUTE_PATH_BYTES {
+            return Err(NativeAbsolutePathError::TooLong {
+                actual_bytes,
+                max_bytes: MAX_NATIVE_ABSOLUTE_PATH_BYTES,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_no_nul(&self) -> Result<(), NativeAbsolutePathError> {
+        let contains_nul = match self {
+            Self::UnixBytes(bytes) => bytes.contains(&0),
+            Self::WindowsUtf16(units) => units.contains(&0),
+        };
+        if contains_nul {
+            return Err(NativeAbsolutePathError::ContainsNul);
+        }
+        Ok(())
+    }
+
+    pub fn validate_absolute(&self) -> Result<(), NativeAbsolutePathError> {
+        let absolute = match self {
+            Self::UnixBytes(bytes) => bytes.first() == Some(&b'/'),
+            Self::WindowsUtf16(units) => windows_utf16_path_is_absolute(units),
+        };
+        if !absolute {
+            return Err(NativeAbsolutePathError::NotAbsolute);
+        }
+        Ok(())
+    }
+
+    /// Validates representation invariants that are meaningful independent of the current host.
+    pub fn validate(&self) -> Result<(), NativeAbsolutePathError> {
+        self.validate_size()?;
+        self.validate_no_nul()?;
+        self.validate_absolute()
+    }
+
+    /// Validates this absolute path for use on the process's current platform.
+    pub fn validate_for_current_platform(&self) -> Result<(), NativeAbsolutePathError> {
+        self.validate()?;
+        #[cfg(unix)]
+        if !matches!(self, Self::UnixBytes(_)) {
+            return Err(NativeAbsolutePathError::ForeignPlatform {
+                expected: NativeAbsolutePathKind::UnixBytesBase64Url,
+                actual: self.kind(),
+            });
+        }
+        #[cfg(windows)]
+        if !matches!(self, Self::WindowsUtf16(_)) {
+            return Err(NativeAbsolutePathError::ForeignPlatform {
+                expected: NativeAbsolutePathKind::WindowsUtf16LeBase64Url,
+                actual: self.kind(),
+            });
+        }
+        #[cfg(not(any(unix, windows)))]
+        return Err(NativeAbsolutePathError::UnsupportedCurrentPlatform);
+        Ok(())
+    }
+
+    /// Captures a local path without UTF-8 conversion or normalization.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, NativeAbsolutePathError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let value = Self::unix(path.as_os_str().as_bytes().to_vec());
+            value.validate_for_current_platform()?;
+            Ok(value)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let value = Self::windows_utf16(path.as_os_str().encode_wide().collect::<Vec<_>>());
+            value.validate_for_current_platform()?;
+            Ok(value)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(NativeAbsolutePathError::UnsupportedCurrentPlatform)
+        }
+    }
+
+    /// Compares a captured locator with a local path using exact native bytes/code units.
+    pub fn equals_path(&self, path: &std::path::Path) -> Result<bool, NativeAbsolutePathError> {
+        self.validate_for_current_platform()?;
+        Ok(self == &Self::from_path(path)?)
+    }
+}
+
+fn windows_utf16_path_is_absolute(units: &[u16]) -> bool {
+    let separator = |unit: u16| unit == b'\\' as u16 || unit == b'/' as u16;
+    let is_namespace_component =
+        |component: &[u16]| component == [b'?' as u16] || component == [b'.' as u16];
+
+    // Device and extended-length namespaces (for example `\\?\`, `\\.\`, and
+    // `\??\`) do not have ordinary drive/UNC semantics and must be admitted explicitly by a
+    // future platform contract rather than slipping through the UNC grammar.
+    if (units.len() >= 4
+        && separator(units[0])
+        && separator(units[1])
+        && matches!(units[2], value if value == b'?' as u16 || value == b'.' as u16)
+        && separator(units[3]))
+        || (units.len() >= 4
+            && separator(units[0])
+            && units[1] == b'?' as u16
+            && units[2] == b'?' as u16
+            && separator(units[3]))
+    {
+        return false;
+    }
+
+    let drive_absolute = units.len() >= 3
+        && u8::try_from(units[0]).is_ok_and(|drive| drive.is_ascii_alphabetic())
+        && units[1] == b':' as u16
+        && separator(units[2]);
+    if drive_absolute {
+        return true;
+    }
+
+    if units.len() < 5 || !separator(units[0]) || !separator(units[1]) || separator(units[2]) {
+        return false;
+    }
+    let mut components = units[2..]
+        .split(|unit| separator(*unit))
+        .filter(|component| !component.is_empty());
+    matches!(
+        (components.next(), components.next()),
+        (Some(server), Some(share))
+            if !is_namespace_component(server)
+                && !is_namespace_component(share)
+                && !server.contains(&(b':' as u16))
+                && !share.contains(&(b':' as u16))
+    )
+}
+
+impl Serialize for NativeAbsolutePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            kind: NativeAbsolutePathKind,
+            value: &'a str,
+        }
+
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let encoded = self.encoded_value();
+        Wire {
+            kind: self.kind(),
+            value: &encoded,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NativeAbsolutePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: NativeAbsolutePathKind,
+            value: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.value.len() > MAX_NATIVE_ABSOLUTE_PATH_BASE64_LEN {
+            return Err(D::Error::custom(
+                "native absolute path payload exceeds 64 KiB",
+            ));
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(&wire.value)
+            .map_err(D::Error::custom)?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != wire.value {
+            return Err(D::Error::custom(
+                "native absolute path payload is not canonical unpadded base64url",
+            ));
+        }
+
+        let value = match wire.kind {
+            NativeAbsolutePathKind::UnixBytesBase64Url => Self::UnixBytes(bytes),
+            NativeAbsolutePathKind::WindowsUtf16LeBase64Url => {
+                let (chunks, remainder) = bytes.as_chunks::<2>();
+                if !remainder.is_empty() {
+                    return Err(D::Error::custom(
+                        "windows utf16 path payload must have even length",
+                    ));
+                }
+                Self::WindowsUtf16(
+                    chunks
+                        .iter()
+                        .map(|chunk| u16::from_le_bytes(*chunk))
+                        .collect(),
+                )
+            }
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl JsonSchema for NativeAbsolutePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NativeAbsolutePath".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        json!({
+            "type": "object",
+            "required": ["kind", "value"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["unix_bytes_base64_url", "windows_utf16_le_base64_url"]
+                },
+                "value": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "maxLength": MAX_NATIVE_ABSOLUTE_PATH_BASE64_LEN
+                }
+            },
+            "additionalProperties": false,
+            "description": "Canonical unpadded base64url of an absolute native path, bounded to 64 KiB of Unix bytes or Windows UTF-16LE bytes"
+        })
+        .try_into()
+        .expect("valid native absolute path schema")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NativeAbsolutePathError {
+    #[error("native absolute path contains a NUL code unit")]
+    ContainsNul,
+    #[error("native path is not absolute for its tagged platform")]
+    NotAbsolute,
+    #[error("native absolute path uses {actual:?}, but this host requires {expected:?}")]
+    ForeignPlatform {
+        expected: NativeAbsolutePathKind,
+        actual: NativeAbsolutePathKind,
+    },
+    #[error("native absolute path is {actual_bytes} bytes; maximum is {max_bytes}")]
+    TooLong {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+    #[error("the current platform has no supported native absolute path representation")]
+    UnsupportedCurrentPlatform,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct Id<T> {
@@ -572,6 +902,7 @@ impl ScanObjectIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NativePathComponent {
     pub entry_id: ScanEntryId,
     pub native_basename: NativeName,
@@ -583,8 +914,11 @@ pub struct NativePathComponent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NativeLocatorEvidence {
     pub scan_root: NativePathComponent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_root_absolute_path: Option<NativeAbsolutePath>,
     pub parent_reopen_recipe: Vec<NativePathComponent>,
     pub entry: NativePathComponent,
 }
@@ -596,12 +930,20 @@ impl NativeLocatorEvidence {
         scan_id: &ScanId,
     ) -> Result<(), ScanEntryIdError> {
         identity.validate_for_scan(scan_id)?;
+        if let Some(absolute_path) = &self.scan_root_absolute_path {
+            absolute_path
+                .validate()
+                .map_err(|_| ScanEntryIdError::InvalidFormat)?;
+        }
         if !self.scan_root.entry_id.belongs_to(scan_id) || !self.entry.entry_id.belongs_to(scan_id)
         {
             return Err(ScanEntryIdError::ScanMismatch);
         }
         if self.scan_root.entry_id != identity.scan_root_id
             || self.entry.entry_id != identity.entry_id
+            || self.scan_root.object_type != ObjectType::Directory
+            || self.scan_root.metadata_fingerprint.is_empty()
+            || self.entry.metadata_fingerprint.is_empty()
         {
             return Err(ScanEntryIdError::InvalidFormat);
         }
@@ -618,7 +960,7 @@ impl NativeLocatorEvidence {
         if self
             .parent_reopen_recipe
             .first()
-            .is_some_and(|component| component.entry_id != self.scan_root.entry_id)
+            .is_some_and(|component| component != &self.scan_root)
         {
             return Err(ScanEntryIdError::InvalidFormat);
         }
@@ -633,7 +975,7 @@ impl NativeLocatorEvidence {
             Some(expected_parent)
                 if self.parent_reopen_recipe.last().map(|part| &part.entry_id)
                     == Some(expected_parent) => {}
-            None if self.parent_reopen_recipe.is_empty() => {}
+            None if self.parent_reopen_recipe.is_empty() && self.entry == self.scan_root => {}
             _ => return Err(ScanEntryIdError::InvalidFormat),
         }
         Ok(())
@@ -714,6 +1056,24 @@ impl ScannedEntry {
         if locator.entry.native_basename != self.native_basename {
             return Err(ScanEntryIdError::InvalidFormat);
         }
+        Ok(Some(locator))
+    }
+
+    /// Returns locator evidence only when it is structurally valid and usable on this host.
+    /// Foreign-platform evidence remains deserializable for reporting but cannot become local
+    /// execution authority.
+    pub fn executable_native_locator(
+        &self,
+    ) -> Result<Option<&NativeLocatorEvidence>, ScanEntryIdError> {
+        let Some(locator) = self.validated_native_locator()? else {
+            return Ok(None);
+        };
+        locator
+            .scan_root_absolute_path
+            .as_ref()
+            .ok_or(ScanEntryIdError::InvalidFormat)?
+            .validate_for_current_platform()
+            .map_err(|_| ScanEntryIdError::InvalidFormat)?;
         Ok(Some(locator))
     }
 }
@@ -1022,6 +1382,186 @@ mod tests {
         let encoded = serde_json::to_string(&name).unwrap();
         let decoded: NativeName = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, name);
+    }
+
+    #[test]
+    fn native_absolute_paths_round_trip_losslessly_for_both_platforms() {
+        let unix = NativeAbsolutePath::unix(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        let windows = NativeAbsolutePath::windows_utf16(
+            r"C:\fixture\rocket-🚀".encode_utf16().collect::<Vec<_>>(),
+        );
+
+        for path in [unix, windows] {
+            let encoded = serde_json::to_string(&path).unwrap();
+            let decoded: NativeAbsolutePath = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, path);
+        }
+    }
+
+    #[test]
+    fn native_absolute_path_rejects_noncanonical_malformed_and_unsafe_wire_forms() {
+        for wire in [
+            r#"{"kind":"unix_bytes_base64_url","value":"L3RtcA=="}"#,
+            r#"{"kind":"unix_bytes_base64_url","value":"dG1w"}"#,
+            r#"{"kind":"unix_bytes_base64_url","value":"LwA"}"#,
+            r#"{"kind":"windows_utf16_le_base64_url","value":"QwA6AFwAAQ"}"#,
+            r#"{"kind":"windows_utf16_le_base64_url","value":"cgBlAGwAYQB0AGkAdgBlAA"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<NativeAbsolutePath>(wire).is_err(),
+                "unexpectedly accepted {wire}"
+            );
+        }
+
+        let oversized = NativeAbsolutePath::unix(
+            std::iter::once(b'/')
+                .chain(std::iter::repeat_n(b'a', MAX_NATIVE_ABSOLUTE_PATH_BYTES))
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            oversized.validate(),
+            Err(NativeAbsolutePathError::TooLong { .. })
+        ));
+        assert!(serde_json::to_string(&oversized).is_err());
+    }
+
+    #[test]
+    fn native_absolute_path_distinguishes_generic_and_host_validation() {
+        let unix = NativeAbsolutePath::unix(b"/tmp/root".to_vec());
+        let windows =
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>());
+        assert!(unix.validate().is_ok());
+        assert!(windows.validate().is_ok());
+
+        #[cfg(unix)]
+        {
+            assert!(unix.validate_for_current_platform().is_ok());
+            assert!(matches!(
+                windows.validate_for_current_platform(),
+                Err(NativeAbsolutePathError::ForeignPlatform { .. })
+            ));
+        }
+        #[cfg(windows)]
+        {
+            assert!(windows.validate_for_current_platform().is_ok());
+            assert!(matches!(
+                unix.validate_for_current_platform(),
+                Err(NativeAbsolutePathError::ForeignPlatform { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn windows_native_absolute_path_rejects_namespace_and_relative_forms() {
+        for path in [
+            r"\\?\C:\root",
+            r"\\.\C:\root",
+            r"\??\C:\root",
+            r"C:relative",
+            r"\\server",
+        ] {
+            let value = NativeAbsolutePath::windows_utf16(path.encode_utf16().collect::<Vec<_>>());
+            assert!(
+                matches!(value.validate(), Err(NativeAbsolutePathError::NotAbsolute)),
+                "unexpectedly accepted {path}"
+            );
+        }
+        assert!(
+            NativeAbsolutePath::windows_utf16(
+                r"\\server\share\root".encode_utf16().collect::<Vec<_>>()
+            )
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn legacy_locator_without_absolute_root_is_readable_but_not_executable() {
+        let scan_id = ScanId::new("legacy-locator");
+        let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
+        let component = NativePathComponent {
+            entry_id: root_id.clone(),
+            native_basename: NativeName::unix(b"root".to_vec()),
+            object_type: ObjectType::Directory,
+            platform_file_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+            filesystem_object_domain_identity: IdentityEvidence::unknown(
+                ReasonCode::UnknownIdentity,
+            ),
+            volume_or_mount_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+            metadata_fingerprint: "root-fingerprint".to_string(),
+        };
+        let wire = json!({
+            "scan_root": component,
+            "parent_reopen_recipe": [],
+            "entry": component,
+        });
+        let locator: NativeLocatorEvidence = serde_json::from_value(wire).unwrap();
+        assert_eq!(locator.scan_root_absolute_path, None);
+        let entry = ScannedEntry {
+            scan_id: scan_id.clone(),
+            identity: Some(ScanObjectIdentity {
+                entry_id: root_id.clone(),
+                scan_root_id: root_id,
+                parent_id: None,
+                platform_file_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+                filesystem_object_domain_identity: IdentityEvidence::unknown(
+                    ReasonCode::UnknownIdentity,
+                ),
+                volume_or_mount_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+            }),
+            native_locator: Some(locator),
+            display_path: "/root".to_string(),
+            native_basename: NativeName::unix(b"root".to_vec()),
+            object_type: ObjectType::Directory,
+            logical_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            metadata_fingerprint: "root-fingerprint".to_string(),
+            coverage: Coverage {
+                state: CoverageState::Complete,
+                complete: true,
+                incomplete_reasons: vec![],
+                details_lost: false,
+                provenance: FieldProvenance::Unknown {
+                    reason: ReasonCode::NotRevalidated,
+                },
+            },
+            provenance: FieldProvenance::Unknown {
+                reason: ReasonCode::NotRevalidated,
+            },
+        };
+        assert!(entry.validated_native_locator().unwrap().is_some());
+        assert!(entry.executable_native_locator().is_err());
+    }
+
+    #[test]
+    fn native_locator_rejects_unknown_fields() {
+        let scan_id = ScanId::new("strict-locator");
+        let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
+        let component = NativePathComponent {
+            entry_id: root_id,
+            native_basename: NativeName::unix(b"root".to_vec()),
+            object_type: ObjectType::Directory,
+            platform_file_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+            filesystem_object_domain_identity: IdentityEvidence::unknown(
+                ReasonCode::UnknownIdentity,
+            ),
+            volume_or_mount_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+            metadata_fingerprint: "root-fingerprint".to_string(),
+        };
+        let mut wire = json!({
+            "scan_root": component,
+            "parent_reopen_recipe": [],
+            "entry": component,
+        });
+        wire["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<NativeLocatorEvidence>(wire).is_err());
     }
 
     #[test]

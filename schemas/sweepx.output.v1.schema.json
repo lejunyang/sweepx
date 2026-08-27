@@ -150,6 +150,30 @@
         }
       }
     },
+    "nativeAbsolutePath": {
+      "$comment": "Value is canonical unpadded base64url. Consumers additionally validate the decoded payload is at most 65536 native bytes, contains no NUL code unit, and is absolute for its tagged platform. Windows device and extended-length namespace forms are not admitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "unix_bytes_base64_url",
+            "windows_utf16_le_base64_url"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 87382,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    },
     "fieldProvenance": {
       "oneOf": [
         {
@@ -336,7 +360,12 @@
       "additionalProperties": false,
       "required": [
         "entryId",
-        "nativeBasename"
+        "nativeBasename",
+        "objectType",
+        "platformFileIdentity",
+        "filesystemObjectDomainIdentity",
+        "volumeOrMountIdentity",
+        "metadataFingerprint"
       ],
       "properties": {
         "entryId": {
@@ -344,11 +373,34 @@
         },
         "nativeBasename": {
           "$ref": "#/$defs/nativeName"
+        },
+        "objectType": {
+          "type": "string",
+          "enum": [
+            "file",
+            "directory",
+            "symlink",
+            "reparse_point",
+            "other"
+          ]
+        },
+        "platformFileIdentity": {
+          "$ref": "#/$defs/platformFileIdentityEvidence"
+        },
+        "filesystemObjectDomainIdentity": {
+          "$ref": "#/$defs/filesystemObjectDomainIdentityEvidence"
+        },
+        "volumeOrMountIdentity": {
+          "$ref": "#/$defs/volumeOrMountIdentityEvidence"
+        },
+        "metadataFingerprint": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
     "nativeLocatorEvidence": {
-      "$comment": "All component IDs must belong to the enclosing ScannedEntry.scanId. scanRoot and entry must match identity.scanRootId and identity.entryId. A root has an empty parentReopenRecipe. Every child recipe begins with scanRoot and continues in ancestor order through the immediate parent, whose ID must match identity.parentId. The entry nativeBasename must match ScannedEntry.nativeBasename. JSON Schema validates structure and lossless encodings; consumers enforce ID equality and ordering relationships.",
+      "$comment": "All component IDs must belong to the enclosing ScannedEntry.scanId. scanRoot and entry must match identity.scanRootId and identity.entryId. New live output includes scanRootAbsolutePath; legacy/imported v1 records may omit it and are non-executable. A root has an empty parentReopenRecipe. Every child recipe begins with scanRoot and continues in ancestor order through the immediate parent, whose ID must match identity.parentId. The entry nativeBasename must match ScannedEntry.nativeBasename. JSON Schema validates structure and lossless encodings; consumers enforce ID equality, ordering, absolute-path grammar, and current-platform matching.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -359,6 +411,9 @@
       "properties": {
         "scanRoot": {
           "$ref": "#/$defs/nativePathComponent"
+        },
+        "scanRootAbsolutePath": {
+          "$ref": "#/$defs/nativeAbsolutePath"
         },
         "parentReopenRecipe": {
           "type": "array",

@@ -10,7 +10,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use serde::{Deserialize, Serialize};
-use sweepx_model::{CountValue, DecimalU128, EvidenceValue, NativeName, ReasonCode};
+use sweepx_model::{
+    CountValue, DecimalU128, EvidenceValue, NativeAbsolutePath, NativeName, ReasonCode,
+};
 use thiserror::Error;
 
 pub type ByteValue = EvidenceValue<DecimalU128>;
@@ -57,6 +59,15 @@ impl ScanRoot {
 pub enum RootValidationError {
     #[error("scan root must be absolute: {0}")]
     NotAbsolute(PathBuf),
+    #[error("scan root has no valid bounded native absolute representation: {0}")]
+    InvalidNativePath(String),
+}
+
+impl ScanRoot {
+    pub fn native_absolute_path(&self) -> Result<NativeAbsolutePath, RootValidationError> {
+        NativeAbsolutePath::from_path(&self.path)
+            .map_err(|error| RootValidationError::InvalidNativePath(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +238,8 @@ pub enum DirectoryEntryInvariantError {
     RootPathMismatch { expected: PathBuf, actual: PathBuf },
     #[error("root metadata is not a directory: got {actual:?}")]
     RootKindMismatch { actual: EntryKind },
+    #[error("root admission did not preserve the exact requested native absolute path")]
+    RootNativePathMismatch,
 }
 
 impl DirectoryEntryRecord {
@@ -437,11 +450,26 @@ fn validate_inspected_path(
 #[derive(Debug)]
 pub struct RootAdmission<D> {
     pub root: ScanRoot,
+    pub root_locator: NativeAbsolutePath,
     pub metadata: EntryMetadata,
     pub directory: D,
 }
 
 impl<D> RootAdmission<D> {
+    pub fn new(
+        root: ScanRoot,
+        metadata: EntryMetadata,
+        directory: D,
+        root_locator: NativeAbsolutePath,
+    ) -> Self {
+        Self {
+            root,
+            root_locator,
+            metadata,
+            directory,
+        }
+    }
+
     /// Validates the reporting half of root admission. The backend additionally guarantees that
     /// `directory` is the no-follow handle from which `metadata` was read.
     pub fn validate_for_root(
@@ -464,6 +492,13 @@ impl<D> RootAdmission<D> {
             return Err(DirectoryEntryInvariantError::RootKindMismatch {
                 actual: self.metadata.kind.clone(),
             });
+        }
+        if !self
+            .root_locator
+            .equals_path(requested.path())
+            .map_err(|_| DirectoryEntryInvariantError::RootNativePathMismatch)?
+        {
+            return Err(DirectoryEntryInvariantError::RootNativePathMismatch);
         }
         Ok(())
     }
@@ -781,6 +816,7 @@ mod tests {
         let requested = ScanRoot::new("/root").unwrap();
         let admission = RootAdmission {
             root: requested.clone(),
+            root_locator: requested.native_absolute_path().unwrap(),
             metadata: EntryMetadata {
                 path: PathBuf::from("/outside"),
                 file_name: native_name("outside"),

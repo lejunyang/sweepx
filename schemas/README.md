@@ -54,9 +54,13 @@ scan component matching `scanId`) remains a consumer validation requirement beca
 cannot decode and compare the base64url component.
 
 New live entries also include `ScannedEntry.nativeLocator`. It binds lossless native-name components
-for the scan root and entry to a complete `parentReopenRecipe` chain. The root itself has an empty
-recipe; every child recipe starts with the scan-root component and proceeds in ancestor order through
-the immediate parent. Legacy or imported records may omit the block, but consumers must never
-rebuild it from `displayPath`. JSON Schema validates every component's `scan-entry:v1` shape, native
-name encoding, and root-versus-child recipe cardinality. Consumers must also verify component order,
-locator IDs, native basenames, and the final parent against the entry's validated identity.
+for the scan root and entry to a complete `parentReopenRecipe` chain, and carries the exact admitted
+root in `scanRootAbsolutePath` as tagged Unix bytes or Windows UTF-16LE. The decoded absolute root is
+bounded to 64 KiB, rejects NUL and Windows namespace forms, and must match the executing platform.
+The root itself has an empty recipe; every child recipe starts with the scan-root component and
+proceeds in ancestor order through the immediate parent. Legacy or imported v1 records may omit the
+whole block or only `scanRootAbsolutePath`; both remain viewable, but missing or foreign-platform
+absolute-root evidence is never execution-eligible and must never be reconstructed from
+`displayPath`. JSON Schema validates component shapes and wire encoding. Consumers must additionally
+verify canonical decoding, absolute-path grammar, component order, locator IDs, native basenames,
+the final parent, and current-platform compatibility before execution.

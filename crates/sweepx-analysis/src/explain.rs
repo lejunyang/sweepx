@@ -230,8 +230,9 @@ mod tests {
     use super::*;
     use sweepx_model::{
         Coverage, CoverageState, FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence,
-        MethodId, NativeLocatorEvidence, NativeName, NativePathComponent, ObjectType,
-        PlatformFileIdentity, ScanEntryId, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
+        MethodId, NativeAbsolutePath, NativeLocatorEvidence, NativeName, NativePathComponent,
+        ObjectType, PlatformFileIdentity, ScanEntryId, ScanId, ScanObjectIdentity,
+        VolumeOrMountIdentity,
     };
     use sweepx_scanner::ScanSummary;
 
@@ -249,6 +250,21 @@ mod tests {
             incomplete_reasons: Vec::new(),
             details_lost: false,
             provenance: live_provenance(),
+        }
+    }
+
+    fn native_absolute_root() -> NativeAbsolutePath {
+        #[cfg(unix)]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
         }
     }
 
@@ -288,6 +304,7 @@ mod tests {
                 volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
                 metadata_fingerprint: "root-fingerprint".to_string(),
             },
+            scan_root_absolute_path: Some(native_absolute_root()),
             parent_reopen_recipe: identity
                 .parent_id
                 .as_ref()

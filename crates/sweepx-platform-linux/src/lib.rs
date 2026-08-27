@@ -340,6 +340,9 @@ impl PlatformScanner for LinuxPlatformScanner {
                 root.path().display()
             )));
         }
+        let root_locator = root
+            .native_absolute_path()
+            .map_err(|error| PlatformError::RootRejected(error.to_string()))?;
 
         let fd = Self::open_root(root.path()).map_err(|error| {
             if matches!(
@@ -374,15 +377,16 @@ impl PlatformScanner for LinuxPlatformScanner {
         })?;
         let metadata =
             Self::metadata_to_entry(root.path(), Self::native_name(root.path()), &stat, mount_id);
-        Ok(RootAdmission {
-            root: root.clone(),
+        Ok(RootAdmission::new(
+            root.clone(),
             metadata,
-            directory: LinuxDirectoryHandle {
+            LinuxDirectoryHandle {
                 fd,
                 display_path: root.path().to_path_buf(),
                 cursor: DirectoryCursor::NotStarted,
             },
-        })
+            root_locator,
+        ))
     }
 
     fn enumerate_children(

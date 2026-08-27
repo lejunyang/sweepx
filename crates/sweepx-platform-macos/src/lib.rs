@@ -402,6 +402,9 @@ mod backend {
                     root.path().display()
                 )));
             }
+            let root_locator = root
+                .native_absolute_path()
+                .map_err(|error| PlatformError::RootRejected(error.to_string()))?;
 
             let directory = Self::open_root_directory(root.path()).map_err(|error| {
                 if matches!(
@@ -435,11 +438,12 @@ mod backend {
                 Some(directory.mount_identity.clone()),
             );
 
-            Ok(RootAdmission {
-                root: root.clone(),
-                metadata: entry,
+            Ok(RootAdmission::new(
+                root.clone(),
+                entry,
                 directory,
-            })
+                root_locator,
+            ))
         }
 
         fn enumerate_children(

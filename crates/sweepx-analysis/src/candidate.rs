@@ -305,7 +305,7 @@ impl<'a> CandidateBuilder<'a> {
         let scan_object_identity = self.entry.validated_identity().ok().flatten().cloned();
         let native_locator = self
             .entry
-            .validated_native_locator()
+            .executable_native_locator()
             .ok()
             .flatten()
             .cloned();
@@ -727,7 +727,7 @@ struct AggregateLink<'a> {
 mod tests {
     use super::*;
     use sweepx_model::{
-        Coverage, FilesystemObjectDomainIdentity, IdentityEvidence, MethodId,
+        Coverage, FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, NativeAbsolutePath,
         NativeLocatorEvidence, NativePathComponent, PlatformFileIdentity, ScanEntryId,
         ScanObjectIdentity, VolumeOrMountIdentity,
     };
@@ -762,6 +762,21 @@ mod tests {
             incomplete_reasons: vec![ReasonCode::IncompleteStreamCoverage],
             details_lost: false,
             provenance: live_provenance(),
+        }
+    }
+
+    fn native_absolute_root() -> NativeAbsolutePath {
+        #[cfg(unix)]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
         }
     }
 
@@ -844,32 +859,22 @@ mod tests {
         identity: &ScanObjectIdentity,
         entry_native_basename: NativeName,
     ) -> NativeLocatorEvidence {
+        let root_component = NativePathComponent {
+            entry_id: identity.scan_root_id.clone(),
+            native_basename: NativeName::unix(b"root".to_vec()),
+            object_type: ObjectType::Directory,
+            platform_file_identity: identity.platform_file_identity.clone(),
+            filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+            metadata_fingerprint: "root-fingerprint".to_string(),
+        };
         NativeLocatorEvidence {
-            scan_root: NativePathComponent {
-                entry_id: identity.scan_root_id.clone(),
-                native_basename: NativeName::unix(b"root".to_vec()),
-                object_type: ObjectType::Directory,
-                platform_file_identity: identity.platform_file_identity.clone(),
-                filesystem_object_domain_identity: identity
-                    .filesystem_object_domain_identity
-                    .clone(),
-                volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-                metadata_fingerprint: "root-fingerprint".to_string(),
-            },
+            scan_root: root_component.clone(),
+            scan_root_absolute_path: Some(native_absolute_root()),
             parent_reopen_recipe: identity
                 .parent_id
                 .as_ref()
-                .map(|parent_id| NativePathComponent {
-                    entry_id: parent_id.clone(),
-                    native_basename: NativeName::unix(b"parent".to_vec()),
-                    object_type: ObjectType::Directory,
-                    platform_file_identity: identity.platform_file_identity.clone(),
-                    filesystem_object_domain_identity: identity
-                        .filesystem_object_domain_identity
-                        .clone(),
-                    volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-                    metadata_fingerprint: "parent-fingerprint".to_string(),
-                })
+                .map(|_| root_component)
                 .into_iter()
                 .collect(),
             entry: NativePathComponent {
@@ -1125,6 +1130,95 @@ mod tests {
 
         assert_ne!(first.locator.native_locator, second.locator.native_locator);
         assert_ne!(first.canonical_digest, second.canonical_digest);
+    }
+
+    #[test]
+    fn absolute_scan_root_locator_changes_candidate_digest() {
+        let entry_identity = identity(2, 1);
+        let first_locator = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        let mut second_locator = first_locator.clone();
+        #[cfg(unix)]
+        {
+            second_locator.scan_root_absolute_path =
+                Some(NativeAbsolutePath::unix(b"/different-root".to_vec()));
+        }
+        #[cfg(windows)]
+        {
+            second_locator.scan_root_absolute_path = Some(NativeAbsolutePath::windows_utf16(
+                r"C:\different-root".encode_utf16().collect::<Vec<_>>(),
+            ));
+        }
+
+        let first = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity.clone()),
+            Some(first_locator),
+        ))
+        .build()
+        .unwrap();
+        let second = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity),
+            Some(second_locator),
+        ))
+        .build()
+        .unwrap();
+
+        assert_ne!(first.canonical_digest, second.canonical_digest);
+    }
+
+    #[test]
+    fn missing_or_foreign_absolute_root_locator_is_report_only() {
+        let entry_identity = identity(2, 1);
+        let mut missing = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        missing.scan_root_absolute_path = None;
+        let missing_candidate = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity.clone()),
+            Some(missing),
+        ))
+        .build()
+        .unwrap();
+        assert_eq!(
+            missing_candidate.eligibility.executable,
+            ExecutableEligibility::ReportOnly
+        );
+        assert_eq!(missing_candidate.locator.native_locator, None);
+
+        #[cfg(unix)]
+        let foreign =
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>());
+        #[cfg(windows)]
+        let foreign = NativeAbsolutePath::unix(b"/root".to_vec());
+        #[cfg(any(unix, windows))]
+        {
+            let mut locator = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+            locator.scan_root_absolute_path = Some(foreign);
+            let foreign_candidate = CandidateBuilder::new(&entry_with_native_locator(
+                "/tmp/file",
+                "fp-1",
+                live_provenance(),
+                ObjectType::File,
+                Some(entry_identity),
+                Some(locator),
+            ))
+            .build()
+            .unwrap();
+            assert_eq!(
+                foreign_candidate.eligibility.executable,
+                ExecutableEligibility::ReportOnly
+            );
+            assert_eq!(foreign_candidate.locator.native_locator, None);
+        }
     }
 
     #[test]

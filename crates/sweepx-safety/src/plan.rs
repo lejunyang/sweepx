@@ -1306,6 +1306,17 @@ fn validate_native_target(
             "native_locator does not match scan_object_identity",
         ));
     }
+    if native_target
+        .native_locator
+        .scan_root_absolute_path
+        .as_ref()
+        .is_none_or(|path| path.validate_for_current_platform().is_err())
+    {
+        return Err(invalid_native_target(
+            item_id,
+            "native_locator has no valid current-platform scan root absolute path",
+        ));
+    }
     if native_target.native_locator.entry.native_basename != native_target.native_basename {
         return Err(invalid_native_target(
             item_id,
@@ -1338,8 +1349,8 @@ mod tests {
     };
     use sweepx_model::{
         CandidateId, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
-        MethodId, NativeLocatorEvidence, NativeName, NativePathComponent, ObjectType, ScanEntryId,
-        ScanId, ScanObjectIdentity,
+        MethodId, NativeAbsolutePath, NativeLocatorEvidence, NativeName, NativePathComponent,
+        ObjectType, ScanEntryId, ScanId, ScanObjectIdentity,
     };
 
     use super::*;
@@ -1405,6 +1416,21 @@ mod tests {
         input
     }
 
+    fn native_absolute_root() -> NativeAbsolutePath {
+        #[cfg(unix)]
+        {
+            NativeAbsolutePath::unix(b"/tmp/root".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeAbsolutePath::unix(b"/tmp/root".to_vec())
+        }
+    }
+
     fn live_candidate() -> AnalysisCandidate {
         let scan_id = ScanId::new("scan-1");
         let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
@@ -1458,6 +1484,7 @@ mod tests {
                             .clone(),
                         metadata_fingerprint: "fp-root".to_string(),
                     },
+                    scan_root_absolute_path: Some(native_absolute_root()),
                     parent_reopen_recipe: vec![NativePathComponent {
                         entry_id: root_id.clone(),
                         native_basename: NativeName::unix(b"root".to_vec()),
@@ -1796,6 +1823,38 @@ mod tests {
         assert!(matches!(
             error,
             CanonicalPlanError::CandidateMissingNativeLocator { .. }
+        ));
+    }
+
+    #[test]
+    fn native_target_rejects_missing_absolute_root_locator() {
+        let candidate = live_candidate();
+        let mut item = plan_item_from_live_candidate(
+            "scan-1",
+            candidate
+                .locator
+                .scan_object_identity
+                .as_ref()
+                .unwrap()
+                .scan_root_id
+                .as_str(),
+            &candidate,
+            ExplanationDigest::new("explain-1"),
+            "action-top-1",
+            TargetIdentity::new("target-1"),
+            vec![PlanAction::new("action-top-1", RiskTier::R2)],
+            None,
+        )
+        .unwrap();
+        item.native_target
+            .as_mut()
+            .unwrap()
+            .native_locator
+            .scan_root_absolute_path = None;
+
+        assert!(matches!(
+            validate_native_target("item-1", item.native_target.as_ref().unwrap()),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
         ));
     }
 
