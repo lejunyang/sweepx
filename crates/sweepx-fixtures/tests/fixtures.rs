@@ -14,20 +14,17 @@ use sweepx_fixtures::{
 use tempfile::tempdir;
 
 #[test]
-fn minimal_contract_generation_matches_expected_receipt_shape() {
+fn minimal_contract_generation_matches_full_expected_receipt() {
     let root = tempdir().expect("tempdir");
     let generated = generate_from_contract_files(root.path(), contract_manifest_path("minimal"))
         .expect("generate minimal fixture");
     let expected =
         load_receipt_contract(contract_receipt_path("minimal")).expect("receipt contract");
-    assert_eq!(
-        normalized_receipt(generated.receipt),
-        normalized_receipt(expected)
-    );
+    assert_eq!(generated.receipt, expected);
 }
 
 #[test]
-fn generation_is_deterministic_and_reproducible() {
+fn generation_receipt_is_byte_for_byte_reproducible_from_seed() {
     let manifest = default_p0_p1_manifest();
     let root_a = tempdir().expect("tempdir a");
     let root_b = tempdir().expect("tempdir b");
@@ -35,12 +32,9 @@ fn generation_is_deterministic_and_reproducible() {
     let generated_a = generate_from_manifest(root_a.path(), &manifest).expect("generate a");
     let generated_b = generate_from_manifest(root_b.path(), &manifest).expect("generate b");
 
-    assert_eq!(
-        generated_a.receipt.generated_at,
-        generated_b.receipt.generated_at
-    );
-    assert_eq!(generated_a.receipt.entries, generated_b.receipt.entries);
-    assert_eq!(generated_a.receipt.totals, generated_b.receipt.totals);
+    let receipt_a = serde_json::to_vec_pretty(&generated_a.receipt).expect("serialize receipt a");
+    let receipt_b = serde_json::to_vec_pretty(&generated_b.receipt).expect("serialize receipt b");
+    assert_eq!(receipt_a, receipt_b);
 
     let alpha_a = generated_a.fixture_dir.join("alpha.txt");
     let alpha_b = generated_b.fixture_dir.join("alpha.txt");
@@ -82,10 +76,7 @@ fn generation_refuses_symlink_fixture_root_and_canonicalizes_root() {
 
     let generated = generate_from_manifest(&real_root, &manifest).expect("generate real root");
     let oracle = oracle_from_manifest(&real_root, &manifest).expect("oracle");
-    assert_eq!(
-        generated.receipt.root_path,
-        real_root.join("p1-deterministic").display().to_string()
-    );
+    assert_eq!(generated.receipt.root_path, "/NORMALIZED/p1-deterministic");
     assert_eq!(generated.receipt.root_path, oracle.receipt.root_path);
 }
 
@@ -152,10 +143,7 @@ fn oracle_reports_independent_identity_boundaries_and_hardlink_group() {
     let generated = generate_from_manifest(root.path(), &manifest).expect("generate");
 
     let oracle = oracle_from_manifest(root.path(), &manifest).expect("oracle");
-    assert_eq!(
-        oracle.receipt.root_path,
-        generated.fixture_dir.display().to_string()
-    );
+    assert_eq!(oracle.receipt.root_path, "/NORMALIZED/p1-deterministic");
     assert!(
         oracle
             .boundaries
@@ -268,7 +256,7 @@ fn normalized_receipt_comparison_ignores_root_path_variance() {
         .expect("generate b")
         .receipt;
 
-    assert_eq!(normalized_receipt(receipt_a), normalized_receipt(receipt_b));
+    assert_eq!(receipt_a, receipt_b);
 }
 
 #[cfg(target_os = "linux")]
@@ -745,38 +733,6 @@ fn linux_p4_named_evidence_trace_and_bundle_are_deterministic() {
 
 fn normalized_receipt(mut receipt: Receipt) -> Receipt {
     receipt.root_path = normalize_root_path(&receipt.root_path);
-    receipt.receipt_id = normalize_receipt_id(&receipt.receipt_id, &receipt.manifest_id);
-    receipt
-        .entries
-        .sort_by(|left, right| left.path.cmp(&right.path));
-    for entry in &mut receipt.entries {
-        match entry.kind {
-            FixtureEntryKind::Directory => {
-                entry.allocated_bytes = Some(TaggedValue::Unknown {
-                    reason: "directory_allocation_platform_specific".into(),
-                });
-                entry.notes.clear();
-            }
-            FixtureEntryKind::File => {
-                if let Some(allocated) = entry.allocated_bytes.take() {
-                    entry.allocated_bytes = Some(normalize_file_allocated(allocated));
-                }
-                entry.notes.clear();
-            }
-            FixtureEntryKind::Symlink => {
-                if let Some(allocated) = entry.allocated_bytes.take() {
-                    entry.allocated_bytes = Some(normalize_symlink_allocated(allocated));
-                }
-            }
-            FixtureEntryKind::Hardlink | FixtureEntryKind::Special => {}
-        }
-    }
-    receipt.totals.allocated_bytes = normalize_file_allocated(receipt.totals.allocated_bytes);
-    receipt.totals.logical_bytes = normalize_numeric_tagged(receipt.totals.logical_bytes);
-    receipt.totals.apparent_logical_bytes =
-        normalize_numeric_tagged(receipt.totals.apparent_logical_bytes);
-    receipt.totals.unique_logical_bytes =
-        normalize_numeric_tagged(receipt.totals.unique_logical_bytes);
     receipt
 }
 
@@ -790,14 +746,6 @@ fn normalize_root_path(path: &str) -> String {
     format!("/NORMALIZED/{name}")
 }
 
-fn normalize_receipt_id(receipt_id: &str, manifest_id: &str) -> String {
-    if receipt_id == format!("receipt-{manifest_id}") {
-        receipt_id.to_string()
-    } else {
-        format!("receipt-{manifest_id}")
-    }
-}
-
 fn load_p4_evidence_bundle(path: impl AsRef<Path>) -> Result<P4EvidenceBundle, serde_json::Error> {
     let bytes = std::fs::read(path).expect("read p4 evidence bundle contract");
     serde_json::from_slice(&bytes)
@@ -808,35 +756,4 @@ fn normalized_p4_bundle(mut bundle: P4EvidenceBundle) -> P4EvidenceBundle {
     bundle.trace.fixture_manifest_digest = "sha256:NORMALIZED_MANIFEST".into();
     bundle.trace.oracle_receipt_digest = "sha256:NORMALIZED_RECEIPT".into();
     bundle
-}
-
-fn normalize_file_allocated(value: TaggedValue) -> TaggedValue {
-    match value {
-        TaggedValue::Known { .. } | TaggedValue::LowerBound { .. } => TaggedValue::LowerBound {
-            value: "5".parse().expect("decimal"),
-            reason: "cross_platform_block_size_unknown".into(),
-        },
-        other => other,
-    }
-}
-
-fn normalize_symlink_allocated(value: TaggedValue) -> TaggedValue {
-    match value {
-        TaggedValue::Known { value } | TaggedValue::LowerBound { value, .. } => {
-            TaggedValue::LowerBound {
-                value,
-                reason: "symlink_target_length".into(),
-            }
-        }
-        other => other,
-    }
-}
-
-fn normalize_numeric_tagged(value: TaggedValue) -> TaggedValue {
-    match value {
-        TaggedValue::Known { value } | TaggedValue::LowerBound { value, .. } => {
-            TaggedValue::Known { value }
-        }
-        other => other,
-    }
 }

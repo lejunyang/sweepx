@@ -1,12 +1,12 @@
 {
   "schema": "sweepx.receipt/v1",
-  "receiptId": "receipt-p0-minimal",
+  "receiptId": "receipt-fixture-p0-minimal",
   "manifestId": "fixture-p0-minimal",
   "generatedAt": "2026-08-26T06:00:01Z",
   "generatorVersion": "0.0.0-p0",
   "seed": "42",
   "status": "verified",
-  "rootPath": "/tmp/sweepx-fixtures/p0-minimal",
+  "rootPath": "/NORMALIZED/p0-minimal",
   "entries": [
     {
       "entryId": "root-dir",
@@ -24,7 +24,7 @@
         "reason": "directory_allocation_platform_specific"
       },
       "notes": [
-        "directory placeholder only"
+        "root fixture directory"
       ]
     },
     {
@@ -46,7 +46,7 @@
       },
       "digest": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
       "notes": [
-        "expected content is hello"
+        "deterministic content is the ASCII string hello"
       ]
     }
   ],

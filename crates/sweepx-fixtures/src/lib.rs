@@ -880,10 +880,8 @@ pub fn oracle_from_manifest(
     let mut identities = BTreeMap::new();
     let mut total_apparent = 0u128;
     let mut total_unique = 0u128;
-    let mut total_allocated_floor = 0u128;
     let mut boundaries = BTreeSet::new();
-    let mut inode_groups = BTreeMap::<String, String>::new();
-    let mut unique_inodes = BTreeSet::<String>::new();
+    let mut unique_manifest_objects = BTreeSet::<String>::new();
     let manifest_map: BTreeMap<Vec<String>, &FixtureEntry> = manifest
         .entries
         .iter()
@@ -919,32 +917,23 @@ pub fn oracle_from_manifest(
             None
         };
         let logical_bytes = logical_bytes_for(&path, &metadata, &observed_kind)?;
-        let allocated_bytes = allocated_bytes_for(&path, &metadata, &observed_kind)?;
+        let allocated_bytes = portable_allocated_bytes(&logical_bytes, &observed_kind);
 
         total_apparent += tagged_numeric_floor(&logical_bytes);
-        total_allocated_floor += tagged_numeric_floor(&allocated_bytes);
         boundaries.extend(boundaries_for(&entry.path, &observed_kind, &logical_bytes));
 
         let hardlink_group = if matches!(
             observed_kind,
             FixtureEntryKind::File | FixtureEntryKind::Hardlink
         ) {
-            inode_identity(&metadata).map(|inode| {
-                if unique_inodes.insert(inode.clone()) {
-                    total_unique += tagged_numeric_floor(&logical_bytes);
-                }
-                inode_groups
-                    .entry(inode)
-                    .or_insert_with(|| {
-                        let canonical = plan
-                            .hardlink_groups
-                            .get(&entry.path)
-                            .cloned()
-                            .unwrap_or_else(|| entry.path.join("/"));
-                        format!("hardlink:{canonical}")
-                    })
-                    .clone()
-            })
+            let hardlink_group = manifest_hardlink_group(&entry.path, &plan.hardlink_groups);
+            let object_key = hardlink_group
+                .clone()
+                .unwrap_or_else(|| format!("entry:{}", entry.path.join("/")));
+            if unique_manifest_objects.insert(object_key) {
+                total_unique += tagged_numeric_floor(&logical_bytes);
+            }
+            hardlink_group
         } else {
             total_unique += tagged_numeric_floor(&logical_bytes);
             None
@@ -981,17 +970,14 @@ pub fn oracle_from_manifest(
         generator_version: manifest.generator_version.clone(),
         seed: manifest.seed,
         status: ReceiptStatus::Verified,
-        root_path: fixture_dir.display().to_string(),
+        root_path: deterministic_receipt_root_path(&fixture_root, &fixture_dir)?,
         entries,
         totals: ReceiptTotals {
             entry_count: DecimalU128::new(manifest.entries.len() as u128),
             logical_bytes: TaggedValue::known(total_apparent),
             apparent_logical_bytes: TaggedValue::known(total_apparent),
             unique_logical_bytes: TaggedValue::known(total_unique),
-            allocated_bytes: TaggedValue::lower_bound(
-                total_allocated_floor,
-                "cross_platform_block_size_unknown",
-            ),
+            allocated_bytes: manifest.expectations.allocated_bytes.clone(),
         },
         errors: Vec::new(),
     };
@@ -1850,46 +1836,38 @@ fn logical_bytes_for(
     }
 }
 
-fn allocated_bytes_for(
-    path: &Path,
-    metadata: &fs::Metadata,
-    kind: &FixtureEntryKind,
-) -> Result<TaggedValue, FixtureError> {
+fn portable_allocated_bytes(logical_bytes: &TaggedValue, kind: &FixtureEntryKind) -> TaggedValue {
     match kind {
-        FixtureEntryKind::Directory => Ok(TaggedValue::unknown(
-            "directory_allocation_platform_specific",
-        )),
-        FixtureEntryKind::File | FixtureEntryKind::Hardlink => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let bytes = (metadata.blocks() as u128) * 512;
-                Ok(TaggedValue::lower_bound(
-                    bytes.max(metadata.len().into()),
-                    "native_metadata_blocks",
-                ))
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = path;
-                Ok(TaggedValue::lower_bound(
-                    metadata.len().into(),
-                    "cross_platform_block_size_unknown",
-                ))
-            }
+        FixtureEntryKind::Directory => {
+            TaggedValue::unknown("directory_allocation_platform_specific")
         }
+        FixtureEntryKind::File | FixtureEntryKind::Hardlink => TaggedValue::lower_bound(
+            tagged_numeric_floor(logical_bytes),
+            "cross_platform_block_size_unknown",
+        ),
         FixtureEntryKind::Symlink => {
-            let target = fs::read_link(path).map_err(|source| FixtureError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            Ok(TaggedValue::lower_bound(
-                symlink_target_len(&target) as u128,
-                "symlink_target_length",
-            ))
+            TaggedValue::lower_bound(tagged_numeric_floor(logical_bytes), "symlink_target_length")
         }
-        FixtureEntryKind::Special => Ok(TaggedValue::unknown("unsupported_special")),
+        FixtureEntryKind::Special => TaggedValue::unknown("unsupported_special"),
     }
+}
+
+fn deterministic_receipt_root_path(
+    fixture_root: &Path,
+    fixture_dir: &Path,
+) -> Result<String, FixtureError> {
+    let relative = fixture_dir.strip_prefix(fixture_root).map_err(|_| {
+        FixtureError::OracleOutsideFixtureRoot {
+            path: fixture_dir.to_path_buf(),
+        }
+    })?;
+    let segments = pathbuf_to_segments(relative.to_path_buf());
+    if segments.is_empty() {
+        return Err(FixtureError::OracleOutsideFixtureRoot {
+            path: fixture_dir.to_path_buf(),
+        });
+    }
+    Ok(format!("/NORMALIZED/{}", segments.join("/")))
 }
 
 fn hash_file(path: &Path) -> Result<String, FixtureError> {
@@ -1956,6 +1934,21 @@ fn receipt_notes(entry: &FixtureEntry, hardlink_group: Option<String>) -> Vec<St
     notes
 }
 
+fn manifest_hardlink_group(
+    path: &[String],
+    hardlink_groups: &BTreeMap<Vec<String>, String>,
+) -> Option<String> {
+    let path_key = path.join("/");
+    let anchor = hardlink_groups
+        .get(path)
+        .map(String::as_str)
+        .unwrap_or(&path_key);
+    hardlink_groups
+        .values()
+        .any(|candidate| candidate == anchor)
+        .then(|| format!("hardlink:{anchor}"))
+}
+
 fn kind_label(kind: &FixtureEntryKind) -> &'static str {
     match kind {
         FixtureEntryKind::Directory => "directory",
@@ -1991,19 +1984,6 @@ fn to_byte_value(tagged: &TaggedValue) -> ByteValue {
         TaggedValue::NotChecked { .. } => EvidenceValue::NotChecked {
             reason: ReasonCode::NotRevalidated,
         },
-    }
-}
-
-fn inode_identity(metadata: &fs::Metadata) -> Option<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some(format!("{}:{}", metadata.dev(), metadata.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        None
     }
 }
 
