@@ -1380,7 +1380,7 @@ fn native_basename_for_path(path: &Path) -> NativeName {
 
         return NativeName::windows_utf16(
             path.file_name()
-                .unwrap_or_else(|| path.as_os_str())
+                .unwrap_or(path.as_os_str())
                 .encode_wide()
                 .collect::<Vec<_>>(),
         );

@@ -528,7 +528,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             &started_at,
             monotonic.elapsed(),
         );
-        return Ok(ScanSuccess {
+        Ok(ScanSuccess {
             output,
             events,
             snapshot,
@@ -539,7 +539,7 @@ pub fn scan_with_store<S: SnapshotStore>(
                 boundaries: Vec::new(),
                 progress: Vec::new(),
             },
-        });
+        })
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
