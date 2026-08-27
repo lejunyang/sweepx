@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -15,13 +15,18 @@ use sweepx_analysis::{
     build_explanation_from_candidate,
 };
 use sweepx_audit::{AuditStore, ProjectionError};
+use sweepx_cache::{
+    AtomicGenerationStore, BudgetUsage, CacheError, CompactedPreview, LoadResult, PreviewBudgets,
+    PreviewCoverage, PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration,
+    admit_preview,
+};
 use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
 use sweepx_model::{
-    CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
-    OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
+    CapabilityState, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
+    ObjectType, OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
 use sweepx_protocol::{
@@ -55,6 +60,44 @@ pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
 pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str =
     "scan --format ndjson is disabled until SweepX has a durable event journal and replay support";
+const PREVIEW_GENERATION_POINTER_DIR: &str = "preview-cache";
+const CACHE_LOAD_MODE_MISS: &str = "miss";
+const CACHE_LOAD_MODE_HIT: &str = "stale_preview";
+const CACHE_LOAD_MODE_QUARANTINED: &str = "quarantined";
+const CACHE_STORE_MODE_WRITTEN: &str = "written";
+const CACHE_STORE_MODE_SKIPPED: &str = "skipped";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachePreviewMetadata {
+    load_status: &'static str,
+    store_status: &'static str,
+    loaded_generation: Option<String>,
+    written_generation: Option<String>,
+    stale_parent_count: DecimalU128,
+    stale_record_count: DecimalU128,
+    preview_byte_count: DecimalU128,
+    resource_limit: bool,
+    incomplete: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachePreviewLoad {
+    status: &'static str,
+    generation: Option<String>,
+    preview: Option<CompactedPreview>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachePreviewStoreResult {
+    status: &'static str,
+    generation: Option<String>,
+    preview_bytes: usize,
+    resource_limit: bool,
+    warnings: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -586,6 +629,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             &digest_hex(ids.operation_id_str())[..12]
         ));
         let compat = compat_snapshot(host_scan_platform());
+        let loaded_preview = load_stale_preview(request.state_dir.as_deref());
         let scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
@@ -595,8 +639,10 @@ pub fn scan_with_store<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         let summary = scanner.scan(&roots, &cancel)?;
+        let stored_preview = store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary);
         let finished_at = timestamp_now();
         let status = scan_status(&summary);
+        let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
 
         let mut output = OutputEnvelope::new(
             OutputKind::ScanResult,
@@ -615,7 +661,8 @@ pub fn scan_with_store<S: SnapshotStore>(
             "boundaryCount": DecimalU128::new(summary.boundaries.len() as u128),
             "errorCount": DecimalU128::new(scan_error_count(&summary)),
             "platform": host_scan_platform(),
-            "mode": "read_only"
+            "mode": "read_only",
+            "cachePreview": camelize_json_keys(serde_json::to_value(&cache_metadata).expect("cache preview metadata serializable"))
         });
         output.data = camelize_json_keys(json!({
             "scanId": scan_id,
@@ -638,6 +685,15 @@ pub fn scan_with_store<S: SnapshotStore>(
                 false,
                 [("scanId", scan_id.to_string())],
             ));
+        }
+        for warning in loaded_preview
+            .warnings
+            .iter()
+            .chain(stored_preview.warnings.iter())
+        {
+            output
+                .warnings
+                .push(protocol_error(warning, "cache", warning, false, []));
         }
 
         let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
@@ -1638,6 +1694,425 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(1);
     format!("…{}", value.chars().skip(count - keep).collect::<String>())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
+    let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
+        return CachePreviewLoad {
+            status: CACHE_LOAD_MODE_MISS,
+            generation: None,
+            preview: None,
+            warnings: Vec::new(),
+        };
+    };
+
+    match store.load_current() {
+        Ok(LoadResult::Hit(generation)) => CachePreviewLoad {
+            status: CACHE_LOAD_MODE_HIT,
+            generation: Some(generation.generation),
+            preview: Some(generation.preview),
+            warnings: Vec::new(),
+        },
+        Ok(LoadResult::Miss) => {
+            let quarantined = store.root().join("quarantine").exists();
+            CachePreviewLoad {
+                status: if quarantined {
+                    CACHE_LOAD_MODE_QUARANTINED
+                } else {
+                    CACHE_LOAD_MODE_MISS
+                },
+                generation: None,
+                preview: None,
+                warnings: if quarantined {
+                    vec!["cache.preview.quarantined".to_string()]
+                } else {
+                    Vec::new()
+                },
+            }
+        }
+        Err(CacheError::Quarantined { .. }) => CachePreviewLoad {
+            status: CACHE_LOAD_MODE_QUARANTINED,
+            generation: None,
+            preview: None,
+            warnings: vec!["cache.preview.quarantined".to_string()],
+        },
+        Err(_) => CachePreviewLoad {
+            status: CACHE_LOAD_MODE_MISS,
+            generation: None,
+            preview: None,
+            warnings: vec!["cache.preview.load_failed".to_string()],
+        },
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn store_stale_preview(
+    state_dir: Option<&Path>,
+    scan_id: &ScanId,
+    summary: &ScanSummary,
+) -> CachePreviewStoreResult {
+    let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
+        return CachePreviewStoreResult {
+            status: CACHE_STORE_MODE_SKIPPED,
+            generation: None,
+            preview_bytes: 0,
+            resource_limit: false,
+            warnings: Vec::new(),
+        };
+    };
+
+    let generation_id = format!(
+        "preview_{}_{}",
+        unix_timestamp_nanos(),
+        &digest_hex(scan_id.as_ref())[..12]
+    );
+    let preview_rows = preview_summaries_from_scan(summary);
+    let admission = match admit_preview(
+        preview_rows,
+        &PreviewBudgets::default(),
+        &BudgetUsage {
+            operation_spill_bytes: 0,
+            global_spill_bytes: 0,
+            state_directory_bytes: state_dir_bytes(store.root()).unwrap_or(0),
+        },
+    ) {
+        Ok(admission) => admission,
+        Err(CacheError::ResourceLimit { .. }) => {
+            return CachePreviewStoreResult {
+                status: CACHE_STORE_MODE_SKIPPED,
+                generation: None,
+                preview_bytes: 0,
+                resource_limit: true,
+                warnings: vec!["cache.preview.resource_limit".to_string()],
+            };
+        }
+        Err(_) => {
+            return CachePreviewStoreResult {
+                status: CACHE_STORE_MODE_SKIPPED,
+                generation: None,
+                preview_bytes: 0,
+                resource_limit: false,
+                warnings: vec!["cache.preview.store_failed".to_string()],
+            };
+        }
+    };
+
+    let stored = StoredGeneration {
+        generation: generation_id.clone(),
+        schema: STORED_PREVIEW_SCHEMA.to_string(),
+        created_at: timestamp_now(),
+        preview: admission.compacted.clone(),
+    };
+    match store.write_generation(&stored) {
+        Ok(()) => CachePreviewStoreResult {
+            status: CACHE_STORE_MODE_WRITTEN,
+            generation: Some(generation_id),
+            preview_bytes: admission.preview_bytes,
+            resource_limit: admission
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, sweepx_cache::CacheWarning::ResourceLimit(_))),
+            warnings: admission
+                .warnings
+                .iter()
+                .map(|_| "cache.preview.resource_limit".to_string())
+                .collect(),
+        },
+        Err(CacheError::ResourceLimit { .. }) => CachePreviewStoreResult {
+            status: CACHE_STORE_MODE_SKIPPED,
+            generation: None,
+            preview_bytes: 0,
+            resource_limit: true,
+            warnings: vec!["cache.preview.resource_limit".to_string()],
+        },
+        Err(_) => CachePreviewStoreResult {
+            status: CACHE_STORE_MODE_SKIPPED,
+            generation: None,
+            preview_bytes: 0,
+            resource_limit: false,
+            warnings: vec!["cache.preview.store_failed".to_string()],
+        },
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cache_preview_metadata(
+    summary: &ScanSummary,
+    loaded: &CachePreviewLoad,
+    stored: &CachePreviewStoreResult,
+) -> CachePreviewMetadata {
+    let stale_parent_count = loaded
+        .preview
+        .as_ref()
+        .map(|preview| DecimalU128::new(preview.parents.len() as u128))
+        .unwrap_or_else(|| DecimalU128::new(0));
+    let stale_record_count = loaded
+        .preview
+        .as_ref()
+        .map(|preview| DecimalU128::new(preview.total_records as u128))
+        .unwrap_or_else(|| DecimalU128::new(0));
+    let incomplete = summary
+        .aggregates
+        .iter()
+        .any(|aggregate| !aggregate.coverage.complete)
+        || summary
+            .boundaries
+            .iter()
+            .any(|boundary| !is_non_partial_boundary(&boundary.kind));
+
+    CachePreviewMetadata {
+        load_status: loaded.status,
+        store_status: stored.status,
+        loaded_generation: loaded.generation.clone(),
+        written_generation: stored.generation.clone(),
+        stale_parent_count,
+        stale_record_count,
+        preview_byte_count: DecimalU128::new(stored.preview_bytes as u128),
+        resource_limit: stored.resource_limit,
+        incomplete,
+        warnings: loaded
+            .warnings
+            .iter()
+            .chain(stored.warnings.iter())
+            .cloned()
+            .collect(),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn preview_generation_store(
+    state_dir: Option<&Path>,
+) -> Result<Option<AtomicGenerationStore>, StateError> {
+    let Some(path) = state_dir else {
+        return Ok(None);
+    };
+    validate_or_prepare_state_dir(path)?;
+    let preview_root = path.join(PREVIEW_GENERATION_POINTER_DIR);
+    validate_or_prepare_private_subdir(&preview_root)?;
+    Ok(Some(AtomicGenerationStore::new(preview_root)))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn preview_summaries_from_scan(summary: &ScanSummary) -> Vec<PreviewSummary> {
+    let aggregate_by_id = summary
+        .aggregates
+        .iter()
+        .filter_map(|aggregate| {
+            aggregate
+                .scan_entry_id()
+                .ok()
+                .map(|entry_id| (entry_id.to_string(), aggregate))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = Vec::new();
+    for entry in summary.roots.iter().chain(summary.entries.iter()) {
+        let Some(identity) = entry.identity.as_ref() else {
+            continue;
+        };
+        let kind = match entry.object_type {
+            ObjectType::Directory if identity.parent_id.is_none() => PreviewKind::Root,
+            ObjectType::Directory => PreviewKind::Directory,
+            _ => PreviewKind::Leaf,
+        };
+        rows.push(PreviewSummary {
+            kind,
+            parent_id: identity.parent_id.as_ref().map(ToString::to_string),
+            entry_id: identity.entry_id.to_string(),
+            native_name: entry.native_basename.clone(),
+            display_name: entry.display_path.clone(),
+            logical_bytes: stale_preview_value(&entry.logical_bytes),
+            allocated_bytes: stale_preview_value(&entry.allocated_bytes),
+            direct_child_count: aggregate_by_id
+                .get(identity.entry_id.as_str())
+                .map(|aggregate| stale_preview_count(&aggregate.direct_child_count))
+                .unwrap_or_else(|| sweepx_platform::known_count(0)),
+            recursive_entry_count: aggregate_by_id
+                .get(identity.entry_id.as_str())
+                .map(|aggregate| stale_preview_count(&aggregate.recursive_entry_count))
+                .unwrap_or_else(|| sweepx_platform::known_count(1)),
+            aggregate: aggregate_by_id
+                .get(identity.entry_id.as_str())
+                .map(|aggregate| stale_preview_aggregate(aggregate)),
+            coverage: PreviewCoverage {
+                complete: entry.coverage.complete,
+                details_lost: !entry.coverage.complete,
+                incomplete_reasons: entry.coverage.incomplete_reasons.clone(),
+            },
+            selectable: false,
+            roles: BTreeSet::new(),
+            provenance: FieldProvenance::StalePreview {
+                observed_at: timestamp_now(),
+            },
+        });
+    }
+
+    for boundary in &summary.boundaries {
+        if let Some(native_name) = boundary_native_name(&boundary.path) {
+            rows.push(PreviewSummary {
+                kind: PreviewKind::Boundary,
+                parent_id: None,
+                entry_id: format!(
+                    "boundary:{}",
+                    sanitize_cache_id(&boundary.path.display().to_string())
+                ),
+                native_name,
+                display_name: boundary.path.display().to_string(),
+                logical_bytes: EvidenceValue::Unknown {
+                    reason: boundary.reason.clone(),
+                },
+                allocated_bytes: EvidenceValue::Unknown {
+                    reason: boundary.reason.clone(),
+                },
+                direct_child_count: sweepx_platform::known_count(0),
+                recursive_entry_count: sweepx_platform::known_count(0),
+                aggregate: None,
+                coverage: PreviewCoverage {
+                    complete: false,
+                    details_lost: true,
+                    incomplete_reasons: vec![boundary.reason.clone()],
+                },
+                selectable: false,
+                roles: {
+                    let mut roles = BTreeSet::new();
+                    roles.insert(sweepx_cache::PreviewRole::Boundary);
+                    roles
+                },
+                provenance: FieldProvenance::StalePreview {
+                    observed_at: timestamp_now(),
+                },
+            });
+        }
+    }
+
+    rows
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stale_preview_value(value: &sweepx_model::ByteValue) -> sweepx_model::ByteValue {
+    match value {
+        sweepx_model::EvidenceValue::Known { value } => {
+            sweepx_model::EvidenceValue::Known { value: *value }
+        }
+        sweepx_model::EvidenceValue::LowerBound { value, reason } => {
+            sweepx_model::EvidenceValue::LowerBound {
+                value: *value,
+                reason: reason.clone(),
+            }
+        }
+        sweepx_model::EvidenceValue::Unknown { reason }
+        | sweepx_model::EvidenceValue::Unsupported { reason }
+        | sweepx_model::EvidenceValue::NotChecked { reason } => {
+            sweepx_model::EvidenceValue::Unknown {
+                reason: reason.clone(),
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stale_preview_count(value: &sweepx_model::CountValue) -> sweepx_model::CountValue {
+    match value {
+        sweepx_model::EvidenceValue::Known { value } => {
+            sweepx_model::EvidenceValue::Known { value: *value }
+        }
+        sweepx_model::EvidenceValue::LowerBound { value, reason } => {
+            sweepx_model::EvidenceValue::LowerBound {
+                value: *value,
+                reason: reason.clone(),
+            }
+        }
+        sweepx_model::EvidenceValue::Unknown { reason }
+        | sweepx_model::EvidenceValue::Unsupported { reason }
+        | sweepx_model::EvidenceValue::NotChecked { reason } => {
+            sweepx_model::EvidenceValue::Unknown {
+                reason: reason.clone(),
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stale_preview_aggregate(
+    aggregate: &sweepx_model::DirectoryAggregate,
+) -> sweepx_model::DirectoryAggregate {
+    let mut aggregate = aggregate.clone();
+    aggregate.apparent_logical_bytes = stale_preview_value(&aggregate.apparent_logical_bytes);
+    aggregate.unique_logical_bytes = stale_preview_value(&aggregate.unique_logical_bytes);
+    aggregate.filesystem_reported_allocated_bytes =
+        stale_preview_value(&aggregate.filesystem_reported_allocated_bytes);
+    aggregate.potentially_reclaimable_bytes =
+        stale_preview_value(&aggregate.potentially_reclaimable_bytes);
+    aggregate.direct_child_count = stale_preview_count(&aggregate.direct_child_count);
+    aggregate.recursive_entry_count = stale_preview_count(&aggregate.recursive_entry_count);
+    aggregate.coverage.provenance = FieldProvenance::StalePreview {
+        observed_at: timestamp_now(),
+    };
+    aggregate
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn state_dir_bytes(path: &Path) -> io::Result<u64> {
+    fn visit(path: &Path, total: &mut u64, visited_dirs: &mut usize) -> io::Result<()> {
+        const MAX_STATE_DIR_ENTRIES: usize = 16_384;
+        *visited_dirs = visited_dirs.saturating_add(1);
+        if *visited_dirs > MAX_STATE_DIR_ENTRIES {
+            return Err(io::Error::other(
+                "preview cache state traversal exceeded bounded entry cap",
+            ));
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::other("preview cache state contains symlink"));
+            }
+            if metadata.is_dir() {
+                visit(&entry.path(), total, visited_dirs)?;
+            } else {
+                *total = total.saturating_add(metadata.len());
+            }
+        }
+        Ok(())
+    }
+
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0;
+    let mut visited_dirs = 0;
+    visit(path, &mut total, &mut visited_dirs)?;
+    Ok(total)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sanitize_cache_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
+    let name = path.file_name()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(sweepx_model::NativeName::unix(name.as_bytes().to_vec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let text = name.to_string_lossy().into_owned();
+        Some(sweepx_model::NativeName::unix(text.into_bytes()))
+    }
 }
 
 pub fn serialize_json(output: &OutputEnvelope) -> String {
@@ -3730,6 +4205,168 @@ mod tests {
         );
         let mode = fs::metadata(entry).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn scan_persists_then_loads_stale_preview_without_replacing_live_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("large.bin"), vec![0u8; 4096]).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested").join("small.txt"), b"hello").unwrap();
+
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let store = DurableSnapshotStore::new(temp.path()).unwrap();
+
+        let first = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: Some(temp.path().to_path_buf()),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(first.output.summary["cachePreview"]["loadStatus"], "miss");
+        assert_eq!(
+            first.output.summary["cachePreview"]["storeStatus"],
+            "written"
+        );
+        assert!(first.output.data.get("stalePreview").is_none());
+        assert!(first.output.data.get("cachePreview").is_none());
+
+        let second = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(temp.path().to_path_buf()),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            second.output.summary["cachePreview"]["loadStatus"],
+            "stale_preview"
+        );
+        assert_eq!(second.output.summary["mode"], "read_only");
+        assert_eq!(
+            second.output.summary["entryCount"],
+            DecimalU128::new(second.summary.entries.len() as u128).to_string()
+        );
+        assert!(
+            second.output.summary["cachePreview"]["staleParentCount"]
+                .as_str()
+                .is_some_and(|count| count != "0")
+        );
+        assert_eq!(
+            second.output.data["entries"]
+                .as_array()
+                .map(|items| items.len())
+                .unwrap_or_default(),
+            second.summary.entries.len()
+        );
+        assert!(
+            temp.path()
+                .join(PREVIEW_GENERATION_POINTER_DIR)
+                .join("current.json")
+                .exists()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn scan_quarantines_corrupt_preview_and_still_returns_live_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), b"content").unwrap();
+
+        let preview_dir = temp.path().join(PREVIEW_GENERATION_POINTER_DIR);
+        fs::create_dir_all(preview_dir.join("generations")).unwrap();
+        fs::write(
+            preview_dir.join("current.json"),
+            br#"{"generation":"bad_gen"}"#,
+        )
+        .unwrap();
+        fs::write(preview_dir.join("generations/bad_gen.json"), b"{not-json").unwrap();
+
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let store = DurableSnapshotStore::new(temp.path()).unwrap();
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(temp.path().to_path_buf()),
+            },
+            Some(&store),
+        )
+        .unwrap();
+
+        assert_eq!(
+            scan.output.summary["cachePreview"]["loadStatus"],
+            "quarantined"
+        );
+        assert!(
+            scan.output
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "cache.preview.quarantined")
+        );
+        assert!(preview_dir.join("quarantine/bad_gen.corrupt.json").exists());
+        assert!(
+            scan.output.data["entries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        );
+        assert!(scan.output.data.get("stalePreview").is_none());
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn scan_rejects_symlinked_preview_cache_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), b"content").unwrap();
+        let real = temp.path().join("real-preview");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join(PREVIEW_GENERATION_POINTER_DIR))
+            .unwrap();
+
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(temp.path().to_path_buf()),
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+
+        assert_eq!(scan.output.summary["cachePreview"]["loadStatus"], "miss");
+        assert_eq!(
+            scan.output.summary["cachePreview"]["storeStatus"],
+            "skipped"
+        );
+        assert!(scan.output.data.get("stalePreview").is_none());
+        assert!(scan.output.data.get("cachePreview").is_none());
+        assert!(
+            scan.output.data["entries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        );
     }
 
     #[test]
