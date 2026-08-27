@@ -2,19 +2,34 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::json;
-use sweepx_analysis::{Candidate, build_candidates_from_summary_with_links};
 use sweepx_cleaner_schema::RiskTier;
-use sweepx_cleaner_vm::{EvalState, EvaluationContext, VmValue, evaluate_rule};
+use sweepx_cleaner_vm::{EvalState, EvaluationContext, RuleEvaluation, VmValue, evaluate_rule};
 use sweepx_model::{
-    DecimalU128, FieldProvenance, NativeName, ObjectType, ScanEntryId, ScannedEntry,
+    ArithmeticState, ByteValue, Coverage, CoverageState, DecimalU128, DirectoryAggregate,
+    EvidenceValue, FieldProvenance, NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId,
+    ScanObjectIdentity, ScannedEntry,
 };
+use sweepx_platform::BoundaryKind;
 use sweepx_scanner::ScanSummary;
 
-use crate::{CoreError, LoadedBuiltInCleaner, directory_links};
+use crate::{CORE_VERSION, CoreError, LoadedBuiltInCleaner};
 
-const CARGO_CLEANER_ID: &str = "org.sweepx.cargo-target";
+pub const CARGO_CLEANER_ID: &str = "org.sweepx.cargo-target";
 const CARGO_RULE_ID: &str = "cargo-target-v1";
-const BUILTIN_MANIFEST_INCOMPATIBLE: &str = "builtin_manifest_incompatible";
+const CARGO_WORKSPACE_EVIDENCE_UNKNOWN: &str = "cargo_workspace_evidence_unknown";
+const CARGO_CONFIG_EVIDENCE_UNKNOWN: &str = "cargo_config_target_dir_evidence_unknown";
+const CARGO_TARGET_SHAPE_UNKNOWN: &str = "cargo_target_shape_unknown";
+const TARGET_AGGREGATE_MISSING: &str = "target_aggregate_missing";
+const TARGET_AGGREGATE_INVALID: &str = "target_aggregate_invalid";
+const TARGET_AGGREGATE_INCOMPLETE: &str = "target_aggregate_incomplete";
+const TARGET_RECLAIMABLE_UNKNOWN: &str = "target_reclaimable_unknown";
+const SOURCE_SCAN_BOUNDARIES_PRESENT: &str = "source_scan_boundaries_present";
+const SOURCE_SCAN_INCOMPLETE: &str = "source_scan_incomplete";
+const SOURCE_SCAN_WARNING: &str = "source_scan_warning";
+const CARGO_REQUIRED_EVIDENCE_UNKNOWN: &str = "cargo_required_evidence_unknown";
+const CARGO_RULE_MATCH_REPORT_ONLY: &str = "cargo_rule_match_report_only";
+const NO_CARGO_TARGET_HINT: &str = "no_cargo_target_hint";
+pub const BUILTIN_MANIFEST_INCOMPATIBLE: &str = "builtin_manifest_incompatible";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,46 +37,183 @@ pub enum ExperimentalCargoDetectDisposition {
     ReportOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentalEvidenceState {
+    Known,
+    Unknown,
+    NotChecked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExperimentalCargoRuleMatch {
-    pub candidate_id: String,
+pub struct ExperimentalCargoIdentityEvidence {
+    pub scan_id: String,
+    pub root_entry_id: String,
+    pub manifest_entry_id: String,
+    pub target_entry_id: String,
+    pub target_parent_entry_id: String,
+    pub native_locator_validated: bool,
+    pub root_parent_lineage_bound: bool,
+    pub same_filesystem_domain: bool,
+    pub same_volume_or_mount: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoRequiredEvidence {
+    pub workspace: ExperimentalEvidenceState,
+    pub configured_target_dir: ExperimentalEvidenceState,
+    pub target_shape: ExperimentalEvidenceState,
+    pub final_complete_aggregate: ExperimentalEvidenceState,
+    pub no_boundary: ExperimentalEvidenceState,
+    pub not_shared: ExperimentalEvidenceState,
+    pub activity: ExperimentalEvidenceState,
+}
+
+impl ExperimentalCargoRequiredEvidence {
+    fn supports_rule_match(&self) -> bool {
+        self.workspace == ExperimentalEvidenceState::Known
+            && self.configured_target_dir == ExperimentalEvidenceState::Known
+            && self.target_shape == ExperimentalEvidenceState::Known
+            && self.final_complete_aggregate == ExperimentalEvidenceState::Known
+            && self.no_boundary == ExperimentalEvidenceState::Known
+            && self.not_shared == ExperimentalEvidenceState::Known
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoAggregateEvidence {
+    pub state: ExperimentalEvidenceState,
+    pub revision: Option<DecimalU128>,
+    pub coverage: Option<Coverage>,
+    pub arithmetic_state: Option<ArithmeticState>,
+    pub potentially_reclaimable_bytes: Option<ByteValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoRuleEvaluation {
+    pub fact_state: String,
+    pub inference_state: String,
+    /// This is the rule VM's provisional floor, not a finalized Candidate risk.
+    pub provisional_risk: String,
+    pub report_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoReadOnlyEvidence {
+    pub identity: ExperimentalCargoIdentityEvidence,
+    pub required: ExperimentalCargoRequiredEvidence,
+    pub aggregate: ExperimentalCargoAggregateEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoRuleObservation {
+    pub observation_id: String,
     pub cleaner_id: String,
     pub cleaner_version: String,
     pub rule_id: String,
     pub display_path: String,
-    pub workspace_root: String,
-    pub target_dir: String,
+    pub observed_root: String,
     pub disposition: ExperimentalCargoDetectDisposition,
-    pub reason_code: String,
+    pub reason_codes: Vec<String>,
     pub executable: bool,
-    pub fact_state: String,
-    pub inference_state: String,
-    pub resolved_risk: String,
-    pub rule_report_only: bool,
-    pub candidate: serde_json::Value,
+    pub rule_evaluation: ExperimentalCargoRuleEvaluation,
+    pub evidence: ExperimentalCargoReadOnlyEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoScanEvidence {
+    pub incomplete: bool,
+    pub warning_count: DecimalU128,
+    pub error_count: DecimalU128,
+    pub boundary_count: DecimalU128,
+    pub partial_boundary_count: DecimalU128,
+    pub incomplete_aggregate_count: DecimalU128,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExperimentalCargoDetectResult {
-    pub matches: Vec<ExperimentalCargoRuleMatch>,
-    pub incompatible_builtin: bool,
+    pub matches: Vec<ExperimentalCargoRuleObservation>,
+    pub hints: Vec<ExperimentalCargoRuleObservation>,
+    pub reasons: Vec<String>,
+    pub scan: ExperimentalCargoScanEvidence,
+}
+
+impl ExperimentalCargoDetectResult {
+    pub fn requires_partial_status(&self) -> bool {
+        self.scan.incomplete || !self.hints.is_empty()
+    }
+
+    pub fn primary_reason_code(&self) -> &'static str {
+        if self.scan.incomplete {
+            SOURCE_SCAN_INCOMPLETE
+        } else if !self.hints.is_empty() {
+            CARGO_REQUIRED_EVIDENCE_UNKNOWN
+        } else if !self.matches.is_empty() {
+            CARGO_RULE_MATCH_REPORT_ONLY
+        } else {
+            NO_CARGO_TARGET_HINT
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct AdmittedWorkspace<'a> {
-    root: &'a ScannedEntry,
-    target: &'a ScannedEntry,
+struct BoundEntry<'a> {
+    entry: &'a ScannedEntry,
+    identity: &'a ScanObjectIdentity,
+    locator: &'a NativeLocatorEvidence,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoundCargoLayoutHint<'a> {
+    root: BoundEntry<'a>,
+    manifest: BoundEntry<'a>,
+    target: BoundEntry<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AggregateLookup<'a> {
+    Valid(&'a DirectoryAggregate),
+    Missing,
+    Invalid,
+}
+
+pub fn cargo_cleaner(
+    cleaners: &[LoadedBuiltInCleaner],
+) -> Result<&LoadedBuiltInCleaner, CoreError> {
+    cleaners
+        .iter()
+        .find(|cleaner| cleaner.package.manifest.id == CARGO_CLEANER_ID)
+        .ok_or_else(|| CoreError::InvalidCleanerRef(CARGO_CLEANER_ID.to_string()))
 }
 
 pub fn detect_live_cargo_cleaner_candidates(
     summary: &ScanSummary,
-    cleaners: &[LoadedBuiltInCleaner],
+    cleaner: &LoadedBuiltInCleaner,
+    source_scan_incomplete: bool,
+    source_scan_warning_count: usize,
 ) -> Result<ExperimentalCargoDetectResult, CoreError> {
-    let cleaner = cleaners
-        .iter()
-        .find(|cleaner| cleaner.package.manifest.id == CARGO_CLEANER_ID)
-        .ok_or_else(|| CoreError::InvalidCleanerRef(CARGO_CLEANER_ID.to_string()))?;
+    if cleaner.package.manifest.id != CARGO_CLEANER_ID {
+        return Err(CoreError::InvalidCleanerRef(
+            cleaner.package.manifest.id.clone(),
+        ));
+    }
+    if !cleaner.compatible {
+        return Err(CoreError::CleanerCompat {
+            cleaner_ref: format!(
+                "{}@{}",
+                cleaner.package.manifest.id, cleaner.package.manifest.version
+            ),
+            required_core: cleaner.package.manifest.requires.core.clone(),
+            current_core: CORE_VERSION.to_string(),
+        });
+    }
     let rule = cleaner
         .package
         .rules
@@ -71,111 +223,167 @@ pub fn detect_live_cargo_cleaner_candidates(
             CoreError::InvalidCleanerRef(format!("{CARGO_CLEANER_ID}@{CARGO_RULE_ID}"))
         })?;
 
-    let links = directory_links(summary);
-    let candidates = build_candidates_from_summary_with_links(summary, &links, true)?;
-    let admitted_targets = admitted_workspace_targets(summary);
-
     let mut matches = Vec::new();
-    for candidate in candidates {
-        if candidate.object_type != ObjectType::Directory || !candidate.source_state.is_live() {
-            continue;
-        }
-        let Some((workspace_root, target_entry)) =
-            candidate_target_context(&candidate, &admitted_targets)
-        else {
-            continue;
+    let mut hints = Vec::new();
+    let scan_evidence = scan_evidence(summary, source_scan_incomplete, source_scan_warning_count);
+    for layout in bound_cargo_layout_hints(summary) {
+        let aggregate_lookup = target_aggregate(summary, &layout.target);
+        let aggregate = match aggregate_lookup {
+            AggregateLookup::Valid(aggregate) => Some(aggregate),
+            AggregateLookup::Missing | AggregateLookup::Invalid => None,
         };
-        let evaluation = evaluate_rule(rule, &build_rule_context(&candidate, workspace_root))?;
-        matches.push(ExperimentalCargoRuleMatch {
-            candidate_id: candidate.candidate_id.to_string(),
+        let required = required_evidence(summary, aggregate);
+        let evaluation = evaluate_rule(rule, &build_rule_context(&layout, aggregate))?;
+        let mut reason_codes =
+            observation_reason_codes(&evaluation, &aggregate_lookup, aggregate, &scan_evidence);
+        reason_codes.sort();
+        reason_codes.dedup();
+        let observation = ExperimentalCargoRuleObservation {
+            observation_id: format!(
+                "cargo-target-observation:{}",
+                layout.target.identity.entry_id
+            ),
             cleaner_id: cleaner.package.manifest.id.clone(),
             cleaner_version: cleaner.package.manifest.version.clone(),
             rule_id: rule.id.clone(),
-            display_path: candidate.path.display_path.clone(),
-            workspace_root: workspace_root.display_path.clone(),
-            target_dir: target_entry.display_path.clone(),
+            display_path: layout.target.entry.display_path.clone(),
+            observed_root: layout.root.entry.display_path.clone(),
             disposition: ExperimentalCargoDetectDisposition::ReportOnly,
-            reason_code: BUILTIN_MANIFEST_INCOMPATIBLE.to_string(),
+            reason_codes,
             executable: false,
-            fact_state: eval_state_label(evaluation.fact_state).to_string(),
-            inference_state: eval_state_label(evaluation.inference_state).to_string(),
-            resolved_risk: risk_label(evaluation.resolved_risk).to_string(),
-            rule_report_only: true,
-            candidate: serde_json::to_value(&candidate)
-                .expect("candidate must serialize for experimental report"),
-        });
+            rule_evaluation: ExperimentalCargoRuleEvaluation {
+                fact_state: eval_state_label(evaluation.fact_state.clone()).to_string(),
+                inference_state: eval_state_label(evaluation.inference_state.clone()).to_string(),
+                provisional_risk: risk_label(evaluation.resolved_risk).to_string(),
+                report_only: evaluation.report_only,
+            },
+            evidence: ExperimentalCargoReadOnlyEvidence {
+                identity: identity_evidence(&layout),
+                aggregate: aggregate_evidence(&aggregate_lookup),
+                required: required.clone(),
+            },
+        };
+        if rule_is_a_match(&evaluation, &required, &scan_evidence) {
+            matches.push(observation);
+        } else {
+            hints.push(observation);
+        }
     }
 
+    let mut reasons = BTreeSet::new();
+    for observation in matches.iter().chain(hints.iter()) {
+        reasons.extend(observation.reason_codes.iter().cloned());
+    }
+    if scan_evidence.incomplete {
+        reasons.insert(SOURCE_SCAN_INCOMPLETE.to_string());
+    }
+    if source_scan_warning_count > 0 {
+        reasons.insert(SOURCE_SCAN_WARNING.to_string());
+    }
     Ok(ExperimentalCargoDetectResult {
         matches,
-        incompatible_builtin: !cleaner.compatible,
+        hints,
+        reasons: reasons.into_iter().collect(),
+        scan: scan_evidence,
     })
 }
 
-fn admitted_workspace_targets<'a>(
-    summary: &'a ScanSummary,
-) -> BTreeMap<ScanEntryId, AdmittedWorkspace<'a>> {
-    let root_entries: BTreeMap<ScanEntryId, &'a ScannedEntry> = summary
-        .roots
-        .iter()
-        .filter_map(valid_live_identity_entry)
-        .filter_map(|entry| {
-            let identity = entry.validated_identity().ok().flatten()?;
-            (identity.parent_id.is_none()).then_some((identity.entry_id.clone(), entry))
-        })
-        .collect();
+fn bound_entry(entry: &ScannedEntry) -> Option<BoundEntry<'_>> {
+    if !matches!(entry.provenance, FieldProvenance::LiveObservation { .. })
+        || !matches!(
+            entry.coverage.provenance,
+            FieldProvenance::LiveObservation { .. }
+        )
+    {
+        return None;
+    }
+    let identity = entry.validated_identity().ok().flatten()?;
+    let locator = entry.executable_native_locator().ok().flatten()?;
+    Some(BoundEntry {
+        entry,
+        identity,
+        locator,
+    })
+}
 
-    let mut cargo_toml_roots = BTreeSet::new();
-    let mut target_dirs = BTreeMap::new();
+fn bound_root(entry: &ScannedEntry) -> Option<BoundEntry<'_>> {
+    let root = bound_entry(entry)?;
+    (root.entry.object_type == ObjectType::Directory
+        && root.identity.parent_id.is_none()
+        && root.identity.entry_id == root.identity.scan_root_id
+        && root.locator.parent_reopen_recipe.is_empty()
+        && root.locator.entry == root.locator.scan_root)
+        .then_some(root)
+}
+
+fn direct_child_is_bound_to_root(child: &BoundEntry<'_>, root: &BoundEntry<'_>) -> bool {
+    child.entry.scan_id == root.entry.scan_id
+        && child.identity.scan_root_id == root.identity.entry_id
+        && child.identity.parent_id.as_ref() == Some(&root.identity.entry_id)
+        && child.locator.scan_root == root.locator.scan_root
+        && child.locator.scan_root_absolute_path == root.locator.scan_root_absolute_path
+        && child.locator.parent_reopen_recipe.as_slice() == [root.locator.scan_root.clone()]
+        && child.identity.filesystem_object_domain_identity
+            == root.identity.filesystem_object_domain_identity
+        && child.identity.volume_or_mount_identity == root.identity.volume_or_mount_identity
+}
+
+fn bound_cargo_layout_hints(summary: &ScanSummary) -> Vec<BoundCargoLayoutHint<'_>> {
+    let mut roots = BTreeMap::<ScanEntryId, BoundEntry<'_>>::new();
+    let mut duplicate_roots = BTreeSet::new();
+    for entry in &summary.roots {
+        let Some(root) = bound_root(entry) else {
+            continue;
+        };
+        if roots.insert(root.identity.entry_id.clone(), root).is_some() {
+            duplicate_roots.insert(root.identity.entry_id.clone());
+        }
+    }
+    for duplicate in duplicate_roots {
+        roots.remove(&duplicate);
+    }
+
+    let mut manifests = BTreeMap::<ScanEntryId, Vec<BoundEntry<'_>>>::new();
+    let mut targets = BTreeMap::<ScanEntryId, Vec<BoundEntry<'_>>>::new();
     for entry in &summary.entries {
-        let Some(entry) = valid_live_identity_entry(entry) else {
+        let Some(child) = bound_entry(entry) else {
             continue;
         };
-        let Some(identity) = entry.validated_identity().ok().flatten() else {
+        let Some(parent_id) = child.identity.parent_id.as_ref() else {
             continue;
         };
-        let Some(parent_id) = &identity.parent_id else {
+        let Some(root) = roots.get(parent_id) else {
             continue;
         };
-        if !root_entries.contains_key(parent_id) {
+        if !direct_child_is_bound_to_root(&child, root) {
             continue;
         }
-        match entry.object_type {
-            ObjectType::File if native_name_eq(&entry.native_basename, "Cargo.toml") => {
-                cargo_toml_roots.insert(parent_id.clone());
+        match child.entry.object_type {
+            ObjectType::File if native_name_eq(&child.entry.native_basename, "Cargo.toml") => {
+                manifests.entry(parent_id.clone()).or_default().push(child);
             }
-            ObjectType::Directory if native_name_eq(&entry.native_basename, "target") => {
-                target_dirs.insert(parent_id.clone(), entry);
+            ObjectType::Directory if native_name_eq(&child.entry.native_basename, "target") => {
+                targets.entry(parent_id.clone()).or_default().push(child);
             }
             _ => {}
         }
     }
 
-    let mut admitted = BTreeMap::new();
-    for (root_id, target) in target_dirs {
-        if !cargo_toml_roots.contains(&root_id) {
-            continue;
-        }
-        let Some(root) = root_entries.get(&root_id).copied() else {
-            continue;
-        };
-        let Some(target_identity) = target.validated_identity().ok().flatten() else {
-            continue;
-        };
-        admitted.insert(
-            target_identity.entry_id.clone(),
-            AdmittedWorkspace { root, target },
-        );
-    }
-    admitted
-}
-
-fn valid_live_identity_entry(entry: &ScannedEntry) -> Option<&ScannedEntry> {
-    if !matches!(entry.provenance, FieldProvenance::LiveObservation { .. }) {
-        return None;
-    }
-    entry.validated_identity().ok().flatten()?;
-    Some(entry)
+    roots
+        .into_iter()
+        .filter_map(|(root_id, root)| {
+            let manifest = manifests.get(&root_id)?.as_slice();
+            let target = targets.get(&root_id)?.as_slice();
+            if manifest.len() != 1 || target.len() != 1 {
+                return None;
+            }
+            Some(BoundCargoLayoutHint {
+                root,
+                manifest: manifest[0],
+                target: target[0],
+            })
+        })
+        .collect()
 }
 
 fn native_name_eq(name: &NativeName, expected: &str) -> bool {
@@ -195,59 +403,80 @@ fn native_name_eq(name: &NativeName, expected: &str) -> bool {
     }
 }
 
-fn candidate_target_context<'a>(
-    candidate: &Candidate,
-    admitted_targets: &'a BTreeMap<ScanEntryId, AdmittedWorkspace<'a>>,
-) -> Option<(&'a ScannedEntry, &'a ScannedEntry)> {
-    let target_id = candidate
-        .locator
-        .scan_object_identity
-        .as_ref()?
-        .entry_id
-        .clone();
-    admitted_targets
-        .get(&target_id)
-        .map(|workspace| (workspace.root, workspace.target))
+fn target_aggregate<'a>(summary: &'a ScanSummary, target: &BoundEntry<'_>) -> AggregateLookup<'a> {
+    let target_id = target.identity.entry_id.to_string();
+    let mut matching = summary
+        .aggregates
+        .iter()
+        .filter(|aggregate| aggregate.directory_identity == target_id);
+    let Some(aggregate) = matching.next() else {
+        return AggregateLookup::Missing;
+    };
+    if matching.next().is_some()
+        || aggregate.scan_id != target.entry.scan_id
+        || aggregate
+            .scan_entry_id()
+            .ok()
+            .as_ref()
+            .is_none_or(|entry_id| entry_id != &target.identity.entry_id)
+    {
+        return AggregateLookup::Invalid;
+    }
+    AggregateLookup::Valid(aggregate)
 }
 
-fn build_rule_context(candidate: &Candidate, workspace_root: &ScannedEntry) -> EvaluationContext {
-    let reclaimable_known = matches!(
-        candidate.reclaimable_estimate,
-        sweepx_model::EvidenceValue::Known { .. }
-    );
-    let workspace_id = workspace_root
-        .validated_identity()
-        .ok()
-        .flatten()
-        .map(|identity| identity.entry_id.to_string())
-        .unwrap_or_else(|| workspace_root.display_path.clone());
-    EvaluationContext::new()
+fn aggregate_is_final_complete(aggregate: &DirectoryAggregate) -> bool {
+    aggregate.coverage.state == CoverageState::Complete
+        && aggregate.coverage.complete
+        && !aggregate.coverage.details_lost
+        && aggregate.coverage.incomplete_reasons.is_empty()
+        && matches!(
+            aggregate.coverage.provenance,
+            FieldProvenance::LiveObservation { .. }
+        )
+        && aggregate.arithmetic_state == ArithmeticState::Exact
+}
+
+fn required_evidence(
+    summary: &ScanSummary,
+    aggregate: Option<&DirectoryAggregate>,
+) -> ExperimentalCargoRequiredEvidence {
+    ExperimentalCargoRequiredEvidence {
+        // A native-name Cargo.toml observation is only a layout hint. The versioned Cargo decoder
+        // and workspace/config evidence types described by the rule are not implemented yet.
+        workspace: ExperimentalEvidenceState::Unknown,
+        configured_target_dir: ExperimentalEvidenceState::Unknown,
+        target_shape: ExperimentalEvidenceState::Unknown,
+        final_complete_aggregate: if aggregate.is_some_and(aggregate_is_final_complete) {
+            ExperimentalEvidenceState::Known
+        } else {
+            ExperimentalEvidenceState::Unknown
+        },
+        // Boundary rows currently have presentation paths but no scan-entry identity. An empty
+        // retained set is useful evidence; a non-empty set cannot safely be assigned to a target.
+        no_boundary: if summary.boundaries.is_empty() {
+            ExperimentalEvidenceState::Known
+        } else {
+            ExperimentalEvidenceState::Unknown
+        },
+        not_shared: ExperimentalEvidenceState::NotChecked,
+        activity: ExperimentalEvidenceState::NotChecked,
+    }
+}
+
+fn build_rule_context(
+    layout: &BoundCargoLayoutHint<'_>,
+    aggregate: Option<&DirectoryAggregate>,
+) -> EvaluationContext {
+    let mut context = EvaluationContext::new()
         .insert(
             "candidate.relativePath",
             VmValue::String("target".to_string()),
         )
         .insert(
-            "coverage.complete",
-            VmValue::Bool(candidate.coverage.complete),
-        )
-        .insert("cargo.targetDir", VmValue::String("target".to_string()))
-        .insert("cargo.targetShape", VmValue::String("unknown".to_string()))
-        .insert("cargo.workspaceId", VmValue::String(workspace_id))
-        .insert(
-            "exclusiveReclaimableBytes",
-            VmValue::String(
-                if reclaimable_known {
-                    "known"
-                } else {
-                    "unknown"
-                }
-                .to_string(),
-            ),
-        )
-        .insert(
             "objectType",
             VmValue::String(
-                match candidate.object_type {
+                match layout.target.entry.object_type {
                     ObjectType::Directory => "Directory",
                     ObjectType::File => "File",
                     ObjectType::Symlink => "Symlink",
@@ -256,9 +485,174 @@ fn build_rule_context(candidate: &Candidate, workspace_root: &ScannedEntry) -> E
                 }
                 .to_string(),
             ),
+        );
+    if let Some(aggregate) = aggregate {
+        context = context.insert(
+            "coverage.complete",
+            VmValue::Bool(aggregate_is_final_complete(aggregate)),
+        );
+        if matches!(
+            aggregate.potentially_reclaimable_bytes,
+            EvidenceValue::Known { .. }
+        ) {
+            context = context.insert(
+                "exclusiveReclaimableBytes",
+                VmValue::String("known".to_string()),
+            );
+        }
+    }
+    // Do not insert cargo.targetDir, cargo.targetShape, cargo.workspaceId, sharing.state, or
+    // activity.state until their versioned evidence producers exist. A missing VM field evaluates
+    // as unknown (or false for `exists`) instead of fabricating a fact.
+    context
+}
+
+fn identity_evidence(layout: &BoundCargoLayoutHint<'_>) -> ExperimentalCargoIdentityEvidence {
+    ExperimentalCargoIdentityEvidence {
+        scan_id: layout.target.entry.scan_id.to_string(),
+        root_entry_id: layout.root.identity.entry_id.to_string(),
+        manifest_entry_id: layout.manifest.identity.entry_id.to_string(),
+        target_entry_id: layout.target.identity.entry_id.to_string(),
+        target_parent_entry_id: layout
+            .target
+            .identity
+            .parent_id
+            .as_ref()
+            .expect("bound direct child has a parent")
+            .to_string(),
+        native_locator_validated: true,
+        root_parent_lineage_bound: true,
+        same_filesystem_domain: true,
+        same_volume_or_mount: true,
+    }
+}
+
+fn aggregate_evidence(lookup: &AggregateLookup<'_>) -> ExperimentalCargoAggregateEvidence {
+    match lookup {
+        AggregateLookup::Valid(aggregate) => ExperimentalCargoAggregateEvidence {
+            state: if aggregate_is_final_complete(aggregate) {
+                ExperimentalEvidenceState::Known
+            } else {
+                ExperimentalEvidenceState::Unknown
+            },
+            revision: Some(aggregate.revision),
+            coverage: Some(aggregate.coverage.clone()),
+            arithmetic_state: Some(aggregate.arithmetic_state.clone()),
+            potentially_reclaimable_bytes: Some(aggregate.potentially_reclaimable_bytes.clone()),
+        },
+        AggregateLookup::Missing | AggregateLookup::Invalid => ExperimentalCargoAggregateEvidence {
+            state: ExperimentalEvidenceState::Unknown,
+            revision: None,
+            coverage: None,
+            arithmetic_state: None,
+            potentially_reclaimable_bytes: None,
+        },
+    }
+}
+
+fn observation_reason_codes(
+    evaluation: &RuleEvaluation,
+    aggregate_lookup: &AggregateLookup<'_>,
+    aggregate: Option<&DirectoryAggregate>,
+    scan: &ExperimentalCargoScanEvidence,
+) -> Vec<String> {
+    let mut reasons = vec![
+        CARGO_WORKSPACE_EVIDENCE_UNKNOWN.to_string(),
+        CARGO_CONFIG_EVIDENCE_UNKNOWN.to_string(),
+        CARGO_TARGET_SHAPE_UNKNOWN.to_string(),
+    ];
+    match aggregate_lookup {
+        AggregateLookup::Missing => reasons.push(TARGET_AGGREGATE_MISSING.to_string()),
+        AggregateLookup::Invalid => reasons.push(TARGET_AGGREGATE_INVALID.to_string()),
+        AggregateLookup::Valid(aggregate) if !aggregate_is_final_complete(aggregate) => {
+            reasons.push(TARGET_AGGREGATE_INCOMPLETE.to_string());
+        }
+        AggregateLookup::Valid(_) => {}
+    }
+    if aggregate.is_some_and(|aggregate| {
+        !matches!(
+            aggregate.potentially_reclaimable_bytes,
+            EvidenceValue::Known { .. }
         )
-        .insert("sharing.state", VmValue::String("shared".to_string()))
-        .insert("activity.state", VmValue::String("inactive".to_string()))
+    }) {
+        reasons.push(TARGET_RECLAIMABLE_UNKNOWN.to_string());
+    }
+    if scan.boundary_count != DecimalU128::ZERO {
+        reasons.push(SOURCE_SCAN_BOUNDARIES_PRESENT.to_string());
+    }
+    if scan.incomplete {
+        reasons.push(SOURCE_SCAN_INCOMPLETE.to_string());
+    }
+    if scan.warning_count != DecimalU128::ZERO {
+        reasons.push(SOURCE_SCAN_WARNING.to_string());
+    }
+    reasons.push(
+        match evaluation.fact_state {
+            EvalState::Known(false) => "cargo_rule_fact_false",
+            EvalState::Unknown => "cargo_rule_fact_unknown",
+            EvalState::Known(true) => "cargo_rule_fact_true",
+        }
+        .to_string(),
+    );
+    reasons.push(
+        match evaluation.inference_state {
+            EvalState::Known(false) => "cargo_rule_inference_false",
+            EvalState::Unknown => "cargo_rule_inference_unknown",
+            EvalState::Known(true) => "cargo_rule_inference_true",
+        }
+        .to_string(),
+    );
+    reasons
+}
+
+fn rule_is_a_match(
+    evaluation: &RuleEvaluation,
+    required: &ExperimentalCargoRequiredEvidence,
+    scan: &ExperimentalCargoScanEvidence,
+) -> bool {
+    evaluation.fact_state.is_true()
+        && evaluation.inference_state.is_true()
+        && required.supports_rule_match()
+        && !scan.incomplete
+        && scan.boundary_count == DecimalU128::ZERO
+}
+
+fn scan_evidence(
+    summary: &ScanSummary,
+    source_scan_incomplete: bool,
+    source_scan_warning_count: usize,
+) -> ExperimentalCargoScanEvidence {
+    let error_count = summary
+        .progress
+        .iter()
+        .filter(|event| matches!(event, sweepx_scanner::ProgressEvent::Error { .. }))
+        .count();
+    let partial_boundary_count = summary
+        .boundaries
+        .iter()
+        .filter(|boundary| {
+            !matches!(
+                boundary.kind,
+                BoundaryKind::Symlink | BoundaryKind::RootSymlink
+            )
+        })
+        .count();
+    let incomplete_aggregate_count = summary
+        .aggregates
+        .iter()
+        .filter(|aggregate| !aggregate_is_final_complete(aggregate))
+        .count();
+    ExperimentalCargoScanEvidence {
+        incomplete: source_scan_incomplete
+            || error_count > 0
+            || partial_boundary_count > 0
+            || incomplete_aggregate_count > 0,
+        warning_count: DecimalU128::new(source_scan_warning_count as u128),
+        error_count: DecimalU128::new(error_count as u128),
+        boundary_count: DecimalU128::new(summary.boundaries.len() as u128),
+        partial_boundary_count: DecimalU128::new(partial_boundary_count as u128),
+        incomplete_aggregate_count: DecimalU128::new(incomplete_aggregate_count as u128),
+    }
 }
 
 fn eval_state_label(state: EvalState) -> &'static str {
@@ -284,9 +678,31 @@ pub fn experimental_cargo_detect_json(result: &ExperimentalCargoDetectResult) ->
         "command": "cleaner.cargo-detect",
         "experimental": true,
         "liveOnly": true,
-        "builtinManifestCompatible": !result.incompatible_builtin,
+        "builtinManifestCompatible": true,
         "matchCount": DecimalU128::new(result.matches.len() as u128),
+        "hintCount": DecimalU128::new(result.hints.len() as u128),
         "matches": result.matches,
+        "hints": result.hints,
+        "reasons": result.reasons,
+        "sourceScan": result.scan,
+        "readOnly": true,
+        "planAllowed": false,
+        "approvalAllowed": false,
+        "executionAllowed": false
+    })
+}
+
+pub fn incompatible_cargo_detect_json() -> serde_json::Value {
+    json!({
+        "command": "cleaner.cargo-detect",
+        "experimental": true,
+        "liveOnly": true,
+        "scanPerformed": false,
+        "builtinManifestCompatible": false,
+        "matchCount": DecimalU128::ZERO,
+        "hintCount": DecimalU128::ZERO,
+        "matches": [],
+        "hints": [],
         "reasons": [BUILTIN_MANIFEST_INCOMPATIBLE],
         "readOnly": true,
         "planAllowed": false,
@@ -299,187 +715,488 @@ pub fn experimental_cargo_detect_json(result: &ExperimentalCargoDetectResult) ->
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
     use sweepx_model::{
         Coverage, CoverageState, EvidenceValue, FilesystemObjectDomainIdentity, IdentityEvidence,
         MethodId, NativeAbsolutePath, NativeLocatorEvidence, NativePathComponent,
-        PlatformFileIdentity, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
+        PlatformFileIdentity, ReasonCode, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
     };
+    use sweepx_platform::BoundaryRecord;
+    use sweepx_scanner::ProgressEvent;
 
     #[test]
-    fn experimental_json_is_read_only_and_report_only() {
-        let payload = experimental_cargo_detect_json(&ExperimentalCargoDetectResult {
-            matches: Vec::new(),
-            incompatible_builtin: true,
-        });
+    fn experimental_json_is_read_only_and_uses_separate_hint_projection() {
+        let summary = complete_layout_summary();
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        let payload = experimental_cargo_detect_json(&result);
+
         assert_eq!(payload["command"], "cleaner.cargo-detect");
         assert_eq!(payload["experimental"], true);
         assert_eq!(payload["liveOnly"], true);
-        assert_eq!(payload["builtinManifestCompatible"], false);
+        assert_eq!(payload["builtinManifestCompatible"], true);
+        assert_eq!(payload["matchCount"], "0");
+        assert_eq!(payload["hintCount"], "1");
         assert_eq!(payload["readOnly"], true);
         assert_eq!(payload["planAllowed"], false);
         assert_eq!(payload["approvalAllowed"], false);
         assert_eq!(payload["executionAllowed"], false);
+        let hint = &payload["hints"][0];
+        assert_eq!(hint["disposition"], "report_only");
+        assert_eq!(hint["executable"], false);
+        assert!(hint.get("candidate").is_none());
+        assert!(hint.get("resolvedRisk").is_none());
+        assert_eq!(hint["ruleEvaluation"]["provisionalRisk"], "R2");
+    }
+
+    #[test]
+    fn incompatible_projection_has_no_scan_or_rule_results() {
+        let payload = incompatible_cargo_detect_json();
+        assert_eq!(payload["scanPerformed"], false);
+        assert_eq!(payload["builtinManifestCompatible"], false);
+        assert_eq!(payload["matchCount"], "0");
+        assert_eq!(payload["hintCount"], "0");
+        assert_eq!(payload["matches"], json!([]));
+        assert_eq!(payload["hints"], json!([]));
         assert_eq!(payload["reasons"][0], BUILTIN_MANIFEST_INCOMPATIBLE);
     }
 
     #[test]
-    fn metadata_only_detection_requires_live_root_with_direct_cargo_toml_and_target() {
-        let summary = summary_with_entries(
-            vec![root_entry(1, "/scan/root", live_provenance(), "workspace")],
-            vec![
-                child_entry(
-                    2,
-                    1,
-                    "/scan/root/Cargo.toml",
-                    ObjectType::File,
-                    live_provenance(),
-                    "Cargo.toml",
-                ),
-                child_entry(
-                    3,
-                    1,
-                    "/scan/root/target",
-                    ObjectType::Directory,
-                    live_provenance(),
-                    "target",
-                ),
-            ],
-        );
+    fn cargo_name_layout_is_a_hint_because_required_decoders_are_not_implemented() {
+        let summary = complete_layout_summary();
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
 
-        let admitted = admitted_workspace_targets(&summary);
-        assert_eq!(admitted.len(), 1);
-        let workspace = admitted.values().next().unwrap();
-        assert_eq!(workspace.root.display_path, "/scan/root");
-        assert_eq!(workspace.target.display_path, "/scan/root/target");
+        assert!(result.matches.is_empty());
+        assert_eq!(result.hints.len(), 1);
+        let hint = &result.hints[0];
+        assert_eq!(hint.rule_evaluation.fact_state, "unknown");
+        assert_eq!(hint.rule_evaluation.inference_state, "known_false");
+        assert!(hint.rule_evaluation.report_only);
+        assert_eq!(
+            hint.evidence.required.workspace,
+            ExperimentalEvidenceState::Unknown
+        );
+        assert_eq!(
+            hint.evidence.required.configured_target_dir,
+            ExperimentalEvidenceState::Unknown
+        );
+        assert_eq!(
+            hint.evidence.required.target_shape,
+            ExperimentalEvidenceState::Unknown
+        );
+        assert_eq!(
+            hint.evidence.required.not_shared,
+            ExperimentalEvidenceState::NotChecked
+        );
+        assert_eq!(
+            hint.evidence.required.activity,
+            ExperimentalEvidenceState::NotChecked
+        );
+        assert!(
+            hint.reason_codes
+                .contains(&CARGO_TARGET_SHAPE_UNKNOWN.to_string())
+        );
     }
 
     #[test]
-    fn stale_entries_are_refused() {
-        let summary = summary_with_entries(
-            vec![root_entry(1, "/scan/root", stale_provenance(), "workspace")],
-            vec![
-                child_entry(
-                    2,
-                    1,
-                    "/scan/root/Cargo.toml",
-                    ObjectType::File,
-                    stale_provenance(),
-                    "Cargo.toml",
-                ),
-                child_entry(
-                    3,
-                    1,
-                    "/scan/root/target",
-                    ObjectType::Directory,
-                    stale_provenance(),
-                    "target",
-                ),
-            ],
-        );
-        assert!(admitted_workspace_targets(&summary).is_empty());
+    fn known_false_fact_state_is_never_a_match() {
+        let required = all_required_evidence_known();
+        let scan = complete_scan_evidence();
+        let false_evaluation = RuleEvaluation {
+            fact_state: EvalState::Known(false),
+            inference_state: EvalState::Known(true),
+            resolved_risk: RiskTier::R2,
+            report_only: false,
+        };
+        assert!(!rule_is_a_match(&false_evaluation, &required, &scan));
+
+        let true_evaluation = RuleEvaluation {
+            fact_state: EvalState::Known(true),
+            inference_state: EvalState::Known(true),
+            resolved_risk: RiskTier::R2,
+            report_only: false,
+        };
+        assert!(rule_is_a_match(&true_evaluation, &required, &scan));
     }
 
     #[test]
-    fn imported_like_entries_without_identity_are_refused() {
-        let summary = summary_with_entries(
-            vec![legacy_root_entry(
-                "/scan/root",
-                live_provenance(),
-                "workspace",
-            )],
-            vec![
-                child_entry(
-                    2,
-                    1,
-                    "/scan/root/Cargo.toml",
-                    ObjectType::File,
-                    live_provenance(),
-                    "Cargo.toml",
-                ),
-                child_entry(
-                    3,
-                    1,
-                    "/scan/root/target",
-                    ObjectType::Directory,
-                    live_provenance(),
-                    "target",
-                ),
-            ],
+    fn incomplete_aggregate_drives_fact_false_and_scan_incomplete() {
+        let mut summary = complete_layout_summary();
+        let aggregate = summary.aggregates.first_mut().unwrap();
+        aggregate.coverage = incomplete_coverage();
+        aggregate.arithmetic_state = ArithmeticState::LowerBound;
+        aggregate.potentially_reclaimable_bytes = EvidenceValue::LowerBound {
+            value: DecimalU128::new(5),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        };
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, true, 1).unwrap();
+
+        assert!(result.matches.is_empty());
+        assert_eq!(result.hints.len(), 1);
+        let hint = &result.hints[0];
+        assert_eq!(hint.rule_evaluation.fact_state, "known_false");
+        assert_eq!(
+            hint.evidence.required.final_complete_aggregate,
+            ExperimentalEvidenceState::Unknown
         );
-        assert!(admitted_workspace_targets(&summary).is_empty());
+        assert_eq!(
+            hint.evidence.aggregate.arithmetic_state,
+            Some(ArithmeticState::LowerBound)
+        );
+        assert!(
+            hint.reason_codes
+                .contains(&TARGET_AGGREGATE_INCOMPLETE.to_string())
+        );
+        assert!(
+            hint.reason_codes
+                .contains(&TARGET_RECLAIMABLE_UNKNOWN.to_string())
+        );
+        assert!(result.scan.incomplete);
+        assert_eq!(result.scan.incomplete_aggregate_count, DecimalU128::new(1));
     }
 
     #[test]
-    fn path_text_alone_is_insufficient() {
-        let summary = summary_with_entries(
-            vec![
-                root_entry(1, "/scan/root", live_provenance(), "workspace"),
-                root_entry(9, "/scan/other", live_provenance(), "other"),
-            ],
-            vec![
-                child_entry(
-                    2,
-                    1,
-                    "/scan/root/Cargo.toml",
-                    ObjectType::File,
-                    live_provenance(),
-                    "Cargo.toml",
-                ),
-                child_entry(
-                    3,
-                    9,
-                    "/scan/root/target",
-                    ObjectType::Directory,
-                    live_provenance(),
-                    "target",
-                ),
-            ],
+    fn missing_aggregate_is_reported_instead_of_using_entry_coverage() {
+        let mut summary = complete_layout_summary();
+        summary.aggregates.clear();
+        assert!(summary.entries[1].coverage.complete);
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+
+        assert!(result.matches.is_empty());
+        assert_eq!(result.hints.len(), 1);
+        assert_eq!(
+            result.hints[0].evidence.aggregate.state,
+            ExperimentalEvidenceState::Unknown
         );
-        assert!(admitted_workspace_targets(&summary).is_empty());
+        assert!(
+            result.hints[0]
+                .reason_codes
+                .contains(&TARGET_AGGREGATE_MISSING.to_string())
+        );
     }
 
     #[test]
-    fn correct_direct_parent_identity_is_required() {
-        let summary = summary_with_entries(
-            vec![root_entry(1, "/scan/root", live_provenance(), "workspace")],
-            vec![
-                child_entry(
-                    2,
-                    1,
-                    "/scan/root/nested",
-                    ObjectType::Directory,
-                    live_provenance(),
-                    "nested",
-                ),
-                entry(
-                    4,
-                    1,
-                    Some(2),
-                    "/scan/root/nested/Cargo.toml",
-                    ObjectType::File,
-                    live_provenance(),
-                    "Cargo.toml",
-                ),
-                child_entry(
-                    3,
-                    1,
-                    "/scan/root/target",
-                    ObjectType::Directory,
-                    live_provenance(),
-                    "target",
-                ),
-            ],
+    fn source_scan_diagnostics_and_boundary_counts_are_propagated() {
+        let mut summary = complete_layout_summary();
+        summary.boundaries.push(BoundaryRecord {
+            path: PathBuf::from("/scan/root/target/link"),
+            kind: BoundaryKind::Symlink,
+            reason: ReasonCode::StrictReadOnly,
+            detail: "symlink recorded and not followed".to_string(),
+        });
+        summary.progress.push(ProgressEvent::Error {
+            path: PathBuf::from("/scan/root/target/unreadable"),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        });
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, true, 3).unwrap();
+
+        assert!(result.matches.is_empty());
+        assert_eq!(result.scan.warning_count, DecimalU128::new(3));
+        assert_eq!(result.scan.error_count, DecimalU128::new(1));
+        assert_eq!(result.scan.boundary_count, DecimalU128::new(1));
+        assert_eq!(result.scan.partial_boundary_count, DecimalU128::ZERO);
+        assert!(result.scan.incomplete);
+        assert!(result.reasons.contains(&SOURCE_SCAN_WARNING.to_string()));
+        assert!(
+            result
+                .reasons
+                .contains(&SOURCE_SCAN_BOUNDARIES_PRESENT.to_string())
         );
-        assert!(admitted_workspace_targets(&summary).is_empty());
     }
 
-    fn summary_with_entries(roots: Vec<ScannedEntry>, entries: Vec<ScannedEntry>) -> ScanSummary {
-        ScanSummary {
-            roots,
-            entries,
+    #[test]
+    fn invalid_or_cross_domain_native_binding_is_not_an_observation() {
+        let mut missing_locator = complete_layout_summary();
+        missing_locator.entries[1].native_locator = None;
+        assert_no_layout_observation(missing_locator);
+
+        let mut forged_root = complete_layout_summary();
+        forged_root.entries[1]
+            .native_locator
+            .as_mut()
+            .unwrap()
+            .scan_root
+            .metadata_fingerprint = "forged-root".to_string();
+        assert_no_layout_observation(forged_root);
+
+        let root = root_entry(1, 11, 21);
+        let manifest = child_entry(2, &root, "Cargo.toml", ObjectType::File, 11, 21);
+        let target = child_entry(3, &root, "target", ObjectType::Directory, 12, 21);
+        assert_no_layout_observation(summary_with_layout(root, manifest, target, false));
+
+        let root = root_entry(1, 11, 21);
+        let manifest = child_entry(2, &root, "Cargo.toml", ObjectType::File, 11, 21);
+        let target = child_entry(3, &root, "target", ObjectType::Directory, 11, 22);
+        assert_no_layout_observation(summary_with_layout(root, manifest, target, false));
+    }
+
+    #[test]
+    fn stale_or_unknown_identity_evidence_is_not_an_observation() {
+        let mut stale = complete_layout_summary();
+        stale.roots[0].provenance = stale_provenance();
+        stale.roots[0].coverage.provenance = stale_provenance();
+        assert_no_layout_observation(stale);
+
+        let mut unknown_identity = complete_layout_summary();
+        unknown_identity.entries[1]
+            .identity
+            .as_mut()
+            .unwrap()
+            .filesystem_object_domain_identity =
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        assert_no_layout_observation(unknown_identity);
+    }
+
+    #[test]
+    fn wrong_root_parent_binding_is_not_accepted_from_matching_path_text() {
+        let root = root_entry(1, 11, 21);
+        let other_root = root_entry(9, 11, 21);
+        let manifest = child_entry(2, &root, "Cargo.toml", ObjectType::File, 11, 21);
+        let mut target = child_entry(3, &other_root, "target", ObjectType::Directory, 11, 21);
+        target.display_path = "/scan/root/target".to_string();
+        let summary = ScanSummary {
+            roots: vec![root, other_root],
+            entries: vec![manifest, target],
             aggregates: Vec::new(),
             boundaries: Vec::new(),
             progress: Vec::new(),
+        };
+        assert_no_layout_observation(summary);
+    }
+
+    fn assert_no_layout_observation(summary: ScanSummary) {
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        assert!(result.matches.is_empty());
+        assert!(result.hints.is_empty());
+    }
+
+    fn compatible_cleaner() -> LoadedBuiltInCleaner {
+        let mut cleaner = crate::load_builtin_cleaners()
+            .unwrap()
+            .into_iter()
+            .find(|cleaner| cleaner.package.manifest.id == CARGO_CLEANER_ID)
+            .unwrap();
+        cleaner.compatible = true;
+        cleaner
+    }
+
+    fn all_required_evidence_known() -> ExperimentalCargoRequiredEvidence {
+        ExperimentalCargoRequiredEvidence {
+            workspace: ExperimentalEvidenceState::Known,
+            configured_target_dir: ExperimentalEvidenceState::Known,
+            target_shape: ExperimentalEvidenceState::Known,
+            final_complete_aggregate: ExperimentalEvidenceState::Known,
+            no_boundary: ExperimentalEvidenceState::Known,
+            not_shared: ExperimentalEvidenceState::Known,
+            activity: ExperimentalEvidenceState::NotChecked,
+        }
+    }
+
+    fn complete_scan_evidence() -> ExperimentalCargoScanEvidence {
+        ExperimentalCargoScanEvidence {
+            incomplete: false,
+            warning_count: DecimalU128::ZERO,
+            error_count: DecimalU128::ZERO,
+            boundary_count: DecimalU128::ZERO,
+            partial_boundary_count: DecimalU128::ZERO,
+            incomplete_aggregate_count: DecimalU128::ZERO,
+        }
+    }
+
+    fn complete_layout_summary() -> ScanSummary {
+        let root = root_entry(1, 11, 21);
+        let manifest = child_entry(2, &root, "Cargo.toml", ObjectType::File, 11, 21);
+        let target = child_entry(3, &root, "target", ObjectType::Directory, 11, 21);
+        summary_with_layout(root, manifest, target, true)
+    }
+
+    fn summary_with_layout(
+        root: ScannedEntry,
+        manifest: ScannedEntry,
+        target: ScannedEntry,
+        include_aggregate: bool,
+    ) -> ScanSummary {
+        let aggregates = include_aggregate
+            .then(|| target_aggregate_for(&target))
+            .into_iter()
+            .collect();
+        ScanSummary {
+            roots: vec![root],
+            entries: vec![manifest, target],
+            aggregates,
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        }
+    }
+
+    fn target_aggregate_for(target: &ScannedEntry) -> DirectoryAggregate {
+        DirectoryAggregate {
+            scan_id: target.scan_id.clone(),
+            directory_identity: target
+                .validated_identity()
+                .unwrap()
+                .unwrap()
+                .entry_id
+                .to_string(),
+            revision: DecimalU128::new(1),
+            apparent_logical_bytes: known_bytes(10),
+            unique_logical_bytes: known_bytes(10),
+            filesystem_reported_allocated_bytes: known_bytes(10),
+            potentially_reclaimable_bytes: known_bytes(5),
+            direct_child_count: known_bytes(0),
+            recursive_entry_count: known_bytes(0),
+            coverage: complete_coverage(),
+            arithmetic_state: ArithmeticState::Exact,
+        }
+    }
+
+    fn root_entry(ordinal: u128, domain: u128, mount: u128) -> ScannedEntry {
+        let identity = scan_identity(ordinal, ordinal, None, domain, mount);
+        let component = native_component(
+            &identity,
+            native_name("workspace"),
+            ObjectType::Directory,
+            "root-fingerprint",
+        );
+        ScannedEntry {
+            scan_id: scan_id(),
+            identity: Some(identity),
+            native_locator: Some(NativeLocatorEvidence {
+                scan_root: component.clone(),
+                scan_root_absolute_path: Some(native_absolute_root()),
+                parent_reopen_recipe: Vec::new(),
+                entry: component,
+            }),
+            display_path: "/scan/root".to_string(),
+            native_basename: native_name("workspace"),
+            object_type: ObjectType::Directory,
+            logical_bytes: known_bytes(10),
+            allocated_bytes: known_bytes(10),
+            reclaimable_estimate: known_bytes(5),
+            metadata_fingerprint: "root-fingerprint".to_string(),
+            coverage: complete_coverage(),
+            provenance: live_provenance(),
+        }
+    }
+
+    fn child_entry(
+        ordinal: u128,
+        root: &ScannedEntry,
+        basename: &str,
+        object_type: ObjectType,
+        domain: u128,
+        mount: u128,
+    ) -> ScannedEntry {
+        let root_identity = root.validated_identity().unwrap().unwrap();
+        let root_locator = root.validated_native_locator().unwrap().unwrap();
+        let identity = scan_identity(
+            ordinal,
+            entry_ordinal(&root_identity.entry_id),
+            Some(entry_ordinal(&root_identity.entry_id)),
+            domain,
+            mount,
+        );
+        let fingerprint = format!("{basename}-fingerprint");
+        let native_basename = native_name(basename);
+        let entry_component = native_component(
+            &identity,
+            native_basename.clone(),
+            object_type.clone(),
+            &fingerprint,
+        );
+        ScannedEntry {
+            scan_id: scan_id(),
+            identity: Some(identity),
+            native_locator: Some(NativeLocatorEvidence {
+                scan_root: root_locator.scan_root.clone(),
+                scan_root_absolute_path: root_locator.scan_root_absolute_path.clone(),
+                parent_reopen_recipe: vec![root_locator.scan_root.clone()],
+                entry: entry_component,
+            }),
+            display_path: format!("/scan/root/{basename}"),
+            native_basename,
+            object_type,
+            logical_bytes: known_bytes(10),
+            allocated_bytes: known_bytes(10),
+            reclaimable_estimate: known_bytes(5),
+            metadata_fingerprint: fingerprint,
+            coverage: complete_coverage(),
+            provenance: live_provenance(),
+        }
+    }
+
+    fn scan_identity(
+        ordinal: u128,
+        root_ordinal: u128,
+        parent_ordinal: Option<u128>,
+        domain: u128,
+        mount: u128,
+    ) -> ScanObjectIdentity {
+        ScanObjectIdentity {
+            entry_id: scan_entry_id(ordinal),
+            scan_root_id: scan_entry_id(root_ordinal),
+            parent_id: parent_ordinal.map(scan_entry_id),
+            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(domain),
+                inode: DecimalU128::new(ordinal),
+            }),
+            filesystem_object_domain_identity: IdentityEvidence::known(
+                FilesystemObjectDomainIdentity {
+                    device: DecimalU128::new(domain),
+                },
+            ),
+            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
+                value: DecimalU128::new(mount),
+            }),
+        }
+    }
+
+    fn native_component(
+        identity: &ScanObjectIdentity,
+        native_basename: NativeName,
+        object_type: ObjectType,
+        metadata_fingerprint: &str,
+    ) -> NativePathComponent {
+        NativePathComponent {
+            entry_id: identity.entry_id.clone(),
+            parent_id: identity.parent_id.clone(),
+            native_basename,
+            object_type,
+            platform_file_identity: identity.platform_file_identity.clone(),
+            filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+            metadata_fingerprint: metadata_fingerprint.to_string(),
+        }
+    }
+
+    fn complete_coverage() -> Coverage {
+        Coverage {
+            state: CoverageState::Complete,
+            complete: true,
+            incomplete_reasons: Vec::new(),
+            details_lost: false,
+            provenance: live_provenance(),
+        }
+    }
+
+    fn incomplete_coverage() -> Coverage {
+        Coverage {
+            state: CoverageState::Incomplete,
+            complete: false,
+            incomplete_reasons: vec![ReasonCode::IncompleteStreamCoverage],
+            details_lost: false,
+            provenance: live_provenance(),
+        }
+    }
+
+    fn known_bytes(value: u128) -> EvidenceValue<DecimalU128> {
+        EvidenceValue::Known {
+            value: DecimalU128::new(value),
         }
     }
 
@@ -496,127 +1213,16 @@ mod tests {
         }
     }
 
-    fn complete_coverage(provenance: FieldProvenance) -> Coverage {
-        Coverage {
-            state: CoverageState::Complete,
-            complete: true,
-            incomplete_reasons: Vec::new(),
-            details_lost: false,
-            provenance,
-        }
-    }
-
-    fn root_entry(
-        ordinal: u128,
-        display_path: &str,
-        provenance: FieldProvenance,
-        basename: &str,
-    ) -> ScannedEntry {
-        entry(
-            ordinal,
-            ordinal,
-            None,
-            display_path,
-            ObjectType::Directory,
-            provenance,
-            basename,
-        )
-    }
-
-    fn legacy_root_entry(
-        display_path: &str,
-        provenance: FieldProvenance,
-        basename: &str,
-    ) -> ScannedEntry {
-        let mut entry = root_entry(1, display_path, provenance, basename);
-        entry.identity = None;
-        entry.native_locator = None;
-        entry
-    }
-
-    fn child_entry(
-        ordinal: u128,
-        root_ordinal: u128,
-        display_path: &str,
-        object_type: ObjectType,
-        provenance: FieldProvenance,
-        basename: &str,
-    ) -> ScannedEntry {
-        entry(
-            ordinal,
-            root_ordinal,
-            Some(root_ordinal),
-            display_path,
-            object_type,
-            provenance,
-            basename,
-        )
-    }
-
-    fn entry(
-        ordinal: u128,
-        root_ordinal: u128,
-        parent_ordinal: Option<u128>,
-        display_path: &str,
-        object_type: ObjectType,
-        provenance: FieldProvenance,
-        basename: &str,
-    ) -> ScannedEntry {
-        let identity = scan_identity(ordinal, root_ordinal, parent_ordinal);
-        let native_basename = native_name(basename);
-        ScannedEntry {
-            scan_id: ScanId::new("scan-cargo-detect"),
-            identity: Some(identity.clone()),
-            native_locator: Some(native_locator(
-                &identity,
-                native_basename.clone(),
-                object_type.clone(),
-                "fingerprint",
-            )),
-            display_path: display_path.to_string(),
-            native_basename,
-            object_type,
-            logical_bytes: EvidenceValue::Known {
-                value: DecimalU128::new(10),
-            },
-            allocated_bytes: EvidenceValue::Known {
-                value: DecimalU128::new(10),
-            },
-            reclaimable_estimate: EvidenceValue::Known {
-                value: DecimalU128::new(5),
-            },
-            metadata_fingerprint: "fingerprint".to_string(),
-            coverage: complete_coverage(provenance.clone()),
-            provenance,
-        }
-    }
-
-    fn scan_identity(
-        ordinal: u128,
-        root_ordinal: u128,
-        parent_ordinal: Option<u128>,
-    ) -> ScanObjectIdentity {
-        ScanObjectIdentity {
-            entry_id: scan_entry_id(ordinal),
-            scan_root_id: scan_entry_id(root_ordinal),
-            parent_id: parent_ordinal.map(scan_entry_id),
-            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
-                device: DecimalU128::new(1),
-                inode: DecimalU128::new(ordinal),
-            }),
-            filesystem_object_domain_identity: IdentityEvidence::known(
-                FilesystemObjectDomainIdentity {
-                    device: DecimalU128::new(1),
-                },
-            ),
-            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
-                value: DecimalU128::new(1),
-            }),
-        }
+    fn scan_id() -> ScanId {
+        ScanId::new("scan-cargo-detect")
     }
 
     fn scan_entry_id(ordinal: u128) -> ScanEntryId {
-        ScanEntryId::for_scan_ordinal(&ScanId::new("scan-cargo-detect"), ordinal).unwrap()
+        ScanEntryId::for_scan_ordinal(&scan_id(), ordinal).unwrap()
+    }
+
+    fn entry_ordinal(id: &ScanEntryId) -> u128 {
+        id.as_str().rsplit_once(':').unwrap().1.parse().unwrap()
     }
 
     fn native_name(name: &str) -> NativeName {
@@ -646,68 +1252,6 @@ mod tests {
         #[cfg(not(any(unix, windows)))]
         {
             NativeAbsolutePath::unix(b"/scan/root".to_vec())
-        }
-    }
-
-    fn native_locator(
-        identity: &ScanObjectIdentity,
-        entry_native_basename: NativeName,
-        entry_object_type: ObjectType,
-        entry_metadata_fingerprint: &str,
-    ) -> NativeLocatorEvidence {
-        let root_component = NativePathComponent {
-            entry_id: identity.scan_root_id.clone(),
-            parent_id: None,
-            native_basename: native_name("workspace"),
-            object_type: ObjectType::Directory,
-            platform_file_identity: identity.platform_file_identity.clone(),
-            filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
-            volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-            metadata_fingerprint: "root-fingerprint".to_string(),
-        };
-        let mut parent_reopen_recipe = Vec::new();
-        if identity.parent_id.is_some() {
-            parent_reopen_recipe.push(root_component.clone());
-        }
-        if let Some(parent_id) = &identity.parent_id
-            && parent_id != &identity.scan_root_id
-        {
-            parent_reopen_recipe.push(NativePathComponent {
-                entry_id: parent_id.clone(),
-                parent_id: Some(identity.scan_root_id.clone()),
-                native_basename: native_name("nested"),
-                object_type: ObjectType::Directory,
-                platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
-                    device: DecimalU128::new(1),
-                    inode: DecimalU128::new(2),
-                }),
-                filesystem_object_domain_identity: IdentityEvidence::known(
-                    FilesystemObjectDomainIdentity {
-                        device: DecimalU128::new(1),
-                    },
-                ),
-                volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
-                    value: DecimalU128::new(1),
-                }),
-                metadata_fingerprint: "nested-fingerprint".to_string(),
-            });
-        }
-        NativeLocatorEvidence {
-            scan_root: root_component,
-            scan_root_absolute_path: Some(native_absolute_root()),
-            parent_reopen_recipe,
-            entry: NativePathComponent {
-                entry_id: identity.entry_id.clone(),
-                parent_id: identity.parent_id.clone(),
-                native_basename: entry_native_basename,
-                object_type: entry_object_type,
-                platform_file_identity: identity.platform_file_identity.clone(),
-                filesystem_object_domain_identity: identity
-                    .filesystem_object_domain_identity
-                    .clone(),
-                volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-                metadata_fingerprint: entry_metadata_fingerprint.to_string(),
-            },
         }
     }
 }

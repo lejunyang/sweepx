@@ -445,9 +445,8 @@ fn cleaner_show_reports_incompatible_builtin_with_exit_12() {
     assert!(stderr.contains("cleaner is incompatible with this core"));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn experimental_cargo_detect_stays_read_only_and_reports_incompatible_builtin() {
+fn experimental_cargo_detect_fails_closed_before_scan_for_incompatible_builtin() {
     let fixture = TempDir::new().unwrap();
     let root = fixture.path().join("workspace");
     fs::create_dir(&root).unwrap();
@@ -466,12 +465,17 @@ fn experimental_cargo_detect_stays_read_only_and_reports_incompatible_builtin() 
         .arg("cargo-detect")
         .arg(&root);
 
-    let output = cmd.assert().get_output().stdout.clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let output = cmd.assert().code(12).get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["kind"], "cleaner.result");
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["exitCode"], 12);
     assert_eq!(json["summary"]["command"], "cleaner.cargo-detect");
     assert_eq!(json["summary"]["experimental"], true);
     assert_eq!(json["summary"]["liveOnly"], true);
+    assert_eq!(json["summary"]["scanPerformed"], false);
+    assert_eq!(json["summary"]["matchCount"], "0");
+    assert_eq!(json["summary"]["hintCount"], "0");
     assert_eq!(
         json["summary"]["reasonCode"],
         "builtin_manifest_incompatible"
@@ -481,13 +485,14 @@ fn experimental_cargo_detect_stays_read_only_and_reports_incompatible_builtin() 
     assert_eq!(json["data"]["approvalAllowed"], false);
     assert_eq!(json["data"]["executionAllowed"], false);
     assert_eq!(json["data"]["builtinManifestCompatible"], false);
+    assert_eq!(json["data"]["scanPerformed"], false);
+    assert_eq!(json["data"]["matchCount"], "0");
+    assert_eq!(json["data"]["hintCount"], "0");
+    assert_eq!(json["data"]["matches"], Value::Array(Vec::new()));
+    assert_eq!(json["data"]["hints"], Value::Array(Vec::new()));
     assert_eq!(json["data"]["reasons"][0], "builtin_manifest_incompatible");
-    let matches = json["data"]["matches"].as_array().unwrap();
-    if let Some(first) = matches.first() {
-        assert_eq!(first["disposition"], "report_only");
-        assert_eq!(first["reasonCode"], "builtin_manifest_incompatible");
-        assert_eq!(first["executable"], false);
-    }
+    assert_eq!(json["errors"][0]["code"], "cleaner.compatibility");
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

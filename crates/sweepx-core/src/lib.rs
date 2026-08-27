@@ -1647,6 +1647,59 @@ pub fn cleaner_cargo_detect(
     context: &CoreContext,
     request: &CleanerCargoDetectRequest,
 ) -> Result<CleanerSuccess, CoreError> {
+    // Compatibility and trust are admission gates, not annotations on a best-effort result.
+    // Resolve them before touching any caller-selected scan root or evaluating package rules.
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let cleaner = cargo_cleaner_detect::cargo_cleaner(&cleaner_catalog.cleaners)?;
+    if !cleaner.compatible {
+        let ids = fresh_operation_ids("cleaner-cargo-detect", &request.roots);
+        let mut output = OutputEnvelope::new(
+            OutputKind::CleanerResult,
+            ids.request_id,
+            ids.operation_id,
+            timestamp_now(),
+            OutputStatus::Failed,
+            ExitCode::CleanerTrustOrCompat,
+            compat_snapshot_with_digest(
+                current_os_family(),
+                cleaner_catalog.cleaner_set_digest.clone(),
+            ),
+        );
+        output.summary = json!({
+            "command": "cleaner.cargo-detect",
+            "cleanerId": cargo_cleaner_detect::CARGO_CLEANER_ID,
+            "experimental": true,
+            "liveOnly": true,
+            "scanPerformed": false,
+            "matchCount": DecimalU128::ZERO,
+            "hintCount": DecimalU128::ZERO,
+            "rootCount": DecimalU128::new(request.roots.len() as u128),
+            "reasonCode": cargo_cleaner_detect::BUILTIN_MANIFEST_INCOMPATIBLE,
+            "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
+        });
+        output.data = cargo_cleaner_detect::incompatible_cargo_detect_json();
+        output.errors.push(protocol_error(
+            "cleaner.compatibility",
+            "cleaner",
+            "cleaner.compatibility",
+            false,
+            [
+                (
+                    "cleanerRef",
+                    format!(
+                        "{}@{}",
+                        cleaner.package.manifest.id, cleaner.package.manifest.version
+                    ),
+                ),
+                (
+                    "requiredCore",
+                    cleaner.package.manifest.requires.core.clone(),
+                ),
+                ("currentCore", CORE_VERSION.to_string()),
+            ],
+        ));
+        return Ok(CleanerSuccess { output });
+    }
     let scan = scan_with_store(
         context,
         &ScanRequest {
@@ -1655,11 +1708,21 @@ pub fn cleaner_cargo_detect(
         },
         Option::<&MemorySnapshotStore>::None,
     )?;
-    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let source_scan_incomplete = scan.output.status == OutputStatus::Partial;
+    let source_scan_warning_count = scan.output.warnings.len();
     let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
         &scan.summary,
-        &cleaner_catalog.cleaners,
+        cleaner,
+        source_scan_incomplete,
+        source_scan_warning_count,
     )?;
+    let status = if detected.requires_partial_status() {
+        OutputStatus::Partial
+    } else {
+        OutputStatus::Ok
+    };
+    let exit_code = ExitCode::from(status);
+    let reason_code = detected.primary_reason_code();
 
     let ids = fresh_operation_ids("cleaner-cargo-detect", &request.roots);
     let mut output = OutputEnvelope::new(
@@ -1667,8 +1730,8 @@ pub fn cleaner_cargo_detect(
         ids.request_id,
         ids.operation_id,
         timestamp_now(),
-        OutputStatus::Partial,
-        ExitCode::Partial,
+        status,
+        exit_code,
         compat_snapshot_with_digest(
             current_os_family(),
             cleaner_catalog.cleaner_set_digest.clone(),
@@ -1676,12 +1739,19 @@ pub fn cleaner_cargo_detect(
     );
     output.summary = json!({
         "command": "cleaner.cargo-detect",
-        "cleanerId": "org.sweepx.cargo-target",
+        "cleanerId": cargo_cleaner_detect::CARGO_CLEANER_ID,
         "experimental": true,
         "liveOnly": true,
         "matchCount": DecimalU128::new(detected.matches.len() as u128),
+        "hintCount": DecimalU128::new(detected.hints.len() as u128),
         "rootCount": DecimalU128::new(request.roots.len() as u128),
-        "reasonCode": "builtin_manifest_incompatible",
+        "reasonCode": reason_code,
+        "sourceScanIncomplete": detected.scan.incomplete,
+        "sourceScanWarningCount": detected.scan.warning_count,
+        "sourceScanErrorCount": detected.scan.error_count,
+        "sourceScanBoundaryCount": detected.scan.boundary_count,
+        "sourceScanPartialBoundaryCount": detected.scan.partial_boundary_count,
+        "sourceScanIncompleteAggregateCount": detected.scan.incomplete_aggregate_count,
         "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
     });
     output.data = cargo_cleaner_detect::experimental_cargo_detect_json(&detected);
@@ -1690,8 +1760,23 @@ pub fn cleaner_cargo_detect(
         "cleaner",
         "cleaner.cargo_detect.experimental",
         false,
-        [("reasonCode", "builtin_manifest_incompatible".to_string())],
+        [("reasonCode", reason_code.to_string())],
     ));
+    if source_scan_incomplete {
+        output.warnings.push(protocol_error(
+            "scan.partial",
+            "scan",
+            "scan.partial",
+            false,
+            [(
+                "scanId",
+                scan.output.summary["scanId"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            )],
+        ));
+    }
     Ok(CleanerSuccess { output })
 }
 
