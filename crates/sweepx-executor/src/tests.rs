@@ -41,6 +41,7 @@ fn plan(mode: DeletionMode, action_count: usize, suffix: &str) -> DeletionPlan {
             let item_id = format!("item-{index:04}");
             let action_id = format!("action-{index:04}");
             PlanItemInput {
+                native_target: None,
                 item_id,
                 candidate_id: format!("candidate-{index:04}"),
                 explanation_digest: ExplanationDigest::new(format!("explanation-{index:04}")),
@@ -61,6 +62,7 @@ fn plan(mode: DeletionMode, action_count: usize, suffix: &str) -> DeletionPlan {
         .collect::<Vec<_>>();
     if items.is_empty() {
         items.push(PlanItemInput {
+            native_target: None,
             item_id: "item-0001".to_string(),
             candidate_id: "candidate-0001".to_string(),
             explanation_digest: ExplanationDigest::new("explanation-0001"),

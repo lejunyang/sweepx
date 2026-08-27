@@ -1559,6 +1559,7 @@ mod tests {
                 root_ordinal,
                 parent_ordinal,
             )),
+            native_locator: None,
             display_path: path.to_string(),
             native_basename: NativeName::unix(display_basename(path).into_bytes()),
             object_type,
@@ -1601,6 +1602,7 @@ mod tests {
         ScannedEntry {
             scan_id: scan_id(),
             identity: None,
+            native_locator: None,
             display_path: path.to_string(),
             native_basename: NativeName::unix(display_basename(path).into_bytes()),
             object_type,

@@ -1287,6 +1287,7 @@ mod tests {
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity: None,
+            native_locator: None,
             display_path: path,
             native_basename: NativeName::unix(b"demo".to_vec()),
             object_type: ObjectType::File,
