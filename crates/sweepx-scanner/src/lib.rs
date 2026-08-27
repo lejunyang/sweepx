@@ -6,9 +6,9 @@ use sweepx_model::{
     FieldProvenance, NativeName, ObjectType, ReasonCode, ScanId, ScannedEntry,
 };
 use sweepx_platform::{
-    BoundaryKind, BoundaryRecord, CancellationToken, EntryKind, EntryMetadata, HardLinkKey,
-    PlatformError, PlatformScanner, RootAdmission, ScanResourceLimits, ScanRoot, WalkEntry,
-    known_count, known_u128, lower_bound_u128, unknown_u128,
+    BoundaryKind, BoundaryRecord, CancellationToken, DirectoryReadLimits, EntryKind, EntryMetadata,
+    HardLinkKey, PlatformError, PlatformScanner, RootAdmission, ScanResourceLimits, ScanRoot,
+    WalkEntry, inspect_bound_child, known_count, known_u128, lower_bound_u128, unknown_u128,
 };
 use thiserror::Error;
 
@@ -72,6 +72,12 @@ pub trait ScanSink {
     fn push_aggregate(&mut self, aggregate: DirectoryAggregate) -> Result<(), ScanError>;
 
     fn overflow_count(&self) -> usize {
+        0
+    }
+
+    /// Number of aggregates retained across the scan so far. Streaming sinks that retain none may
+    /// leave this at zero.
+    fn retained_aggregate_count(&self) -> usize {
         0
     }
 }
@@ -198,6 +204,15 @@ impl ScanSink for CollectingScanSink {
     }
 
     fn push_aggregate(&mut self, aggregate: DirectoryAggregate) -> Result<(), ScanError> {
+        if self.summary.aggregates.len() >= self.limits.max_retained_aggregates {
+            let root = PathBuf::from(&aggregate.directory_identity);
+            self.mark_overflow(
+                &root,
+                &root,
+                "retained aggregate cap exceeded across scan roots",
+            );
+            return Ok(());
+        }
         self.summary.aggregates.push(aggregate);
         Ok(())
     }
@@ -205,11 +220,24 @@ impl ScanSink for CollectingScanSink {
     fn overflow_count(&self) -> usize {
         self.overflow_count
     }
+
+    fn retained_aggregate_count(&self) -> usize {
+        self.summary.aggregates.len()
+    }
 }
 
 pub struct Scanner<P> {
     platform: P,
     options: ScannerOptions,
+}
+
+#[derive(Debug)]
+struct FrontierDirectory<D> {
+    path: PathBuf,
+    handle: D,
+    started: bool,
+    consumed_entries: usize,
+    consumed_bytes: usize,
 }
 
 impl<P> Scanner<P>
@@ -243,6 +271,26 @@ where
         }
 
         for root in roots {
+            if sink.retained_aggregate_count()
+                >= self.options.resource_limits.max_retained_aggregates
+            {
+                sink.push_progress(
+                    root.path(),
+                    ProgressEvent::ResourceLimit {
+                        path: root.path().to_path_buf(),
+                    },
+                )?;
+                sink.push_boundary(
+                    root.path(),
+                    BoundaryRecord {
+                        path: root.path().to_path_buf(),
+                        kind: BoundaryKind::ResourceLimit,
+                        reason: ReasonCode::ResourceLimit,
+                        detail: "retained aggregate cap exceeded across scan roots".to_string(),
+                    },
+                )?;
+                continue;
+            }
             let admission = match self.platform.admit_root(root, cancel) {
                 Ok(admission) => admission,
                 Err(PlatformError::Cancelled) => {
@@ -260,6 +308,12 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
+            admission.validate_for_root(root).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: root.path().to_path_buf(),
+                    detail: error.to_string(),
+                }
+            })?;
             let overflow_count_before = sink.overflow_count();
             sink.push_progress(
                 root.path(),
@@ -276,7 +330,7 @@ where
                 ),
             )?;
 
-            self.scan_root(&admission, cancel, overflow_count_before, sink)?;
+            self.scan_root(admission, cancel, overflow_count_before, sink)?;
         }
 
         sink.push_progress(Path::new("/"), ProgressEvent::Finished)?;
@@ -285,33 +339,51 @@ where
 
     fn scan_root<S: ScanSink>(
         &self,
-        admission: &RootAdmission,
+        admission: RootAdmission<P::DirectoryHandle>,
         cancel: &CancellationToken,
         overflow_count_before: usize,
         sink: &mut S,
     ) -> Result<(), ScanError> {
-        let mut frontier = VecDeque::from([admission.metadata.path.clone()]);
+        let RootAdmission {
+            root,
+            metadata: root_metadata,
+            directory,
+        } = admission;
+        let root_path = root.path().to_path_buf();
+        let initial_aggregate_count = sink.retained_aggregate_count();
+        let mut frontier = VecDeque::from([FrontierDirectory {
+            path: root_metadata.path.clone(),
+            handle: directory,
+            started: false,
+            consumed_entries: 0,
+            consumed_bytes: 0,
+        }]);
         let mut active_frontier_entries = 1usize;
         let mut visited_directories = 0usize;
         let mut directory_states = BTreeMap::<PathBuf, DirectoryState>::new();
         directory_states.insert(
-            admission.metadata.path.clone(),
-            DirectoryState::new(admission.metadata.path.clone()),
+            root_metadata.path.clone(),
+            DirectoryState::new(root_metadata.path.clone()),
         );
 
-        while let Some(path) = frontier.pop_front() {
+        while let Some(mut current) = frontier.pop_front() {
             active_frontier_entries = active_frontier_entries.saturating_sub(1);
+            let path = current.path.clone();
             if cancel.is_cancelled() {
                 mark_all_open_incomplete(
                     &mut directory_states,
                     ReasonCode::IncompleteStreamCoverage,
                 );
-                sink.push_progress(admission.root.path(), ProgressEvent::Cancelled { path })?;
+                sink.push_progress(&root_path, ProgressEvent::Cancelled { path })?;
                 break;
             }
 
-            visited_directories += 1;
-            if visited_directories > self.options.resource_limits.max_visited_entries {
+            if !current.started {
+                visited_directories += 1;
+            }
+            if !current.started
+                && visited_directories > self.options.resource_limits.max_visited_entries
+            {
                 let boundary = BoundaryRecord {
                     path: path.clone(),
                     kind: BoundaryKind::ResourceLimit,
@@ -324,17 +396,39 @@ where
                     boundary.reason.clone(),
                 );
                 sink.push_progress(
-                    admission.root.path(),
+                    &root_path,
                     ProgressEvent::ResourceLimit { path: path.clone() },
                 )?;
-                sink.push_boundary(admission.root.path(), boundary)?;
+                sink.push_boundary(&root_path, boundary)?;
                 continue;
             }
 
-            let entries = match self.platform.read_dir_entries(
-                &path,
+            let remaining_entries = self
+                .options
+                .resource_limits
+                .max_directory_entries
+                .saturating_sub(current.consumed_entries);
+            let remaining_bytes = self
+                .options
+                .resource_limits
+                .max_directory_bytes
+                .saturating_sub(current.consumed_bytes);
+            let requested_batch_limits = DirectoryReadLimits {
+                max_batch_entries: self
+                    .options
+                    .resource_limits
+                    .max_directory_batch_entries
+                    .min(remaining_entries),
+                max_batch_bytes: self
+                    .options
+                    .resource_limits
+                    .max_directory_batch_bytes
+                    .min(remaining_bytes),
+            };
+            let batch = match self.platform.enumerate_children(
+                &mut current.handle,
                 cancel,
-                self.options.resource_limits.max_directory_entries,
+                requested_batch_limits,
             ) {
                 Ok(entries) => entries,
                 Err(PlatformError::Cancelled) => {
@@ -343,7 +437,7 @@ where
                         ReasonCode::IncompleteStreamCoverage,
                     );
                     sink.push_progress(
-                        admission.root.path(),
+                        &root_path,
                         ProgressEvent::Cancelled { path: path.clone() },
                     )?;
                     break;
@@ -355,14 +449,14 @@ where
                         ReasonCode::IncompleteStreamCoverage,
                     );
                     sink.push_progress(
-                        admission.root.path(),
+                        &root_path,
                         ProgressEvent::Error {
                             path: path.clone(),
                             reason: ReasonCode::IncompleteStreamCoverage,
                         },
                     )?;
                     sink.push_entry(
-                        admission.root.path(),
+                        &root_path,
                         ScannedEntry {
                             scan_id: self.options.scan_id.clone(),
                             display_path: path.display().to_string(),
@@ -396,11 +490,11 @@ where
                 Err(PlatformError::ResourceLimit(detail)) => {
                     note_boundary(&mut directory_states, &path, ReasonCode::ResourceLimit);
                     sink.push_progress(
-                        admission.root.path(),
+                        &root_path,
                         ProgressEvent::ResourceLimit { path: path.clone() },
                     )?;
                     sink.push_boundary(
-                        admission.root.path(),
+                        &root_path,
                         BoundaryRecord {
                             path: path.clone(),
                             kind: BoundaryKind::ResourceLimit,
@@ -412,24 +506,73 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
-            for directory_entry in entries {
+            if batch.entries.is_empty() && !batch.end_of_directory {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: path.clone(),
+                    detail: "backend returned an empty non-terminal directory batch".to_string(),
+                }
+                .into());
+            }
+            let batch_entries = batch.entries.len();
+            let batch_bytes = batch.entries.iter().try_fold(0usize, |total, entry| {
+                entry
+                    .estimated_retained_bytes()
+                    .and_then(|bytes| total.checked_add(bytes))
+            });
+            if batch_entries > requested_batch_limits.max_batch_entries
+                || batch_bytes.is_none_or(|bytes| bytes > requested_batch_limits.max_batch_bytes)
+            {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: path.clone(),
+                    detail: "backend exceeded the requested directory batch limit".to_string(),
+                }
+                .into());
+            }
+            current.consumed_entries = current
+                .consumed_entries
+                .checked_add(batch_entries)
+                .ok_or_else(|| {
+                    PlatformError::ResourceLimit("directory entry accounting overflow".to_string())
+                })?;
+            current.consumed_bytes = current
+                .consumed_bytes
+                .checked_add(batch_bytes.expect("batch byte accounting checked above"))
+                .ok_or_else(|| {
+                    PlatformError::ResourceLimit("directory byte accounting overflow".to_string())
+                })?;
+            current.started = true;
+            let end_of_directory = batch.end_of_directory;
+            let directory_limit_blocks_continuation = !end_of_directory
+                && (current.consumed_entries >= self.options.resource_limits.max_directory_entries
+                    || current.consumed_bytes >= self.options.resource_limits.max_directory_bytes);
+            let continuation_reserved = !end_of_directory && !directory_limit_blocks_continuation;
+            if continuation_reserved {
+                // The current item occupied a frontier slot before it was popped, so reserving its
+                // continuation cannot exceed a previously valid frontier bound.
+                active_frontier_entries += 1;
+            }
+            let mut interrupted = false;
+            for directory_entry in batch.entries {
                 if cancel.is_cancelled() {
                     mark_all_open_incomplete(
                         &mut directory_states,
                         ReasonCode::IncompleteStreamCoverage,
                     );
                     sink.push_progress(
-                        admission.root.path(),
+                        &root_path,
                         ProgressEvent::Cancelled {
                             path: directory_entry.path,
                         },
                     )?;
+                    interrupted = true;
                     break;
                 }
 
-                let walk = match self.platform.stat_entry(
-                    &directory_entry.path,
-                    directory_entry.file_name.clone(),
+                let walk = match inspect_bound_child(
+                    &self.platform,
+                    &current.handle,
+                    &path,
+                    &directory_entry,
                     cancel,
                 ) {
                     Ok(entry) => entry,
@@ -439,19 +582,28 @@ where
                             ReasonCode::IncompleteStreamCoverage,
                         );
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::Cancelled {
                                 path: directory_entry.path.clone(),
                             },
                         )?;
+                        interrupted = true;
                         break;
                     }
                     Err(error) => return Err(error.into()),
                 };
                 match walk {
-                    WalkEntry::Directory(metadata) => {
-                        let same_mount =
-                            self.platform.is_same_mount(&admission.metadata, &metadata);
+                    WalkEntry::Directory(opened) => {
+                        let metadata = opened.metadata;
+                        let same_mount = if root_metadata.mount_identity.is_none()
+                            || metadata.mount_identity.is_none()
+                        {
+                            Err(PlatformError::Unsupported(
+                                "mount identity unavailable".to_string(),
+                            ))
+                        } else {
+                            self.platform.is_same_mount(&root_metadata, &metadata)
+                        };
                         match same_mount {
                             Ok(true) => {}
                             Ok(false) => {
@@ -467,13 +619,13 @@ where
                                     boundary.reason.clone(),
                                 );
                                 sink.push_progress(
-                                    admission.root.path(),
+                                    &root_path,
                                     ProgressEvent::Boundary {
                                         path: metadata.path.clone(),
                                         kind: boundary.kind.clone(),
                                     },
                                 )?;
-                                sink.push_boundary(admission.root.path(), boundary)?;
+                                sink.push_boundary(&root_path, boundary)?;
                                 continue;
                             }
                             Err(_) => {
@@ -489,13 +641,13 @@ where
                                     boundary.reason.clone(),
                                 );
                                 sink.push_progress(
-                                    admission.root.path(),
+                                    &root_path,
                                     ProgressEvent::Boundary {
                                         path: metadata.path.clone(),
                                         kind: boundary.kind.clone(),
                                     },
                                 )?;
-                                sink.push_boundary(admission.root.path(), boundary)?;
+                                sink.push_boundary(&root_path, boundary)?;
                                 continue;
                             }
                         }
@@ -515,13 +667,41 @@ where
                                 boundary.reason.clone(),
                             );
                             sink.push_progress(
-                                admission.root.path(),
+                                &root_path,
                                 ProgressEvent::Boundary {
                                     path: metadata.path.clone(),
                                     kind: boundary.kind.clone(),
                                 },
                             )?;
-                            sink.push_boundary(admission.root.path(), boundary)?;
+                            sink.push_boundary(&root_path, boundary)?;
+                            continue;
+                        }
+
+                        if initial_aggregate_count
+                            .checked_add(directory_states.len())
+                            .is_none_or(|count| {
+                                count >= self.options.resource_limits.max_retained_aggregates
+                            })
+                        {
+                            let boundary = BoundaryRecord {
+                                path: metadata.path.clone(),
+                                kind: BoundaryKind::ResourceLimit,
+                                reason: ReasonCode::ResourceLimit,
+                                detail: "retained aggregate limit exceeded".to_string(),
+                            };
+                            note_boundary(
+                                &mut directory_states,
+                                &metadata.path,
+                                boundary.reason.clone(),
+                            );
+                            sink.push_progress(
+                                &root_path,
+                                ProgressEvent::Boundary {
+                                    path: metadata.path.clone(),
+                                    kind: boundary.kind.clone(),
+                                },
+                            )?;
+                            sink.push_boundary(&root_path, boundary)?;
                             continue;
                         }
 
@@ -531,7 +711,7 @@ where
                             complete_coverage(),
                         );
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::EntryObserved {
                                 path: metadata.path.clone(),
                                 kind: ObjectType::Directory,
@@ -541,8 +721,14 @@ where
                         directory_states
                             .entry(metadata.path.clone())
                             .or_insert_with(|| DirectoryState::new(metadata.path.clone()));
-                        sink.push_entry(admission.root.path(), scanned)?;
-                        frontier.push_back(metadata.path.clone());
+                        sink.push_entry(&root_path, scanned)?;
+                        frontier.push_back(FrontierDirectory {
+                            path: metadata.path.clone(),
+                            handle: opened.handle,
+                            started: false,
+                            consumed_entries: 0,
+                            consumed_bytes: 0,
+                        });
                         active_frontier_entries += 1;
                     }
                     WalkEntry::File(metadata) => {
@@ -552,14 +738,14 @@ where
                             complete_coverage(),
                         );
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::EntryObserved {
                                 path: metadata.path.clone(),
                                 kind: ObjectType::File,
                             },
                         )?;
                         propagate_file_entry(&mut directory_states, &metadata.path, &metadata);
-                        sink.push_entry(admission.root.path(), scanned)?;
+                        sink.push_entry(&root_path, scanned)?;
                     }
                     WalkEntry::Link(metadata) => {
                         let coverage = Coverage {
@@ -570,14 +756,14 @@ where
                             provenance: live_provenance(),
                         };
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::Boundary {
                                 path: metadata.path.clone(),
                                 kind: BoundaryKind::Symlink,
                             },
                         )?;
                         sink.push_boundary(
-                            admission.root.path(),
+                            &root_path,
                             BoundaryRecord {
                                 path: metadata.path.clone(),
                                 kind: BoundaryKind::Symlink,
@@ -586,7 +772,7 @@ where
                             },
                         )?;
                         sink.push_entry(
-                            admission.root.path(),
+                            &root_path,
                             scanned_entry_from_metadata(&self.options.scan_id, &metadata, coverage),
                         )?;
                     }
@@ -597,25 +783,25 @@ where
                             boundary.reason.clone(),
                         );
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::Boundary {
                                 path: boundary.path.clone(),
                                 kind: boundary.kind.clone(),
                             },
                         )?;
-                        sink.push_boundary(admission.root.path(), boundary)?;
+                        sink.push_boundary(&root_path, boundary)?;
                     }
                     WalkEntry::Error(error) => {
                         note_boundary(&mut directory_states, &error.path, error.reason.clone());
                         sink.push_progress(
-                            admission.root.path(),
+                            &root_path,
                             ProgressEvent::Error {
                                 path: error.path.clone(),
                                 reason: error.reason.clone(),
                             },
                         )?;
                         sink.push_entry(
-                            admission.root.path(),
+                            &root_path,
                             ScannedEntry {
                                 scan_id: self.options.scan_id.clone(),
                                 display_path: error.path.display().to_string(),
@@ -637,6 +823,27 @@ where
                         )?;
                     }
                 }
+            }
+            if !interrupted && directory_limit_blocks_continuation {
+                note_boundary(&mut directory_states, &path, ReasonCode::ResourceLimit);
+                sink.push_progress(
+                    &root_path,
+                    ProgressEvent::ResourceLimit { path: path.clone() },
+                )?;
+                sink.push_boundary(
+                    &root_path,
+                    BoundaryRecord {
+                        path: path.clone(),
+                        kind: BoundaryKind::ResourceLimit,
+                        reason: ReasonCode::ResourceLimit,
+                        detail: "per-directory cumulative enumeration limit exceeded".to_string(),
+                    },
+                )?;
+            }
+            if interrupted && continuation_reserved {
+                active_frontier_entries = active_frontier_entries.saturating_sub(1);
+            } else if continuation_reserved {
+                frontier.push_back(current);
             }
         }
 
@@ -1060,14 +1267,66 @@ fn native_basename_for_path(path: &Path) -> NativeName {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
-    use sweepx_platform::{DirectoryEntryRecord, EntryIdentity, FilesystemIdentity, MountIdentity};
+    use sweepx_platform::{
+        DirectoryEntryBatch, DirectoryEntryRecord, EntryIdentity, FilesystemIdentity, MountIdentity,
+    };
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     fn linux_scanner(options: ScannerOptions) -> Scanner<HostPlatformScanner> {
         Scanner::new(HostPlatformScanner::new(), options)
+    }
+
+    fn test_native_name(name: &str) -> NativeName {
+        #[cfg(unix)]
+        {
+            return NativeName::unix(name.as_bytes().to_vec());
+        }
+        #[cfg(windows)]
+        {
+            return NativeName::windows_utf16(name.encode_utf16().collect::<Vec<_>>());
+        }
+        #[allow(unreachable_code)]
+        NativeName::unix(name.as_bytes().to_vec())
+    }
+
+    fn test_entry(parent: &Path, name: &str) -> DirectoryEntryRecord {
+        DirectoryEntryRecord::from_parent_and_name(parent, test_native_name(name)).unwrap()
+    }
+
+    fn test_metadata(
+        path: PathBuf,
+        name: &str,
+        kind: EntryKind,
+        mount_identity: Option<u64>,
+    ) -> EntryMetadata {
+        EntryMetadata {
+            path,
+            file_name: test_native_name(name),
+            kind,
+            logical_bytes: known_u128(0),
+            allocated_bytes: known_u128(0),
+            hard_link_count: known_count(1),
+            fingerprint: format!("fake:{name}"),
+            identity: Some(EntryIdentity {
+                device: 1,
+                inode: match name {
+                    "root" => 1,
+                    "child" => 2,
+                    "safe" => 3,
+                    "evil" => 4,
+                    _ => 5,
+                },
+            }),
+            filesystem_identity: Some(FilesystemIdentity { device: 1 }),
+            mount_identity: mount_identity.map(|value| MountIdentity { value }),
+            hard_link_key: None,
+        }
     }
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
@@ -1157,8 +1416,12 @@ mod tests {
         let scanner = linux_scanner(ScannerOptions {
             resource_limits: ScanResourceLimits {
                 max_directory_entries: 32,
+                max_directory_bytes: 1024 * 1024,
+                max_directory_batch_entries: 8,
+                max_directory_batch_bytes: 256 * 1024,
                 max_frontier_entries: 1,
                 max_visited_entries: 32,
+                max_retained_aggregates: 32,
                 max_retained_entries: 16_384,
                 max_retained_boundaries: 16_384,
                 max_progress_events: 16_384,
@@ -1233,8 +1496,12 @@ mod tests {
         let scanner = linux_scanner(ScannerOptions {
             resource_limits: ScanResourceLimits {
                 max_directory_entries: 32,
+                max_directory_bytes: 1024 * 1024,
+                max_directory_batch_entries: 8,
+                max_directory_batch_bytes: 256 * 1024,
                 max_frontier_entries: 32,
                 max_visited_entries: 1,
+                max_retained_aggregates: 32,
                 max_retained_entries: 16_384,
                 max_retained_boundaries: 16_384,
                 max_progress_events: 16_384,
@@ -1265,8 +1532,12 @@ mod tests {
         let scanner = linux_scanner(ScannerOptions {
             resource_limits: ScanResourceLimits {
                 max_directory_entries: 32,
+                max_directory_bytes: 1024 * 1024,
+                max_directory_batch_entries: 8,
+                max_directory_batch_bytes: 256 * 1024,
                 max_frontier_entries: 32,
                 max_visited_entries: 32,
+                max_retained_aggregates: 32,
                 max_retained_entries: 1,
                 max_retained_boundaries: 4,
                 max_progress_events: 8,
@@ -1314,19 +1585,12 @@ mod tests {
         let scanner = Scanner::new(
             FakePlatform::new(
                 root.clone(),
-                vec![DirectoryEntryRecord {
-                    path: file.clone(),
-                    file_name: NativeName::windows_utf16(
-                        "file.bin".encode_utf16().collect::<Vec<_>>(),
-                    ),
-                }],
+                vec![test_entry(&root, "file.bin")],
                 BTreeMap::from([(
                     file.clone(),
                     WalkEntry::File(EntryMetadata {
                         path: file.clone(),
-                        file_name: NativeName::windows_utf16(
-                            "file.bin".encode_utf16().collect::<Vec<_>>(),
-                        ),
+                        file_name: test_native_name("file.bin"),
                         kind: EntryKind::File,
                         logical_bytes: known_u128(7),
                         allocated_bytes: lower_bound_u128(11, ReasonCode::UnknownLayout),
@@ -1377,19 +1641,12 @@ mod tests {
         let scanner = Scanner::new(
             FakePlatform::new(
                 root.clone(),
-                vec![DirectoryEntryRecord {
-                    path: file.clone(),
-                    file_name: NativeName::windows_utf16(
-                        "file.bin".encode_utf16().collect::<Vec<_>>(),
-                    ),
-                }],
+                vec![test_entry(&root, "file.bin")],
                 BTreeMap::from([(
                     file.clone(),
                     WalkEntry::File(EntryMetadata {
                         path: file.clone(),
-                        file_name: NativeName::windows_utf16(
-                            "file.bin".encode_utf16().collect::<Vec<_>>(),
-                        ),
+                        file_name: test_native_name("file.bin"),
                         kind: EntryKind::File,
                         logical_bytes: known_u128(7),
                         allocated_bytes: unknown_u128(ReasonCode::UnknownLayout),
@@ -1450,23 +1707,574 @@ mod tests {
         assert_eq!(lower.into_value(true), unknown_u128(ReasonCode::Overflow));
     }
 
+    #[test]
+    fn forged_child_path_is_rejected_before_backend_inspection() {
+        let root = PathBuf::from("/root");
+        let outside = PathBuf::from("/outside/evil");
+        let inspect_calls = Arc::new(AtomicUsize::new(0));
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![DirectoryEntryRecord {
+                    path: outside.clone(),
+                    file_name: test_native_name("safe"),
+                }],
+                BTreeMap::from([(
+                    outside.clone(),
+                    WalkEntry::File(test_metadata(
+                        outside.clone(),
+                        "safe",
+                        EntryKind::File,
+                        Some(1),
+                    )),
+                )]),
+            )
+            .with_inspect_calls(inspect_calls.clone()),
+            ScannerOptions::default(),
+        );
+
+        let error = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScanError::Platform(PlatformError::InvalidDirectoryEntry { parent, .. })
+                if parent == root
+        ));
+        assert_eq!(inspect_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn forged_child_name_is_rejected_before_backend_inspection() {
+        let root = PathBuf::from("/root");
+        let child_path = root.join("safe");
+        let outside = PathBuf::from("/outside/evil");
+        let inspect_calls = Arc::new(AtomicUsize::new(0));
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![DirectoryEntryRecord {
+                    path: child_path,
+                    file_name: test_native_name("../outside/evil"),
+                }],
+                BTreeMap::from([(
+                    outside.clone(),
+                    WalkEntry::File(test_metadata(outside, "evil", EntryKind::File, Some(1))),
+                )]),
+            )
+            .with_inspect_calls(inspect_calls.clone()),
+            ScannerOptions::default(),
+        );
+
+        let error = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScanError::Platform(PlatformError::InvalidDirectoryEntry { parent, .. })
+                if parent == root
+        ));
+        assert_eq!(inspect_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn substituted_inspection_metadata_cannot_redirect_accounting() {
+        let root = PathBuf::from("/root");
+        let safe = root.join("safe");
+        let outside = PathBuf::from("/outside/evil");
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![test_entry(&root, "safe")],
+                BTreeMap::from([(
+                    safe,
+                    WalkEntry::File(test_metadata(outside, "evil", EntryKind::File, Some(1))),
+                )]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let error = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScanError::Platform(PlatformError::InvalidDirectoryEntry { parent, .. })
+                if parent == root
+        ));
+    }
+
+    #[test]
+    fn retained_child_handle_prevents_ancestor_replacement_redirect() {
+        let root = PathBuf::from("/root");
+        let child = root.join("child");
+        let safe = child.join("safe");
+        let replacement = child.join("evil");
+        let platform = FakePlatform::tree(
+            root.clone(),
+            BTreeMap::from([
+                (root.clone(), vec![test_entry(&root, "child")]),
+                (child.clone(), vec![test_entry(&child, "safe")]),
+            ]),
+            BTreeMap::from([
+                (
+                    child.clone(),
+                    WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                        metadata: test_metadata(
+                            child.clone(),
+                            "child",
+                            EntryKind::Directory,
+                            Some(1),
+                        ),
+                        handle: FakeDirectoryHandle {
+                            path: child.clone(),
+                            capability_id: 2,
+                            cursor: 0,
+                        },
+                    }),
+                ),
+                (
+                    safe.clone(),
+                    WalkEntry::File(test_metadata(
+                        safe.clone(),
+                        "safe",
+                        EntryKind::File,
+                        Some(1),
+                    )),
+                ),
+                (
+                    replacement.clone(),
+                    WalkEntry::File(test_metadata(
+                        replacement.clone(),
+                        "evil",
+                        EntryKind::File,
+                        Some(1),
+                    )),
+                ),
+            ]),
+        );
+        let replacement_flag = platform.replace_child_path_after_open.clone();
+        replacement_flag.store(true, Ordering::SeqCst);
+        let scanner = Scanner::new(platform, ScannerOptions::default());
+
+        let result = scanner
+            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+            .unwrap();
+
+        let paths: Vec<_> = result
+            .entries
+            .iter()
+            .map(|entry| entry.display_path.as_str())
+            .collect();
+        assert!(paths.contains(&child.to_str().unwrap()));
+        assert!(paths.contains(&safe.to_str().unwrap()));
+        assert!(!paths.contains(&replacement.to_str().unwrap()));
+    }
+
+    #[test]
+    fn unknown_mount_identity_fails_closed_even_if_backend_claims_same_mount() {
+        let root = PathBuf::from("/root");
+        let child = root.join("child");
+        let nested = child.join("safe");
+        let scanner = Scanner::new(
+            FakePlatform::tree(
+                root.clone(),
+                BTreeMap::from([
+                    (root.clone(), vec![test_entry(&root, "child")]),
+                    (child.clone(), vec![test_entry(&child, "safe")]),
+                ]),
+                BTreeMap::from([(
+                    child.clone(),
+                    WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                        metadata: test_metadata(child.clone(), "child", EntryKind::Directory, None),
+                        handle: FakeDirectoryHandle {
+                            path: child.clone(),
+                            capability_id: 2,
+                            cursor: 0,
+                        },
+                    }),
+                )]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(result.entries.is_empty());
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.path == child
+                && boundary.kind == BoundaryKind::Mount
+                && boundary.reason == ReasonCode::UnknownIdentity
+        }));
+        assert!(
+            !result
+                .entries
+                .iter()
+                .any(|entry| entry.display_path == nested.display().to_string())
+        );
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert!(!aggregate.coverage.complete);
+        assert!(
+            aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::UnknownIdentity)
+        );
+    }
+
+    #[test]
+    fn fake_resource_limit_keeps_aggregate_incomplete() {
+        let root = PathBuf::from("/root");
+        let scanner = Scanner::new(
+            FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
+                PlatformError::ResourceLimit("adversarial byte budget".to_string()),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+
+        assert!(!aggregate.coverage.complete);
+        assert!(
+            aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn cancellation_during_fake_inspection_keeps_aggregate_incomplete() {
+        let root = PathBuf::from("/root");
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![test_entry(&root, "safe")],
+                BTreeMap::new(),
+            )
+            .with_cancel_on_inspect(),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+
+        assert!(!aggregate.coverage.complete);
+        assert!(
+            aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::IncompleteStreamCoverage)
+        );
+        assert!(result.progress.iter().any(
+            |event| matches!(event, ProgressEvent::Cancelled { path } if path == &root.join("safe"))
+        ));
+    }
+
+    #[test]
+    fn scanner_consumes_bounded_batches_until_end_of_directory() {
+        let root = PathBuf::from("/root");
+        let paths: Vec<_> = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| root.join(name))
+            .collect();
+        let entries = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| test_entry(&root, name))
+            .collect();
+        let walk_entries = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| {
+                let path = root.join(name);
+                (
+                    path.clone(),
+                    WalkEntry::File(test_metadata(path, name, EntryKind::File, Some(1))),
+                )
+            })
+            .collect();
+        let scanner = Scanner::new(
+            FakePlatform::new(root.clone(), entries, walk_entries).with_batch_size(1),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.entries.len(), 3);
+        for path in paths {
+            assert!(
+                result
+                    .entries
+                    .iter()
+                    .any(|entry| entry.display_path == path.display().to_string())
+            );
+        }
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert_eq!(aggregate.direct_child_count, known_count(3));
+        assert!(aggregate.coverage.complete);
+    }
+
+    #[test]
+    fn retained_aggregate_cap_blocks_new_subtrees_and_marks_root_incomplete() {
+        let root = PathBuf::from("/root");
+        let first = root.join("first");
+        let second = root.join("second");
+        let nested = first.join("nested");
+        let scanner = Scanner::new(
+            FakePlatform::tree(
+                root.clone(),
+                BTreeMap::from([
+                    (
+                        root.clone(),
+                        vec![test_entry(&root, "first"), test_entry(&root, "second")],
+                    ),
+                    (first.clone(), vec![test_entry(&first, "nested")]),
+                ]),
+                BTreeMap::from([
+                    (
+                        first.clone(),
+                        WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                            metadata: test_metadata(
+                                first.clone(),
+                                "first",
+                                EntryKind::Directory,
+                                Some(1),
+                            ),
+                            handle: FakeDirectoryHandle {
+                                path: first.clone(),
+                                capability_id: 2,
+                                cursor: 0,
+                            },
+                        }),
+                    ),
+                    (
+                        second.clone(),
+                        WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                            metadata: test_metadata(
+                                second.clone(),
+                                "second",
+                                EntryKind::Directory,
+                                Some(1),
+                            ),
+                            handle: FakeDirectoryHandle {
+                                path: second.clone(),
+                                capability_id: 3,
+                                cursor: 0,
+                            },
+                        }),
+                    ),
+                    (
+                        nested.clone(),
+                        WalkEntry::File(test_metadata(
+                            nested.clone(),
+                            "nested",
+                            EntryKind::File,
+                            Some(1),
+                        )),
+                    ),
+                ]),
+            ),
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_retained_aggregates: 2,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(result.aggregates.len() <= 2);
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.path == second
+                && boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "retained aggregate limit exceeded"
+        }));
+        let root_aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert!(!root_aggregate.coverage.complete);
+        assert!(
+            root_aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn cumulative_directory_cap_stops_continuation_and_marks_incomplete() {
+        let root = PathBuf::from("/root");
+        let entries: Vec<_> = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| test_entry(&root, name))
+            .collect();
+        let walk_entries = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| {
+                let path = root.join(name);
+                (
+                    path.clone(),
+                    WalkEntry::File(test_metadata(path, name, EntryKind::File, Some(1))),
+                )
+            })
+            .collect();
+        let scanner = Scanner::new(
+            FakePlatform::new(root.clone(), entries, walk_entries).with_batch_size(1),
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_directory_entries: 2,
+                    max_directory_batch_entries: 1,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.path == root
+                && boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "per-directory cumulative enumeration limit exceeded"
+        }));
+        let aggregate = result
+            .aggregates
+            .iter()
+            .find(|entry| entry.directory_identity == root.display().to_string())
+            .unwrap();
+        assert!(!aggregate.coverage.complete);
+        assert!(
+            aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn collecting_sink_caps_aggregates_across_multiple_roots() {
+        let limits = ScanResourceLimits {
+            max_retained_aggregates: 1,
+            ..ScanResourceLimits::default()
+        };
+        let mut sink = CollectingScanSink::new(limits);
+        let first =
+            DirectoryState::new(PathBuf::from("/first")).into_aggregate(&ScanId::new("scan"));
+        let second =
+            DirectoryState::new(PathBuf::from("/second")).into_aggregate(&ScanId::new("scan"));
+
+        sink.push_aggregate(first).unwrap();
+        sink.push_aggregate(second).unwrap();
+        let summary = sink.finish();
+
+        assert_eq!(summary.aggregates.len(), 1);
+        assert!(summary.boundaries.iter().any(|boundary| {
+            boundary.path == Path::new("/second")
+                && boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "retained aggregate cap exceeded across scan roots"
+        }));
+        assert!(summary.progress.iter().any(|event| {
+            matches!(event, ProgressEvent::ResourceLimit { path } if path == Path::new("/second"))
+        }));
+    }
+
     #[derive(Debug)]
     struct FakePlatform {
         root_metadata: EntryMetadata,
-        entries: Vec<DirectoryEntryRecord>,
-        walk_entries: BTreeMap<PathBuf, WalkEntry>,
+        entries_by_capability: BTreeMap<u64, Vec<DirectoryEntryRecord>>,
+        walk_entries: BTreeMap<PathBuf, WalkEntry<FakeDirectoryHandle>>,
+        inspect_calls: Arc<AtomicUsize>,
+        enumeration_failure: Option<FakeEnumerationFailure>,
+        cancel_on_inspect: bool,
+        replace_child_path_after_open: Arc<AtomicBool>,
+        batch_size: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    enum FakeEnumerationFailure {
+        ResourceLimit(String),
+    }
+
+    #[derive(Debug)]
+    struct FakeDirectoryHandle {
+        path: PathBuf,
+        capability_id: u64,
+        cursor: usize,
     }
 
     impl FakePlatform {
         fn new(
             root: PathBuf,
             entries: Vec<DirectoryEntryRecord>,
-            walk_entries: BTreeMap<PathBuf, WalkEntry>,
+            walk_entries: BTreeMap<PathBuf, WalkEntry<FakeDirectoryHandle>>,
         ) -> Self {
             Self {
                 root_metadata: EntryMetadata {
                     path: root.clone(),
-                    file_name: NativeName::windows_utf16("root".encode_utf16().collect::<Vec<_>>()),
+                    file_name: test_native_name("root"),
                     kind: EntryKind::Directory,
                     logical_bytes: known_u128(0),
                     allocated_bytes: known_u128(0),
@@ -1480,13 +2288,62 @@ mod tests {
                     mount_identity: Some(MountIdentity { value: 1 }),
                     hard_link_key: None,
                 },
-                entries,
+                entries_by_capability: BTreeMap::from([(1, entries)]),
                 walk_entries,
+                inspect_calls: Arc::new(AtomicUsize::new(0)),
+                enumeration_failure: None,
+                cancel_on_inspect: false,
+                replace_child_path_after_open: Arc::new(AtomicBool::new(false)),
+                batch_size: None,
             }
+        }
+
+        fn tree(
+            root: PathBuf,
+            entries_by_path: BTreeMap<PathBuf, Vec<DirectoryEntryRecord>>,
+            walk_entries: BTreeMap<PathBuf, WalkEntry<FakeDirectoryHandle>>,
+        ) -> Self {
+            let mut platform = Self::new(root.clone(), Vec::new(), walk_entries);
+            platform.entries_by_capability = entries_by_path
+                .into_iter()
+                .map(|(path, entries)| {
+                    let capability_id = if path == root { 1 } else { 2 };
+                    (capability_id, entries)
+                })
+                .collect();
+            platform
+        }
+
+        fn with_inspect_calls(mut self, inspect_calls: Arc<AtomicUsize>) -> Self {
+            self.inspect_calls = inspect_calls;
+            self
+        }
+
+        fn with_enumeration_failure(mut self, failure: PlatformError) -> Self {
+            self.enumeration_failure = Some(match failure {
+                PlatformError::ResourceLimit(detail) => {
+                    FakeEnumerationFailure::ResourceLimit(detail)
+                }
+                _ => panic!("fake supports resource-limit enumeration failure only"),
+            });
+            self
+        }
+
+        fn with_cancel_on_inspect(mut self) -> Self {
+            self.cancel_on_inspect = true;
+            self
+        }
+
+        fn with_batch_size(mut self, batch_size: usize) -> Self {
+            assert!(batch_size > 0);
+            self.batch_size = Some(batch_size);
+            self
         }
     }
 
     impl PlatformScanner for FakePlatform {
+        type DirectoryHandle = FakeDirectoryHandle;
+
         fn platform_name(&self) -> &'static str {
             "fake"
         }
@@ -1495,41 +2352,113 @@ mod tests {
             &self,
             root: &ScanRoot,
             cancel: &CancellationToken,
-        ) -> Result<RootAdmission, PlatformError> {
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
             Ok(RootAdmission {
                 root: root.clone(),
                 metadata: self.root_metadata.clone(),
+                directory: FakeDirectoryHandle {
+                    path: self.root_metadata.path.clone(),
+                    capability_id: 1,
+                    cursor: 0,
+                },
             })
         }
 
-        fn read_dir_entries(
+        fn enumerate_children(
             &self,
-            _path: &Path,
+            directory: &mut Self::DirectoryHandle,
             cancel: &CancellationToken,
-            _max_entries: usize,
-        ) -> Result<Vec<DirectoryEntryRecord>, PlatformError> {
+            limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
-            Ok(self.entries.clone())
+            if let Some(failure) = &self.enumeration_failure {
+                return match failure {
+                    FakeEnumerationFailure::ResourceLimit(detail) => {
+                        Err(PlatformError::ResourceLimit(detail.clone()))
+                    }
+                };
+            }
+            let entries = self
+                .entries_by_capability
+                .get(&directory.capability_id)
+                .cloned()
+                .unwrap_or_default();
+            if directory.capability_id == 2
+                && self.replace_child_path_after_open.load(Ordering::SeqCst)
+            {
+                assert_eq!(directory.path, PathBuf::from("/root/child"));
+                // A path-reopening implementation would observe `evil`; the retained capability
+                // continues to enumerate the directory admitted as capability 2.
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|entry| entry.file_name == test_native_name("safe"))
+                    .collect();
+                let start = directory.cursor.min(entries.len());
+                let end = self.batch_size.map_or(entries.len(), |size| {
+                    start
+                        .saturating_add(size.min(limits.max_batch_entries))
+                        .min(entries.len())
+                });
+                directory.cursor = end;
+                return Ok(DirectoryEntryBatch {
+                    entries: entries[start..end].to_vec(),
+                    end_of_directory: end == entries.len(),
+                });
+            }
+            let start = directory.cursor.min(entries.len());
+            let end = self.batch_size.map_or(entries.len(), |size| {
+                start
+                    .saturating_add(size.min(limits.max_batch_entries))
+                    .min(entries.len())
+            });
+            directory.cursor = end;
+            Ok(DirectoryEntryBatch {
+                entries: entries[start..end].to_vec(),
+                end_of_directory: end == entries.len(),
+            })
         }
 
-        fn stat_entry(
+        fn inspect_child(
             &self,
-            path: &Path,
-            _file_name: NativeName,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
-        ) -> Result<WalkEntry, PlatformError> {
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
-            self.walk_entries
-                .get(path)
-                .cloned()
-                .ok_or_else(|| PlatformError::Unsupported("missing fake entry".to_string()))
+            self.inspect_calls.fetch_add(1, Ordering::SeqCst);
+            if self.cancel_on_inspect {
+                return Err(PlatformError::Cancelled);
+            }
+            child.validate_for_parent(&parent.path).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: parent.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+            match self.walk_entries.get(&child.path) {
+                Some(WalkEntry::Directory(opened)) => {
+                    Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                        metadata: opened.metadata.clone(),
+                        handle: FakeDirectoryHandle {
+                            path: opened.metadata.path.clone(),
+                            capability_id: opened.handle.capability_id,
+                            cursor: 0,
+                        },
+                    }))
+                }
+                Some(WalkEntry::File(metadata)) => Ok(WalkEntry::File(metadata.clone())),
+                Some(WalkEntry::Link(metadata)) => Ok(WalkEntry::Link(metadata.clone())),
+                Some(WalkEntry::Boundary(boundary)) => Ok(WalkEntry::Boundary(boundary.clone())),
+                Some(WalkEntry::Error(error)) => Ok(WalkEntry::Error(error.clone())),
+                None => Err(PlatformError::Unsupported("missing fake entry".to_string())),
+            }
         }
 
         fn is_same_mount(

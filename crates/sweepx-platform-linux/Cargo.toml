@@ -12,11 +12,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc = "0.2.189"
 sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
 sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
 
 [dev-dependencies]
-libc = "0.2.189"
 sha2 = "0.10.9"
 sweepx-fixtures = { version = "0.1.0", path = "../sweepx-fixtures" }
 tempfile = "3.21.0"
