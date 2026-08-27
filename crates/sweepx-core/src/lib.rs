@@ -52,7 +52,11 @@ use sweepx_protocol::{
 };
 pub use sweepx_scanner::ScanSummary;
 use sweepx_scanner::{ProgressEvent, ScanError};
-use sweepx_tui::{LoadLimits as TuiLoadLimits, ViewModel, ViewModelError};
+use sweepx_tui::{
+    DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProvider,
+    DetailRescanRequest as TuiDetailRescanRequest, DetailRescanResult as TuiDetailRescanResult,
+    LoadLimits as TuiLoadLimits, RefreshedDetail, ViewModel, ViewModelError,
+};
 use thiserror::Error;
 
 #[cfg(unix)]
@@ -60,7 +64,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_platform::{CancellationToken, ScanRoot};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use sweepx_scanner::HostPlatformScanner;
+use sweepx_scanner::{
+    DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest, DetailRescanner,
+    HostPlatformScanner,
+};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_scanner::{Scanner, ScannerOptions};
 
@@ -353,6 +360,327 @@ pub struct TuiScanParts {
     pub exit_code: u8,
     pub scan_id: Option<String>,
     pub summary: ScanSummary,
+}
+
+/// A read-only adapter from the TUI detail protocol to the host scanner's targeted rescan API.
+///
+/// Construction fails closed when the live summary does not establish one consistent scan-id
+/// namespace. The provider never accepts a display path as authority; scanner-side reopening is
+/// driven exclusively by the request's lossless native root and no-follow lineage recipe.
+pub struct TuiDetailRescanProvider {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    live: Option<LiveTuiDetailRescanProvider>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+struct LiveTuiDetailRescanProvider {
+    scanner: DetailRescanner<HostPlatformScanner>,
+    ids: DetailEntryIdAllocator,
+    cancel: CancellationToken,
+}
+
+pub fn tui_detail_rescan_provider(summary: &ScanSummary) -> TuiDetailRescanProvider {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let live = live_tui_detail_rescan_provider(summary).ok();
+        TuiDetailRescanProvider { live }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = summary;
+        TuiDetailRescanProvider {}
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn live_tui_detail_rescan_provider(
+    summary: &ScanSummary,
+) -> Result<LiveTuiDetailRescanProvider, DetailRescanError> {
+    let scan_id = summary
+        .roots
+        .iter()
+        .chain(summary.entries.iter())
+        .map(|entry| &entry.scan_id)
+        .next()
+        .ok_or(DetailRescanError::InvalidRequest)?
+        .clone();
+    let mut ids = DetailEntryIdAllocator::new(scan_id.clone())?;
+    for entry in summary.roots.iter().chain(summary.entries.iter()) {
+        if entry.scan_id != scan_id {
+            return Err(DetailRescanError::InvalidRequest);
+        }
+        let identity = entry
+            .validated_identity()
+            .map_err(|_| DetailRescanError::InvalidRequest)?
+            .ok_or(DetailRescanError::InvalidRequest)?;
+        ids.reserve(&identity.entry_id)?;
+        ids.reserve(&identity.scan_root_id)?;
+        if let Some(parent_id) = &identity.parent_id {
+            ids.reserve(parent_id)?;
+        }
+    }
+    for aggregate in &summary.aggregates {
+        if aggregate.scan_id != scan_id {
+            return Err(DetailRescanError::InvalidRequest);
+        }
+        ids.reserve(
+            &aggregate
+                .scan_entry_id()
+                .map_err(|_| DetailRescanError::InvalidRequest)?,
+        )?;
+    }
+    Ok(LiveTuiDetailRescanProvider {
+        scanner: DetailRescanner::new(
+            HostPlatformScanner::new(),
+            sweepx_platform::ScanResourceLimits::default(),
+        ),
+        ids,
+        cancel: CancellationToken::new(),
+    })
+}
+
+impl DetailRescanProvider for TuiDetailRescanProvider {
+    fn rescan_detail(&mut self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &mut self.live {
+            let binding = request.binding.clone();
+            return match live.scanner.rescan(
+                DetailRescanRequest {
+                    source_scan_id: &request.binding.source_scan_id,
+                    source_root_identity: &request.binding.source_root_identity,
+                    source_directory_identity: &request.binding.source_directory_identity,
+                    directory_locator: &request.directory_locator,
+                    revision: request.binding.revision,
+                    max_rows: request.max_rows,
+                },
+                &mut live.ids,
+                &live.cancel,
+            ) {
+                Ok(detail) => TuiDetailRescanResult::Refreshed(Box::new(RefreshedDetail {
+                    binding,
+                    observed_root: detail.observed_root,
+                    observed_directory: detail.observed_directory,
+                    rows: detail.rows,
+                    aggregate: detail.aggregate,
+                })),
+                Err(error) => TuiDetailRescanResult::Failed {
+                    binding: Box::new(binding),
+                    failure: map_tui_detail_rescan_error(error),
+                },
+            };
+        }
+        TuiDetailRescanResult::Failed {
+            binding: Box::new(request.binding.clone()),
+            failure: TuiDetailRescanFailure::Unavailable,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn map_tui_detail_rescan_error(error: DetailRescanError) -> TuiDetailRescanFailure {
+    match error {
+        DetailRescanError::InvalidRequest => TuiDetailRescanFailure::InvalidResult,
+        DetailRescanError::IdentityUnavailable => TuiDetailRescanFailure::IdentityUnavailable,
+        DetailRescanError::IdentityMismatch => TuiDetailRescanFailure::IdentityMismatch,
+        DetailRescanError::MountChanged => TuiDetailRescanFailure::MountChanged,
+        DetailRescanError::SymlinkOrReparse => TuiDetailRescanFailure::SymlinkOrReparse,
+        DetailRescanError::Cancelled => TuiDetailRescanFailure::Cancelled,
+        DetailRescanError::ResourceLimit => TuiDetailRescanFailure::ResourceLimit,
+        DetailRescanError::Unavailable => TuiDetailRescanFailure::Unavailable,
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod tui_detail_rescan_provider_tests {
+    use super::*;
+    use sweepx_model::{
+        FilesystemObjectDomainIdentity, IdentityEvidence, NativeAbsolutePath, NativeName,
+        NativePathComponent, PlatformFileIdentity, ScanEntryId, ScanObjectIdentity,
+        VolumeOrMountIdentity,
+    };
+    use sweepx_tui::{DetailRescanBinding, DetailRescanReason};
+
+    fn identity(scan_id: &ScanId, ordinal: u128) -> ScanObjectIdentity {
+        let entry_id = ScanEntryId::for_scan_ordinal(scan_id, ordinal).unwrap();
+        ScanObjectIdentity {
+            entry_id: entry_id.clone(),
+            scan_root_id: entry_id,
+            parent_id: None,
+            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(1),
+                inode: DecimalU128::new(1),
+            }),
+            filesystem_object_domain_identity: IdentityEvidence::known(
+                FilesystemObjectDomainIdentity {
+                    device: DecimalU128::new(1),
+                },
+            ),
+            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
+                value: DecimalU128::new(1),
+            }),
+        }
+    }
+
+    #[test]
+    fn empty_summary_constructs_a_fail_closed_unavailable_provider() {
+        let scan_id = ScanId::new("missing-live-summary");
+        let identity = identity(&scan_id, 1);
+        let component = NativePathComponent {
+            entry_id: identity.entry_id.clone(),
+            parent_id: None,
+            native_basename: {
+                #[cfg(unix)]
+                {
+                    NativeName::unix(b"root".to_vec())
+                }
+                #[cfg(windows)]
+                {
+                    NativeName::windows_utf16("root".encode_utf16().collect::<Vec<_>>())
+                }
+            },
+            object_type: ObjectType::Directory,
+            platform_file_identity: identity.platform_file_identity.clone(),
+            filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+            metadata_fingerprint: "root".to_string(),
+        };
+        let locator = sweepx_model::NativeLocatorEvidence {
+            scan_root: component.clone(),
+            scan_root_absolute_path: Some({
+                #[cfg(unix)]
+                {
+                    NativeAbsolutePath::unix(b"/root".to_vec())
+                }
+                #[cfg(windows)]
+                {
+                    NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>())
+                }
+            }),
+            parent_reopen_recipe: Vec::new(),
+            entry: component,
+        };
+        let mut provider = tui_detail_rescan_provider(&ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        });
+        let request = TuiDetailRescanRequest {
+            binding: DetailRescanBinding {
+                source_scan_id: scan_id,
+                source_root_identity: identity.clone(),
+                source_directory_identity: identity,
+                base_revision: DecimalU128::new(1),
+                revision: DecimalU128::new(2),
+            },
+            directory_locator: locator,
+            reason: DetailRescanReason::Incomplete,
+            max_rows: 1,
+        };
+
+        assert!(matches!(
+            provider.rescan_detail(&request),
+            TuiDetailRescanResult::Failed { binding, failure: TuiDetailRescanFailure::Unavailable }
+                if *binding == request.binding
+        ));
+    }
+
+    #[test]
+    fn scanner_error_mapping_is_conservative() {
+        let cases = [
+            (
+                DetailRescanError::InvalidRequest,
+                TuiDetailRescanFailure::InvalidResult,
+            ),
+            (
+                DetailRescanError::IdentityUnavailable,
+                TuiDetailRescanFailure::IdentityUnavailable,
+            ),
+            (
+                DetailRescanError::IdentityMismatch,
+                TuiDetailRescanFailure::IdentityMismatch,
+            ),
+            (
+                DetailRescanError::MountChanged,
+                TuiDetailRescanFailure::MountChanged,
+            ),
+            (
+                DetailRescanError::SymlinkOrReparse,
+                TuiDetailRescanFailure::SymlinkOrReparse,
+            ),
+            (
+                DetailRescanError::Cancelled,
+                TuiDetailRescanFailure::Cancelled,
+            ),
+            (
+                DetailRescanError::ResourceLimit,
+                TuiDetailRescanFailure::ResourceLimit,
+            ),
+            (
+                DetailRescanError::Unavailable,
+                TuiDetailRescanFailure::Unavailable,
+            ),
+        ];
+        for (scanner, tui) in cases {
+            assert_eq!(map_tui_detail_rescan_error(scanner), tui);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_provider_echoes_binding_and_returns_complete_direct_detail() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root_path = temp.path().join("root");
+        std::fs::create_dir(&root_path).unwrap();
+        std::fs::write(root_path.join("child"), b"1234").unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root_path],
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+        let root = scan.summary.roots[0].clone();
+        let root_identity = root.identity.as_ref().unwrap().clone();
+        let binding = DetailRescanBinding {
+            source_scan_id: root.scan_id.clone(),
+            source_root_identity: root_identity.clone(),
+            source_directory_identity: root_identity,
+            base_revision: DecimalU128::new(1),
+            revision: DecimalU128::new(2),
+        };
+        let request = TuiDetailRescanRequest {
+            binding: binding.clone(),
+            directory_locator: root.executable_native_locator().unwrap().unwrap().clone(),
+            reason: DetailRescanReason::Evicted,
+            max_rows: 8,
+        };
+        let mut provider = tui_detail_rescan_provider(&scan.summary);
+
+        let TuiDetailRescanResult::Refreshed(detail) = provider.rescan_detail(&request) else {
+            panic!("live provider unexpectedly failed");
+        };
+        assert_eq!(detail.binding, binding);
+        assert_eq!(detail.rows.len(), 1);
+        assert_eq!(detail.aggregate.revision, DecimalU128::new(2));
+        assert_eq!(
+            detail.aggregate.direct_child_count,
+            sweepx_model::EvidenceValue::Known {
+                value: DecimalU128::new(1),
+            }
+        );
+        assert!(detail.aggregate.coverage.complete);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

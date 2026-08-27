@@ -10,11 +10,12 @@ use sweepx_core::{
     cancel_with_store, capabilities, cleaner_cargo_detect, cleaner_list, cleaner_show,
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
     render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
-    state_dir_from_explicit_or_default, status_with_store, validate_absolute_root,
+    state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
+    validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
-use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser};
+use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser_with_detail_rescan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FormatArg {
@@ -298,6 +299,7 @@ fn finish_tui_scan(
         println!("{human_output}");
         return ProcessExitCode::from(exit_code);
     }
+    let provider = tui_detail_rescan_provider(&summary);
     let sweepx_core::ScanSummary {
         roots,
         entries,
@@ -319,7 +321,7 @@ fn finish_tui_scan(
             return ProcessExitCode::from(8);
         }
     };
-    let browser_result = run_live_browser(model);
+    let browser_result = run_live_browser_with_detail_rescan(model, provider);
     // The browser restores the terminal before returning, so this report
     // remains visible even though the interactive view used the alternate
     // screen.

@@ -1,3 +1,10 @@
+mod detail_rescan;
+
+pub use detail_rescan::{
+    DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest,
+    DetailRescanResult, DetailRescanner,
+};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
