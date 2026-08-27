@@ -44,7 +44,7 @@ mod backend {
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
         FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-        NtCreateFile,
+        NtCreateFile, RtlIsDosDeviceName_U,
     };
     use windows_sys::Win32::Foundation::{
         HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
@@ -83,6 +83,22 @@ mod backend {
         attributes: u32,
         standard: FILE_STANDARD_INFO,
         file_id: FILE_ID_INFO,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DirectoryOpenRole {
+        Ancestor,
+        AdmittedRoot,
+    }
+
+    impl DirectoryOpenRole {
+        const fn desired_access(self) -> u32 {
+            let access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+            match self {
+                Self::Ancestor => access,
+                Self::AdmittedRoot => access | FILE_LIST_DIRECTORY,
+            }
+        }
     }
 
     fn io_error_from_ntstatus(status: i32) -> io::Error {
@@ -151,15 +167,77 @@ mod backend {
             }
             for name in suffix.split(|unit| *unit == b'\\' as u16) {
                 if name.is_empty()
-                    || name.contains(&(b':' as u16))
                     || name == [b'.' as u16]
                     || name == [b'.' as u16, b'.' as u16]
+                    || name.iter().copied().any(|unit| {
+                        unit <= 31
+                            || matches!(
+                                unit,
+                                0x0022
+                                    | 0x002a
+                                    | 0x002f
+                                    | 0x003a
+                                    | 0x003c
+                                    | 0x003e
+                                    | 0x003f
+                                    | 0x005c
+                                    | 0x007c
+                            )
+                    })
+                    || name
+                        .last()
+                        .is_some_and(|unit| matches!(*unit, 0x002e | 0x0020))
+                    || Self::is_reserved_dos_device_name(name)
                 {
                     return Err(RootOpenError::UnsupportedNamespace);
                 }
                 components.push(name.to_vec());
             }
             Ok(ParsedDrivePath { drive, components })
+        }
+
+        fn is_reserved_dos_device_name(component: &[u16]) -> bool {
+            // Win32 resolves DOS device aliases case-insensitively and before considering an
+            // extension. Relative NtCreateFile opens do neither, so admitting such a spelling
+            // would bind the capability to a different object than ordinary Win32 callers name.
+            let stem_end = component
+                .iter()
+                .position(|unit| *unit == b'.' as u16)
+                .unwrap_or(component.len());
+            let stem = &component[..stem_end];
+            let stem = &stem[..stem
+                .iter()
+                .rposition(|unit| *unit != b' ' as u16)
+                .map_or(0, |index| index + 1)];
+
+            fn ascii_eq_ignore_case(actual: &[u16], expected: &[u8]) -> bool {
+                actual.len() == expected.len()
+                    && actual.iter().zip(expected).all(|(actual, expected)| {
+                        u8::try_from(*actual)
+                            .is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+                    })
+            }
+
+            // CLOCK$ is a legacy DOS device alias even though current RtlIsDosDeviceName_U
+            // implementations do not consistently report it.
+            if ascii_eq_ignore_case(stem, b"CLOCK$") {
+                return true;
+            }
+            if stem.len() == 4
+                && matches!(stem[3], 0x00b9 | 0x00b2 | 0x00b3)
+                && (ascii_eq_ignore_case(&stem[..3], b"COM")
+                    || ascii_eq_ignore_case(&stem[..3], b"LPT"))
+            {
+                return true;
+            }
+            let mut nul_terminated = Vec::with_capacity(stem.len() + 1);
+            nul_terminated.extend_from_slice(stem);
+            nul_terminated.push(0);
+
+            // SAFETY: the component parser rejects interior NULs, and this owned buffer remains
+            // live and NUL-terminated for the duration of the call. Using the Windows routine
+            // keeps case folding and the superscript-digit aliases aligned with Win32 itself.
+            unsafe { RtlIsDosDeviceName_U(nul_terminated.as_ptr()) != 0 }
         }
 
         fn drive_root_names(drive: u8) -> ([u16; 4], [u16; 7]) {
@@ -177,7 +255,10 @@ mod backend {
             )
         }
 
-        fn open_drive_volume_root(drive: u8) -> Result<OwnedHandle, RootOpenError> {
+        fn open_drive_volume_root(
+            drive: u8,
+            volume_role: DirectoryOpenRole,
+        ) -> Result<OwnedHandle, RootOpenError> {
             let (dos_root, nt_root) = Self::drive_root_names(drive);
             // Reject network and indeterminate drive mappings before any root traversal.
             if !matches!(
@@ -190,10 +271,12 @@ mod backend {
             // Pin the drive designator itself, then require it to identify the same directory as
             // the documented local volume-GUID mapping. This rejects SUBST-style directory roots
             // and avoids using the mutable drive mapping for any descendant lookup.
-            let drive_handle = Self::nt_open_directory(ptr::null_mut(), &nt_root)?;
+            let drive_handle =
+                Self::nt_open_directory(ptr::null_mut(), &nt_root, DirectoryOpenRole::Ancestor)?;
             let drive_metadata = Self::reject_reparse_or_nondirectory(&drive_handle)?;
             let volume_root = Self::volume_guid_nt_path(&dos_root)?;
-            let volume_handle = Self::nt_open_directory(ptr::null_mut(), &volume_root)?;
+            let volume_handle =
+                Self::nt_open_directory(ptr::null_mut(), &volume_root, volume_role)?;
             let volume_metadata = Self::reject_reparse_or_nondirectory(&volume_handle)?;
             if drive_metadata.file_id.VolumeSerialNumber
                 != volume_metadata.file_id.VolumeSerialNumber
@@ -239,11 +322,16 @@ mod backend {
         fn open_child_directory(
             parent: &OwnedHandle,
             component: &[u16],
+            role: DirectoryOpenRole,
         ) -> Result<OwnedHandle, RootOpenError> {
-            Self::nt_open_directory(parent.as_raw_handle() as HANDLE, component)
+            Self::nt_open_directory(parent.as_raw_handle() as HANDLE, component, role)
         }
 
-        fn nt_open_directory(parent: HANDLE, name: &[u16]) -> Result<OwnedHandle, RootOpenError> {
+        fn nt_open_directory(
+            parent: HANDLE,
+            name: &[u16],
+            role: DirectoryOpenRole,
+        ) -> Result<OwnedHandle, RootOpenError> {
             let byte_length = name
                 .len()
                 .checked_mul(mem::size_of::<u16>())
@@ -271,7 +359,7 @@ mod backend {
             let status = unsafe {
                 NtCreateFile(
                     &mut handle,
-                    FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+                    role.desired_access(),
                     &object_attributes,
                     &mut io_status,
                     ptr::null(),
@@ -318,16 +406,27 @@ mod backend {
             cancel: &CancellationToken,
         ) -> Result<(OwnedHandle, ObservedMetadata), RootOpenError> {
             let parsed = Self::parse_drive_path(path)?;
-            let mut handle = Self::open_drive_volume_root(parsed.drive)?;
+            let volume_role = if parsed.components.is_empty() {
+                DirectoryOpenRole::AdmittedRoot
+            } else {
+                DirectoryOpenRole::Ancestor
+            };
+            let mut handle = Self::open_drive_volume_root(parsed.drive, volume_role)?;
             let mut observed = Self::reject_reparse_or_nondirectory(&handle)?;
             if cancel.is_cancelled() {
                 return Err(RootOpenError::Cancelled);
             }
-            for component in parsed.components {
+            let last_component = parsed.components.len().checked_sub(1);
+            for (index, component) in parsed.components.into_iter().enumerate() {
                 if cancel.is_cancelled() {
                     return Err(RootOpenError::Cancelled);
                 }
-                let child = Self::open_child_directory(&handle, &component)?;
+                let role = if Some(index) == last_component {
+                    DirectoryOpenRole::AdmittedRoot
+                } else {
+                    DirectoryOpenRole::Ancestor
+                };
+                let child = Self::open_child_directory(&handle, &component, role)?;
                 observed = Self::reject_reparse_or_nondirectory(&child)?;
                 handle = child;
                 if cancel.is_cancelled() {
@@ -431,7 +530,7 @@ mod backend {
                         root.path().display()
                     )),
                     RootOpenError::UnsupportedNamespace => PlatformError::RootRejected(format!(
-                        "root must use an ordinary local drive-letter path without dot components: {}",
+                        "root must use an ordinary local drive-letter path without ambiguous Win32 components: {}",
                         root.path().display()
                     )),
                     RootOpenError::Io(error) => PlatformError::io(root.path(), error),
@@ -525,6 +624,140 @@ mod backend {
 
         fn scanner() -> WindowsPlatformScanner {
             WindowsPlatformScanner::new()
+        }
+
+        fn parse(path: &str) -> Result<ParsedDrivePath, RootOpenError> {
+            WindowsPlatformScanner::parse_drive_path(Path::new(path))
+        }
+
+        #[test]
+        fn parses_ordinary_components_without_changing_case() {
+            let parsed =
+                parse(r"c:\Mixed Case\.well-known\COM10").expect("ordinary Win32 components parse");
+
+            assert_eq!(parsed.drive, b'C');
+            assert_eq!(
+                parsed.components,
+                ["Mixed Case", ".well-known", "COM10"]
+                    .map(|component| component.encode_utf16().collect::<Vec<_>>())
+            );
+        }
+
+        #[test]
+        fn rejects_trailing_dot_or_space_in_every_component() {
+            for path in [
+                r"C:\root.\child",
+                r"C:\root \child",
+                r"C:\root\child.",
+                r"C:\root\child ",
+                r"C:\root\...",
+            ] {
+                assert!(
+                    matches!(parse(path), Err(RootOpenError::UnsupportedNamespace)),
+                    "Win32-normalized component was accepted: {path:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_reserved_dos_device_names_case_insensitively() {
+            for component in [
+                "CON", "con", "PrN", "aux", "NUL", "CLOCK$", "clock$", "ConIn$", "conout$", "COM1",
+                "com9", "LPT1", "lPt9", "COM¹", "com²", "LPT³",
+            ] {
+                let path = format!(r"C:\parent\{component}\child");
+                assert!(
+                    matches!(parse(&path), Err(RootOpenError::UnsupportedNamespace)),
+                    "reserved DOS device name was accepted: {component:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_reserved_dos_device_aliases_with_extensions() {
+            for component in [
+                "NUL.txt",
+                "nul.tar.gz",
+                "CON .txt",
+                "COM1.log",
+                "lpt9...txt",
+                "COM¹.data",
+                "CLOCK$.log",
+                "ConOut$.log",
+            ] {
+                let path = format!(r"C:\parent\{component}");
+                assert!(
+                    matches!(parse(&path), Err(RootOpenError::UnsupportedNamespace)),
+                    "reserved DOS device alias was accepted: {component:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn accepts_near_miss_dos_device_names() {
+            for component in [
+                "CONSOLE", "NUL0", "COM0", "COM10", "COMA", "LPT0", "LPT10", "CONIN", "CONOUT",
+                "XCLOCK$", "XCOM1", "COM1X",
+            ] {
+                let path = format!(r"C:\parent\{component}");
+                assert!(
+                    parse(&path).is_ok(),
+                    "ordinary near-miss name was rejected: {component:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn ancestor_handles_do_not_request_enumeration_rights() {
+            let ancestor = DirectoryOpenRole::Ancestor.desired_access();
+            let admitted_root = DirectoryOpenRole::AdmittedRoot.desired_access();
+
+            assert_eq!(ancestor & FILE_LIST_DIRECTORY, 0);
+            assert_eq!(admitted_root & FILE_LIST_DIRECTORY, FILE_LIST_DIRECTORY);
+            assert_eq!(ancestor, FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE);
+            assert_eq!(admitted_root, ancestor | FILE_LIST_DIRECTORY);
+        }
+
+        #[test]
+        fn admission_rejects_ambiguous_win32_components_before_io() {
+            for path in [
+                r"C:\missing\child.",
+                r"C:\missing\child ",
+                r"C:\missing\NUL.txt",
+                r"C:\missing\cOm1",
+                r"C:\missing\LPT².log",
+                r"C:\missing\CLOCK$",
+                r"C:\missing\ConOut$.log",
+            ] {
+                let forged_root = ScanRoot {
+                    path: PathBuf::from(path),
+                };
+                assert!(
+                    matches!(
+                        scanner().admit_root(&forged_root, &CancellationToken::new()),
+                        Err(PlatformError::RootRejected(_))
+                    ),
+                    "ambiguous Win32 spelling reached filesystem I/O: {path:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_other_non_win32_component_spellings() {
+            for path in [
+                "C:\\parent\\control\u{1}",
+                r#"C:\parent\quo"te"#,
+                r"C:\parent\star*",
+                r"C:\parent\question?",
+                r"C:\parent\less<than",
+                r"C:\parent\greater>than",
+                r"C:\parent\pipe|",
+            ] {
+                assert!(
+                    matches!(parse(path), Err(RootOpenError::UnsupportedNamespace)),
+                    "non-Win32 component spelling was accepted: {path:?}"
+                );
+            }
         }
 
         #[test]
