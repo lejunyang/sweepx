@@ -2036,6 +2036,21 @@ impl AuditStore {
                         message: format!("audit projection unavailable: {error}"),
                     })
                 }
+                AuditError::Database(ref database_error)
+                    if matches!(
+                        database_error.sqlite_error_code(),
+                        Some(
+                            rusqlite::ErrorCode::DatabaseCorrupt
+                                | rusqlite::ErrorCode::NotADatabase
+                                | rusqlite::ErrorCode::SchemaChanged
+                                | rusqlite::ErrorCode::TypeMismatch
+                        )
+                    ) =>
+                {
+                    ProjectionError::Corruption(ProjectionCorruption {
+                        message: format!("audit projection unavailable: {error}"),
+                    })
+                }
                 other => ProjectionError::Operational(other),
             })
     }
