@@ -12,8 +12,8 @@
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
 | Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
-| `sweepx scan` | **Linux：degraded**、**macOS：degraded** 的同步、只读目录扫描 | macOS 目前接入 handle-bound degraded scanner，并通过统一的 `sweepx scan` / `sweepx scan --tui` 暴露；Windows 仍 fail-closed 为 unsupported；未完成三平台发布资格 |
-| `sweepx status` | Unix 上读取已持久化的 operation snapshot | Windows durable state 暂时禁用；它也不是后台任务监控，不表示扫描仍在运行 |
+| `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal；三者均通过 `sweepx scan` / `sweepx scan --tui` 暴露，但都不代表发布资格 |
+| `sweepx status` | Unix 上读取已持久化的 operation snapshot | Windows durable state 禁用、默认 `state_dir=None`，且显式 `--state-dir` fail-closed；它也不是后台任务监控 |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
@@ -56,10 +56,9 @@ irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
 # 查看当前能力矩阵
 cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
-# Linux 上执行开发版只读扫描；默认直接显示有界终端表格
-cargo run -p sweepx-cli -- \
-  --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root
+# 执行 development-grade/degraded 的只读扫描；默认直接显示有界终端表格
+# Windows 不要传 --state-dir；Unix 可显式选择 durable state 目录
+cargo run -p sweepx-cli -- scan /absolute/path/to/root
 
 # 扫描后进入文件管理器式 TUI（Enter/Right 进入，Esc/Backspace/Left 返回）
 cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
@@ -68,7 +67,7 @@ cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
 cargo run -p sweepx-cli -- \
   --format json scan /absolute/path/to/root > /absolute/path/to/scan.json
 
-# 读取扫描结束时保存的 snapshot
+# Unix 上读取扫描结束时保存的 snapshot
 cargo run -p sweepx-cli -- \
   --format json \
   --state-dir /absolute/path/to/sweepx-state \
@@ -85,11 +84,11 @@ cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
 ```
 
-`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描和 state 创建前以 unsupported 拒绝，直到 durable event journal、replay 和 durable terminal event 都实现。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
+`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝，直到 durable event journal、replay 和 durable terminal event 都实现。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
 
 ### `status` 与 `cancel` 的诚实语义
 
-当前扫描是同步命令。Unix 上 `status` 读取扫描结束时写入 durable state 的快照；它不是 live progress API。Windows durable snapshot state 暂时完全禁用：当前实现尚不能同时保证 current-user-private DACL 与逐组件 reparse-point 拒绝，因此默认不创建 state，显式 `--state-dir` 也会失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
+当前扫描是同步命令。Unix 上 `status` 读取扫描结束时写入 durable state 的快照；它不是 live progress API。Windows durable snapshot state 完全禁用：默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
 
 ### 导入 JSON 永远不是执行依据
 
@@ -160,7 +159,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 
 - Linux scanner 已实现为 development-grade/degraded，只能依据当前测试理解，不能据此宣称生产资格或完整文件系统覆盖。
 - macOS scanner 现为 handle-bound degraded live scanner，并通过统一 `sweepx scan` / `scan --tui` 接入；这不等于三平台扫描资格完成。
-- Windows scanner 仍为 fail-closed unsupported；跨平台的 explain、Cleaner metadata 和终端 UI 不等于 Windows 已有 live scanner。
+- Windows scanner 现为 development-grade/degraded 的只读 handle-relative live scanner，并通过统一的 `scan` / `scan --tui` 接入；这不等于 Windows 或三平台扫描已取得发布资格。
 - P4 的 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图。
 - 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流；尚未实际发布稳定版本，也没有签名、SBOM、provenance 或稳定支持承诺。
 
@@ -176,7 +175,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 ## 已知缺口
 
 - Linux scan 的性能预算、复杂文件系统语义和故障注入仍需更完整、可复现的验证。
-- macOS degraded live scanner 已存在，但其资格、覆盖与跨平台一致性仍未完成；Windows live scanner、三平台 native Trash、可信本地审批 broker 与真实 preflight revalidation 尚未实现。
+- macOS handle-bound 与 Windows handle-relative 的 degraded live scanner 均已存在，但其资格、覆盖与跨平台一致性仍未完成；三平台 native Trash、可信本地审批 broker 与真实 preflight revalidation 尚未实现。
 - Cleaner 签名、更新、撤销、沙箱和外部 query/mutation adapter 尚未达到发布状态。
 - P3 plan/simulation authorization、audit/recovery 和 executor 已在 library 层实现；仍没有公共 CLI 合同、可信 HumanApproval broker 或 native adapter。
 - 对 sparse、compressed、hard link、clone/reflink、snapshot、dedup、overlay、quota 和共享存储的空间归因不能被概括成“将释放多少空间”。
