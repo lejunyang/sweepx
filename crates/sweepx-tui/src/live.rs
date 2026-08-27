@@ -2,11 +2,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::mem::size_of;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{
     Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel,
 };
+use std::sync::{Arc, OnceLock};
 #[cfg(unix)]
 use std::sync::{Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -38,8 +38,11 @@ use crate::{
 
 pub const BROWSER_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const DETAIL_RESCAN_QUERY_DEADLINE: Duration = Duration::from_secs(2);
+pub const MAX_DETAIL_RESCAN_WORKERS: usize = 32;
 pub const DEFAULT_MAX_BROWSER_ENTRIES: usize = 16_384;
 pub const DEFAULT_MAX_BROWSER_INDEX_BYTES: usize = 48 * 1024 * 1024;
+
+static DETAIL_RESCAN_WORKER_LIMITER: OnceLock<Arc<DetailRescanWorkerLimiter>> = OnceLock::new();
 
 /// Why an entered directory needs a bounded, prioritized detail rescan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,12 +134,18 @@ pub enum DetailRescanResult {
 
 /// Executes bounded detail queries outside the terminal event thread.
 ///
-/// Implementations must finish a query promptly after `cancel_detail_rescan` is
-/// called. Providers which use the default no-op cancellation hook must enforce
-/// their own finite query bound no longer than `DETAIL_RESCAN_QUERY_DEADLINE`.
-/// A provider which violates that contract is quarantined as the reducer's one
-/// detached worker after the deadline; no replacement worker is created.
+/// Implementations should finish a query promptly after
+/// `cancel_detail_rescan` is called. A non-cooperative provider is quarantined
+/// after `DETAIL_RESCAN_QUERY_DEADLINE` and retains one process-wide worker
+/// permit until it really returns; capacity exhaustion rejects a new browser
+/// instead of creating unbounded detached threads.
 pub trait DetailRescanProvider: Send + Sync + 'static {
+    /// Starts a new single-flight query generation before it is queued to the
+    /// background worker. Providers can use this hook to replace cancellation
+    /// state left by the preceding query without losing a cancellation that
+    /// arrives after the new query has been queued but before the worker runs.
+    fn prepare_detail_rescan(&self) {}
+
     fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult;
 
     fn cancel_detail_rescan(&self) {}
@@ -785,11 +794,13 @@ impl BrowserModel {
             return None;
         };
 
+        let previous_state = self.nodes[node_index].detail_rescan_state.clone();
         self.nodes[node_index].detail_rescan_state = DetailRescanState::Pending { revision };
         self.reload_loaded_level();
         Some(PendingDetailRescan {
             node_index,
             request,
+            previous_state,
             started_at: Instant::now(),
             timed_out: false,
         })
@@ -800,7 +811,11 @@ impl BrowserModel {
         pending: PendingDetailRescan,
         result: DetailRescanResult,
     ) -> bool {
-        if !self.detail_rescan_target_matches(&pending) {
+        if !self.detail_rescan_binding_matches(&pending) {
+            return false;
+        }
+        if self.selected_node_index() != Some(pending.node_index) {
+            self.restore_detail_rescan_state(&pending);
             return false;
         }
         let revision = pending.request.binding.revision;
@@ -824,21 +839,28 @@ impl BrowserModel {
         pending: &PendingDetailRescan,
         failure: DetailRescanFailure,
     ) -> bool {
-        if self.detail_rescan_target_matches(pending) {
+        if self.detail_rescan_binding_matches(pending) {
+            let should_enter = self.selected_node_index() == Some(pending.node_index);
             self.mark_detail_stale(
                 pending.node_index,
                 pending.request.binding.revision,
                 failure,
             );
-            true
+            should_enter
         } else {
             false
         }
     }
 
-    fn detail_rescan_target_matches(&self, pending: &PendingDetailRescan) -> bool {
-        self.selected_node_index() == Some(pending.node_index)
-            && self.node_binding_matches(pending.node_index, &pending.request.binding)
+    fn detail_rescan_binding_matches(&self, pending: &PendingDetailRescan) -> bool {
+        self.node_binding_matches(pending.node_index, &pending.request.binding)
+    }
+
+    fn restore_detail_rescan_state(&mut self, pending: &PendingDetailRescan) {
+        if self.detail_rescan_binding_matches(pending) {
+            self.nodes[pending.node_index].detail_rescan_state = pending.previous_state.clone();
+            self.reload_loaded_level();
+        }
     }
 
     fn node_binding_matches(&self, node_index: usize, binding: &DetailRescanBinding) -> bool {
@@ -1651,6 +1673,7 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
 struct PendingDetailRescan {
     node_index: usize,
     request: DetailRescanRequest,
+    previous_state: DetailRescanState,
     started_at: Instant,
     timed_out: bool,
 }
@@ -1659,6 +1682,51 @@ struct CompletedDetailRescan {
     request: DetailRescanRequest,
     result: DetailRescanResult,
     finished_at: Instant,
+}
+
+#[derive(Debug)]
+struct DetailRescanWorkerLimiter {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+impl DetailRescanWorkerLimiter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<DetailRescanWorkerPermit, BrowserError> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.limit).then_some(active + 1)
+            })
+            .map_err(|_| BrowserError::DetailRescanWorkerCapacity { limit: self.limit })?;
+        Ok(DetailRescanWorkerPermit {
+            limiter: Arc::clone(self),
+        })
+    }
+}
+
+fn detail_rescan_worker_limiter() -> Arc<DetailRescanWorkerLimiter> {
+    Arc::clone(
+        DETAIL_RESCAN_WORKER_LIMITER
+            .get_or_init(|| Arc::new(DetailRescanWorkerLimiter::new(MAX_DETAIL_RESCAN_WORKERS))),
+    )
+}
+
+#[derive(Debug)]
+struct DetailRescanWorkerPermit {
+    limiter: Arc<DetailRescanWorkerLimiter>,
+}
+
+impl Drop for DetailRescanWorkerPermit {
+    fn drop(&mut self) {
+        let previous = self.limiter.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
 }
 
 /// Navigation reducer which delegates bounded detail enumeration to one
@@ -1676,12 +1744,20 @@ pub struct DetailRescanBrowserReducer<P: DetailRescanProvider> {
 }
 
 impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
-    pub fn new(provider: P) -> Self {
+    pub fn new(provider: P) -> Result<Self, BrowserError> {
         Self::try_new_with_deadline(provider, DETAIL_RESCAN_QUERY_DEADLINE)
-            .expect("detail rescan worker must start")
     }
 
-    fn try_new_with_deadline(provider: P, deadline: Duration) -> io::Result<Self> {
+    fn try_new_with_deadline(provider: P, deadline: Duration) -> Result<Self, BrowserError> {
+        Self::try_new_with_limiter(provider, deadline, detail_rescan_worker_limiter())
+    }
+
+    fn try_new_with_limiter(
+        provider: P,
+        deadline: Duration,
+        limiter: Arc<DetailRescanWorkerLimiter>,
+    ) -> Result<Self, BrowserError> {
+        let worker_permit = limiter.acquire()?;
         let provider = Arc::new(provider);
         let worker_provider = Arc::clone(&provider);
         let (request_sender, request_receiver) = sync_channel::<DetailRescanRequest>(1);
@@ -1690,6 +1766,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         let worker = thread::Builder::new()
             .name("sweepx-detail-rescan".to_string())
             .spawn(move || {
+                let _worker_permit = worker_permit;
                 while let Ok(request) = request_receiver.recv() {
                     let result = worker_provider.rescan_detail(&request);
                     if completion_sender
@@ -1737,9 +1814,9 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // Rust cannot forcibly stop a blocked OS thread. Quarantine
-                    // this single worker after the provider's bounded deadline;
-                    // this reducer never creates a replacement, so detached
-                    // work cannot grow without bound within one browser run.
+                    // this single worker after the provider's bounded deadline.
+                    // Its process-wide permit remains owned by the thread, so
+                    // repeated browser runs cannot leak workers without bound.
                     drop(worker);
                 }
             }
@@ -1750,6 +1827,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         let Some(requests) = &self.requests else {
             return Err(Box::new(pending));
         };
+        self.provider().prepare_detail_rescan();
         match requests.try_send(pending.request.clone()) {
             Ok(()) => {
                 *self.pending.borrow_mut() = Some(pending);
@@ -1827,7 +1905,11 @@ where
         }
 
         if self.pending.borrow().is_some() {
-            return BrowserControl::Continue;
+            return if action == BrowserAction::EnterDirectory {
+                BrowserControl::Continue
+            } else {
+                ReadOnlyBrowserReducer.reduce(model, action)
+            };
         }
 
         if action == BrowserAction::EnterDirectory
@@ -1983,6 +2065,8 @@ impl Drop for UnixTerminationFlag {
 pub enum BrowserError {
     #[error("terminal I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("detail rescan worker capacity exhausted: limit={limit}")]
+    DetailRescanWorkerCapacity { limit: usize },
 }
 
 /// Restores all terminal modes independently on explicit restore or drop.
@@ -2986,7 +3070,8 @@ mod tests {
                 binding: Box::new(request.binding.clone()),
                 failure: DetailRescanFailure::Unavailable,
             }
-        });
+        })
+        .unwrap();
         let mut model = model();
         model.status = OutputStatus::Partial;
 
@@ -3006,7 +3091,8 @@ mod tests {
                 request,
                 vec![entry("/root/new.txt", ObjectType::File, 3, 1, Some(1))],
             )
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3041,7 +3127,8 @@ mod tests {
                 binding: Box::new(request.binding.clone()),
                 failure: DetailRescanFailure::Cancelled,
             }
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(evicted_coverage());
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3101,7 +3188,8 @@ mod tests {
                     ),
                     _ => unreachable!(),
                 }
-            });
+            })
+            .unwrap();
             let mut model = rescan_model(incomplete_coverage());
 
             reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3156,7 +3244,8 @@ mod tests {
                     _ => unreachable!(),
                 }
                 result
-            });
+            })
+            .unwrap();
             let mut model = rescan_model(incomplete_coverage());
 
             reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3185,7 +3274,8 @@ mod tests {
                 binding: Box::new(binding),
                 failure: DetailRescanFailure::Cancelled,
             }
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3219,7 +3309,8 @@ mod tests {
                     binding: Box::new(request.binding.clone()),
                     failure: DetailRescanFailure::Unavailable,
                 }
-            });
+            })
+            .unwrap();
             let root = entry("/root", ObjectType::Directory, 1, 1, None);
             let mut child = entry("/root/item", object_type, 2, 1, Some(1));
             child.coverage = incomplete_coverage();
@@ -3251,7 +3342,8 @@ mod tests {
                 binding: Box::new(request.binding.clone()),
                 failure: DetailRescanFailure::Unavailable,
             }
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
         model.nodes[0].entry.native_locator = None;
 
@@ -3277,7 +3369,8 @@ mod tests {
                 binding: Box::new(request.binding.clone()),
                 failure: DetailRescanFailure::Unavailable,
             }
-        });
+        })
+        .unwrap();
         let mut malformed = coverage();
         malformed.complete = false;
         let mut model = rescan_model(malformed);
@@ -3310,7 +3403,8 @@ mod tests {
                     };
                 }
                 result
-            });
+            })
+            .unwrap();
             let mut model = rescan_model(incomplete_coverage());
 
             reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3340,7 +3434,8 @@ mod tests {
                     Some(1),
                 )],
             )
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
@@ -3366,7 +3461,8 @@ mod tests {
                 binding: Box::new(request.binding.clone()),
                 failure: DetailRescanFailure::Unavailable,
             }
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
         model.nodes[0].detail_rescan_state = DetailRescanState::Snapshot {
             revision: DecimalU128::new(u128::MAX),
@@ -3388,7 +3484,7 @@ mod tests {
     fn detail_rescan_is_single_flight_and_does_not_block_quit() {
         let provider = BlockingProvider::new();
         let observer = provider.clone();
-        let reducer = DetailRescanBrowserReducer::new(provider);
+        let reducer = DetailRescanBrowserReducer::new(provider).unwrap();
         let mut model = rescan_model(incomplete_coverage());
 
         assert_eq!(
@@ -3418,6 +3514,91 @@ mod tests {
     }
 
     #[test]
+    fn inflight_rescan_allows_navigation_but_rejects_a_second_enter() {
+        let provider = BlockingProvider::new();
+        let observer = provider.clone();
+        let reducer =
+            DetailRescanBrowserReducer::try_new_with_deadline(provider, Duration::from_millis(1))
+                .unwrap();
+        let mut model = BrowserModel::from_owned_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Partial,
+            Some("scan-live".to_string()),
+            vec![
+                {
+                    let mut root = entry("/first", ObjectType::Directory, 1, 1, None);
+                    root.coverage = incomplete_coverage();
+                    attach_root_locator(&mut root);
+                    root
+                },
+                entry("/second", ObjectType::Directory, 2, 2, None),
+            ],
+            Vec::new(),
+            vec![{
+                let mut aggregate = aggregate(1);
+                aggregate.coverage = incomplete_coverage();
+                aggregate
+            }],
+        )
+        .unwrap();
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        observer.wait_until_called();
+        reducer.reduce(&mut model, BrowserAction::MoveDown);
+        assert_eq!(model.selected_row().unwrap().display_path(), "/second");
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert!(model.is_virtual_roots());
+        assert_eq!(observer.state.0.lock().unwrap().calls, 1);
+        thread::sleep(Duration::from_millis(2));
+        reducer.poll_background(&mut model);
+        assert!(model.is_virtual_roots());
+        assert_eq!(model.selected_row().unwrap().display_path(), "/second");
+        assert_eq!(observer.state.0.lock().unwrap().calls, 1);
+
+        reducer.reduce(&mut model, BrowserAction::MoveUp);
+        assert_eq!(model.selected_row().unwrap().display_path(), "/first");
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        assert!(model.is_virtual_roots());
+        assert_eq!(observer.state.0.lock().unwrap().calls, 1);
+    }
+
+    #[test]
+    fn inflight_rescan_allows_back_and_discards_the_completion() {
+        let provider = BlockingProvider::new();
+        let observer = provider.clone();
+        let reducer = DetailRescanBrowserReducer::new(provider).unwrap();
+        let mut model = rescan_model(coverage());
+        model.enter_selected();
+        model.nodes[1].entry.object_type = ObjectType::Directory;
+        model.nodes[1].entry.coverage = incomplete_coverage();
+        model.nodes[1].aggregate = Some({
+            let mut aggregate = aggregate(2);
+            aggregate.coverage = incomplete_coverage();
+            aggregate
+        });
+        model.nodes[1].entry.native_locator = model.nodes[0].entry.native_locator.clone();
+        let child_identity = model.nodes[1].entry.identity.clone().unwrap();
+        let child_component = native_component(&model.nodes[1].entry);
+        if let Some(locator) = &mut model.nodes[1].entry.native_locator {
+            locator.entry = child_component;
+            locator.parent_reopen_recipe = vec![locator.scan_root.clone()];
+            locator.entry.entry_id = child_identity.entry_id.clone();
+            locator.entry.parent_id = child_identity.parent_id.clone();
+        }
+        model.reload_loaded_level();
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        observer.wait_until_called();
+        reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+        assert!(model.is_virtual_roots());
+
+        reducer.cancel_background();
+        finish_background(&reducer, &mut model);
+        assert!(model.is_virtual_roots());
+        assert_eq!(model.visible_rows()[0].display_path(), "/root");
+    }
+
+    #[test]
     fn event_loop_accepts_quit_keys_while_detail_rescan_is_running() {
         let quit_keys = [
             key(KeyCode::Char('q')),
@@ -3429,7 +3610,7 @@ mod tests {
         for quit_key in quit_keys {
             let provider = BlockingProvider::new();
             let observer = provider.clone();
-            let reducer = DetailRescanBrowserReducer::new(provider);
+            let reducer = DetailRescanBrowserReducer::new(provider).unwrap();
             let backend = TestBackend::new(80, 14);
             let mut terminal = Terminal::new(backend).unwrap();
             let mut model = rescan_model(incomplete_coverage());
@@ -3461,7 +3642,7 @@ mod tests {
     fn event_loop_termination_cancels_an_inflight_detail_rescan() {
         let provider = BlockingProvider::new();
         let observer = provider.clone();
-        let reducer = DetailRescanBrowserReducer::new(provider);
+        let reducer = DetailRescanBrowserReducer::new(provider).unwrap();
         let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut model = rescan_model(incomplete_coverage());
@@ -3494,7 +3675,7 @@ mod tests {
         let provider = BlockingProvider::new();
         let observer = provider.clone();
         let mut model = rescan_model(incomplete_coverage());
-        let reducer = DetailRescanBrowserReducer::new(provider);
+        let reducer = DetailRescanBrowserReducer::new(provider).unwrap();
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
         observer.wait_until_called();
@@ -3535,6 +3716,61 @@ mod tests {
         let (released, changed) = &*release;
         *released.lock().unwrap() = true;
         changed.notify_all();
+    }
+
+    #[test]
+    fn repeated_non_cooperative_workers_exhaust_a_strict_shared_limit() {
+        let limiter = Arc::new(DetailRescanWorkerLimiter::new(2));
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let mut reducers = Vec::new();
+        for _ in 0..2 {
+            let worker_release = Arc::clone(&release);
+            let reducer = DetailRescanBrowserReducer::try_new_with_limiter(
+                move |request: &DetailRescanRequest| {
+                    let (released, changed) = &*worker_release;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                    DetailRescanResult::Failed {
+                        binding: Box::new(request.binding.clone()),
+                        failure: DetailRescanFailure::Cancelled,
+                    }
+                },
+                Duration::from_millis(1),
+                Arc::clone(&limiter),
+            )
+            .unwrap();
+            let mut model = rescan_model(incomplete_coverage());
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+            thread::sleep(Duration::from_millis(2));
+            drop(reducer);
+            reducers.push(model);
+        }
+        assert_eq!(limiter.active.load(Ordering::Acquire), 2);
+
+        let error = match DetailRescanBrowserReducer::try_new_with_limiter(
+            UnavailableDetailRescanProvider,
+            Duration::from_millis(1),
+            Arc::clone(&limiter),
+        ) {
+            Ok(_) => panic!("worker capacity must be exhausted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            BrowserError::DetailRescanWorkerCapacity { limit: 2 }
+        ));
+
+        let (released, changed) = &*release;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while limiter.active.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(limiter.active.load(Ordering::Acquire), 0);
+        drop(reducers);
     }
 
     #[test]
@@ -3585,7 +3821,8 @@ mod tests {
                 request,
                 vec![entry("/root/new.txt", ObjectType::File, 3, 1, Some(1))],
             )
-        });
+        })
+        .unwrap();
         let mut model = rescan_model(incomplete_coverage());
 
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);

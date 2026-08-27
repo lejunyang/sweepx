@@ -440,6 +440,15 @@ fn live_tui_detail_rescan_provider(
 }
 
 impl DetailRescanProvider for TuiDetailRescanProvider {
+    fn prepare_detail_rescan(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(mut cancel) = live.cancel.lock()
+        {
+            *cancel = CancellationToken::new();
+        }
+    }
+
     fn rescan_detail(&self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if let Some(live) = &self.live {
@@ -482,12 +491,6 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                     failure: map_tui_detail_rescan_error(error),
                 },
             };
-            if cancel.is_cancelled()
-                && let Ok(mut current) = live.cancel.lock()
-                && current.is_cancelled()
-            {
-                *current = CancellationToken::new();
-            }
             return result;
         }
         TuiDetailRescanResult::Failed {
@@ -734,6 +737,7 @@ mod tui_detail_rescan_provider_tests {
         };
         let provider = tui_detail_rescan_provider(&scan.summary);
 
+        provider.prepare_detail_rescan();
         provider.cancel_detail_rescan();
         assert!(matches!(
             provider.rescan_detail(&request),
@@ -742,6 +746,7 @@ mod tui_detail_rescan_provider_tests {
                 ..
             }
         ));
+        provider.prepare_detail_rescan();
         assert!(matches!(
             provider.rescan_detail(&request),
             TuiDetailRescanResult::Refreshed(_)
