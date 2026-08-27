@@ -2030,6 +2030,7 @@ impl AuditStore {
                 AuditError::HeadMismatch
                 | AuditError::JournalTampered { .. }
                 | AuditError::IntegrityCheckFailed(_)
+                | AuditError::DatabaseConfiguration(_)
                 | AuditError::JournalDecode(_) => {
                     ProjectionError::Corruption(ProjectionCorruption {
                         message: format!("audit projection unavailable: {error}"),
@@ -4851,6 +4852,17 @@ mod tests {
                 )
                 .unwrap();
         }
+        let error = store.projection_snapshot().unwrap_err();
+        assert!(matches!(error, ProjectionError::Corruption(_)));
+    }
+
+    #[test]
+    fn projection_snapshot_classifies_invalid_database_header_as_corruption() {
+        let (_temp, store) = store();
+        let connection = store.connection().unwrap();
+        connection.pragma_update(None, "application_id", 0).unwrap();
+        drop(connection);
+
         let error = store.projection_snapshot().unwrap_err();
         assert!(matches!(error, ProjectionError::Corruption(_)));
     }
