@@ -1,9 +1,9 @@
-#[cfg(target_os = "macos")]
-use sweepx_platform::OpenedDirectory;
 use sweepx_platform::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryReadLimits,
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
+#[cfg(target_os = "macos")]
+use sweepx_platform::{DirectoryHandleAdmission, OpenedDirectory};
 
 #[derive(Debug)]
 pub struct MacosUnavailableDirectory;
@@ -537,6 +537,21 @@ mod backend {
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             child.validate_for_parent(&parent.path).map_err(|error| {
                 PlatformError::InvalidDirectoryEntry {
                     parent: parent.path.clone(),
@@ -563,6 +578,14 @@ mod backend {
 
             match kind_from_mode(observed.stat.st_mode) {
                 EntryKind::Directory => {
+                    if directory_admission == DirectoryHandleAdmission::Deny {
+                        return Ok(WalkEntry::Boundary(BoundaryRecord {
+                            path: child.path.clone(),
+                            kind: BoundaryKind::ResourceLimit,
+                            reason: ReasonCode::ResourceLimit,
+                            detail: "frontier limit exceeded".to_string(),
+                        }));
+                    }
                     let handle = Self::open_child_directory(parent, child, &observed)?;
                     let metadata = Self::metadata_to_entry(
                         &child.path,
@@ -652,6 +675,16 @@ impl PlatformScanner for MacosPlatformScanner {
         Err(PlatformError::Unsupported(
             "macOS scanner backend is unavailable on this host".to_string(),
         ))
+    }
+
+    fn inspect_child_with_directory_admission(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        _directory_admission: sweepx_platform::DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        self.inspect_child(parent, child, cancel)
     }
 
     fn is_same_mount(

@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use sweepx_platform::DirectoryHandleAdmission;
 use sweepx_platform::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryReadLimits,
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
@@ -1203,6 +1205,21 @@ mod backend {
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             Self::ensure_not_cancelled(cancel)?;
             child
                 .validate_for_parent(&parent.display_path)
@@ -1268,6 +1285,14 @@ mod backend {
                     &observed,
                     EntryKind::Directory,
                 );
+                if directory_admission == DirectoryHandleAdmission::Deny {
+                    return Ok(WalkEntry::Boundary(BoundaryRecord {
+                        path: child.path.clone(),
+                        kind: BoundaryKind::ResourceLimit,
+                        reason: ReasonCode::ResourceLimit,
+                        detail: "frontier limit exceeded".to_string(),
+                    }));
+                }
                 Self::ensure_not_cancelled(cancel)?;
                 let directory_handle =
                     match Self::open_enumerated_child_directory(&parent.handle, units) {
@@ -2530,6 +2555,16 @@ mod backend {
             Err(PlatformError::Unsupported(
                 "Windows scanner backend is unavailable on this host".to_string(),
             ))
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            _directory_admission: sweepx_platform::DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child(parent, child, cancel)
         }
 
         fn enumerate_children(

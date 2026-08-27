@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use sweepx_model::{NativeName, ReasonCode};
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord,
-    DirectoryReadLimits, EntryIdentity, EntryKind, EntryMetadata, ErrorRecord, FilesystemIdentity,
-    HardLinkKey, MountIdentity, OpenedDirectory, PlatformError, PlatformScanner, RootAdmission,
-    ScanRoot, WalkEntry, error_kind_for_io, fingerprint_for, known_count, known_u128,
-    reason_for_io,
+    DirectoryHandleAdmission, DirectoryReadLimits, EntryIdentity, EntryKind, EntryMetadata,
+    ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity, OpenedDirectory, PlatformError,
+    PlatformScanner, RootAdmission, ScanRoot, WalkEntry, error_kind_for_io, fingerprint_for,
+    known_count, known_u128, reason_for_io,
 };
 
 // Native mutation remains a test-only qualification concern. In particular,
@@ -496,6 +496,21 @@ impl PlatformScanner for LinuxPlatformScanner {
         child: &DirectoryEntryRecord,
         cancel: &CancellationToken,
     ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        self.inspect_child_with_directory_admission(
+            parent,
+            child,
+            cancel,
+            DirectoryHandleAdmission::Allow,
+        )
+    }
+
+    fn inspect_child_with_directory_admission(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        directory_admission: DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
         child
             .validate_for_parent(&parent.display_path)
             .map_err(|error| PlatformError::InvalidDirectoryEntry {
@@ -523,6 +538,14 @@ impl PlatformScanner for LinuxPlatformScanner {
         };
 
         if Self::kind_from_mode(pinned_stat.st_mode) == EntryKind::Directory {
+            if directory_admission == DirectoryHandleAdmission::Deny {
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path,
+                    kind: BoundaryKind::ResourceLimit,
+                    reason: ReasonCode::ResourceLimit,
+                    detail: "frontier limit exceeded".to_string(),
+                }));
+            }
             let directory_fd = match Self::open_matching_child_directory(
                 &parent.fd,
                 &name,
@@ -666,6 +689,55 @@ mod tests {
             .unwrap();
 
         assert!(matches!(entry, WalkEntry::Link(_)));
+    }
+
+    #[test]
+    fn denied_directory_admission_classifies_without_opening_a_retained_handle() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("directory")).unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        std::os::unix::fs::symlink("file", temp.path().join("link")).unwrap();
+
+        let scanner = LinuxPlatformScanner::new();
+        let mut admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let children = scanner
+            .enumerate_children(
+                &mut admission.directory,
+                &CancellationToken::new(),
+                limits(64),
+            )
+            .unwrap()
+            .entries;
+
+        for child in children {
+            let name = child.file_name.clone();
+            let entry = scanner
+                .inspect_child_with_directory_admission(
+                    &admission.directory,
+                    &child,
+                    &CancellationToken::new(),
+                    DirectoryHandleAdmission::Deny,
+                )
+                .unwrap();
+            if name == NativeName::unix(b"directory".to_vec()) {
+                assert!(matches!(
+                    entry,
+                    WalkEntry::Boundary(BoundaryRecord {
+                        kind: BoundaryKind::ResourceLimit,
+                        ..
+                    })
+                ));
+            } else if name == NativeName::unix(b"file".to_vec()) {
+                assert!(matches!(entry, WalkEntry::File(_)));
+            } else if name == NativeName::unix(b"link".to_vec()) {
+                assert!(matches!(entry, WalkEntry::Link(_)));
+            }
+        }
     }
 
     #[test]

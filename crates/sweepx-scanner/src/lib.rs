@@ -18,9 +18,10 @@ use sweepx_model::{
     ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity, ScannedEntry, VolumeOrMountIdentity,
 };
 use sweepx_platform::{
-    BoundaryKind, BoundaryRecord, CancellationToken, DirectoryReadLimits, EntryKind, EntryMetadata,
-    HardLinkKey, PlatformError, PlatformScanner, RootAdmission, ScanResourceLimits, ScanRoot,
-    WalkEntry, inspect_bound_child, known_count, known_u128, lower_bound_u128, unknown_u128,
+    BoundaryKind, BoundaryRecord, CancellationToken, DirectoryHandleAdmission, DirectoryReadLimits,
+    EntryKind, EntryMetadata, HardLinkKey, PlatformError, PlatformScanner, RootAdmission,
+    ScanResourceLimits, ScanRoot, WalkEntry, inspect_bound_child_with_directory_admission,
+    known_count, known_u128, lower_bound_u128, unknown_u128,
 };
 use thiserror::Error;
 
@@ -274,6 +275,11 @@ struct DirectoryTask<D> {
     child_directory_permits: usize,
 }
 
+struct ScheduledDirectory<D> {
+    current: FrontierDirectory<D>,
+    child_directory_permits: usize,
+}
+
 struct DirectoryTaskResult<D> {
     ticket: u128,
     child_directory_permits: usize,
@@ -492,15 +498,18 @@ fn inspect_directory_entry<P: PlatformScanner + ?Sized>(
     cancel: &CancellationToken,
     child_directory_permit: bool,
 ) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
-    if !child_directory_permit {
-        return Ok(WalkEntry::Boundary(BoundaryRecord {
-            path: directory_entry.path.clone(),
-            kind: BoundaryKind::ResourceLimit,
-            reason: ReasonCode::ResourceLimit,
-            detail: "frontier limit exceeded".to_string(),
-        }));
-    }
-    inspect_bound_child(platform, parent, parent_path, directory_entry, cancel)
+    inspect_bound_child_with_directory_admission(
+        platform,
+        parent,
+        parent_path,
+        directory_entry,
+        cancel,
+        if child_directory_permit {
+            DirectoryHandleAdmission::Allow
+        } else {
+            DirectoryHandleAdmission::Deny
+        },
+    )
 }
 
 impl<P> Scanner<P>
@@ -530,6 +539,11 @@ where
         if self.options.max_workers == 0 {
             return Err(ScanError::RootValidation(
                 "max_workers must be greater than zero".to_string(),
+            ));
+        }
+        if self.options.resource_limits.max_frontier_entries == 0 {
+            return Err(ScanError::RootValidation(
+                "max_frontier_entries must be greater than zero".to_string(),
             ));
         }
         let mut next_entry_ordinal = Some(1u128);
@@ -734,6 +748,7 @@ where
                 // sync channels have a common, explicit bound.
                 let mut ready = BTreeMap::<u128, DirectoryTaskResult<P::DirectoryHandle>>::new();
                 let mut ticket_paths = BTreeMap::<u128, PathBuf>::new();
+                let mut scheduled = VecDeque::<ScheduledDirectory<P::DirectoryHandle>>::new();
 
                 loop {
                     if cancel.is_cancelled() && next_commit_ticket == next_dispatch_ticket {
@@ -749,8 +764,43 @@ where
                         sink.push_progress(&root_path, ProgressEvent::Cancelled { path })?;
                         break;
                     }
-                    if next_commit_ticket == next_dispatch_ticket && frontier.is_empty() {
+                    if next_commit_ticket == next_dispatch_ticket
+                        && scheduled.is_empty()
+                        && frontier.is_empty()
+                    {
                         break;
+                    }
+                    if next_commit_ticket == next_dispatch_ticket
+                        && scheduled.is_empty()
+                        && !frontier.is_empty()
+                    {
+                        let directory_count = frontier.len();
+                        let available = self
+                            .options
+                            .resource_limits
+                            .max_frontier_entries
+                            .saturating_sub(active_frontier_entries);
+                        let quotient = available / directory_count;
+                        let remainder = available % directory_count;
+                        for index in 0..directory_count {
+                            let current = frontier
+                                .pop_front()
+                                .expect("frontier round length was captured");
+                            let child_directory_permits = quotient
+                                .saturating_add(usize::from(index < remainder))
+                                .min(self.options.resource_limits.max_directory_batch_entries);
+                            active_frontier_entries = active_frontier_entries
+                                .checked_add(child_directory_permits)
+                                .ok_or_else(|| {
+                                    PlatformError::ResourceLimit(
+                                        "frontier permit accounting overflow".to_string(),
+                                    )
+                                })?;
+                            scheduled.push_back(ScheduledDirectory {
+                                current,
+                                child_directory_permits,
+                            });
+                        }
                     }
 
                     while !cancel.is_cancelled()
@@ -762,7 +812,11 @@ where
                         if cancel.is_cancelled() {
                             break;
                         }
-                        let Some(current) = frontier.pop_front() else {
+                        let Some(ScheduledDirectory {
+                            current,
+                            child_directory_permits,
+                        }) = scheduled.pop_front()
+                        else {
                             break;
                         };
                         let ticket = next_dispatch_ticket;
@@ -790,7 +844,7 @@ where
                                 ticket,
                                 DirectoryTaskResult {
                                     ticket,
-                                    child_directory_permits: 0,
+                                    child_directory_permits,
                                     outcome: DirectoryTaskOutcome::VisitedLimit {
                                         path: current.path.clone(),
                                     },
@@ -799,14 +853,6 @@ where
                             continue;
                         }
 
-                        let child_directory_permits = self
-                            .options
-                            .resource_limits
-                            .max_frontier_entries
-                            .saturating_sub(active_frontier_entries)
-                            .saturating_sub(frontier.len())
-                            .min(self.options.resource_limits.max_directory_batch_entries);
-                        active_frontier_entries += child_directory_permits;
                         task_tx
                             .send(DirectoryTask {
                                 ticket,
@@ -1925,6 +1971,35 @@ mod tests {
     }
 
     #[test]
+    fn frontier_admission_is_independent_of_worker_count() {
+        fn scan_with_workers(max_workers: usize) -> Vec<(String, ObjectType)> {
+            let probe = Arc::new(SchedulerProbe::new(0));
+            let platform = SchedulingPlatform::new(4, probe);
+            let root = platform.root.clone();
+            let summary = Scanner::new(
+                platform,
+                ScannerOptions {
+                    scan_id: ScanId::new(format!("worker-parity-{max_workers}")),
+                    max_workers,
+                    resource_limits: ScanResourceLimits {
+                        max_frontier_entries: 3,
+                        ..ScanResourceLimits::default()
+                    },
+                },
+            )
+            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+            .unwrap();
+            summary
+                .entries
+                .into_iter()
+                .map(|entry| (entry.display_path, entry.object_type))
+                .collect()
+        }
+
+        assert_eq!(scan_with_workers(1), scan_with_workers(4));
+    }
+
+    #[test]
     fn sequencer_commits_worker_results_in_stable_ticket_order() {
         let root = PathBuf::from("/scheduler-root");
         let slow = root.join("dir-000");
@@ -2398,7 +2473,9 @@ mod tests {
             "live directory handle high-water exceeded the frontier permit cap"
         );
         assert_eq!(live_handles.load(Ordering::SeqCst), 0);
-        assert_eq!(child_inspections.load(Ordering::SeqCst), 2);
+        // Every token is still inspected so non-directory entries cannot be
+        // lost; only two inspections may retain directory handles.
+        assert_eq!(child_inspections.load(Ordering::SeqCst), 16);
         assert_eq!(
             result
                 .boundaries
@@ -2438,7 +2515,9 @@ mod tests {
 
         assert_eq!(max_live_handles.load(Ordering::SeqCst), 1);
         assert_eq!(live_handles.load(Ordering::SeqCst), 0);
-        assert_eq!(child_inspections.load(Ordering::SeqCst), 0);
+        // Metadata-only inspection classifies every token while denying every
+        // child directory before a second retained handle is constructed.
+        assert_eq!(child_inspections.load(Ordering::SeqCst), 4);
         assert_eq!(
             result
                 .boundaries
@@ -2446,6 +2525,128 @@ mod tests {
                 .filter(|boundary| boundary.detail == "frontier limit exceeded")
                 .count(),
             4
+        );
+    }
+
+    #[test]
+    fn zero_frontier_limit_fails_before_root_admission() {
+        let live_handles = Arc::new(AtomicUsize::new(0));
+        let max_live_handles = Arc::new(AtomicUsize::new(0));
+        let child_inspections = Arc::new(AtomicUsize::new(0));
+        let platform = HandleCountingPlatform::new(
+            1,
+            Arc::clone(&live_handles),
+            Arc::clone(&max_live_handles),
+            Arc::clone(&child_inspections),
+        );
+        let root = platform.root.clone();
+
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries: 0,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new());
+
+        assert!(matches!(
+            result,
+            Err(ScanError::RootValidation(message))
+                if message == "max_frontier_entries must be greater than zero"
+        ));
+        assert_eq!(live_handles.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_handles.load(Ordering::SeqCst), 0);
+        assert_eq!(child_inspections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn full_frontier_still_observes_files_and_links() {
+        let root = PathBuf::from("/root");
+        let directory = root.join("dir");
+        let file = root.join("file.bin");
+        let link = root.join("link");
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![
+                    test_entry(&root, "dir"),
+                    test_entry(&root, "file.bin"),
+                    test_entry(&root, "link"),
+                ],
+                BTreeMap::from([
+                    (
+                        directory.clone(),
+                        WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                            metadata: test_metadata(
+                                directory.clone(),
+                                "dir",
+                                EntryKind::Directory,
+                                Some(1),
+                            ),
+                            handle: FakeDirectoryHandle {
+                                path: directory.clone(),
+                                capability_id: 2,
+                                cursor: 0,
+                            },
+                        }),
+                    ),
+                    (
+                        file.clone(),
+                        WalkEntry::File(test_metadata(
+                            file.clone(),
+                            "file.bin",
+                            EntryKind::File,
+                            Some(1),
+                        )),
+                    ),
+                    (
+                        link.clone(),
+                        WalkEntry::Link(test_metadata(
+                            link.clone(),
+                            "link",
+                            EntryKind::Symlink,
+                            Some(1),
+                        )),
+                    ),
+                ]),
+            ),
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries: 1,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(result.entries.iter().any(|entry| {
+            entry.display_path == file.display().to_string()
+                && entry.object_type == ObjectType::File
+        }));
+        assert!(result.entries.iter().any(|entry| {
+            entry.display_path == link.display().to_string()
+                && entry.object_type == ObjectType::Symlink
+        }));
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.path == directory
+                && boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "frontier limit exceeded"
+        }));
+        assert!(
+            result.boundaries.iter().any(|boundary| {
+                boundary.path == link && boundary.kind == BoundaryKind::Symlink
+            })
         );
     }
 
@@ -3576,6 +3777,16 @@ mod tests {
             unreachable!("empty roots have no children")
         }
 
+        fn inspect_child_with_directory_admission(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+            _directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("empty roots have no children")
+        }
+
         fn is_same_mount(
             &self,
             _root: &EntryMetadata,
@@ -3735,6 +3946,21 @@ mod tests {
             child: &DirectoryEntryRecord,
             _cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                _cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             self.child_inspections.fetch_add(1, Ordering::SeqCst);
             child.validate_for_parent(&parent.path).map_err(|error| {
                 PlatformError::InvalidDirectoryEntry {
@@ -3750,6 +3976,14 @@ mod tests {
                 .and_then(|index| index.parse::<u64>().ok())
                 .expect("generated handle-counting directory name")
                 + 2;
+            if directory_admission == DirectoryHandleAdmission::Deny {
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::ResourceLimit,
+                    reason: ReasonCode::ResourceLimit,
+                    detail: "frontier limit exceeded".to_string(),
+                }));
+            }
             Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
                 metadata: self.metadata(child.path.clone(), capability_id),
                 handle: CountingDirectoryHandle::new(
@@ -3984,6 +4218,21 @@ mod tests {
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
@@ -4002,6 +4251,14 @@ mod tests {
                     .and_then(|index| index.parse::<u64>().ok())
                     .expect("generated scheduler directory name");
                 let capability_id = index + 2;
+                if directory_admission == DirectoryHandleAdmission::Deny {
+                    return Ok(WalkEntry::Boundary(BoundaryRecord {
+                        path: child.path.clone(),
+                        kind: BoundaryKind::ResourceLimit,
+                        reason: ReasonCode::ResourceLimit,
+                        detail: "frontier limit exceeded".to_string(),
+                    }));
+                }
                 Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
                     metadata: self.metadata(
                         child.path.clone(),
@@ -4215,6 +4472,21 @@ mod tests {
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             if cancel.is_cancelled() {
                 return Err(PlatformError::Cancelled);
             }
@@ -4230,6 +4502,14 @@ mod tests {
             })?;
             match self.walk_entries.get(&child.path) {
                 Some(WalkEntry::Directory(opened)) => {
+                    if directory_admission == DirectoryHandleAdmission::Deny {
+                        return Ok(WalkEntry::Boundary(BoundaryRecord {
+                            path: child.path.clone(),
+                            kind: BoundaryKind::ResourceLimit,
+                            reason: ReasonCode::ResourceLimit,
+                            detail: "frontier limit exceeded".to_string(),
+                        }));
+                    }
                     Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
                         metadata: opened.metadata.clone(),
                         handle: FakeDirectoryHandle {

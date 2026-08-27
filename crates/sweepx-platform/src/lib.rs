@@ -390,6 +390,18 @@ pub enum WalkEntry<D> {
     Error(ErrorRecord),
 }
 
+/// Whether child inspection may retain a newly opened directory handle.
+///
+/// A denied directory is still inspected with no-follow metadata semantics so
+/// files, links, reparse points, and errors in the same batch are not lost when
+/// a traversal frontier is full. Backends must return a resource-limit boundary
+/// for a directory before constructing the retained handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryHandleAdmission {
+    Allow,
+    Deny,
+}
+
 impl<D> WalkEntry<D> {
     /// Validates that an inspection result still describes the enumerated child.
     ///
@@ -650,6 +662,19 @@ pub trait PlatformScanner: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError>;
 
+    /// Performs the same bound inspection while optionally denying creation of
+    /// a retained child-directory handle. Implementations must classify a
+    /// denied directory without first constructing its retained handle; this
+    /// method is required so a new backend cannot accidentally bypass the
+    /// scheduler's handle budget.
+    fn inspect_child_with_directory_admission(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        directory_admission: DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError>;
+
     fn is_same_mount(
         &self,
         root: &EntryMetadata,
@@ -670,6 +695,24 @@ pub fn inspect_bound_child<P: PlatformScanner + ?Sized>(
     child: &DirectoryEntryRecord,
     cancel: &CancellationToken,
 ) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    inspect_bound_child_with_directory_admission(
+        platform,
+        parent,
+        parent_path,
+        child,
+        cancel,
+        DirectoryHandleAdmission::Allow,
+    )
+}
+
+pub fn inspect_bound_child_with_directory_admission<P: PlatformScanner + ?Sized>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    directory_admission: DirectoryHandleAdmission,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
     if cancel.is_cancelled() {
         return Err(PlatformError::Cancelled);
     }
@@ -679,7 +722,12 @@ pub fn inspect_bound_child<P: PlatformScanner + ?Sized>(
             detail: error.to_string(),
         }
     })?;
-    let inspected = platform.inspect_child(parent, child, cancel)?;
+    let inspected = platform.inspect_child_with_directory_admission(
+        parent,
+        child,
+        cancel,
+        directory_admission,
+    )?;
     inspected
         .validate_for_child(parent_path, child)
         .map_err(|error| PlatformError::InvalidDirectoryEntry {
