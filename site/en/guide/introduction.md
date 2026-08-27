@@ -15,11 +15,11 @@ SweepX is a safety-first Rust disk-analysis project. The current repository has 
 - The macOS scanner now exposes a handle-bound synchronous, read-only live scan and still reports only `degraded`, not release qualification.
 - The Windows scanner now provides a handle-relative synchronous read-only live scan through `scan` / `scan --tui`. It remains development-grade/degraded, not release-qualified.
 - On Unix, `status` reads a persisted terminal snapshot. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `cancel` remains `disabled` because there is no live operation registry.
-- Scan NDJSON remains disabled until durable journaling and replay exist; current machine scan output uses JSON.
+- The protocol layer now has durable event envelope/stream validators, opaque durable-cursor constraints, and schema/golden coverage; SQLite journaling/replay and atomic terminal persistence are still incomplete, so scan NDJSON remains disabled and current machine output stays JSON.
 - `explain` analyzes bounded `scan.result` JSON, but imported data is downgraded to stale/incomplete provenance and candidates remain report-only.
 - Built-in Cleaners support metadata-only list/show and fail closed on Core-version incompatibility.
-- `sweepx scan --tui` opens a file-manager-style, read-only browser in the same binary after scanning. It enters and leaves directories without an intermediate JSON file.
-- P3 implements immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed deterministic simulated executor as library APIs. The Unix audit store now uses bundled SQLite WAL atomic transactions plus event replay; there is still no trusted HumanApproval broker.
+- `sweepx scan --tui` opens a file-manager-style, read-only browser in the same binary after scanning. It enters and leaves directories without an intermediate JSON file. Directory detail rescans now run as a single-flight background task with a 2 s deadline; navigation and quit do not wait for a non-cooperative worker, late completions are discarded, and a process-wide cap of 32 bounds stuck workers.
+- P3 implements immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed deterministic simulated executor as library APIs. Durable event validation and schema/golden coverage now exist at the protocol layer, while SQLite journaling/replay and atomic terminal persistence remain incomplete; there is still no trusted HumanApproval broker.
 
 Those are code- and test-backed development capabilities. The repository now has cross-platform archives, installers, and release automation, but no stable release, production support, or three-platform scan qualification.
 

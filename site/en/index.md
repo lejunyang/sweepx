@@ -29,7 +29,7 @@ features:
 ---
 
 > [!CAUTION]
-> **SweepX has no cleanup capability today.** P3 plan, authorization, durable-audit, and executor work is library-only deterministic simulation. The simulator accepts no native path and uses only a sealed fake adapter. The Unix audit store now uses bundled SQLite WAL atomic transactions plus event replay, but that is still not real-execution qualification.
+> **SweepX has no cleanup capability today.** P3 plan, authorization, durable-audit, and executor work is library-only deterministic simulation. The simulator accepts no native path and uses only a sealed fake adapter. The protocol layer now has durable event envelope/stream validation plus schema/golden coverage, but SQLite journaling/replay and atomic terminal persistence are still incomplete, which is not real-execution qualification.
 
 ## What works now
 
@@ -42,10 +42,10 @@ features:
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |
 | Cleaner | read-only metadata list/show with compatibility gates |
-| CLI/TUI | one `sweepx` entry point; terminal table by default, directory browser via `scan --tui` |
+| CLI/TUI | one `sweepx` entry point; terminal table by default, directory browser via `scan --tui`; detail rescans run as single-flight background work with a 2 s deadline and responsive navigation/quit |
 | Trash / Permanent | absent |
 
-The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. Current machine scan output uses JSON; NDJSON is disabled until durable journaling and replay exist.
+The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. Current machine scan output uses JSON; durable event envelope/stream validation is in place, but NDJSON remains disabled until SQLite journaling/replay and atomic terminal persistence exist.
 Release automation builds five target archives, checksums, installers, and this GitHub Pages site. No stable release has been published yet.
 
 ## Read by question

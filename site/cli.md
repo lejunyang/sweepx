@@ -64,7 +64,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 - macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
 - Windows backend 现提供 handle-relative 的 degraded 只读扫描，并通过 `scan` / `scan --tui` 接入；这不等于发布资格。
 - Windows 扫描不要传 `--state-dir`；Unix 可显式选择 durable snapshot 目录。
-- `scan --format ndjson` 当前在扫描前返回 unsupported；只有 durable event journal、replay 和 durable terminal event 完成后才会开放。
+- `scan --format ndjson` 当前在扫描前返回 unsupported；协议层的 durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 已完成，但 SQLite journal、replay 和 durable terminal persistence 仍未完成，所以还不会开放。
 
 只有脚本和系统集成才需要显式机器输出：
 
@@ -129,7 +129,7 @@ cargo run -p sweepx-cli -- --locale zh-CN \
 
 TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`q` 或 `Ctrl-C` 退出。symlink 和 reparse point 只显示而不可进入。
 
-`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。Windows 不创建默认 state，显式 `--state-dir` 失败关闭。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。
+`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。Windows 不创建默认 state，显式 `--state-dir` 失败关闭。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。目录 detail rescan 以 single-flight 后台任务运行：query deadline 为 2 秒，导航或退出不会等待非协作 worker，超时后的 late result 会丢弃，并由 process-wide 32 stuck-worker cap 限制脱落线程。
 
 ## 当前不存在的命令
 

@@ -29,7 +29,7 @@ features:
 ---
 
 > [!CAUTION]
-> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。Unix audit 已改为 bundled SQLite WAL 原子事务 + event replay，但这不等于真实执行资格。
+> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。协议层已经补齐 durable event envelope/stream validator 与 schema/golden 覆盖，但 SQLite journal/replay 和 atomic terminal persistence 仍未完成，这不等于真实执行资格。
 
 ## 现在能做什么
 
@@ -42,10 +42,10 @@ features:
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门 |
-| CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览 |
+| CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览；detail rescan 为 single-flight 后台任务，2 s deadline，导航/退出不中断 |
 | Trash / Permanent | 不存在 |
 
-CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 scan 机器输出使用 JSON；NDJSON 在 durable journal/replay 完成前禁用。
+CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 scan 机器输出使用 JSON；durable event envelope/stream validator 已完成，但 NDJSON 仍要等 SQLite journal/replay 与 atomic terminal persistence 完成后才会开放。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；稳定 release 尚未发布。
 
 ## 按你的问题阅读

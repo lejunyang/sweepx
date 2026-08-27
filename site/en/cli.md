@@ -64,7 +64,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
 - The Windows backend now provides a handle-relative degraded read-only scanner through `scan` / `scan --tui`; that is not release qualification.
 - Do not pass `--state-dir` for a Windows scan; Unix may explicitly select durable snapshot storage.
-- `scan --format ndjson` currently returns unsupported before scanning. It remains disabled until the durable event journal, replay, and durable terminal event exist.
+- `scan --format ndjson` currently returns unsupported before scanning. The protocol layer now has durable event envelope/stream validators, opaque durable-cursor constraints, and schema/golden coverage, but SQLite journaling, replay, and durable terminal persistence are still incomplete, so NDJSON remains disabled.
 
 Request machine output explicitly for scripts and integrations:
 
@@ -129,7 +129,7 @@ cargo run -p sweepx-cli -- --locale en-US \
 
 The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, and `q` or `Ctrl-C` to quit. Symlinks and reparse points are visible but cannot be entered.
 
-`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Windows creates no default state and rejects explicit `--state-dir`. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences.
+`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Windows creates no default state and rejects explicit `--state-dir`. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences. Directory detail rescans run as a single-flight background task with a 2 s query deadline; navigation or quit does not wait for a non-cooperative worker, late results are discarded, and a process-wide cap of 32 bounds stuck workers.
 
 ## Commands that do not exist today
 

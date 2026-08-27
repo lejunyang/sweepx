@@ -37,7 +37,7 @@ Linux, macOS, and Windows connect real development-grade/degraded read-only scan
 
 ## State and cancellation
 
-CLI scan completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `status` is not connected to a background worker; scan NDJSON and live cancellation also remain disabled. `cancel` returns an honest disposition; that is why its capability is disabled.
+CLI scan completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `status` is not connected to a background worker; live cancellation also remains disabled. The protocol layer now validates durable event envelopes/streams and durable-cursor shape, but scan NDJSON still stays disabled until SQLite journaling/replay and atomic terminal persistence exist. `cancel` returns an honest disposition; that is why its capability is disabled.
 
 ## Import is an explicit trust boundary
 
@@ -53,7 +53,7 @@ The P3 library layering deliberately leaves nowhere to plug in native mutation:
 - permits and the revalidation observer are simulation-specific;
 - executor requests contain no native path;
 - the adapter trait is sealed and its only implementation is deterministic and fake.
-- audit persistence is currently Unix-only; it now uses bundled SQLite WAL atomic transactions plus event replay to manage durable claim, intent, outcome, and reconciliation state. It is still not release-grade native-mutation storage.
+- audit persistence is currently Unix-only; protocol-level durable event validation and schema/golden coverage now exist, but SQLite journaling/replay and atomic terminal persistence remain incomplete. It is still not release-grade native-mutation storage.
 
 That supports state-machine and crash-semantics tests without deleting a target. The audit library performs filesystem I/O for its own state files; that is not mutation of scanned targets.
 

@@ -15,11 +15,11 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有�
 - macOS scanner 现已接入 handle-bound 的同步、只读 live scan，仍只报告 `degraded`，不是发布资格。
 - Windows scanner 现提供 handle-relative 的同步只读 live scan，并通过 `scan` / `scan --tui` 暴露；能力仍为 development-grade/degraded，不是发布资格。
 - Unix 上 `status` 读取持久化终态 snapshot。Windows durable state 当前禁用：默认 `state_dir=None`，不持久化终态 snapshot，显式 `--state-dir` 失败关闭。`cancel` 因没有 live operation registry 而保持 `disabled`。
-- scan NDJSON 在 durable journal/replay 实现前保持禁用；当前机器扫描输出使用 JSON。
+- 协议层已经完成 durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 覆盖；但 SQLite journal/replay 与 atomic terminal persistence 尚未完成，所以 scan NDJSON 仍保持禁用，当前机器扫描输出使用 JSON。
 - `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
-- `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式只读浏览器，可进入和返回目录，不需要 JSON 中间文件。
-- P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；Unix audit 现使用 bundled SQLite WAL 原子事务与 event replay；仍没有可信 HumanApproval broker。
+- `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式只读浏览器，可进入和返回目录，不需要 JSON 中间文件；目录 detail rescan 现在是 single-flight 后台任务，2 秒 deadline 下导航和退出不会被非协作 worker 卡住，late result 会被丢弃，且有 process-wide 32 stuck-worker cap。
+- P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；durable event protocol 侧已补齐 validator 与 schema/golden，SQLite journal/replay 与 atomic terminal persistence 仍未完成；仍没有可信 HumanApproval broker。
 
 这些是代码和测试覆盖到的开发能力。仓库已有跨平台归档、安装器和发布自动化，但尚未发布稳定版本，也不是生产支持或三平台扫描资格声明。
 

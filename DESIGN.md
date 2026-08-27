@@ -1,8 +1,8 @@
 # SweepX 总体设计
 
-状态：设计基线与部分开发实现。设计与外部证据截点：2026-08-26；实现快照：2026-08-27。
+状态：设计基线与部分开发实现。设计与外部证据截点：2026-08-26；实现快照：2026-08-28。
 
-本文把扫描、专项 Cleaner、CLI/TUI、人工审批和跨平台删除收束为一个安全核心。当前仓库已有开发级只读 CLI/TUI：Linux、macOS 与 Windows live scan 均为 `degraded`；macOS traversal 为 handle-bound，Windows traversal 为 handle-relative，三者统一通过 `sweepx scan` / `sweepx scan --tui` 暴露。另有只读解释与 Cleaner 元数据，以及 library-only 的不可变计划、simulation-only 授权、Unix 审计/恢复和确定性 fake execution。这些实现不代表阶段、发布或 mutation qualification；当前没有 native Trash/Permanent adapter、mutation CLI 或审批 UI，所有 native mutation capability 仍为 `disabled`。v1 只以当前普通用户身份工作，未通过真实平台发布门槛的能力必须保持 `report-only` 或只提供扫描、解释和计划导出。
+本文把扫描、专项 Cleaner、CLI/TUI、人工审批和跨平台删除收束为一个安全核心。当前仓库已有开发级只读 CLI/TUI：Linux、macOS 与 Windows live scan 均为 `degraded`；macOS traversal 为 handle-bound，Windows traversal 为 handle-relative，三者统一通过 `sweepx scan` / `sweepx scan --tui` 暴露。TUI detail rescan 现为 single-flight 后台任务：query deadline 为 2 s，导航与退出不会等待非协作 worker，late result 会被丢弃，并由 process-wide 32 stuck-worker cap 限制脱落线程。另有只读解释与 Cleaner 元数据，以及 library-only 的不可变计划、simulation-only 授权、Unix 审计/恢复和确定性 fake execution。durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 覆盖已完成，但 SQLite journal/replay 与 atomic durable terminal event 尚未完成，因此 NDJSON 仍保持 `disabled`。这些实现不代表阶段、发布或 mutation qualification；当前没有 native Trash/Permanent adapter、mutation CLI 或审批 UI，所有 native mutation capability 仍为 `disabled`。v1 只以当前普通用户身份工作，未通过真实平台发布门槛的能力必须保持 `report-only` 或只提供扫描、解释和计划导出。
 
 ## 0. 文档约定、范围与导航
 
@@ -678,7 +678,7 @@ sweepx [global-options] <command>
 
 bounded 命令返回一个 `sweepx.output/v1` terminal envelope；stream 返回每行一个 `sweepx.event/v1`。sequence 为十进制字符串、严格递增；交付 at-least-once，以 `(streamId, sequence)` 去重；cursor 绑定 stream/sequence/checkpoint。cursor 过期先发 `stream.reset_required`，客户端取 status snapshot 后续读。每个 operation 恰好一个 durable `operation.terminal`。
 
-当前实现尚无满足该契约的 durable event journal 和 replay path，因此 `scan --format ndjson` 必须在 admission 前返回 unsupported，不能输出仅驻内存、checkpoint 非 durable 的伪事件流。当前 scan 机器输出只开放 bounded JSON；NDJSON 在 journal、cursor replay 与 durable terminal event 同时落地后再启用。Windows durable snapshot store 同样失败关闭，直到实现 current-user-private DACL、逐组件 reparse-point 拒绝和私有文件 ACL；默认路径不创建，显式 `--state-dir` 也拒绝。
+当前实现已经具备 bounded durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 覆盖，但仍没有满足该契约的 SQLite event journal、cursor replay path 与 atomic durable terminal persistence，因此 `scan --format ndjson` 必须在 admission 前返回 unsupported，不能输出仅驻内存、checkpoint 非 durable 的伪事件流。当前 scan 机器输出只开放 bounded JSON；NDJSON 在 journal、cursor replay 与 durable terminal event 同时落地后再启用。Windows durable snapshot store 同样失败关闭，直到实现 current-user-private DACL、逐组件 reparse-point 拒绝和私有文件 ACL；默认路径不创建，显式 `--state-dir` 也拒绝。
 
 事件集合包括：operation/phase；scan root/progress/aggregate/boundary/error/completed；candidate/analysis；plan/authorization（含 human approval 与 explicit dangerous delete）；revalidation/preflight/protection；cancel；action intent/platform/skipped/permit/reconcile；item/batch/recovery/audit；detail persistence、stream reset 和 terminal。只有中间 progress、非终版 aggregate 可合并；错误、边界、incomplete reason、intent、outcome 和 terminal 不丢。`approval.*` 事件只来自 core/TUI 内部 broker stream；`authorization.explicit_dangerous_delete` 只记录 flag admission 与精确 plan digest，不泄露 record/nonce。
 
@@ -972,7 +972,7 @@ scanner 正常只使用有界内存；仅当实际 charged memory 达到 75% 高
 详细里程碑、owner、退出条件和发布矩阵见 [docs/ROADMAP.md](docs/ROADMAP.md)。总体顺序：
 
 1. **M0 契约与只读骨架**：workspace、models/JCS/digest、protocol/schema golden、普通用户 capability probe、三平台 CI。
-2. **M1 有界 Scanner**：portable adapters、aggregate/cache/spill、TUI、bounded JSON、fixtures/oracle；durable journal/replay 完成后再开放 NDJSON；无 deletion code path。
+2. **M1 有界 Scanner**：portable adapters、aggregate/cache/spill、TUI、bounded JSON、fixtures/oracle；当前已完成 durable event validator 与 schema/golden，durable SQLite journal/replay 与 atomic terminal 完成后再开放 NDJSON；无 deletion code path。
 3. **M2 Cleaner 与 Catalog**：Z0 typed rules、Cargo/Chromium cache 示例、开发生态 report-only、签名/撤销/probe host。
 4. **M3 Plan/Approval/Audit dry-run**：canonical plan、Broker、hard protection、preflight simulation、crash journal；adapter 仍编译为 deny-all。
 5. **M4 Trash capability**：逐平台真实 gate 通过后按 capability 开放，默认 Trash；未通过平台保持 read-only。

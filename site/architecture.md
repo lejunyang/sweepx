@@ -37,7 +37,7 @@ Linux、macOS 与 Windows 均连接实际的 development-grade/degraded 只读 s
 
 ## 状态与取消
 
-CLI scan 当前同步完成，并在 Unix 上启用 state directory 时保存 terminal snapshot。Windows durable state 禁用：默认 `state_dir=None`，不持久化 terminal snapshot，显式 `--state-dir` 失败关闭。`status` 不是后台 worker 查询；scan NDJSON 与 live cancel 也仍禁用。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+CLI scan 当前同步完成，并在 Unix 上启用 state directory 时保存 terminal snapshot。Windows durable state 禁用：默认 `state_dir=None`，不持久化 terminal snapshot，显式 `--state-dir` 失败关闭。`status` 不是后台 worker 查询；live cancel 也仍禁用。协议层已经完成 durable event envelope/stream validator、opaque cursor 约束与 schema/golden，但 scan NDJSON 仍因缺少 SQLite journal/replay 与 atomic terminal persistence 而保持禁用。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
 
 ## 导入是明确的信任边界
 
@@ -53,7 +53,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - permit 与 revalidation observer 是 simulation-specific；
 - executor 的 request 没有 native path；
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
-- audit persistence 当前仅支持 Unix；它现在使用 bundled SQLite WAL 原子事务与 event replay 管理 durable claim、intent、outcome 与 reconciliation 状态；它仍不是 native mutation 的发布级存储。
+- audit persistence 当前仅支持 Unix；协议层已有 durable event validator 与 schema/golden 覆盖，但 SQLite journal/replay 与 atomic terminal persistence 尚未完成；它仍不是 native mutation 的发布级存储。
 
 这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
 

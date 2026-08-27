@@ -22,7 +22,7 @@ SweepX safety currently starts with absent capabilities and explicit type bounda
 | Cleaner | Metadata only, with fail-closed compatibility checks |
 | Capability language | unsupported, degraded, report_only, and disabled remain distinct |
 
-The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. On Unix, `scan` may write its own terminal snapshot under the selected state directory. Windows durable operation state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. Separately, the P3 audit library may persist simulation-only audit state on Unix through bundled SQLite WAL atomic transactions and event replay; none of these surfaces changes a scanned target or qualifies real execution.
+The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. On Unix, `scan` may write its own terminal snapshot under the selected state directory. Windows durable operation state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. Separately, the P3 audit/protocol path now includes durable event envelope/stream validation, opaque durable-cursor constraints, and schema/golden coverage, while SQLite journaling/replay and atomic terminal persistence remain incomplete; none of these surfaces changes a scanned target or qualifies real execution.
 
 ## Why imported reports are report-only
 

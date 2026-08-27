@@ -7,7 +7,7 @@
 
 ## 当前实现状态
 
-状态截点：2026-08-27。以下描述来自当前代码与测试，不是发布或跨平台资格声明。
+状态截点：2026-08-28。以下描述来自当前代码与测试，不是发布或跨平台资格声明。
 
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
@@ -18,10 +18,10 @@
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
 | `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Cleaner manifest/trust 不兼容时在扫描前失败关闭并返回 exit 12；兼容时，只有完整规则证据才计入 match，名称线索与未知证据单列为 hint；不会产生 executable candidate、计划、授权或执行 |
-| `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；要求终端 stdin/stdout |
+| `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；detail rescan 为 single-flight 后台任务，2 s deadline，导航与退出不等待非协作 worker，late result 会丢弃，且有 process-wide 32 stuck-worker cap |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
-| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；不是阶段资格声明，没有 CLI 接线或 native target mutation |
+| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；durable event envelope/stream validator 与 schema/golden 已完成，但 SQLite journal/replay/atomic terminal 尚未完成；不是阶段资格声明，没有 CLI 接线或 native target mutation |
 | 真实清理 | **不可用** | Trash、Permanent、管理器 mutation 与 destructive Agent workflow 均未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
@@ -88,7 +88,7 @@ cargo run -p sweepx-cli -- --format json cleaner cargo-detect /absolute/path/to/
 
 ```
 
-`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝，直到 durable event journal、replay 和 durable terminal event 都实现。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
+`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。当前已完成 durable event envelope/stream validator、bounded durable cursor 约束以及 schema/golden 覆盖，但 SQLite journal、cursor replay 和 atomic terminal snapshot 尚未完成，因此 NDJSON 仍保持 disabled。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入；目录 detail rescan 使用 single-flight 后台任务，deadline 为 2 s，导航或退出不会等待非协作 worker，超时后的 late result 会被丢弃，并由 process-wide 32 stuck-worker cap 防止无限泄漏。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
 
 ### `status` 与 `cancel` 的诚实语义
 
@@ -122,7 +122,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 7. **没有降级删除。** 未来即使实现 Trash，失败、拒绝、取消或结果不明也不得自动转为 Permanent。
 8. **硬保护不可绕过。** 根目录、系统区域、home/profile 根、SweepX state、受保护 anchor 及其包含关系在未来 mutation model 中必须失败关闭。
 
-P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit persistence 仅支持 Unix，使用 bundled SQLite WAL 原子事务与 event replay 维护审计状态；它不是 future native mutation 的发布级存储，也不应被写成跨平台或真实执行资格。
+P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit/recovery 仍仅支持 Unix，且 durable event protocol 侧已经完成 envelope/stream validation 与 schema/golden 覆盖；但 SQLite journal、replay 与 atomic terminal snapshot 仍未完成，因此这条能力既不是 future native mutation 的发布级存储，也不能被写成跨平台或真实执行资格。
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前它们在 Linux、macOS、Windows 上全部为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。当前没有这样的合格记录，也没有 native adapter、mutation command 或 approval UI。
 
