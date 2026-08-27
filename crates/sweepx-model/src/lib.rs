@@ -580,7 +580,7 @@ pub struct NativePathComponent {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct NativeLocatorEvidence {
     pub scan_root: NativePathComponent,
-    pub parent: Option<NativePathComponent>,
+    pub parent_reopen_recipe: Vec<NativePathComponent>,
     pub entry: NativePathComponent,
 }
 
@@ -600,16 +600,16 @@ impl NativeLocatorEvidence {
         {
             return Err(ScanEntryIdError::InvalidFormat);
         }
-        match (&self.parent, &identity.parent_id) {
-            (Some(parent), Some(expected_parent)) => {
-                if !parent.entry_id.belongs_to(scan_id) {
-                    return Err(ScanEntryIdError::ScanMismatch);
-                }
-                if &parent.entry_id != expected_parent {
-                    return Err(ScanEntryIdError::InvalidFormat);
-                }
+        for component in &self.parent_reopen_recipe {
+            if !component.entry_id.belongs_to(scan_id) {
+                return Err(ScanEntryIdError::ScanMismatch);
             }
-            (None, None) => {}
+        }
+        match &identity.parent_id {
+            Some(expected_parent)
+                if self.parent_reopen_recipe.last().map(|part| &part.entry_id)
+                    == Some(expected_parent) => {}
+            None if self.parent_reopen_recipe.is_empty() => {}
             _ => return Err(ScanEntryIdError::InvalidFormat),
         }
         Ok(())

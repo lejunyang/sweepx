@@ -3,10 +3,10 @@ mod digest;
 mod explain;
 
 pub use candidate::{
-    Candidate, CandidateBuilder, CandidateDigestInput, CandidateEligibility, CandidateSourceState,
-    ExecutableEligibility, Explanation, ExplanationBuilder, ExplanationClause,
-    ExplanationDigestInput, ExplanationKind, FactPresence, InferenceStrength, MonotonicClassifier,
-    PathPresentation, RiskAssessment, RiskSignal, UnknownImpact,
+    Candidate, CandidateBuilder, CandidateDigestInput, CandidateEligibility, CandidateLocator,
+    CandidateSourceState, ExecutableEligibility, Explanation, ExplanationBuilder,
+    ExplanationClause, ExplanationDigestInput, ExplanationKind, FactPresence, InferenceStrength,
+    MonotonicClassifier, PathPresentation, RiskAssessment, RiskSignal, UnknownImpact,
 };
 pub use digest::{AnalysisDigestError, analysis_attention_fingerprint, analysis_digest_hex};
 pub use explain::{

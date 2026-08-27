@@ -54,6 +54,7 @@ fn item(
         explanation_digest: ExplanationDigest::new(format!("explanation-{item_id}")),
         top_level_action_id: top_level_action_id.to_string(),
         target: TargetIdentity::new(format!("target-{item_id}")),
+        native_target: None,
         risk_tier,
         risk_factors: vec![RiskFactor::new(format!("risk-{item_id}"))],
         subtree_complete: true,

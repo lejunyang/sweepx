@@ -52,6 +52,23 @@
             }
           }
         },
+        "nativeLocator": {
+          "scanRoot": {
+            "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+            "nativeBasename": {
+              "kind": "unix_bytes_base64_url",
+              "value": "cDAtbWluaW1hbA"
+            }
+          },
+          "parentReopenRecipe": [],
+          "entry": {
+            "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+            "nativeBasename": {
+              "kind": "unix_bytes_base64_url",
+              "value": "cDAtbWluaW1hbA"
+            }
+          }
+        },
         "displayPath": "/fixtures/p0-minimal",
         "nativeBasename": {
           "kind": "unix_bytes_base64_url",
@@ -110,6 +127,31 @@
             "state": "known",
             "value": {
               "value": "77"
+            }
+          }
+        },
+        "nativeLocator": {
+          "scanRoot": {
+            "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+            "nativeBasename": {
+              "kind": "unix_bytes_base64_url",
+              "value": "cDAtbWluaW1hbA"
+            }
+          },
+          "parentReopenRecipe": [
+            {
+              "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+              "nativeBasename": {
+                "kind": "unix_bytes_base64_url",
+                "value": "cDAtbWluaW1hbA"
+              }
+            }
+          ],
+          "entry": {
+            "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:2",
+            "nativeBasename": {
+              "kind": "unix_bytes_base64_url",
+              "value": "Zml4dHVyZS5iaW4"
             }
           }
         },

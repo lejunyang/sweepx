@@ -331,6 +331,46 @@
         }
       }
     },
+    "nativePathComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "nativeBasename"
+      ],
+      "properties": {
+        "entryId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        "nativeBasename": {
+          "$ref": "#/$defs/nativeName"
+        }
+      }
+    },
+    "nativeLocatorEvidence": {
+      "$comment": "All component IDs must belong to the enclosing ScannedEntry.scanId. scanRoot and entry must match identity.scanRootId and identity.entryId. A root has an empty parentReopenRecipe. Every child recipe begins with scanRoot and continues in ancestor order through the immediate parent, whose ID must match identity.parentId. The entry nativeBasename must match ScannedEntry.nativeBasename. JSON Schema validates structure and lossless encodings; consumers enforce ID equality and ordering relationships.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanRoot",
+        "parentReopenRecipe",
+        "entry"
+      ],
+      "properties": {
+        "scanRoot": {
+          "$ref": "#/$defs/nativePathComponent"
+        },
+        "parentReopenRecipe": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nativePathComponent"
+          }
+        },
+        "entry": {
+          "$ref": "#/$defs/nativePathComponent"
+        }
+      }
+    },
     "platformFileIdentityEvidence": {
       "oneOf": [
         {
@@ -470,6 +510,10 @@
           "$ref": "#/$defs/scanObjectIdentity",
           "description": "Required on new live scanner output. It may be absent only on legacy or imported records; absence never permits synthesizing identity from displayPath."
         },
+        "nativeLocator": {
+          "$ref": "#/$defs/nativeLocatorEvidence",
+          "description": "Required on new live scanner output. It may be absent only on legacy or imported records; absence never permits synthesizing a reopen recipe from displayPath."
+        },
         "displayPath": {
           "type": "string"
         },
@@ -504,7 +548,63 @@
         "provenance": {
           "$ref": "#/$defs/fieldProvenance"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "identity",
+              "nativeLocator"
+            ],
+            "properties": {
+              "identity": {
+                "required": [
+                  "parentId"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "nativeLocator": {
+                "properties": {
+                  "parentReopenRecipe": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "identity",
+              "nativeLocator"
+            ],
+            "properties": {
+              "identity": {
+                "not": {
+                  "required": [
+                    "parentId"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "nativeLocator": {
+                "properties": {
+                  "parentReopenRecipe": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "directoryIdentity": {
       "$comment": "Only the scanEntryId branch is trusted identity evidence. Acceptance of the legacy branch is wire compatibility, never authority.",

@@ -35,9 +35,9 @@ Run validation with:
 The validation script checks:
 
 - example output envelope
-- live `scan.result` entry identity and directory-aggregate identity structure
-- legacy imported scan entries without identity, which remain readable but untrusted
-- malformed or path-derived values cannot enter the trusted `scan-entry:v1` identity branch
+- live `scan.result` entry identity, native locator lineage, and directory-aggregate identity structure
+- legacy imported scan entries without identity or native locator, which remain readable but untrusted
+- malformed or path-derived values cannot enter trusted `scan-entry:v1` IDs or lossless native-name components
 - example event envelope
 - example capability record
 - deterministic minimal fixture manifest
@@ -52,3 +52,11 @@ trusted shape. Non-prefixed strings are accepted solely for legacy wire compatib
 be treated as identity or synthesized from `displayPath`. Cross-field scan membership (the encoded
 scan component matching `scanId`) remains a consumer validation requirement because JSON Schema
 cannot decode and compare the base64url component.
+
+New live entries also include `ScannedEntry.nativeLocator`. It binds lossless native-name components
+for the scan root and entry to a complete `parentReopenRecipe` chain. The root itself has an empty
+recipe; every child recipe starts with the scan-root component and proceeds in ancestor order through
+the immediate parent. Legacy or imported records may omit the block, but consumers must never
+rebuild it from `displayPath`. JSON Schema validates every component's `scan-entry:v1` shape, native
+name encoding, and root-versus-child recipe cardinality. Consumers must also verify component order,
+locator IDs, native basenames, and the final parent against the entry's validated identity.

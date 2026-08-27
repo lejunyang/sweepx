@@ -3,6 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
+use sweepx_analysis::{Candidate, ExecutableEligibility};
+use sweepx_model::{NativeLocatorEvidence, ScanObjectIdentity};
 use thiserror::Error;
 
 use sweepx_canonical::{
@@ -120,6 +122,42 @@ impl TargetIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativePlanTarget {
+    pub(crate) scan_id: String,
+    pub(crate) scan_root_identity: String,
+    pub(crate) stable_identity: String,
+    pub(crate) scan_object_identity: ScanObjectIdentity,
+    pub(crate) native_locator: NativeLocatorEvidence,
+    pub(crate) candidate_digest: String,
+}
+
+impl NativePlanTarget {
+    pub fn scan_id(&self) -> &str {
+        &self.scan_id
+    }
+
+    pub fn scan_root_identity(&self) -> &str {
+        &self.scan_root_identity
+    }
+
+    pub fn stable_identity(&self) -> &str {
+        &self.stable_identity
+    }
+
+    pub fn scan_object_identity(&self) -> &ScanObjectIdentity {
+        &self.scan_object_identity
+    }
+
+    pub fn native_locator(&self) -> &NativeLocatorEvidence {
+        &self.native_locator
+    }
+
+    pub fn candidate_digest(&self) -> &str {
+        &self.candidate_digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AggregateRisk {
     pub(crate) tier: RiskTier,
     pub(crate) factors: Vec<RiskFactor>,
@@ -154,6 +192,7 @@ pub struct PlanItem {
     pub(crate) explanation_digest: ExplanationDigest,
     pub(crate) top_level_action_id: String,
     pub(crate) target: TargetIdentity,
+    pub(crate) native_target: Option<NativePlanTarget>,
     pub(crate) risk_tier: RiskTier,
     pub(crate) risk_factors: Vec<RiskFactor>,
     pub(crate) subtree_complete: bool,
@@ -178,6 +217,10 @@ impl PlanItem {
         Ok(PlanItemDigest(PlanDigest::new(
             sweepx_canonical::plan_digest_hex_from_canonical(&canonical),
         )))
+    }
+
+    pub fn native_target(&self) -> Option<&NativePlanTarget> {
+        self.native_target.as_ref()
     }
 }
 
@@ -495,6 +538,7 @@ impl DeletionPlan {
                         domain_separated_digest(&SimulatedSourceIdentityInput {
                             domain: SIMULATED_SOURCE_IDENTITY_DOMAIN,
                             target: &item.target,
+                            native_target: item.native_target.as_ref(),
                         })?;
                     let revalidation_digest =
                         domain_separated_digest(&SimulatedRevalidationInput {
@@ -568,6 +612,7 @@ pub struct PlanItemInput {
     pub explanation_digest: ExplanationDigest,
     pub top_level_action_id: String,
     pub target: TargetIdentity,
+    pub native_target: Option<NativePlanTarget>,
     pub risk_tier: RiskTier,
     pub risk_factors: Vec<RiskFactor>,
     pub subtree_complete: bool,
@@ -604,6 +649,7 @@ impl TryFrom<PlanItemInput> for PlanItem {
             explanation_digest: input.explanation_digest,
             top_level_action_id: input.top_level_action_id,
             target: input.target,
+            native_target: input.native_target,
             risk_tier: input.risk_tier,
             risk_factors: input.risk_factors,
             subtree_complete: input.subtree_complete,
@@ -668,6 +714,32 @@ pub enum CanonicalPlanError {
     CanonicalDigestMismatch,
     #[error("invalid field {field}: {reason}")]
     InvalidField { field: &'static str, reason: String },
+    #[error("item {item_id} native target binding is invalid: {reason}")]
+    InvalidNativeTarget { item_id: String, reason: String },
+    #[error("candidate {candidate_id} is not executable")]
+    CandidateNotExecutable { candidate_id: String },
+    #[error("candidate {candidate_id} is not from a current live source")]
+    CandidateNotLive { candidate_id: String },
+    #[error("candidate {candidate_id} is missing a validated stable identity")]
+    CandidateMissingIdentity { candidate_id: String },
+    #[error("candidate {candidate_id} is missing a validated native locator")]
+    CandidateMissingNativeLocator { candidate_id: String },
+    #[error(
+        "candidate {candidate_id} scan {candidate_scan_id} does not match requested plan scan {plan_scan_id}"
+    )]
+    CandidateScanMismatch {
+        candidate_id: String,
+        candidate_scan_id: String,
+        plan_scan_id: String,
+    },
+    #[error(
+        "candidate {candidate_id} scan root {candidate_scan_root_identity} does not match requested plan root {plan_scan_root_identity}"
+    )]
+    CandidateScanRootMismatch {
+        candidate_id: String,
+        candidate_scan_root_identity: String,
+        plan_scan_root_identity: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -697,6 +769,7 @@ struct PlanDigestInput<'a> {
 struct SimulatedSourceIdentityInput<'a> {
     domain: &'static str,
     target: &'a TargetIdentity,
+    native_target: Option<&'a NativePlanTarget>,
 }
 
 #[derive(Serialize)]
@@ -837,6 +910,7 @@ fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
         explanation_digest: ExplanationDigest::new(required_string(value, "explanation_digest")?),
         top_level_action_id: required_string(value, "top_level_action_id")?,
         target: TargetIdentity::new(required_string(value, "target")?),
+        native_target: optional_native_target(value)?,
         risk_tier: parse_risk_tier("risk_tier", &required_string(value, "risk_tier")?)?,
         risk_factors: required_array(value, "risk_factors")?
             .iter()
@@ -881,6 +955,129 @@ fn optional_manifest_digest(
             reason: "expected string or null".to_string(),
         }),
     }
+}
+
+fn optional_native_target(root: &Value) -> Result<Option<NativePlanTarget>, CanonicalPlanError> {
+    let Some(value) = root.get("native_target") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(parse_native_target(value)?))
+}
+
+fn parse_native_target(value: &Value) -> Result<NativePlanTarget, CanonicalPlanError> {
+    Ok(NativePlanTarget {
+        scan_id: required_string(value, "scan_id")?,
+        scan_root_identity: required_string(value, "scan_root_identity")?,
+        stable_identity: required_string(value, "stable_identity")?,
+        scan_object_identity: serde_json::from_value(
+            value.get("scan_object_identity").cloned().ok_or_else(|| {
+                CanonicalPlanError::InvalidField {
+                    field: "native_target.scan_object_identity",
+                    reason: "expected object".to_string(),
+                }
+            })?,
+        )
+        .map_err(CanonicalPlanError::Json)?,
+        native_locator: serde_json::from_value(value.get("native_locator").cloned().ok_or_else(
+            || CanonicalPlanError::InvalidField {
+                field: "native_target.native_locator",
+                reason: "expected object".to_string(),
+            },
+        )?)
+        .map_err(CanonicalPlanError::Json)?,
+        candidate_digest: required_string(value, "candidate_digest")?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_item_from_live_candidate(
+    scan_id: &str,
+    scan_root_identity: &str,
+    candidate: &Candidate,
+    explanation_digest: ExplanationDigest,
+    top_level_action_id: impl Into<String>,
+    target: TargetIdentity,
+    actions: Vec<PlanAction>,
+    descendant_manifest_digest: Option<ManifestDigest>,
+) -> Result<PlanItemInput, CanonicalPlanError> {
+    let candidate_id = candidate.candidate_id.to_string();
+    if candidate.eligibility.executable != ExecutableEligibility::Executable {
+        return Err(CanonicalPlanError::CandidateNotExecutable { candidate_id });
+    }
+    if !candidate.source_state.is_live() || !candidate.source_state.is_current() {
+        return Err(CanonicalPlanError::CandidateNotLive { candidate_id });
+    }
+    if candidate.scan_id.to_string() != scan_id {
+        return Err(CanonicalPlanError::CandidateScanMismatch {
+            candidate_id,
+            candidate_scan_id: candidate.scan_id.to_string(),
+            plan_scan_id: scan_id.to_string(),
+        });
+    }
+
+    let stable_identity = candidate.locator.stable_identity.clone().ok_or_else(|| {
+        CanonicalPlanError::CandidateMissingIdentity {
+            candidate_id: candidate.candidate_id.to_string(),
+        }
+    })?;
+    let scan_object_identity = candidate
+        .locator
+        .scan_object_identity
+        .clone()
+        .ok_or_else(|| CanonicalPlanError::CandidateMissingIdentity {
+            candidate_id: candidate.candidate_id.to_string(),
+        })?;
+    if scan_object_identity.scan_root_id.as_str() != scan_root_identity {
+        return Err(CanonicalPlanError::CandidateScanRootMismatch {
+            candidate_id: candidate.candidate_id.to_string(),
+            candidate_scan_root_identity: scan_object_identity.scan_root_id.to_string(),
+            plan_scan_root_identity: scan_root_identity.to_string(),
+        });
+    }
+    let native_locator = candidate.locator.native_locator.clone().ok_or_else(|| {
+        CanonicalPlanError::CandidateMissingNativeLocator {
+            candidate_id: candidate.candidate_id.to_string(),
+        }
+    })?;
+
+    Ok(PlanItemInput {
+        item_id: format!("item-{}", candidate.candidate_id),
+        candidate_id: candidate.candidate_id.to_string(),
+        explanation_digest,
+        top_level_action_id: top_level_action_id.into(),
+        target,
+        native_target: Some(NativePlanTarget {
+            scan_id: candidate.scan_id.to_string(),
+            scan_root_identity: scan_root_identity.to_string(),
+            stable_identity,
+            scan_object_identity,
+            native_locator,
+            candidate_digest: candidate.canonical_digest.clone(),
+        }),
+        risk_tier: match candidate.risk.tier {
+            sweepx_model::RiskTier::R1 => RiskTier::R1,
+            sweepx_model::RiskTier::R2 => RiskTier::R2,
+            sweepx_model::RiskTier::R3 => RiskTier::R3,
+            sweepx_model::RiskTier::R4 => RiskTier::R4,
+            sweepx_model::RiskTier::Blocked => RiskTier::Blocked,
+        },
+        risk_factors: candidate
+            .risk
+            .signals
+            .iter()
+            .map(|signal| RiskFactor::new(format!("{signal:?}")))
+            .collect(),
+        subtree_complete: candidate.coverage.complete
+            && candidate
+                .aggregate_coverage
+                .as_ref()
+                .is_none_or(|coverage| coverage.complete),
+        descendant_manifest_digest,
+        actions,
+    })
 }
 
 fn validate_plan_ttl(
@@ -966,6 +1163,9 @@ fn validate_plan_semantics(
                 max_action_risk,
             });
         }
+        if let Some(native_target) = &item.native_target {
+            validate_native_target(&item.item_id, native_target)?;
+        }
         if mode == DeletionMode::Permanent
             && (item.risk_tier != RiskTier::R4
                 || item
@@ -1012,6 +1212,71 @@ fn validate_plan_semantics(
     Ok(())
 }
 
+fn validate_native_target(
+    item_id: &str,
+    native_target: &NativePlanTarget,
+) -> Result<(), CanonicalPlanError> {
+    if native_target.scan_id.is_empty() {
+        return Err(invalid_native_target(item_id, "scan_id is empty"));
+    }
+    if native_target.scan_root_identity.is_empty() {
+        return Err(invalid_native_target(
+            item_id,
+            "scan_root_identity is empty",
+        ));
+    }
+    if native_target.stable_identity.is_empty() {
+        return Err(invalid_native_target(item_id, "stable_identity is empty"));
+    }
+    if native_target.candidate_digest.is_empty() {
+        return Err(invalid_native_target(item_id, "candidate_digest is empty"));
+    }
+    if native_target.stable_identity != native_target.scan_object_identity.entry_id.as_str() {
+        return Err(invalid_native_target(
+            item_id,
+            "stable_identity does not match scan_object_identity.entry_id",
+        ));
+    }
+    if native_target.scan_root_identity != native_target.scan_object_identity.scan_root_id.as_str()
+    {
+        return Err(invalid_native_target(
+            item_id,
+            "scan_root_identity does not match scan_object_identity.scan_root_id",
+        ));
+    }
+    if native_target
+        .scan_object_identity
+        .validate_for_scan(&sweepx_model::ScanId::new(native_target.scan_id.clone()))
+        .is_err()
+    {
+        return Err(invalid_native_target(
+            item_id,
+            "scan_object_identity is not valid for scan_id",
+        ));
+    }
+    if native_target
+        .native_locator
+        .validate_for_identity(
+            &native_target.scan_object_identity,
+            &sweepx_model::ScanId::new(native_target.scan_id.clone()),
+        )
+        .is_err()
+    {
+        return Err(invalid_native_target(
+            item_id,
+            "native_locator does not match scan_object_identity",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_native_target(item_id: &str, reason: &'static str) -> CanonicalPlanError {
+    CanonicalPlanError::InvalidNativeTarget {
+        item_id: item_id.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
 fn to_unix_millis(value: SystemTime) -> Result<u128, CanonicalPlanError> {
     value
         .duration_since(UNIX_EPOCH)
@@ -1022,6 +1287,15 @@ fn to_unix_millis(value: SystemTime) -> Result<u128, CanonicalPlanError> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use sweepx_analysis::{
+        Candidate as AnalysisCandidate, CandidateEligibility, CandidateLocator,
+        CandidateSourceState, PathPresentation, RiskAssessment, RiskSignal,
+    };
+    use sweepx_model::{
+        CandidateId, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
+        MethodId, NativeLocatorEvidence, NativeName, NativePathComponent, ObjectType, ScanEntryId,
+        ScanId, ScanObjectIdentity,
+    };
 
     use super::*;
 
@@ -1048,6 +1322,7 @@ mod tests {
                 explanation_digest: ExplanationDigest::new("explain-1"),
                 top_level_action_id: "action-top-1".to_string(),
                 target: TargetIdentity::new("target-1"),
+                native_target: None,
                 risk_tier: RiskTier::R2,
                 risk_factors: vec![RiskFactor::new("user-content")],
                 subtree_complete: true,
@@ -1083,6 +1358,104 @@ mod tests {
             PlanAction::new("action-top-1", RiskTier::R4),
         ];
         input
+    }
+
+    fn live_candidate() -> AnalysisCandidate {
+        let scan_id = ScanId::new("scan-1");
+        let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
+        let entry_id = ScanEntryId::for_scan_ordinal(&scan_id, 2).unwrap();
+        let scan_object_identity = ScanObjectIdentity {
+            entry_id: entry_id.clone(),
+            scan_root_id: root_id.clone(),
+            parent_id: Some(root_id.clone()),
+            platform_file_identity: sweepx_model::IdentityEvidence::known(
+                sweepx_model::PlatformFileIdentity {
+                    device: DecimalU128::new(1),
+                    inode: DecimalU128::new(2),
+                },
+            ),
+            filesystem_object_domain_identity: sweepx_model::IdentityEvidence::known(
+                sweepx_model::FilesystemObjectDomainIdentity {
+                    device: DecimalU128::new(1),
+                },
+            ),
+            volume_or_mount_identity: sweepx_model::IdentityEvidence::known(
+                sweepx_model::VolumeOrMountIdentity {
+                    value: DecimalU128::new(1),
+                },
+            ),
+        };
+        AnalysisCandidate {
+            candidate_id: CandidateId::new("cand-live"),
+            canonical_digest: "sha256:candidate-live".to_string(),
+            scan_id: scan_id.clone(),
+            object_type: ObjectType::File,
+            metadata_fingerprint: "fp-live".to_string(),
+            path: PathPresentation {
+                display_path: "/tmp/live".to_string(),
+                native_basename: NativeName::unix(b"live".to_vec()),
+                stable_identity: Some(entry_id.to_string()),
+            },
+            locator: CandidateLocator {
+                stable_identity: Some(entry_id.to_string()),
+                scan_object_identity: Some(scan_object_identity.clone()),
+                native_locator: Some(NativeLocatorEvidence {
+                    scan_root: NativePathComponent {
+                        entry_id: root_id.clone(),
+                        native_basename: NativeName::unix(b"root".to_vec()),
+                    },
+                    parent_reopen_recipe: vec![NativePathComponent {
+                        entry_id: root_id.clone(),
+                        native_basename: NativeName::unix(b"root".to_vec()),
+                    }],
+                    entry: NativePathComponent {
+                        entry_id: entry_id.clone(),
+                        native_basename: NativeName::unix(b"live".to_vec()),
+                    },
+                }),
+                native_basename: NativeName::unix(b"live".to_vec()),
+                metadata_fingerprint: "fp-live".to_string(),
+            },
+            provenance: FieldProvenance::LiveObservation {
+                observed_at: "2026-08-27T00:00:00Z".to_string(),
+                method: MethodId::NativeApi,
+            },
+            source_state: CandidateSourceState::Live,
+            live_source_required: true,
+            logical_bytes: EvidenceValue::Known {
+                value: DecimalU128::new(1),
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: DecimalU128::new(1),
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: DecimalU128::new(1),
+            },
+            coverage: Coverage {
+                state: CoverageState::Complete,
+                complete: true,
+                incomplete_reasons: Vec::new(),
+                details_lost: false,
+                provenance: FieldProvenance::LiveObservation {
+                    observed_at: "2026-08-27T00:00:00Z".to_string(),
+                    method: MethodId::NativeApi,
+                },
+            },
+            aggregate_directory_identity: None,
+            aggregate_revision: None,
+            aggregate_coverage: None,
+            aggregate_arithmetic_state: None,
+            risk: RiskAssessment {
+                tier: sweepx_model::RiskTier::R2,
+                signals: vec![RiskSignal::Fact {
+                    code: "live".to_string(),
+                }],
+            },
+            eligibility: CandidateEligibility {
+                executable: sweepx_analysis::ExecutableEligibility::Executable,
+                reasons: Vec::new(),
+            },
+        }
     }
 
     #[test]
@@ -1290,6 +1663,126 @@ mod tests {
         assert_eq!(original[0].item_id(), "item-1");
         assert_eq!(original[0].action_id(), "action-top-1");
         assert_eq!(original[0].risk_tier(), RiskTier::R2);
+    }
+
+    #[test]
+    fn live_candidate_builder_attaches_native_target() {
+        let candidate = live_candidate();
+        let item = plan_item_from_live_candidate(
+            "scan-1",
+            candidate
+                .locator
+                .scan_object_identity
+                .as_ref()
+                .unwrap()
+                .scan_root_id
+                .as_str(),
+            &candidate,
+            ExplanationDigest::new("explain-live"),
+            "action-live",
+            TargetIdentity::new("target-live"),
+            vec![PlanAction::new("action-live", RiskTier::R2)],
+            None,
+        )
+        .unwrap();
+
+        let native_target = item.native_target.as_ref().unwrap();
+        assert_eq!(native_target.candidate_digest, candidate.canonical_digest);
+        assert_eq!(
+            native_target.stable_identity,
+            candidate.locator.stable_identity.clone().unwrap()
+        );
+        assert_eq!(
+            native_target.native_locator,
+            candidate.locator.native_locator.clone().unwrap()
+        );
+    }
+
+    #[test]
+    fn live_candidate_builder_rejects_missing_native_locator() {
+        let mut candidate = live_candidate();
+        candidate.locator.native_locator = None;
+
+        let error = plan_item_from_live_candidate(
+            "scan-1",
+            candidate
+                .locator
+                .scan_object_identity
+                .as_ref()
+                .unwrap()
+                .scan_root_id
+                .as_str(),
+            &candidate,
+            ExplanationDigest::new("explain-live"),
+            "action-live",
+            TargetIdentity::new("target-live"),
+            vec![PlanAction::new("action-live", RiskTier::R2)],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CanonicalPlanError::CandidateMissingNativeLocator { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_item_digest_changes_when_native_target_changes() {
+        let first = PlanItem::try_from(
+            plan_item_from_live_candidate(
+                "scan-1",
+                live_candidate()
+                    .locator
+                    .scan_object_identity
+                    .as_ref()
+                    .unwrap()
+                    .scan_root_id
+                    .as_str(),
+                &live_candidate(),
+                ExplanationDigest::new("explain-live"),
+                "action-live",
+                TargetIdentity::new("target-live"),
+                vec![PlanAction::new("action-live", RiskTier::R2)],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut changed_candidate = live_candidate();
+        changed_candidate
+            .locator
+            .native_locator
+            .as_mut()
+            .unwrap()
+            .entry
+            .native_basename = NativeName::unix(b"changed".to_vec());
+        let second = PlanItem::try_from(
+            plan_item_from_live_candidate(
+                "scan-1",
+                changed_candidate
+                    .locator
+                    .scan_object_identity
+                    .as_ref()
+                    .unwrap()
+                    .scan_root_id
+                    .as_str(),
+                &changed_candidate,
+                ExplanationDigest::new("explain-live"),
+                "action-live",
+                TargetIdentity::new("target-live"),
+                vec![PlanAction::new("action-live", RiskTier::R2)],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(first.native_target(), second.native_target());
+        assert_ne!(
+            first.digest().unwrap().as_str(),
+            second.digest().unwrap().as_str()
+        );
     }
 
     #[test]

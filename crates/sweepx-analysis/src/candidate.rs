@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sweepx_model::{
     ArithmeticState, ByteValue, CandidateId, Coverage, CoverageState, DecimalU128,
-    DirectoryAggregate, EvidenceValue, FieldProvenance, NativeName, ObjectType, ReasonCode,
-    RiskTier, ScanId, ScanObjectIdentity, ScannedEntry,
+    DirectoryAggregate, EvidenceValue, FieldProvenance, NativeLocatorEvidence, NativeName,
+    ObjectType, ReasonCode, RiskTier, ScanId, ScanObjectIdentity, ScannedEntry,
 };
 
 use crate::digest::{AnalysisDigestError, analysis_digest_hex};
@@ -19,6 +19,7 @@ pub struct PathPresentation {
 pub struct CandidateLocator {
     pub stable_identity: Option<String>,
     pub scan_object_identity: Option<ScanObjectIdentity>,
+    pub native_locator: Option<NativeLocatorEvidence>,
     pub native_basename: NativeName,
     pub metadata_fingerprint: String,
 }
@@ -302,6 +303,12 @@ impl<'a> CandidateBuilder<'a> {
     pub fn build(self) -> Result<Candidate, AnalysisDigestError> {
         let source_state = CandidateSourceState::from_provenance(&self.entry.provenance);
         let scan_object_identity = self.entry.validated_identity().ok().flatten().cloned();
+        let native_locator = self
+            .entry
+            .validated_native_locator()
+            .ok()
+            .flatten()
+            .cloned();
         let stable_identity = scan_object_identity
             .as_ref()
             .map(|identity| identity.entry_id.to_string());
@@ -313,6 +320,7 @@ impl<'a> CandidateBuilder<'a> {
         let locator = CandidateLocator {
             stable_identity,
             scan_object_identity: scan_object_identity.clone(),
+            native_locator,
             native_basename: self.entry.native_basename.clone(),
             metadata_fingerprint: self.entry.metadata_fingerprint.clone(),
         };
@@ -336,15 +344,16 @@ impl<'a> CandidateBuilder<'a> {
             self.live_source_required,
         );
         let risk = MonotonicClassifier::classify(&risk_signals);
-        let eligibility = evaluate_eligibility(
-            self.entry.object_type == ObjectType::Directory,
-            &self.entry.coverage,
-            aggregate.map(|aggregate| &aggregate.coverage),
-            aggregate_link_requested,
-            scan_object_identity.is_some(),
+        let eligibility = evaluate_eligibility(EligibilityInput {
+            directory_requires_aggregate: self.entry.object_type == ObjectType::Directory,
+            entry_coverage: &self.entry.coverage,
+            aggregate_coverage: aggregate.map(|aggregate| &aggregate.coverage),
+            aggregate_linked: aggregate_link_requested,
+            identity_valid: scan_object_identity.is_some(),
+            native_locator_valid: digest_input_locator_has_native_locator(&locator),
             source_state,
-            self.live_source_required,
-        );
+            live_source_required: self.live_source_required,
+        });
 
         let digest_input = CandidateDigestInput {
             scan_id: self.entry.scan_id.clone(),
@@ -612,43 +621,56 @@ fn push_value_signals(signals: &mut Vec<RiskSignal>, code: &str, value: &ByteVal
     }
 }
 
-fn evaluate_eligibility(
+struct EligibilityInput<'a> {
     directory_requires_aggregate: bool,
-    entry_coverage: &Coverage,
-    aggregate_coverage: Option<&Coverage>,
+    entry_coverage: &'a Coverage,
+    aggregate_coverage: Option<&'a Coverage>,
     aggregate_linked: bool,
     identity_valid: bool,
+    native_locator_valid: bool,
     source_state: CandidateSourceState,
     live_source_required: bool,
-) -> CandidateEligibility {
+}
+
+fn evaluate_eligibility(input: EligibilityInput<'_>) -> CandidateEligibility {
     let mut reasons = Vec::new();
     let mut executable = ExecutableEligibility::Executable;
 
-    collect_incomplete_reasons(&mut reasons, entry_coverage);
-    if let Some(aggregate_coverage) = aggregate_coverage {
+    collect_incomplete_reasons(&mut reasons, input.entry_coverage);
+    if let Some(aggregate_coverage) = input.aggregate_coverage {
         collect_incomplete_reasons(&mut reasons, aggregate_coverage);
     }
 
-    if entry_coverage.details_lost
-        || entry_coverage.state == CoverageState::DetailsLost
-        || aggregate_coverage
+    if input.entry_coverage.details_lost
+        || input.entry_coverage.state == CoverageState::DetailsLost
+        || input
+            .aggregate_coverage
             .map(|coverage| coverage.details_lost || coverage.state == CoverageState::DetailsLost)
             .unwrap_or(false)
     {
         executable = ExecutableEligibility::Blocked;
     }
 
-    if (live_source_required && !source_state.is_live()) || !source_state.is_current() {
+    if (input.live_source_required && !input.source_state.is_live())
+        || !input.source_state.is_current()
+    {
         executable = downgrade(executable, ExecutableEligibility::ReportOnly);
         reasons.push(ReasonCode::NotRevalidated);
     }
 
-    if (directory_requires_aggregate || aggregate_linked) && aggregate_coverage.is_none() {
+    if (input.directory_requires_aggregate || input.aggregate_linked)
+        && input.aggregate_coverage.is_none()
+    {
         executable = downgrade(executable, ExecutableEligibility::ReportOnly);
         reasons.push(ReasonCode::UnknownIdentity);
     }
 
-    if !identity_valid {
+    if !input.identity_valid {
+        executable = downgrade(executable, ExecutableEligibility::ReportOnly);
+        reasons.push(ReasonCode::UnknownIdentity);
+    }
+
+    if !input.native_locator_valid {
         executable = downgrade(executable, ExecutableEligibility::ReportOnly);
         reasons.push(ReasonCode::UnknownIdentity);
     }
@@ -661,6 +683,10 @@ fn evaluate_eligibility(
         executable,
         reasons,
     }
+}
+
+fn digest_input_locator_has_native_locator(locator: &CandidateLocator) -> bool {
+    locator.native_locator.is_some()
 }
 
 fn collect_incomplete_reasons(reasons: &mut Vec<ReasonCode>, coverage: &Coverage) {
@@ -701,8 +727,9 @@ struct AggregateLink<'a> {
 mod tests {
     use super::*;
     use sweepx_model::{
-        Coverage, FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, PlatformFileIdentity,
-        ScanEntryId, ScanObjectIdentity, VolumeOrMountIdentity,
+        Coverage, FilesystemObjectDomainIdentity, IdentityEvidence, MethodId,
+        NativeLocatorEvidence, NativePathComponent, PlatformFileIdentity, ScanEntryId,
+        ScanObjectIdentity, VolumeOrMountIdentity,
     };
 
     fn live_provenance() -> FieldProvenance {
@@ -745,12 +772,16 @@ mod tests {
         object_type: ObjectType,
         identity: Option<ScanObjectIdentity>,
     ) -> ScannedEntry {
+        let native_basename = NativeName::unix(b"demo".to_vec());
+        let native_locator = identity
+            .as_ref()
+            .map(|identity| native_locator(identity, native_basename.clone()));
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity,
-            native_locator: None,
+            native_locator,
             display_path: display_path.to_string(),
-            native_basename: NativeName::unix(b"demo".to_vec()),
+            native_basename,
             object_type,
             logical_bytes: EvidenceValue::Known {
                 value: DecimalU128::new(10),
@@ -765,6 +796,25 @@ mod tests {
             coverage: complete_coverage(),
             provenance,
         }
+    }
+
+    fn entry_with_native_locator(
+        display_path: &str,
+        metadata_fingerprint: &str,
+        provenance: FieldProvenance,
+        object_type: ObjectType,
+        identity: Option<ScanObjectIdentity>,
+        native_locator: Option<NativeLocatorEvidence>,
+    ) -> ScannedEntry {
+        let mut entry = entry(
+            display_path,
+            metadata_fingerprint,
+            provenance,
+            object_type,
+            identity,
+        );
+        entry.native_locator = native_locator;
+        entry
     }
 
     fn identity(entry_ordinal: u128, root_ordinal: u128) -> ScanObjectIdentity {
@@ -787,6 +837,31 @@ mod tests {
             volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
                 value: DecimalU128::new(1),
             }),
+        }
+    }
+
+    fn native_locator(
+        identity: &ScanObjectIdentity,
+        entry_native_basename: NativeName,
+    ) -> NativeLocatorEvidence {
+        NativeLocatorEvidence {
+            scan_root: NativePathComponent {
+                entry_id: identity.scan_root_id.clone(),
+                native_basename: NativeName::unix(b"root".to_vec()),
+            },
+            parent_reopen_recipe: identity
+                .parent_id
+                .as_ref()
+                .map(|parent_id| NativePathComponent {
+                    entry_id: parent_id.clone(),
+                    native_basename: NativeName::unix(b"parent".to_vec()),
+                })
+                .into_iter()
+                .collect(),
+            entry: NativePathComponent {
+                entry_id: identity.entry_id.clone(),
+                native_basename: entry_native_basename,
+            },
         }
     }
 
@@ -973,6 +1048,65 @@ mod tests {
     }
 
     #[test]
+    fn validated_native_locator_is_carried_into_candidate_locator() {
+        let entry_identity = identity(2, 1);
+        let candidate = CandidateBuilder::new(&entry(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity.clone()),
+        ))
+        .build()
+        .unwrap();
+
+        let locator = candidate.locator.native_locator.as_ref().unwrap();
+        assert_eq!(locator.scan_root.entry_id, entry_identity.scan_root_id);
+        assert_eq!(locator.entry.entry_id, entry_identity.entry_id);
+        assert_eq!(
+            locator
+                .parent_reopen_recipe
+                .last()
+                .map(|component| &component.entry_id),
+            entry_identity.parent_id.as_ref(),
+        );
+    }
+
+    #[test]
+    fn native_locator_changes_candidate_digest() {
+        let entry_identity = identity(2, 1);
+        let first = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity.clone()),
+            Some(native_locator(
+                &entry_identity,
+                NativeName::unix(b"demo".to_vec()),
+            )),
+        ))
+        .build()
+        .unwrap();
+        let second = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity.clone()),
+            Some(native_locator(
+                &entry_identity,
+                NativeName::unix(b"different".to_vec()),
+            )),
+        ))
+        .build()
+        .unwrap();
+
+        assert_ne!(first.locator.native_locator, second.locator.native_locator);
+        assert_ne!(first.canonical_digest, second.canonical_digest);
+    }
+
+    #[test]
     fn explicit_aggregate_binding_carries_identity_and_revision() {
         let entry_identity = identity(2, 1);
         let aggregate = aggregate(entry_identity.entry_id.as_str(), complete_coverage(), 42);
@@ -1063,6 +1197,37 @@ mod tests {
 
         assert_eq!(candidate.locator.scan_object_identity, None);
         assert_eq!(candidate.locator.stable_identity, None);
+        assert_eq!(candidate.locator.native_locator, None);
+        assert_eq!(
+            candidate.eligibility.executable,
+            ExecutableEligibility::ReportOnly
+        );
+        assert!(
+            candidate
+                .eligibility
+                .reasons
+                .contains(&ReasonCode::UnknownIdentity)
+        );
+    }
+
+    #[test]
+    fn malformed_native_locator_is_not_promoted_into_locator() {
+        let entry_identity = identity(2, 1);
+        let mut malformed = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        malformed.entry.entry_id = malformed.scan_root.entry_id.clone();
+        let candidate = CandidateBuilder::new(&entry_with_native_locator(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(entry_identity),
+            Some(malformed),
+        ))
+        .build()
+        .unwrap();
+
+        assert!(candidate.locator.scan_object_identity.is_some());
+        assert_eq!(candidate.locator.native_locator, None);
         assert_eq!(
             candidate.eligibility.executable,
             ExecutableEligibility::ReportOnly

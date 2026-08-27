@@ -612,6 +612,7 @@ mod tests {
                 explanation_digest: ExplanationDigest::new("explanation-01-safety"),
                 top_level_action_id: ACTION_ID.to_string(),
                 target: TargetIdentity::new("target-01-safety"),
+                native_target: None,
                 risk_tier: risk,
                 risk_factors: vec![RiskFactor::new("risk-safety")],
                 subtree_complete: true,

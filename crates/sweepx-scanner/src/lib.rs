@@ -246,10 +246,18 @@ struct FrontierDirectory<D> {
     handle: D,
     identity: ScanObjectIdentity,
     native_component: NativePathComponent,
-    parent_native_component: Option<NativePathComponent>,
+    parent_reopen_recipe: Vec<NativePathComponent>,
     started: bool,
     consumed_entries: usize,
     consumed_bytes: usize,
+}
+
+impl<D> FrontierDirectory<D> {
+    fn parent_recipe_with_self(&self) -> Vec<NativePathComponent> {
+        let mut recipe = self.parent_reopen_recipe.clone();
+        recipe.push(self.native_component.clone());
+        recipe
+    }
 }
 
 impl<P> Scanner<P>
@@ -355,7 +363,7 @@ where
                             &root_identity.entry_id,
                             &admission.metadata.file_name,
                         ),
-                        None,
+                        &[],
                         &native_path_component(
                             &root_identity.entry_id,
                             &admission.metadata.file_name,
@@ -403,7 +411,7 @@ where
                 &root_identity.entry_id,
                 &root_metadata.file_name,
             ),
-            parent_native_component: None,
+            parent_reopen_recipe: Vec::new(),
             started: false,
             consumed_entries: 0,
             consumed_bytes: 0,
@@ -515,7 +523,7 @@ where
                                     &root_identity.entry_id,
                                     &root_metadata.file_name,
                                 ),
-                                current.parent_native_component.as_ref(),
+                                &current.parent_reopen_recipe,
                                 &current.native_component,
                             )),
                             display_path: path.display().to_string(),
@@ -782,7 +790,7 @@ where
                                     &root_identity.entry_id,
                                     &root_metadata.file_name,
                                 ),
-                                Some(&current.native_component),
+                                &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
                             complete_coverage(),
@@ -804,7 +812,7 @@ where
                             handle: opened.handle,
                             identity,
                             native_component,
-                            parent_native_component: Some(current.native_component.clone()),
+                            parent_reopen_recipe: current.parent_recipe_with_self(),
                             started: false,
                             consumed_entries: 0,
                             consumed_bytes: 0,
@@ -829,7 +837,7 @@ where
                                     &root_identity.entry_id,
                                     &root_metadata.file_name,
                                 ),
-                                Some(&current.native_component),
+                                &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
                             complete_coverage(),
@@ -887,7 +895,7 @@ where
                                         &root_identity.entry_id,
                                         &root_metadata.file_name,
                                     ),
-                                    Some(&current.native_component),
+                                    &current.parent_recipe_with_self(),
                                     &native_component,
                                 ),
                                 coverage,
@@ -1387,12 +1395,12 @@ fn scan_object_identity(
 
 fn native_locator_evidence(
     root_component: &NativePathComponent,
-    parent_component: Option<&NativePathComponent>,
+    parent_reopen_recipe: &[NativePathComponent],
     entry_component: &NativePathComponent,
 ) -> NativeLocatorEvidence {
     NativeLocatorEvidence {
         scan_root: root_component.clone(),
-        parent: parent_component.cloned(),
+        parent_reopen_recipe: parent_reopen_recipe.to_vec(),
         entry: entry_component.clone(),
     }
 }
@@ -1610,7 +1618,7 @@ mod tests {
         ));
         let root_locator = result.roots[0].validated_native_locator().unwrap().unwrap();
         assert_eq!(root_locator.scan_root.entry_id, root_identity.entry_id);
-        assert_eq!(root_locator.parent, None);
+        assert!(root_locator.parent_reopen_recipe.is_empty());
         assert_eq!(root_locator.entry.entry_id, root_identity.entry_id);
         assert_eq!(root_locator.entry.native_basename, test_native_name("root"));
         let sub_entry = result
@@ -1632,17 +1640,19 @@ mod tests {
         assert_eq!(sub_locator.scan_root.entry_id, root_identity.entry_id);
         assert_eq!(
             sub_locator
-                .parent
-                .as_ref()
-                .map(|component| &component.entry_id),
-            Some(&root_identity.entry_id)
+                .parent_reopen_recipe
+                .iter()
+                .map(|component| &component.entry_id)
+                .collect::<Vec<_>>(),
+            [&root_identity.entry_id]
         );
         assert_eq!(
             sub_locator
-                .parent
-                .as_ref()
-                .map(|component| component.native_basename.clone()),
-            Some(test_native_name("root"))
+                .parent_reopen_recipe
+                .iter()
+                .map(|component| component.native_basename.clone())
+                .collect::<Vec<_>>(),
+            [test_native_name("root")]
         );
         assert_eq!(sub_locator.entry.entry_id, sub_identity.entry_id);
         assert_eq!(sub_locator.entry.native_basename, test_native_name("sub"));
@@ -1657,17 +1667,19 @@ mod tests {
         assert_eq!(beta_locator.scan_root.entry_id, root_identity.entry_id);
         assert_eq!(
             beta_locator
-                .parent
-                .as_ref()
-                .map(|component| &component.entry_id),
-            Some(&sub_identity.entry_id)
+                .parent_reopen_recipe
+                .iter()
+                .map(|component| &component.entry_id)
+                .collect::<Vec<_>>(),
+            [&root_identity.entry_id, &sub_identity.entry_id]
         );
         assert_eq!(
             beta_locator
-                .parent
-                .as_ref()
-                .map(|component| component.native_basename.clone()),
-            Some(test_native_name("sub"))
+                .parent_reopen_recipe
+                .iter()
+                .map(|component| component.native_basename.clone())
+                .collect::<Vec<_>>(),
+            [test_native_name("root"), test_native_name("sub")]
         );
         assert_eq!(beta_locator.entry.entry_id, beta_identity.entry_id);
         assert_eq!(

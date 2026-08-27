@@ -230,8 +230,8 @@ mod tests {
     use super::*;
     use sweepx_model::{
         Coverage, CoverageState, FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence,
-        MethodId, NativeName, ObjectType, PlatformFileIdentity, ScanEntryId, ScanId,
-        ScanObjectIdentity, VolumeOrMountIdentity,
+        MethodId, NativeLocatorEvidence, NativeName, NativePathComponent, ObjectType,
+        PlatformFileIdentity, ScanEntryId, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
     };
     use sweepx_scanner::ScanSummary;
 
@@ -272,6 +272,28 @@ mod tests {
             volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
                 value: sweepx_model::DecimalU128::new(1),
             }),
+        }
+    }
+
+    fn native_locator(identity: &ScanObjectIdentity, basename: &str) -> NativeLocatorEvidence {
+        NativeLocatorEvidence {
+            scan_root: NativePathComponent {
+                entry_id: identity.scan_root_id.clone(),
+                native_basename: NativeName::unix(b"root".to_vec()),
+            },
+            parent_reopen_recipe: identity
+                .parent_id
+                .as_ref()
+                .map(|parent_id| NativePathComponent {
+                    entry_id: parent_id.clone(),
+                    native_basename: NativeName::unix(b"root".to_vec()),
+                })
+                .into_iter()
+                .collect(),
+            entry: NativePathComponent {
+                entry_id: identity.entry_id.clone(),
+                native_basename: NativeName::unix(basename.as_bytes().to_vec()),
+            },
         }
     }
 
@@ -369,7 +391,7 @@ mod tests {
         let entry = ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity: Some(stable_identity.clone()),
-            native_locator: None,
+            native_locator: Some(native_locator(&stable_identity, "dir")),
             display_path: "/tmp/dir".to_string(),
             native_basename: NativeName::unix(b"dir".to_vec()),
             object_type: ObjectType::Directory,

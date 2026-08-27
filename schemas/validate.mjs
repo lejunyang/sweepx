@@ -145,7 +145,7 @@ const liveScanOutput = readJson(
 );
 const scanSchemaCases = [
   {
-    name: "live scan identity and aggregate scan entry ID",
+    name: "live scan identity, native locator, and aggregate scan entry ID",
     expected: true,
     mutate() {}
   },
@@ -154,7 +154,9 @@ const scanSchemaCases = [
     expected: true,
     mutate(output) {
       delete output.data.roots[0].identity;
+      delete output.data.roots[0].nativeLocator;
       delete output.data.entries[0].identity;
+      delete output.data.entries[0].nativeLocator;
       output.data.aggregates[0].directoryIdentity = "/legacy/path";
     }
   },
@@ -188,6 +190,53 @@ const scanSchemaCases = [
     expected: false,
     mutate(output) {
       output.data.roots[0].identity.platformFileIdentity.value = 0;
+    }
+  },
+  {
+    name: "malformed scan entry ID is rejected in native locator recipe",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.parentReopenRecipe[0].entryId =
+        "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:0";
+    }
+  },
+  {
+    name: "child native locator requires a root-to-parent recipe",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.parentReopenRecipe = [];
+    }
+  },
+  {
+    name: "root native locator has an empty parent recipe",
+    expected: false,
+    mutate(output) {
+      output.data.roots[0].nativeLocator.parentReopenRecipe.push(
+        clone(output.data.roots[0].nativeLocator.scanRoot)
+      );
+    }
+  },
+  {
+    name: "native locator requires an explicit parent recipe array",
+    expected: false,
+    mutate(output) {
+      delete output.data.entries[0].nativeLocator.parentReopenRecipe;
+    }
+  },
+  {
+    name: "display path is rejected as native locator entry ID",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.entry.entryId =
+        "/fixtures/p0-minimal/fixture.bin";
+    }
+  },
+  {
+    name: "display path is rejected as lossless native basename",
+    expected: false,
+    mutate(output) {
+      output.data.entries[0].nativeLocator.entry.nativeBasename.value =
+        "/fixtures/p0-minimal/fixture.bin";
     }
   }
 ];

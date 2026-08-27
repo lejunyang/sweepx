@@ -75,8 +75,9 @@ pub mod simulation {
 }
 pub use plan::{
     AggregateRisk, CanonicalPlanError, DeletionMode, DeletionPlan, DeletionPlanInput,
-    ExplanationDigest, ManifestDigest, PlanAction, PlanDigest, PlanFingerprint, PlanId, PlanItem,
-    PlanItemDigest, PlanItemInput, RiskFactor, RiskTier, SelectedActionSet, TargetIdentity,
+    ExplanationDigest, ManifestDigest, NativePlanTarget, PlanAction, PlanDigest, PlanFingerprint,
+    PlanId, PlanItem, PlanItemDigest, PlanItemInput, RiskFactor, RiskTier, SelectedActionSet,
+    TargetIdentity, plan_item_from_live_candidate,
 };
 pub use protection::{
     HardProtectionDecision, HardProtectionPolicy, HardProtectionReason, ModePolicyError,
