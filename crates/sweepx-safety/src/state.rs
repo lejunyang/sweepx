@@ -163,7 +163,139 @@ pub enum ItemStateError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct PolicyTransitions {
+        batch: Vec<PolicyEdge>,
+        item: Vec<PolicyEdge>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PolicyEdge {
+        from: String,
+        to: Vec<String>,
+    }
+
+    fn policy_transitions() -> PolicyTransitions {
+        serde_json::from_str(include_str!("../../../policy/state-transitions.json"))
+            .expect("valid state transition policy json")
+    }
+
+    fn batch_policy_from_json() -> BTreeMap<String, BTreeSet<String>> {
+        policy_transitions()
+            .batch
+            .into_iter()
+            .map(|edge| (edge.from, edge.to.into_iter().collect()))
+            .collect()
+    }
+
+    fn item_policy_from_json() -> BTreeMap<String, BTreeSet<String>> {
+        policy_transitions()
+            .item
+            .into_iter()
+            .map(|edge| (edge.from, edge.to.into_iter().collect()))
+            .collect()
+    }
+
+    fn batch_policy_from_rust() -> BTreeMap<String, BTreeSet<String>> {
+        default_batch_transition_policy()
+            .into_iter()
+            .map(|(from, to)| {
+                (
+                    batch_state_name(from).to_string(),
+                    to.into_iter()
+                        .map(batch_state_name)
+                        .map(str::to_string)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn item_policy_from_rust() -> BTreeMap<String, BTreeSet<String>> {
+        default_item_transition_policy()
+            .into_iter()
+            .map(|(from, to)| {
+                (
+                    item_state_name(from).to_string(),
+                    to.into_iter()
+                        .map(item_state_name)
+                        .map(str::to_string)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn batch_state_name(state: BatchState) -> &'static str {
+        match state {
+            BatchState::Discovered => "DISCOVERED",
+            BatchState::Explained => "EXPLAINED",
+            BatchState::Planned => "PLANNED",
+            BatchState::AuthorizationPending => "AUTHORIZATION_PENDING",
+            BatchState::Authorized => "AUTHORIZED",
+            BatchState::Revalidating => "REVALIDATING",
+            BatchState::Ready => "READY",
+            BatchState::Executing => "EXECUTING",
+            BatchState::Completed => "COMPLETED",
+            BatchState::Partial => "PARTIAL",
+            BatchState::Cancelled => "CANCELLED",
+            BatchState::NeedsReconciliation => "NEEDS_RECONCILIATION",
+            BatchState::Rejected => "REJECTED",
+            BatchState::HardBlocked => "HARD_BLOCKED",
+            BatchState::Audited => "AUDITED",
+        }
+    }
+
+    fn item_state_name(state: ItemState) -> &'static str {
+        match state {
+            ItemState::Candidate => "CANDIDATE",
+            ItemState::Explained => "EXPLAINED",
+            ItemState::InPlan => "IN_PLAN",
+            ItemState::Authorized => "AUTHORIZED",
+            ItemState::Revalidating => "REVALIDATING",
+            ItemState::PreflightReady => "PREFLIGHT_READY",
+            ItemState::Trashing => "TRASHING",
+            ItemState::PermanentDeleting => "PERMANENT_DELETING",
+            ItemState::Succeeded => "SUCCEEDED",
+            ItemState::Failed => "FAILED",
+            ItemState::Skipped => "SKIPPED",
+            ItemState::Stale => "STALE",
+            ItemState::Cancelled => "CANCELLED",
+            ItemState::Indeterminate => "INDETERMINATE",
+            ItemState::Rejected => "REJECTED",
+            ItemState::HardBlocked => "HARD_BLOCKED",
+            ItemState::Audited => "AUDITED",
+        }
+    }
+
+    fn can_reach(
+        start: ItemState,
+        goal: ItemState,
+        policy: &StateTransitionPolicy<ItemState>,
+    ) -> bool {
+        let mut visited = BTreeSet::new();
+        let mut frontier = VecDeque::from([start]);
+
+        while let Some(current) = frontier.pop_front() {
+            if current == goal {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(next) = policy.get(&current) {
+                frontier.extend(next.iter().copied());
+            }
+        }
+
+        false
+    }
 
     #[test]
     fn batch_policy_rejects_invalid_edges() {
@@ -199,6 +331,96 @@ mod tests {
                 from: ItemState::Candidate,
                 to: ItemState::Succeeded,
             }
+        );
+    }
+
+    #[test]
+    fn policy_json_and_rust_batch_transition_tables_stay_in_parity() {
+        assert_eq!(batch_policy_from_rust(), batch_policy_from_json());
+    }
+
+    #[test]
+    fn policy_json_and_rust_item_transition_tables_stay_in_parity() {
+        assert_eq!(item_policy_from_rust(), item_policy_from_json());
+    }
+
+    #[test]
+    fn trash_failure_unsupported_denied_cancelled_and_ambiguous_outcomes_cannot_transition_to_permanent()
+     {
+        let policy = default_item_transition_policy();
+        for outcome in [
+            ItemState::Failed,
+            ItemState::Skipped,
+            ItemState::Rejected,
+            ItemState::Cancelled,
+            ItemState::Indeterminate,
+            ItemState::HardBlocked,
+            ItemState::Stale,
+        ] {
+            assert_eq!(
+                validate_item_transition(outcome, ItemState::PermanentDeleting, &policy)
+                    .unwrap_err(),
+                ItemStateError::InvalidTransition {
+                    from: outcome,
+                    to: ItemState::PermanentDeleting,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn trash_failure_unsupported_denied_cancelled_and_ambiguous_outcomes_cannot_dispatch_to_permanent()
+     {
+        let policy = default_item_transition_policy();
+        for outcome in [
+            ItemState::Failed,
+            ItemState::Skipped,
+            ItemState::Rejected,
+            ItemState::Cancelled,
+            ItemState::Indeterminate,
+            ItemState::HardBlocked,
+            ItemState::Stale,
+        ] {
+            assert!(
+                !can_reach(outcome, ItemState::PermanentDeleting, &policy),
+                "{outcome:?} unexpectedly reaches PermanentDeleting"
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_dispatch_is_only_available_from_preflight_ready() {
+        let policy = default_item_transition_policy();
+        for state in [
+            ItemState::Candidate,
+            ItemState::Explained,
+            ItemState::InPlan,
+            ItemState::Authorized,
+            ItemState::Revalidating,
+            ItemState::Trashing,
+            ItemState::PermanentDeleting,
+            ItemState::Succeeded,
+            ItemState::Failed,
+            ItemState::Skipped,
+            ItemState::Stale,
+            ItemState::Cancelled,
+            ItemState::Indeterminate,
+            ItemState::Rejected,
+            ItemState::HardBlocked,
+            ItemState::Audited,
+        ] {
+            assert!(
+                validate_item_transition(state, ItemState::PermanentDeleting, &policy).is_err(),
+                "{state:?} unexpectedly dispatches to PermanentDeleting"
+            );
+        }
+        assert!(
+            validate_item_transition(
+                ItemState::PreflightReady,
+                ItemState::PermanentDeleting,
+                &policy
+            )
+            .is_ok()
         );
     }
 }
