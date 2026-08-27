@@ -614,8 +614,7 @@ impl NativeLocatorEvidence {
         }
         let mut seen = std::collections::BTreeSet::new();
         for component in &self.parent_reopen_recipe {
-            if !seen.insert(component.entry_id.clone())
-                || component.entry_id == self.entry.entry_id
+            if !seen.insert(component.entry_id.clone()) || component.entry_id == self.entry.entry_id
             {
                 return Err(ScanEntryIdError::InvalidFormat);
             }

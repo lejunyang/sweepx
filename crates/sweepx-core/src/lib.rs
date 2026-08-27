@@ -10,11 +10,11 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sweepx_canonical::canonicalize_value;
 use sweepx_analysis::{
     DirectoryAggregateLink, build_candidates_from_summary_with_links,
     build_explanation_from_candidate,
 };
+use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
@@ -2492,7 +2492,9 @@ fn cleaner_set_digest_with_trust(
                 .as_str()
                 .unwrap_or_default(),
             left["catalogTrust"]["epoch"].as_u64().unwrap_or_default(),
-            left["catalogTrust"]["freshness"].as_str().unwrap_or_default(),
+            left["catalogTrust"]["freshness"]
+                .as_str()
+                .unwrap_or_default(),
             left["catalogTrust"]["disposition"]
                 .as_str()
                 .unwrap_or_default(),
@@ -2506,7 +2508,9 @@ fn cleaner_set_digest_with_trust(
                 .as_str()
                 .unwrap_or_default(),
             right["catalogTrust"]["epoch"].as_u64().unwrap_or_default(),
-            right["catalogTrust"]["freshness"].as_str().unwrap_or_default(),
+            right["catalogTrust"]["freshness"]
+                .as_str()
+                .unwrap_or_default(),
             right["catalogTrust"]["disposition"]
                 .as_str()
                 .unwrap_or_default(),
