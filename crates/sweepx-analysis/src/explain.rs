@@ -308,6 +308,7 @@ mod tests {
             &ScannedEntry {
                 scan_id: ScanId::new("scan-1"),
                 identity: None,
+                native_locator: None,
                 display_path: "/tmp/item".to_string(),
                 native_basename: NativeName::unix(b"item".to_vec()),
                 object_type: ObjectType::File,
@@ -368,6 +369,7 @@ mod tests {
         let entry = ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity: Some(stable_identity.clone()),
+            native_locator: None,
             display_path: "/tmp/dir".to_string(),
             native_basename: NativeName::unix(b"dir".to_vec()),
             object_type: ObjectType::Directory,
@@ -434,6 +436,7 @@ mod tests {
         let entry = ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity: Some(stable_identity.clone()),
+            native_locator: None,
             display_path: "/tmp/dir".to_string(),
             native_basename: NativeName::unix(b"dir".to_vec()),
             object_type: ObjectType::Directory,

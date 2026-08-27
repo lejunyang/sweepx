@@ -572,6 +572,51 @@ impl ScanObjectIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct NativePathComponent {
+    pub entry_id: ScanEntryId,
+    pub native_basename: NativeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct NativeLocatorEvidence {
+    pub scan_root: NativePathComponent,
+    pub parent: Option<NativePathComponent>,
+    pub entry: NativePathComponent,
+}
+
+impl NativeLocatorEvidence {
+    pub fn validate_for_identity(
+        &self,
+        identity: &ScanObjectIdentity,
+        scan_id: &ScanId,
+    ) -> Result<(), ScanEntryIdError> {
+        identity.validate_for_scan(scan_id)?;
+        if !self.scan_root.entry_id.belongs_to(scan_id) || !self.entry.entry_id.belongs_to(scan_id)
+        {
+            return Err(ScanEntryIdError::ScanMismatch);
+        }
+        if self.scan_root.entry_id != identity.scan_root_id
+            || self.entry.entry_id != identity.entry_id
+        {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        match (&self.parent, &identity.parent_id) {
+            (Some(parent), Some(expected_parent)) => {
+                if !parent.entry_id.belongs_to(scan_id) {
+                    return Err(ScanEntryIdError::ScanMismatch);
+                }
+                if &parent.entry_id != expected_parent {
+                    return Err(ScanEntryIdError::InvalidFormat);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(ScanEntryIdError::InvalidFormat),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageState {
     Complete,
@@ -605,6 +650,11 @@ pub struct ScannedEntry {
     /// always supplies this block; consumers must not synthesize one from `display_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ScanObjectIdentity>,
+    /// Absent only on legacy/imported records that predate native lineage capture. New live
+    /// scanner output always supplies this block; consumers must not synthesize one from
+    /// `display_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_locator: Option<NativeLocatorEvidence>,
     pub display_path: String,
     pub native_basename: NativeName,
     pub object_type: ObjectType,
@@ -623,6 +673,21 @@ impl ScannedEntry {
             identity.validate_for_scan(&self.scan_id)?;
         }
         Ok(self.identity.as_ref())
+    }
+
+    /// Returns validated native locator evidence only when it matches the current validated scan
+    /// identity. Legacy/imported records may return `Ok(None)`.
+    pub fn validated_native_locator(
+        &self,
+    ) -> Result<Option<&NativeLocatorEvidence>, ScanEntryIdError> {
+        let Some(locator) = &self.native_locator else {
+            return Ok(None);
+        };
+        let Some(identity) = self.validated_identity()? else {
+            return Ok(None);
+        };
+        locator.validate_for_identity(identity, &self.scan_id)?;
+        Ok(Some(locator))
     }
 }
 

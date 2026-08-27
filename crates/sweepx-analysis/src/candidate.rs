@@ -748,6 +748,7 @@ mod tests {
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity,
+            native_locator: None,
             display_path: display_path.to_string(),
             native_basename: NativeName::unix(b"demo".to_vec()),
             object_type,

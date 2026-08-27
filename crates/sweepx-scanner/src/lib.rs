@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use sweepx_model::{
     ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, EvidenceValue,
-    FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence, NativeName, ObjectType,
-    PlatformFileIdentity, ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity, ScannedEntry,
-    VolumeOrMountIdentity,
+    FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence, NativeLocatorEvidence,
+    NativeName, NativePathComponent, ObjectType, PlatformFileIdentity, ReasonCode, ScanEntryId,
+    ScanId, ScanObjectIdentity, ScannedEntry, VolumeOrMountIdentity,
 };
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryReadLimits, EntryKind, EntryMetadata,
@@ -245,6 +245,8 @@ struct FrontierDirectory<D> {
     path: PathBuf,
     handle: D,
     identity: ScanObjectIdentity,
+    native_component: NativePathComponent,
+    parent_native_component: Option<NativePathComponent>,
     started: bool,
     consumed_entries: usize,
     consumed_bytes: usize,
@@ -348,6 +350,17 @@ where
                     &self.options.scan_id,
                     &admission.metadata,
                     root_identity.clone(),
+                    native_locator_evidence(
+                        &native_path_component(
+                            &root_identity.entry_id,
+                            &admission.metadata.file_name,
+                        ),
+                        None,
+                        &native_path_component(
+                            &root_identity.entry_id,
+                            &admission.metadata.file_name,
+                        ),
+                    ),
                     complete_coverage(),
                 ),
             )?;
@@ -386,6 +399,11 @@ where
             path: root_metadata.path.clone(),
             handle: directory,
             identity: root_identity.clone(),
+            native_component: native_path_component(
+                &root_identity.entry_id,
+                &root_metadata.file_name,
+            ),
+            parent_native_component: None,
             started: false,
             consumed_entries: 0,
             consumed_bytes: 0,
@@ -492,6 +510,14 @@ where
                         ScannedEntry {
                             scan_id: self.options.scan_id.clone(),
                             identity: Some(current.identity.clone()),
+                            native_locator: Some(native_locator_evidence(
+                                &native_path_component(
+                                    &root_identity.entry_id,
+                                    &root_metadata.file_name,
+                                ),
+                                current.parent_native_component.as_ref(),
+                                &current.native_component,
+                            )),
                             display_path: path.display().to_string(),
                             native_basename: native_basename_for_path(&path),
                             object_type: ObjectType::Directory,
@@ -745,10 +771,20 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
+                        let native_component =
+                            native_path_component(&identity.entry_id, &metadata.file_name);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
                             identity.clone(),
+                            native_locator_evidence(
+                                &native_path_component(
+                                    &root_identity.entry_id,
+                                    &root_metadata.file_name,
+                                ),
+                                Some(&current.native_component),
+                                &native_component,
+                            ),
                             complete_coverage(),
                         );
                         sink.push_progress(
@@ -767,6 +803,8 @@ where
                             path: metadata.path.clone(),
                             handle: opened.handle,
                             identity,
+                            native_component,
+                            parent_native_component: Some(current.native_component.clone()),
                             started: false,
                             consumed_entries: 0,
                             consumed_bytes: 0,
@@ -774,14 +812,25 @@ where
                         active_frontier_entries += 1;
                     }
                     WalkEntry::File(metadata) => {
+                        let identity = scan_object_identity(
+                            entry_id,
+                            root_identity.entry_id.clone(),
+                            Some(current.identity.entry_id.clone()),
+                            &metadata,
+                        );
+                        let native_component =
+                            native_path_component(&identity.entry_id, &metadata.file_name);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
-                            scan_object_identity(
-                                entry_id,
-                                root_identity.entry_id.clone(),
-                                Some(current.identity.entry_id.clone()),
-                                &metadata,
+                            identity.clone(),
+                            native_locator_evidence(
+                                &native_path_component(
+                                    &root_identity.entry_id,
+                                    &root_metadata.file_name,
+                                ),
+                                Some(&current.native_component),
+                                &native_component,
                             ),
                             complete_coverage(),
                         );
@@ -802,6 +851,8 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
+                        let native_component =
+                            native_path_component(&identity.entry_id, &metadata.file_name);
                         let coverage = Coverage {
                             state: CoverageState::Complete,
                             complete: true,
@@ -830,7 +881,15 @@ where
                             scanned_entry_from_metadata(
                                 &self.options.scan_id,
                                 &metadata,
-                                identity,
+                                identity.clone(),
+                                native_locator_evidence(
+                                    &native_path_component(
+                                        &root_identity.entry_id,
+                                        &root_metadata.file_name,
+                                    ),
+                                    Some(&current.native_component),
+                                    &native_component,
+                                ),
                                 coverage,
                             ),
                         )?;
@@ -877,6 +936,7 @@ where
                                         ReasonCode::UnknownIdentity,
                                     ),
                                 }),
+                                native_locator: None,
                                 display_path: error.path.display().to_string(),
                                 native_basename: native_basename_for_path(&error.path),
                                 object_type: ObjectType::Other,
@@ -1239,11 +1299,13 @@ fn scanned_entry_from_metadata(
     scan_id: &ScanId,
     metadata: &EntryMetadata,
     identity: ScanObjectIdentity,
+    native_locator: NativeLocatorEvidence,
     coverage: Coverage,
 ) -> ScannedEntry {
     ScannedEntry {
         scan_id: scan_id.clone(),
         identity: Some(identity),
+        native_locator: Some(native_locator),
         display_path: metadata.path.display().to_string(),
         native_basename: metadata.file_name.clone(),
         object_type: match metadata.kind {
@@ -1274,6 +1336,16 @@ fn scanned_entry_from_metadata(
         metadata_fingerprint: metadata.fingerprint.clone(),
         coverage,
         provenance: live_provenance(),
+    }
+}
+
+fn native_path_component(
+    entry_id: &ScanEntryId,
+    native_basename: &NativeName,
+) -> NativePathComponent {
+    NativePathComponent {
+        entry_id: entry_id.clone(),
+        native_basename: native_basename.clone(),
     }
 }
 
@@ -1310,6 +1382,18 @@ fn scan_object_identity(
         platform_file_identity,
         filesystem_object_domain_identity,
         volume_or_mount_identity,
+    }
+}
+
+fn native_locator_evidence(
+    root_component: &NativePathComponent,
+    parent_component: Option<&NativePathComponent>,
+    entry_component: &NativePathComponent,
+) -> NativeLocatorEvidence {
+    NativeLocatorEvidence {
+        scan_root: root_component.clone(),
+        parent: parent_component.cloned(),
+        entry: entry_component.clone(),
     }
 }
 
@@ -1524,6 +1608,11 @@ mod tests {
             root_identity.volume_or_mount_identity,
             IdentityEvidence::Known { .. }
         ));
+        let root_locator = result.roots[0].validated_native_locator().unwrap().unwrap();
+        assert_eq!(root_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(root_locator.parent, None);
+        assert_eq!(root_locator.entry.entry_id, root_identity.entry_id);
+        assert_eq!(root_locator.entry.native_basename, test_native_name("root"));
         let sub_entry = result
             .entries
             .iter()
@@ -1538,6 +1627,52 @@ mod tests {
         assert_eq!(
             aggregate_for_path(&result, &sub).directory_identity,
             sub_identity.entry_id.as_str()
+        );
+        let sub_locator = sub_entry.validated_native_locator().unwrap().unwrap();
+        assert_eq!(sub_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(
+            sub_locator
+                .parent
+                .as_ref()
+                .map(|component| &component.entry_id),
+            Some(&root_identity.entry_id)
+        );
+        assert_eq!(
+            sub_locator
+                .parent
+                .as_ref()
+                .map(|component| component.native_basename.clone()),
+            Some(test_native_name("root"))
+        );
+        assert_eq!(sub_locator.entry.entry_id, sub_identity.entry_id);
+        assert_eq!(sub_locator.entry.native_basename, test_native_name("sub"));
+        let beta = sub.join("beta.txt");
+        let beta_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.display_path == beta.display().to_string())
+            .unwrap();
+        let beta_identity = beta_entry.identity.as_ref().unwrap();
+        let beta_locator = beta_entry.validated_native_locator().unwrap().unwrap();
+        assert_eq!(beta_locator.scan_root.entry_id, root_identity.entry_id);
+        assert_eq!(
+            beta_locator
+                .parent
+                .as_ref()
+                .map(|component| &component.entry_id),
+            Some(&sub_identity.entry_id)
+        );
+        assert_eq!(
+            beta_locator
+                .parent
+                .as_ref()
+                .map(|component| component.native_basename.clone()),
+            Some(test_native_name("sub"))
+        );
+        assert_eq!(beta_locator.entry.entry_id, beta_identity.entry_id);
+        assert_eq!(
+            beta_locator.entry.native_basename,
+            test_native_name("beta.txt")
         );
         assert!(
             result
