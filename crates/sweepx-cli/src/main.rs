@@ -220,7 +220,7 @@ fn main() -> ProcessExitCode {
                     .map(RenderedResult::Cleaner)
             }
         },
-        Commands::Capabilities => Ok(RenderedResult::Capabilities(capabilities(&context))),
+        Commands::Capabilities => capabilities(&context).map(RenderedResult::Capabilities),
     };
 
     match result {
