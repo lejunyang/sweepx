@@ -1359,6 +1359,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sweepx-analysis",
+ "sweepx-audit",
  "sweepx-canonical",
  "sweepx-catalog",
  "sweepx-cleaner-schema",

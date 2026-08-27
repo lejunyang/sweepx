@@ -14,6 +14,7 @@ use sweepx_analysis::{
     DirectoryAggregateLink, build_candidates_from_summary_with_links,
     build_explanation_from_candidate,
 };
+use sweepx_audit::{AuditStore, ProjectionError};
 use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
@@ -24,10 +25,10 @@ use sweepx_model::{
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
 use sweepx_protocol::{
-    CapabilityCell, CapabilityEvidence, CapabilityRecordV1, CompatSnapshot, EventCheckpoint,
-    EventEnvelope, EventPhase, EventType, EvidenceClass, ExitCode, OsFamily, OutputEnvelope,
-    OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage, QualificationKey,
-    QualificationScope, QualificationValidity, QualificationValidityStatus,
+    AuditProjectionSnapshot, CapabilityCell, CapabilityEvidence, CapabilityRecordV1,
+    CompatSnapshot, EventCheckpoint, EventEnvelope, EventPhase, EventType, EvidenceClass, ExitCode,
+    OsFamily, OutputEnvelope, OutputKind, OutputStatus, PlatformAdapterCompat, ProtocolMessage,
+    QualificationKey, QualificationScope, QualificationValidity, QualificationValidityStatus,
     RuntimePrivilegeProfile,
 };
 pub use sweepx_scanner::ScanSummary;
@@ -358,6 +359,8 @@ pub enum CoreError {
     TuiRead(String),
     #[error("tui view-model load failed: {0}")]
     TuiViewModel(String),
+    #[error(transparent)]
+    AuditProjection(#[from] ProjectionError),
 }
 
 #[derive(Debug, Error)]
@@ -490,6 +493,10 @@ pub fn durable_store(state_dir: Option<&Path>) -> Result<Option<DurableSnapshotS
         Some(path) => Ok(Some(DurableSnapshotStore::new(path)?)),
         None => Ok(None),
     }
+}
+
+pub fn audit_projection(store: &AuditStore) -> Result<AuditProjectionSnapshot, CoreError> {
+    Ok(store.projection_snapshot()?)
 }
 
 pub fn scan_with_store<S: SnapshotStore>(
@@ -2825,6 +2832,7 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
             ExitCode::CleanerTrustOrCompat
         }
         CoreError::State(_) => ExitCode::StateIntegrityUnavailable,
+        CoreError::AuditProjection(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::Scan(_)
         | CoreError::AnalysisBuild(_)
         | CoreError::Catalog(_)
@@ -3186,6 +3194,55 @@ fn sync_directory(path: &Path) -> Result<(), StateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::io::{Seek, SeekFrom};
+
+    #[cfg(unix)]
+    fn empty_audit_store() -> (tempfile::TempDir, AuditStore) {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let audit_root = temp.path().join("audit");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&audit_root)
+            .unwrap();
+        let store = AuditStore::open(audit_root).unwrap();
+        (temp, store)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_projection_returns_empty_snapshot_for_existing_store() {
+        let (_temp, store) = empty_audit_store();
+
+        let snapshot = audit_projection(&store).unwrap();
+
+        assert_eq!(snapshot.schema, sweepx_protocol::AUDIT_PROJECTION_SCHEMA);
+        assert!(snapshot.batches.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_projection_propagates_corrupted_header() {
+        let (temp, store) = empty_audit_store();
+        let audit_root = temp.path().join("audit");
+        let mut database = OpenOptions::new()
+            .write(true)
+            .open(audit_root.join("audit.db"))
+            .unwrap();
+        database.seek(SeekFrom::Start(68)).unwrap();
+        database.write_all(&[0; 4]).unwrap();
+        database.sync_all().unwrap();
+        drop(database);
+
+        let error = audit_projection(&store).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::AuditProjection(ProjectionError::Corruption(_))
+        ));
+    }
 
     #[test]
     fn operation_id_validation_rejects_traversal_like_input() {
