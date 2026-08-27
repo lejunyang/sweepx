@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sweepx_audit::{
     AuditError, AuditStore, AuthorizationId, BatchId, DigestString, IntentRequest,
@@ -947,24 +947,30 @@ fn cancellation_stops_before_reserving_the_next_action_and_keeps_claimed_state()
 
 #[derive(Debug)]
 struct JumpAtSubmitClock {
-    calls: AtomicUsize,
+    monotonic_calls: AtomicUsize,
+    monotonic_start: Instant,
 }
 
 impl JumpAtSubmitClock {
     fn new() -> Self {
         Self {
-            calls: AtomicUsize::new(0),
+            monotonic_calls: AtomicUsize::new(0),
+            monotonic_start: Instant::now(),
         }
     }
 }
 
 impl Clock for JumpAtSubmitClock {
     fn now(&self) -> SystemTime {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call < 4 {
-            base_time() + Duration::from_secs(1)
+        base_time() + Duration::from_secs(1)
+    }
+
+    fn monotonic_now(&self) -> Instant {
+        let call = self.monotonic_calls.fetch_add(1, Ordering::SeqCst);
+        if call < 2 {
+            self.monotonic_start
         } else {
-            base_time() + Duration::from_secs(1) + PERMIT_TTL
+            self.monotonic_start + PERMIT_TTL
         }
     }
 }

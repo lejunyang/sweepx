@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use sweepx_audit::{DurableIntentToken, RequestedMode, RiskTier as AuditRiskTier};
 use thiserror::Error;
@@ -132,8 +132,8 @@ pub struct PreflightPermit {
     policy_version: String,
     policy_digest: String,
     protected_anchor_snapshot_digest: String,
-    validated_at: SystemTime,
-    expires_at: SystemTime,
+    validated_at: Instant,
+    expires_at: Instant,
     final_parent_identity: String,
     final_object_identity: String,
     final_filesystem_object_domain_identity: String,
@@ -170,8 +170,8 @@ struct ConsumedPermitClaims {
     mode: DeletionMode,
     risk_tier: RiskTier,
     fence_epoch: u64,
-    validated_at: SystemTime,
-    expires_at: SystemTime,
+    validated_at: Instant,
+    expires_at: Instant,
     policy_version: String,
     policy_digest: String,
     protected_anchor_snapshot_digest: String,
@@ -264,7 +264,7 @@ impl PreflightPermit {
             return Err(PreflightPermitError::PermanentRequiresR4);
         }
 
-        let validated_at = clock.now();
+        let validated_at = clock.monotonic_now();
         let expires_at = validated_at
             .checked_add(PERMIT_TTL)
             .ok_or(PreflightPermitError::InvalidClock)?;
@@ -295,8 +295,8 @@ impl PreflightPermit {
         })
     }
 
-    pub fn is_expired_at(&self, now: SystemTime) -> bool {
-        now >= self.expires_at
+    pub fn is_expired_at(&self, now: Instant) -> bool {
+        permit_is_expired(self.validated_at, now)
     }
 
     pub(crate) fn consume(
@@ -320,7 +320,7 @@ impl PreflightPermit {
             .take()
             .ok_or(PreflightPermitError::AuthorityStateUnavailable)?;
 
-        let now = clock.now();
+        let now = clock.monotonic_now();
         if self.is_expired_at(now) {
             return Err(PreflightPermitError::ExpiredAfterConsumption);
         }
@@ -378,15 +378,20 @@ fn risk_tier(risk: AuditRiskTier) -> RiskTier {
 }
 
 impl ConsumedPermitClaims {
-    fn validate_not_expired_at_submit(&self, now: SystemTime) -> Result<(), PreflightPermitError> {
+    fn validate_not_expired_at_submit(&self, now: Instant) -> Result<(), PreflightPermitError> {
         self.durable_intent
             .validate_current_process()
             .map_err(map_intent_authority_error)?;
-        if now >= self.expires_at {
+        if permit_is_expired(self.validated_at, now) {
             return Err(PreflightPermitError::ExpiredAtSubmit);
         }
         Ok(())
     }
+}
+
+fn permit_is_expired(validated_at: Instant, now: Instant) -> bool {
+    now.checked_duration_since(validated_at)
+        .is_none_or(|elapsed| elapsed >= PERMIT_TTL)
 }
 
 fn map_intent_authority_error(error: sweepx_audit::AuditError) -> PreflightPermitError {
@@ -403,7 +408,8 @@ macro_rules! impl_consumed_permit {
                 &self,
                 clock: &dyn Clock,
             ) -> Result<(), PreflightPermitError> {
-                self.claims.validate_not_expired_at_submit(clock.now())
+                self.claims
+                    .validate_not_expired_at_submit(clock.monotonic_now())
             }
 
             pub fn durable_intent(&self) -> &DurableIntentToken {
@@ -442,11 +448,11 @@ macro_rules! impl_consumed_permit {
                 self.claims.fence_epoch
             }
 
-            pub fn validated_at(&self) -> SystemTime {
+            pub fn validated_at(&self) -> Instant {
                 self.claims.validated_at
             }
 
-            pub fn expires_at(&self) -> SystemTime {
+            pub fn expires_at(&self) -> Instant {
                 self.claims.expires_at
             }
 
@@ -558,7 +564,7 @@ pub enum PreflightPermitError {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use sweepx_audit::{
         ActionId, AuditStore, AuthorizationBinding, AuthorizationId, AuthorizationSource, BatchId,
@@ -913,9 +919,14 @@ mod tests {
     #[test]
     fn permit_ttl_is_enforced_after_atomic_consumption() {
         let fixture = fixture(DeletionMode::Permanent, RiskTier::R4, "consume-expiry");
-        let issue_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(10));
+        let monotonic_start = Instant::now();
+        let issue_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), monotonic_start);
         let permit = issue(&fixture, &issue_clock);
-        let expired_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(13));
+        let expired_clock = FixedClock::from_parts(
+            UNIX_EPOCH + Duration::from_secs(13),
+            monotonic_start + Duration::from_secs(3),
+        );
 
         assert!(matches!(
             consume_preflight_permit(&permit, &expired_clock).unwrap_err(),
@@ -930,9 +941,14 @@ mod tests {
     #[test]
     fn permit_expires_at_the_exact_ttl_boundary_and_stays_spent() {
         let fixture = fixture(DeletionMode::Permanent, RiskTier::R4, "consume-boundary");
-        let issue_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(10));
+        let monotonic_start = Instant::now();
+        let issue_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), monotonic_start);
         let permit = issue(&fixture, &issue_clock);
-        let boundary_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(12));
+        let boundary_clock = FixedClock::from_parts(
+            UNIX_EPOCH + Duration::from_secs(12),
+            monotonic_start + PERMIT_TTL,
+        );
 
         assert!(matches!(
             consume_preflight_permit(&permit, &boundary_clock).unwrap_err(),
@@ -947,10 +963,15 @@ mod tests {
     #[test]
     fn consumed_permit_submit_rechecks_ttl() {
         let fixture = fixture(DeletionMode::Permanent, RiskTier::R4, "submit-expiry");
-        let issue_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(10));
+        let monotonic_start = Instant::now();
+        let issue_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), monotonic_start);
         let permit = issue(&fixture, &issue_clock);
         let consumed = consume_preflight_permit(&permit, &issue_clock).unwrap();
-        let expired_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(13));
+        let expired_clock = FixedClock::from_parts(
+            UNIX_EPOCH + Duration::from_secs(13),
+            monotonic_start + Duration::from_secs(3),
+        );
 
         assert!(matches!(
             consumed.validate_for_submit(&expired_clock).unwrap_err(),
@@ -961,13 +982,68 @@ mod tests {
     #[test]
     fn consumed_permit_submit_rejects_the_exact_ttl_boundary() {
         let fixture = fixture(DeletionMode::Permanent, RiskTier::R4, "submit-boundary");
-        let issue_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(10));
+        let monotonic_start = Instant::now();
+        let issue_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), monotonic_start);
         let permit = issue(&fixture, &issue_clock);
         let consumed = consume_preflight_permit(&permit, &issue_clock).unwrap();
-        let boundary_clock = FixedClock::new(UNIX_EPOCH + Duration::from_secs(12));
+        let boundary_clock = FixedClock::from_parts(
+            UNIX_EPOCH + Duration::from_secs(12),
+            monotonic_start + PERMIT_TTL,
+        );
 
         assert!(matches!(
             consumed.validate_for_submit(&boundary_clock).unwrap_err(),
+            PreflightPermitError::ExpiredAtSubmit
+        ));
+    }
+
+    #[test]
+    fn wall_clock_rollback_does_not_extend_permit_ttl() {
+        let fixture = fixture(DeletionMode::Permanent, RiskTier::R4, "wall-rollback");
+        let monotonic_start = Instant::now();
+        let issue_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), monotonic_start);
+        let permit = issue(&fixture, &issue_clock);
+        let wall_rollback_at_deadline = FixedClock::from_parts(
+            UNIX_EPOCH + Duration::from_secs(9),
+            monotonic_start + PERMIT_TTL,
+        );
+
+        assert!(matches!(
+            consume_preflight_permit(&permit, &wall_rollback_at_deadline).unwrap_err(),
+            PreflightPermitError::ExpiredAfterConsumption
+        ));
+    }
+
+    #[test]
+    fn monotonic_regression_fails_closed_during_consumption_and_submit() {
+        let consume_fixture = fixture(
+            DeletionMode::Permanent,
+            RiskTier::R4,
+            "consume-monotonic-regression",
+        );
+        let submit_fixture = fixture(
+            DeletionMode::Permanent,
+            RiskTier::R4,
+            "submit-monotonic-regression",
+        );
+        let monotonic_start = Instant::now();
+        let issued_at = monotonic_start + Duration::from_secs(1);
+        let issue_clock = FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(10), issued_at);
+        let regressed_clock =
+            FixedClock::from_parts(UNIX_EPOCH + Duration::from_secs(11), monotonic_start);
+
+        let consume_permit = issue(&consume_fixture, &issue_clock);
+        assert!(matches!(
+            consume_preflight_permit(&consume_permit, &regressed_clock).unwrap_err(),
+            PreflightPermitError::ExpiredAfterConsumption
+        ));
+
+        let submit_permit = issue(&submit_fixture, &issue_clock);
+        let consumed = consume_preflight_permit(&submit_permit, &issue_clock).unwrap();
+        assert!(matches!(
+            consumed.validate_for_submit(&regressed_clock).unwrap_err(),
             PreflightPermitError::ExpiredAtSubmit
         ));
     }

@@ -5,7 +5,7 @@
 //! permit are only one-shot capabilities for the current process.
 
 use std::collections::BTreeSet;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use sweepx_audit::{
     ActionId, AuditError, AuditStore, ClaimedExecution, DigestString, DurableIntentToken,
@@ -898,8 +898,8 @@ trait PermitView {
     fn mode(&self) -> DeletionMode;
     fn risk_tier(&self) -> RiskTier;
     fn fence_epoch(&self) -> u64;
-    fn validated_at(&self) -> SystemTime;
-    fn expires_at(&self) -> SystemTime;
+    fn validated_at(&self) -> Instant;
+    fn expires_at(&self) -> Instant;
     fn policy_version(&self) -> &str;
     fn policy_digest(&self) -> &str;
     fn protected_anchor_snapshot_digest(&self) -> &str;
@@ -941,10 +941,10 @@ macro_rules! impl_permit_view {
             fn fence_epoch(&self) -> u64 {
                 self.fence_epoch()
             }
-            fn validated_at(&self) -> SystemTime {
+            fn validated_at(&self) -> Instant {
                 self.validated_at()
             }
-            fn expires_at(&self) -> SystemTime {
+            fn expires_at(&self) -> Instant {
                 self.expires_at()
             }
             fn policy_version(&self) -> &str {
@@ -1076,8 +1076,7 @@ fn validate_consumed_authority(
     )?;
     if permit
         .expires_at()
-        .duration_since(permit.validated_at())
-        .ok()
+        .checked_duration_since(permit.validated_at())
         != Some(PERMIT_TTL)
     {
         return Err("permit_ttl");
