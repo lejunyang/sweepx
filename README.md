@@ -12,7 +12,7 @@
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
 | Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
-| `sweepx scan` | **Linux：degraded** 的同步、只读目录扫描 | macOS/Windows 目前只编译 stub，扫描返回 unsupported；未完成三平台发布资格 |
+| `sweepx scan` | **Linux：degraded**、**macOS：degraded** 的同步、只读目录扫描 | macOS 目前接入 handle-bound degraded scanner，并通过统一的 `sweepx scan` / `sweepx scan --tui` 暴露；Windows 仍 fail-closed 为 unsupported；未完成三平台发布资格 |
 | `sweepx status` | 读取已持久化的 operation snapshot | 不是后台任务监控，也不表示扫描仍在运行 |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
@@ -118,7 +118,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 7. **没有降级删除。** 未来即使实现 Trash，失败、拒绝、取消或结果不明也不得自动转为 Permanent。
 8. **硬保护不可绕过。** 根目录、系统区域、home/profile 根、SweepX state、受保护 anchor 及其包含关系在未来 mutation model 中必须失败关闭。
 
-P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit persistence 仅支持 Unix，使用私有 snapshot + anchor 检测意外回滚/损坏；它不能抵抗同一用户同时回滚并重算两者，也不是未来 native mutation 的发布级存储。
+P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit persistence 仅支持 Unix，使用 bundled SQLite WAL 原子事务与 event replay 维护审计状态；它不是 future native mutation 的发布级存储，也不应被写成跨平台或真实执行资格。
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前它们在 Linux、macOS、Windows 上全部为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。当前没有这样的合格记录，也没有 native adapter、mutation command 或 approval UI。
 
@@ -159,7 +159,8 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 ## 平台与发布边界
 
 - Linux scanner 已实现为 development-grade/degraded，只能依据当前测试理解，不能据此宣称生产资格或完整文件系统覆盖。
-- macOS 与 Windows scanner 目前是 compilation-only stub；跨平台的 explain、Cleaner metadata 和终端 UI 不等于这些平台已有 live scanner。
+- macOS scanner 现为 handle-bound degraded live scanner，并通过统一 `sweepx scan` / `scan --tui` 接入；这不等于三平台扫描资格完成。
+- Windows scanner 仍为 fail-closed unsupported；跨平台的 explain、Cleaner metadata 和终端 UI 不等于 Windows 已有 live scanner。
 - P4 的 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图。
 - 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流；尚未实际发布稳定版本，也没有签名、SBOM、provenance 或稳定支持承诺。
 
@@ -175,7 +176,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 ## 已知缺口
 
 - Linux scan 的性能预算、复杂文件系统语义和故障注入仍需更完整、可复现的验证。
-- macOS/Windows live scanner、三平台 native Trash、可信本地审批 broker 与真实 preflight revalidation 尚未实现。
+- macOS degraded live scanner 已存在，但其资格、覆盖与跨平台一致性仍未完成；Windows live scanner、三平台 native Trash、可信本地审批 broker 与真实 preflight revalidation 尚未实现。
 - Cleaner 签名、更新、撤销、沙箱和外部 query/mutation adapter 尚未达到发布状态。
 - P3 plan/simulation authorization、audit/recovery 和 executor 已在 library 层实现；仍没有公共 CLI 合同、可信 HumanApproval broker 或 native adapter。
 - 对 sparse、compressed、hard link、clone/reflink、snapshot、dedup、overlay、quota 和共享存储的空间归因不能被概括成“将释放多少空间”。

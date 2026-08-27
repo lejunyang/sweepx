@@ -112,7 +112,12 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     && item["qualificationKey"]["capability"] == "scan.tui.live"
             })
             .unwrap();
-        assert_eq!(tui["state"], "unsupported");
+        let expected_tui_state = if os == "macos" {
+            "degraded"
+        } else {
+            "unsupported"
+        };
+        assert_eq!(tui["state"], expected_tui_state);
     }
 
     let linux_tui = json["data"]["capabilities"]

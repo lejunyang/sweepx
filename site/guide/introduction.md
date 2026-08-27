@@ -12,12 +12,13 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有�
 ## 当前状态
 
 - Linux scanner 能在用户明确选择的绝对路径上做同步、只读扫描，能力状态为 `degraded`。
-- macOS 和 Windows scanner 仍是 compilation-only stub，live scan 返回 `unsupported`。
+- macOS scanner 现已接入 handle-bound 的同步、只读 live scan，仍只报告 `degraded`，不是发布资格。
+- Windows scanner 仍 fail-closed 为 `unsupported`。
 - `status` 读取已持久化的终态 snapshot；`cancel` 因没有 live operation registry 而标记为 `disabled`。
 - `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
 - `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式只读浏览器，可进入和返回目录，不需要 JSON 中间文件。
-- P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；没有可信 HumanApproval broker。
+- P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；Unix audit 现使用 bundled SQLite WAL 原子事务与 event replay；仍没有可信 HumanApproval broker。
 
 这些是代码和测试覆盖到的开发能力。仓库已有跨平台归档、安装器和发布自动化，但尚未发布稳定版本，也不是生产支持或三平台扫描资格声明。
 

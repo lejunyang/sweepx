@@ -22,14 +22,14 @@ bounded scan.result JSON
   -> report-only explanation
 ```
 
-Linux connects a real scanner backend. macOS and Windows currently provide stubs, so Core returns unsupported scan output instead of simulating success.
+Linux connects a real scanner backend. macOS now exposes a handle-bound degraded scanner through the same `sweepx scan` / `scan --tui` path. Windows remains fail-closed unsupported, so Core returns unsupported scan output there instead of simulating success.
 
 ## Crate responsibilities
 
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
-| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux read-only traversal, aggregation and state |
+| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux/macOS read-only traversal, Windows fail-closed unsupported behavior, aggregation and state |
 | Analysis and Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
@@ -52,7 +52,7 @@ The P3 library layering deliberately leaves nowhere to plug in native mutation:
 - permits and the revalidation observer are simulation-specific;
 - executor requests contain no native path;
 - the adapter trait is sealed and its only implementation is deterministic and fake.
-- audit persistence is currently Unix-only; its snapshot plus anchor detects accidental rollback and partial corruption, but not coordinated same-user rewriting, and is not release-grade native-mutation storage.
+- audit persistence is currently Unix-only; it now uses bundled SQLite WAL atomic transactions plus event replay to manage durable claim, intent, outcome, and reconciliation state. It is still not release-grade native-mutation storage.
 
 That supports state-machine and crash-semantics tests without deleting a target. The audit library performs filesystem I/O for its own state files; that is not mutation of scanned targets.
 

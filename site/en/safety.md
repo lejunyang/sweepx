@@ -22,7 +22,7 @@ SweepX safety currently starts with absent capabilities and explicit type bounda
 | Cleaner | Metadata only, with fail-closed compatibility checks |
 | Capability language | unsupported, degraded, report_only, and disabled remain distinct |
 
-The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. “Read-only” refers to scan targets: `scan` may write its own state snapshot under the selected state directory, and the P3 audit library may persist SweepX audit state. Neither changes a scanned target.
+The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. “Read-only” refers to scan targets: `scan` may write its own terminal snapshot under the selected state directory, and the P3 audit library may persist SweepX audit state through Unix bundled SQLite WAL atomic transactions plus event replay. Neither changes a scanned target.
 
 ## Why imported reports are report-only
 

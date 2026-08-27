@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: 可运行，但只读
-    details: Linux 上已有 degraded 的开发版扫描器；默认终端表格和 `scan --tui` 文件管理器可运行。macOS/Windows 扫描仍是 unsupported stub。
+    details: Linux 与 macOS 现都有 degraded 的开发版只读扫描器，并统一通过 `sweepx scan` / `scan --tui` 接入；Windows 扫描仍 fail-closed 为 unsupported。
   - title: 证据不会变成授权
     details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。查看报告或解释候选不会产生删除权限；live TUI 同样只有导航能力。
   - title: 破坏性路径仍封闭
@@ -29,14 +29,15 @@ features:
 ---
 
 > [!CAUTION]
-> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。
+> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。Unix audit 已改为 bundled SQLite WAL 原子事务 + event replay，但这不等于真实执行资格。
 
 ## 现在能做什么
 
 | 能力 | 当前状态 |
 |---|---|
 | Linux 目录扫描 | development-grade、read-only、degraded |
-| macOS / Windows 扫描 | unsupported compilation stub |
+| macOS 目录扫描 | development-grade、read-only、handle-bound degraded |
+| Windows 扫描 | fail-closed unsupported |
 | `status` | 读取持久化的终态 snapshot |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |

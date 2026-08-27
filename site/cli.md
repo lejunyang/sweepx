@@ -63,7 +63,8 @@ cargo run -p sweepx-cli -- \
 - 默认直接向终端输出有界的 40 行文件表；不要求 JSON 文件。
 - 扫描同步运行，metadata-only、no-follow，并把挂载/链接/资源边界与错误写进结果。
 - 当前 Linux capability 是 `degraded`，不是发布资格。
-- macOS/Windows backend 目前是 unsupported stub；能编译不等于能扫描。
+- macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
+- Windows backend 仍是 fail-closed unsupported；能编译不等于能扫描。
 - `ndjson` 用于事件流，并以 terminal event 结束；这不意味着存在后台 daemon。
 
 只有脚本和系统集成才需要显式机器输出：

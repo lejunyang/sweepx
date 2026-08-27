@@ -113,12 +113,12 @@ jobs:
             target: x86_64-apple-darwin
             executable: target/x86_64-apple-darwin/debug/sweepx
             capability_os: macos
-            scan_state: unsupported
+            scan_state: degraded
           - os: macos-15
             target: aarch64-apple-darwin
             executable: target/aarch64-apple-darwin/debug/sweepx
             capability_os: macos
-            scan_state: unsupported
+            scan_state: degraded
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             executable: target/x86_64-pc-windows-msvc/debug/sweepx.exe

@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: Runnable, but read-only
-    details: Linux has a degraded development scanner. The default terminal table and `scan --tui` file manager run today. macOS and Windows scanning remains an unsupported stub.
+    details: Linux and macOS now have degraded development-grade read-only scanners exposed through the same `sweepx scan` / `scan --tui` entry points. Windows scanning remains fail-closed unsupported.
   - title: Evidence never becomes authority
     details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Reports and explanations create no deletion authority; the live TUI likewise exposes navigation only.
   - title: Mutation remains sealed off
@@ -29,14 +29,15 @@ features:
 ---
 
 > [!CAUTION]
-> **SweepX has no cleanup capability today.** P3 plan, authorization, durable-audit, and executor work is library-only deterministic simulation. The simulator accepts no native path and uses only a sealed fake adapter.
+> **SweepX has no cleanup capability today.** P3 plan, authorization, durable-audit, and executor work is library-only deterministic simulation. The simulator accepts no native path and uses only a sealed fake adapter. The Unix audit store now uses bundled SQLite WAL atomic transactions plus event replay, but that is still not real-execution qualification.
 
 ## What works now
 
 | Capability | Current state |
 |---|---|
 | Linux directory scan | development-grade, read-only, degraded |
-| macOS / Windows scan | unsupported compilation stub |
+| macOS directory scan | development-grade, read-only, handle-bound degraded |
+| Windows scan | fail-closed unsupported |
 | `status` | reads a persisted terminal snapshot |
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |

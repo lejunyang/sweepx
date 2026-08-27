@@ -22,14 +22,14 @@ bounded scan.result JSON
   -> report-only explanation
 ```
 
-Linux 连接了实际 scanner backend。macOS/Windows backend 目前只提供 stub，因此 Core 会返回 unsupported scan output，而不是模拟成功。
+Linux 连接了实际 scanner backend。macOS 现接入 handle-bound degraded scanner，并通过统一的 `sweepx scan` / `scan --tui` 路径暴露；Windows 仍为 fail-closed unsupported，因此 Core 在该平台返回 unsupported scan output，而不是模拟成功。
 
 ## Crate 职责
 
 | 层 | 代表 crate | 当前职责 |
 |---|---|---|
 | 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |
-| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | platform boundary、Linux 只读遍历、聚合与状态 |
+| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | platform boundary、Linux/macOS 只读遍历、Windows fail-closed unsupported、聚合与状态 |
 | 分析与 Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | candidate/explanation、声明式规则、内置 package |
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
@@ -52,7 +52,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - permit 与 revalidation observer 是 simulation-specific；
 - executor 的 request 没有 native path；
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
-- audit persistence 当前仅支持 Unix；snapshot + anchor 用于检测意外回滚与部分损坏，不能抵抗同一用户同时改写两者，也不是 native mutation 的发布级存储。
+- audit persistence 当前仅支持 Unix；它现在使用 bundled SQLite WAL 原子事务与 event replay 管理 durable claim、intent、outcome 与 reconciliation 状态；它仍不是 native mutation 的发布级存储。
 
 这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
 

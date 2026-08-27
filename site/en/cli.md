@@ -63,7 +63,8 @@ cargo run -p sweepx-cli -- \
 - The default writes a bounded 40-row file table directly to the terminal; no JSON file is required.
 - The scan runs synchronously, is metadata-only and no-follow, and reports mount/link/resource boundaries and errors.
 - The current Linux capability is `degraded`, not release qualification.
-- macOS and Windows backends are unsupported stubs; compilation is not scanning support.
+- The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
+- The Windows backend remains fail-closed unsupported; compilation is not scanning support.
 - `ndjson` emits an event stream ending in a terminal event; it does not imply a background daemon.
 
 Request machine output explicitly for scripts and integrations:
