@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::symlink;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::Digest;
 use sweepx_fixtures::{
@@ -137,6 +137,71 @@ fn invalid_hardlink_manifest_is_rejected_before_mutation() {
 }
 
 #[test]
+fn self_referential_hardlink_is_rejected_before_mutation() {
+    let mut manifest = default_p0_p1_manifest();
+    let hardlink = manifest
+        .entries
+        .iter_mut()
+        .find(|entry| entry.kind == FixtureEntryKind::Hardlink)
+        .expect("hardlink entry");
+    hardlink.hardlink_to = Some(hardlink.path.clone());
+
+    let root = tempdir().expect("tempdir");
+    let err = generate_from_manifest(root.path(), &manifest)
+        .expect_err("must reject self-referential hardlink");
+    assert!(matches!(err, FixtureError::HardlinkCycle { .. }));
+    assert!(
+        fs::read_dir(root.path())
+            .expect("root listing")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn multi_node_hardlink_cycle_is_rejected_before_mutation() {
+    let mut manifest = default_p0_p1_manifest();
+    let first_path = vec![
+        "p1-deterministic".into(),
+        "nested".into(),
+        "alpha-hard.txt".into(),
+    ];
+    let second_path = vec![
+        "p1-deterministic".into(),
+        "nested".into(),
+        "beta-hard.txt".into(),
+    ];
+    manifest
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == first_path)
+        .expect("first hardlink entry")
+        .hardlink_to = Some(second_path.clone());
+    manifest.entries.push(FixtureEntry {
+        entry_id: "beta-hardlink".into(),
+        path: second_path,
+        kind: FixtureEntryKind::Hardlink,
+        bytes: None,
+        mode: None,
+        content_pattern: None,
+        link_target: None,
+        hardlink_to: Some(first_path),
+        notes: vec![],
+    });
+
+    let root = tempdir().expect("tempdir");
+    let err = generate_from_manifest(root.path(), &manifest)
+        .expect_err("must reject multi-node hardlink cycle");
+    assert!(matches!(err, FixtureError::HardlinkCycle { .. }));
+    assert!(
+        fs::read_dir(root.path())
+            .expect("root listing")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn oracle_reports_independent_identity_boundaries_and_hardlink_group() {
     let manifest = default_p0_p1_manifest();
     let root = tempdir().expect("tempdir");
@@ -244,7 +309,7 @@ fn receipt_json_roundtrip_keeps_contract_shape() {
 }
 
 #[test]
-fn normalized_receipt_comparison_ignores_root_path_variance() {
+fn receipt_comparison_is_independent_of_generation_root() {
     let manifest = default_p0_p1_manifest();
     let root_a = tempdir().expect("root a");
     let root_b = tempdir().expect("root b");
@@ -722,38 +787,21 @@ fn linux_p4_named_evidence_trace_and_bundle_are_deterministic() {
     ))
     .expect("golden bundle");
     assert_eq!(
-        normalized_p4_bundle(bundle.clone()),
-        normalized_p4_bundle(expected)
+        bundle.trace.fixture_manifest_digest,
+        "sha256:49a8824cb0d8c7d567941d580402ca3cdfbe6acdab05be6a6b67b7f1698af4cf"
+    );
+    assert_eq!(
+        bundle.trace.oracle_receipt_digest,
+        "sha256:d7df63f4132e2d84f8def197e8b6e66c38733346b64c6b6fb1c2520815ad8a4f"
     );
     assert_eq!(
         bundle.trace.oracle_receipt_digest,
         selected.oracle_receipt_digest()
     );
-}
-
-fn normalized_receipt(mut receipt: Receipt) -> Receipt {
-    receipt.root_path = normalize_root_path(&receipt.root_path);
-    receipt
-}
-
-fn normalize_root_path(path: &str) -> String {
-    let path = PathBuf::from(path);
-    let name = path
-        .file_name()
-        .expect("fixture dirname")
-        .to_string_lossy()
-        .into_owned();
-    format!("/NORMALIZED/{name}")
+    assert_eq!(bundle, expected);
 }
 
 fn load_p4_evidence_bundle(path: impl AsRef<Path>) -> Result<P4EvidenceBundle, serde_json::Error> {
     let bytes = std::fs::read(path).expect("read p4 evidence bundle contract");
     serde_json::from_slice(&bytes)
-}
-
-fn normalized_p4_bundle(mut bundle: P4EvidenceBundle) -> P4EvidenceBundle {
-    bundle.oracle_receipt = normalized_receipt(bundle.oracle_receipt);
-    bundle.trace.fixture_manifest_digest = "sha256:NORMALIZED_MANIFEST".into();
-    bundle.trace.oracle_receipt_digest = "sha256:NORMALIZED_RECEIPT".into();
-    bundle
 }

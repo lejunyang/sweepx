@@ -357,6 +357,8 @@ pub enum FixtureError {
     HardlinkTargetMissing { path: Vec<String> },
     #[error("manifest hardlink target must reference a file: {path:?}")]
     HardlinkTargetNotFile { path: Vec<String> },
+    #[error("manifest hardlink target chain contains a cycle at: {path:?}")]
+    HardlinkCycle { path: Vec<String> },
     #[error("manifest symlink target is missing: {path:?}")]
     SymlinkTargetMissing { path: Vec<String> },
     #[error("manifest symlink target escapes fixture root: {path:?}")]
@@ -1259,7 +1261,16 @@ fn validate_manifest(manifest: &FixtureManifest) -> Result<ManifestPlan, Fixture
             }
         }
     }
-    let mut hardlink_groups = BTreeMap::new();
+    let hardlink_targets = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .hardlink_to
+                .as_ref()
+                .map(|target| (entry.path.clone(), target.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     for entry in &manifest.entries {
         if let Some(hardlink_to) = &entry.hardlink_to {
             match kinds.get(hardlink_to) {
@@ -1275,15 +1286,13 @@ fn validate_manifest(manifest: &FixtureManifest) -> Result<ManifestPlan, Fixture
                     });
                 }
             }
-            let mut anchor = hardlink_to.clone();
-            while let Some(next) = manifest
-                .entries
-                .iter()
-                .find(|candidate| candidate.path == anchor)
-                .and_then(|candidate| candidate.hardlink_to.clone())
-            {
-                anchor = next;
-            }
+        }
+    }
+    let mut hardlink_groups = BTreeMap::new();
+    for entry in &manifest.entries {
+        if let Some(hardlink_to) = &entry.hardlink_to {
+            let anchor =
+                resolve_hardlink_anchor(hardlink_to, &hardlink_targets, manifest.entries.len())?;
             hardlink_groups.insert(entry.path.clone(), anchor.join("/"));
         }
     }
@@ -1302,6 +1311,27 @@ fn validate_manifest(manifest: &FixtureManifest) -> Result<ManifestPlan, Fixture
         ordered_entries,
         hardlink_groups,
     })
+}
+
+fn resolve_hardlink_anchor(
+    initial_target: &[String],
+    hardlink_targets: &BTreeMap<Vec<String>, Vec<String>>,
+    max_hops: usize,
+) -> Result<Vec<String>, FixtureError> {
+    let mut current = initial_target.to_vec();
+    let mut visited = BTreeSet::new();
+
+    for _ in 0..=max_hops {
+        if !visited.insert(current.clone()) {
+            return Err(FixtureError::HardlinkCycle { path: current });
+        }
+        let Some(next) = hardlink_targets.get(&current) else {
+            return Ok(current);
+        };
+        current = next.clone();
+    }
+
+    Err(FixtureError::HardlinkCycle { path: current })
 }
 
 fn validate_fixture_root_common(path: &Path) -> Result<(), FixtureError> {
