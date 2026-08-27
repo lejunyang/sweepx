@@ -133,6 +133,28 @@ jobs:
         run: |
           rustup show active-toolchain
           rustup target add "${{ matrix.target }}"
+      - name: Check Windows platform crates natively
+        if: matrix.capability_os == 'windows'
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: >-
+          cargo check --locked --all-targets --target ${{ matrix.target }}
+          --package sweepx-model
+          --package sweepx-platform
+          --package sweepx-platform-windows
+      - name: Lint Windows platform crates natively
+        if: matrix.capability_os == 'windows'
+        run: >-
+          cargo clippy --locked --all-targets --target ${{ matrix.target }}
+          --package sweepx-model
+          --package sweepx-platform
+          --package sweepx-platform-windows
+          -- -D warnings
+      - name: Test Windows platform crates natively
+        if: matrix.capability_os == 'windows'
+        run: >-
+          cargo test --locked --target ${{ matrix.target }}
+          --package sweepx-platform-windows
       - name: Build native CLI
         run: cargo build --locked --package sweepx-cli --target ${{ matrix.target }}
       - name: Smoke-test binary and capability truthfulness
