@@ -848,6 +848,13 @@ mod tests {
             scan_root: NativePathComponent {
                 entry_id: identity.scan_root_id.clone(),
                 native_basename: NativeName::unix(b"root".to_vec()),
+                object_type: ObjectType::Directory,
+                platform_file_identity: identity.platform_file_identity.clone(),
+                filesystem_object_domain_identity: identity
+                    .filesystem_object_domain_identity
+                    .clone(),
+                volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+                metadata_fingerprint: "root-fingerprint".to_string(),
             },
             parent_reopen_recipe: identity
                 .parent_id
@@ -855,12 +862,26 @@ mod tests {
                 .map(|parent_id| NativePathComponent {
                     entry_id: parent_id.clone(),
                     native_basename: NativeName::unix(b"parent".to_vec()),
+                    object_type: ObjectType::Directory,
+                    platform_file_identity: identity.platform_file_identity.clone(),
+                    filesystem_object_domain_identity: identity
+                        .filesystem_object_domain_identity
+                        .clone(),
+                    volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+                    metadata_fingerprint: "parent-fingerprint".to_string(),
                 })
                 .into_iter()
                 .collect(),
             entry: NativePathComponent {
                 entry_id: identity.entry_id.clone(),
                 native_basename: entry_native_basename,
+                object_type: ObjectType::File,
+                platform_file_identity: identity.platform_file_identity.clone(),
+                filesystem_object_domain_identity: identity
+                    .filesystem_object_domain_identity
+                    .clone(),
+                volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+                metadata_fingerprint: "fp-1".to_string(),
             },
         }
     }

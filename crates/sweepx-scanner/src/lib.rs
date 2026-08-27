@@ -359,15 +359,9 @@ where
                     &admission.metadata,
                     root_identity.clone(),
                     native_locator_evidence(
-                        &native_path_component(
-                            &root_identity.entry_id,
-                            &admission.metadata.file_name,
-                        ),
+                        &native_path_component(&root_identity.entry_id, &admission.metadata),
                         &[],
-                        &native_path_component(
-                            &root_identity.entry_id,
-                            &admission.metadata.file_name,
-                        ),
+                        &native_path_component(&root_identity.entry_id, &admission.metadata),
                     ),
                     complete_coverage(),
                 ),
@@ -407,10 +401,7 @@ where
             path: root_metadata.path.clone(),
             handle: directory,
             identity: root_identity.clone(),
-            native_component: native_path_component(
-                &root_identity.entry_id,
-                &root_metadata.file_name,
-            ),
+            native_component: native_path_component(&root_identity.entry_id, &root_metadata),
             parent_reopen_recipe: Vec::new(),
             started: false,
             consumed_entries: 0,
@@ -519,10 +510,7 @@ where
                             scan_id: self.options.scan_id.clone(),
                             identity: Some(current.identity.clone()),
                             native_locator: Some(native_locator_evidence(
-                                &native_path_component(
-                                    &root_identity.entry_id,
-                                    &root_metadata.file_name,
-                                ),
+                                &native_path_component(&root_identity.entry_id, &root_metadata),
                                 &current.parent_reopen_recipe,
                                 &current.native_component,
                             )),
@@ -779,17 +767,13 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component =
-                            native_path_component(&identity.entry_id, &metadata.file_name);
+                        let native_component = native_path_component(&identity.entry_id, &metadata);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
-                                &native_path_component(
-                                    &root_identity.entry_id,
-                                    &root_metadata.file_name,
-                                ),
+                                &native_path_component(&root_identity.entry_id, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
@@ -826,17 +810,13 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component =
-                            native_path_component(&identity.entry_id, &metadata.file_name);
+                        let native_component = native_path_component(&identity.entry_id, &metadata);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
-                                &native_path_component(
-                                    &root_identity.entry_id,
-                                    &root_metadata.file_name,
-                                ),
+                                &native_path_component(&root_identity.entry_id, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
@@ -859,8 +839,7 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component =
-                            native_path_component(&identity.entry_id, &metadata.file_name);
+                        let native_component = native_path_component(&identity.entry_id, &metadata);
                         let coverage = Coverage {
                             state: CoverageState::Complete,
                             complete: true,
@@ -891,10 +870,7 @@ where
                                 &metadata,
                                 identity.clone(),
                                 native_locator_evidence(
-                                    &native_path_component(
-                                        &root_identity.entry_id,
-                                        &root_metadata.file_name,
-                                    ),
+                                    &native_path_component(&root_identity.entry_id, &root_metadata),
                                     &current.parent_recipe_with_self(),
                                     &native_component,
                                 ),
@@ -1347,13 +1323,22 @@ fn scanned_entry_from_metadata(
     }
 }
 
-fn native_path_component(
-    entry_id: &ScanEntryId,
-    native_basename: &NativeName,
-) -> NativePathComponent {
+fn native_path_component(entry_id: &ScanEntryId, metadata: &EntryMetadata) -> NativePathComponent {
+    let identity = scan_object_identity(entry_id.clone(), entry_id.clone(), None, metadata);
     NativePathComponent {
         entry_id: entry_id.clone(),
-        native_basename: native_basename.clone(),
+        native_basename: metadata.file_name.clone(),
+        object_type: match metadata.kind {
+            EntryKind::File => ObjectType::File,
+            EntryKind::Directory => ObjectType::Directory,
+            EntryKind::Symlink => ObjectType::Symlink,
+            EntryKind::ReparsePoint => ObjectType::ReparsePoint,
+            EntryKind::Other => ObjectType::Other,
+        },
+        platform_file_identity: identity.platform_file_identity,
+        filesystem_object_domain_identity: identity.filesystem_object_domain_identity,
+        volume_or_mount_identity: identity.volume_or_mount_identity,
+        metadata_fingerprint: metadata.fingerprint.clone(),
     }
 }
 

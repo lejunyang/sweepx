@@ -575,6 +575,11 @@ impl ScanObjectIdentity {
 pub struct NativePathComponent {
     pub entry_id: ScanEntryId,
     pub native_basename: NativeName,
+    pub object_type: ObjectType,
+    pub platform_file_identity: IdentityEvidence<PlatformFileIdentity>,
+    pub filesystem_object_domain_identity: IdentityEvidence<FilesystemObjectDomainIdentity>,
+    pub volume_or_mount_identity: IdentityEvidence<VolumeOrMountIdentity>,
+    pub metadata_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -603,6 +608,11 @@ impl NativeLocatorEvidence {
         for component in &self.parent_reopen_recipe {
             if !component.entry_id.belongs_to(scan_id) {
                 return Err(ScanEntryIdError::ScanMismatch);
+            }
+            if component.object_type != ObjectType::Directory
+                || component.metadata_fingerprint.is_empty()
+            {
+                return Err(ScanEntryIdError::InvalidFormat);
             }
         }
         if self

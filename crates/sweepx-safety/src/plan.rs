@@ -1448,14 +1448,41 @@ mod tests {
                     scan_root: NativePathComponent {
                         entry_id: root_id.clone(),
                         native_basename: NativeName::unix(b"root".to_vec()),
+                        object_type: ObjectType::Directory,
+                        platform_file_identity: scan_object_identity.platform_file_identity.clone(),
+                        filesystem_object_domain_identity: scan_object_identity
+                            .filesystem_object_domain_identity
+                            .clone(),
+                        volume_or_mount_identity: scan_object_identity
+                            .volume_or_mount_identity
+                            .clone(),
+                        metadata_fingerprint: "fp-root".to_string(),
                     },
                     parent_reopen_recipe: vec![NativePathComponent {
                         entry_id: root_id.clone(),
                         native_basename: NativeName::unix(b"root".to_vec()),
+                        object_type: ObjectType::Directory,
+                        platform_file_identity: scan_object_identity.platform_file_identity.clone(),
+                        filesystem_object_domain_identity: scan_object_identity
+                            .filesystem_object_domain_identity
+                            .clone(),
+                        volume_or_mount_identity: scan_object_identity
+                            .volume_or_mount_identity
+                            .clone(),
+                        metadata_fingerprint: "fp-root".to_string(),
                     }],
                     entry: NativePathComponent {
                         entry_id: entry_id.clone(),
                         native_basename: NativeName::unix(b"live".to_vec()),
+                        object_type: ObjectType::File,
+                        platform_file_identity: scan_object_identity.platform_file_identity.clone(),
+                        filesystem_object_domain_identity: scan_object_identity
+                            .filesystem_object_domain_identity
+                            .clone(),
+                        volume_or_mount_identity: scan_object_identity
+                            .volume_or_mount_identity
+                            .clone(),
+                        metadata_fingerprint: "fp-live".to_string(),
                     },
                 }),
                 native_basename: NativeName::unix(b"live".to_vec()),
