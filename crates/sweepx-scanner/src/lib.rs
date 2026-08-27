@@ -491,7 +491,7 @@ where
                     )?;
                     break;
                 }
-                Err(PlatformError::Io { detail, .. }) => {
+                Err(PlatformError::Io { .. }) => {
                     note_boundary(
                         &mut directory_states,
                         &path,
@@ -502,42 +502,6 @@ where
                         ProgressEvent::Error {
                             path: path.clone(),
                             reason: ReasonCode::IncompleteStreamCoverage,
-                        },
-                    )?;
-                    sink.push_entry(
-                        &root_path,
-                        ScannedEntry {
-                            scan_id: self.options.scan_id.clone(),
-                            identity: Some(current.identity.clone()),
-                            native_locator: Some(native_locator_evidence(
-                                &native_path_component(&root_identity.entry_id, &root_metadata),
-                                &current.parent_reopen_recipe,
-                                &current.native_component,
-                            )),
-                            display_path: path.display().to_string(),
-                            native_basename: native_basename_for_path(&path),
-                            object_type: ObjectType::Directory,
-                            logical_bytes: lower_bound_u128(
-                                0,
-                                ReasonCode::IncompleteStreamCoverage,
-                            ),
-                            allocated_bytes: lower_bound_u128(
-                                0,
-                                ReasonCode::IncompleteStreamCoverage,
-                            ),
-                            reclaimable_estimate: lower_bound_u128(
-                                0,
-                                ReasonCode::IncompleteStreamCoverage,
-                            ),
-                            metadata_fingerprint: format!("read_dir_error:{detail}"),
-                            coverage: Coverage {
-                                state: CoverageState::Incomplete,
-                                complete: false,
-                                incomplete_reasons: vec![ReasonCode::IncompleteStreamCoverage],
-                                details_lost: false,
-                                provenance: live_provenance(),
-                            },
-                            provenance: live_provenance(),
                         },
                     )?;
                     continue;
@@ -2515,6 +2479,55 @@ mod tests {
     }
 
     #[test]
+    fn enumeration_io_error_does_not_duplicate_directory_identity() {
+        let root = PathBuf::from("/root");
+        let scanner = Scanner::new(
+            FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
+                PlatformError::Io {
+                    path: root.clone(),
+                    detail: "injected enumeration failure".to_string(),
+                    io_kind: Some(std::io::ErrorKind::PermissionDenied),
+                },
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.roots.len(), 1);
+        assert!(result.entries.is_empty());
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .chain(result.entries.iter())
+                .filter_map(|entry| entry.identity.as_ref())
+                .map(|identity| identity.entry_id.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        assert!(result.progress.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Error { path, reason }
+                if path == &root && reason == &ReasonCode::IncompleteStreamCoverage
+        )));
+        let aggregate = aggregate_for_path(&result, &root);
+        assert!(!aggregate.coverage.complete);
+        assert!(
+            aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::IncompleteStreamCoverage)
+        );
+    }
+
+    #[test]
     fn cancellation_during_fake_inspection_keeps_aggregate_incomplete() {
         let root = PathBuf::from("/root");
         let scanner = Scanner::new(
@@ -2847,6 +2860,11 @@ mod tests {
     #[derive(Debug)]
     enum FakeEnumerationFailure {
         ResourceLimit(String),
+        Io {
+            path: PathBuf,
+            detail: String,
+            io_kind: Option<std::io::ErrorKind>,
+        },
     }
 
     #[derive(Debug)]
@@ -2912,7 +2930,16 @@ mod tests {
                 PlatformError::ResourceLimit(detail) => {
                     FakeEnumerationFailure::ResourceLimit(detail)
                 }
-                _ => panic!("fake supports resource-limit enumeration failure only"),
+                PlatformError::Io {
+                    path,
+                    detail,
+                    io_kind,
+                } => FakeEnumerationFailure::Io {
+                    path,
+                    detail,
+                    io_kind,
+                },
+                _ => panic!("fake supports resource-limit and I/O enumeration failures only"),
             });
             self
         }
@@ -2969,6 +2996,15 @@ mod tests {
                     FakeEnumerationFailure::ResourceLimit(detail) => {
                         Err(PlatformError::ResourceLimit(detail.clone()))
                     }
+                    FakeEnumerationFailure::Io {
+                        path,
+                        detail,
+                        io_kind,
+                    } => Err(PlatformError::Io {
+                        path: path.clone(),
+                        detail: detail.clone(),
+                        io_kind: *io_kind,
+                    }),
                 };
             }
             let entries = self
