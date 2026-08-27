@@ -79,7 +79,7 @@ pub fn resolve_production_catalog_trust(
     // revoked or otherwise invalid package cannot partially advance caller-owned history.
     let mut candidate_history = history.clone();
     let snapshot = verify_trust_snapshot(snapshot_bytes, root_anchors, now, &mut candidate_history)
-        .map_err(CoreError::ProductionCatalogTrust)?;
+        .map_err(|error| CoreError::ProductionCatalogTrust(Box::new(error)))?;
 
     let mut cleaner_records = Vec::with_capacity(BUILT_INS.len());
     let mut catalog_disposition = ProductionCatalogDisposition::Trusted;
@@ -88,7 +88,9 @@ pub fn resolve_production_catalog_trust(
     })?;
 
     for cleaner in BUILT_INS {
-        let package = cleaner.load().map_err(CoreError::ProductionCatalogTrust)?;
+        let package = cleaner
+            .load()
+            .map_err(|error| CoreError::ProductionCatalogTrust(Box::new(error)))?;
         let file_table = built_in_file_table(cleaner, &package.manifest)?;
         let decision = evaluate_package_trust(
             &package.manifest,
@@ -98,7 +100,7 @@ pub fn resolve_production_catalog_trust(
             now,
             &mut candidate_history,
         )
-        .map_err(CoreError::ProductionCatalogTrust)?;
+        .map_err(|error| CoreError::ProductionCatalogTrust(Box::new(error)))?;
         let required_core = VersionReq::parse(&package.manifest.requires.core).map_err(|_| {
             CoreError::CleanerCompat {
                 cleaner_ref: package.manifest.id.clone(),
@@ -211,7 +213,7 @@ fn built_in_file_table(
     let manifest_bytes = manifest
         .canonical_without_package_digest()
         .map_err(CatalogError::Schema)
-        .map_err(CoreError::ProductionCatalogTrust)?;
+        .map_err(|error| CoreError::ProductionCatalogTrust(Box::new(error)))?;
     let mut entries = Vec::with_capacity(
         1usize
             .checked_add(cleaner.rule_files.len())
@@ -239,14 +241,14 @@ fn built_in_file_table(
 
     let actual = compute_package_digest(&entries)
         .map_err(CatalogError::Schema)
-        .map_err(CoreError::ProductionCatalogTrust)?;
+        .map_err(|error| CoreError::ProductionCatalogTrust(Box::new(error)))?;
     if actual != manifest.package_digest {
-        return Err(CoreError::ProductionCatalogTrust(
+        return Err(CoreError::ProductionCatalogTrust(Box::new(
             CatalogError::PackageDigestMismatch {
                 expected: manifest.package_digest.clone(),
                 actual,
             },
-        ));
+        )));
     }
     Ok(entries)
 }

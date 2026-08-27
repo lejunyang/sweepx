@@ -408,7 +408,7 @@ pub enum CoreError {
     #[error("cleaner catalog failed: {0}")]
     Catalog(#[from] sweepx_catalog::CatalogError),
     #[error("production cleaner catalog trust failed: {0}")]
-    ProductionCatalogTrust(#[source] sweepx_catalog::CatalogError),
+    ProductionCatalogTrust(#[source] Box<sweepx_catalog::CatalogError>),
     #[error("cleaner rule evaluation failed: {0}")]
     CleanerVm(#[from] sweepx_cleaner_vm::VmError),
     #[error("cleaner reference is invalid: {0}")]
