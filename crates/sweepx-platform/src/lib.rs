@@ -93,8 +93,38 @@ pub enum ErrorKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntryIdentity {
-    pub device: u64,
-    pub inode: u64,
+    /// Unix device identifier or Windows volume serial number.
+    device: u64,
+    /// Unix inode number or a reversible little-endian encoding of Windows `FILE_ID_128`.
+    inode: u128,
+}
+
+impl EntryIdentity {
+    pub const fn from_unix(device: u64, inode: u64) -> Self {
+        Self {
+            device,
+            inode: inode as u128,
+        }
+    }
+
+    pub const fn from_windows_file_id(device: u64, file_id: [u8; 16]) -> Self {
+        Self {
+            device,
+            inode: u128::from_le_bytes(file_id),
+        }
+    }
+
+    pub const fn device(&self) -> u64 {
+        self.device
+    }
+
+    pub const fn inode(&self) -> u128 {
+        self.inode
+    }
+
+    pub const fn windows_file_id(&self) -> [u8; 16] {
+        self.inode.to_le_bytes()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,10 +137,49 @@ pub struct MountIdentity {
     pub value: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HardLinkKey {
-    pub device: u64,
-    pub inode: u64,
+    /// Unix device identifier or Windows volume serial number.
+    device: u64,
+    /// Unix inode number or a reversible little-endian encoding of Windows `FILE_ID_128`.
+    inode: u128,
+}
+
+impl HardLinkKey {
+    pub const fn from_unix(device: u64, inode: u64) -> Self {
+        Self {
+            device,
+            inode: inode as u128,
+        }
+    }
+
+    pub const fn from_windows_file_id(device: u64, file_id: [u8; 16]) -> Self {
+        Self {
+            device,
+            inode: u128::from_le_bytes(file_id),
+        }
+    }
+
+    pub const fn device(&self) -> u64 {
+        self.device
+    }
+
+    pub const fn inode(&self) -> u128 {
+        self.inode
+    }
+
+    pub const fn windows_file_id(&self) -> [u8; 16] {
+        self.inode.to_le_bytes()
+    }
+}
+
+impl From<EntryIdentity> for HardLinkKey {
+    fn from(identity: EntryIdentity) -> Self {
+        Self {
+            device: identity.device,
+            inode: identity.inode,
+        }
+    }
 }
 
 /// An untrusted, displayable child token returned by directory enumeration.
@@ -650,8 +719,8 @@ pub fn fingerprint_for(
     match identity {
         Some(identity) => format!(
             "{}:{}:{kind:?}:{}",
-            identity.device,
-            identity.inode,
+            identity.device(),
+            identity.inode(),
             DisplayByteValue(logical_bytes)
         ),
         None => format!("unknown:{kind:?}:{}", DisplayByteValue(logical_bytes)),
@@ -660,6 +729,8 @@ pub fn fingerprint_for(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn native_name(name: &str) -> NativeName {
@@ -730,5 +801,47 @@ mod tests {
             admission.validate_for_root(&requested),
             Err(DirectoryEntryInvariantError::RootPathMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn windows_file_id_round_trip_preserves_high_bits() {
+        let file_id = 0x8000_0000_0000_0001_0123_4567_89ab_cdef_u128.to_le_bytes();
+        let identity = EntryIdentity::from_windows_file_id(42, file_id);
+
+        assert_eq!(identity.device(), 42);
+        assert_eq!(
+            identity.inode(),
+            0x8000_0000_0000_0001_0123_4567_89ab_cdef_u128
+        );
+        assert_eq!(identity.windows_file_id(), file_id);
+
+        let hard_link_key = HardLinkKey::from(identity);
+        assert_eq!(hard_link_key.device(), 42);
+        assert_eq!(hard_link_key.windows_file_id(), file_id);
+        assert_eq!(
+            hard_link_key,
+            HardLinkKey::from_windows_file_id(42, file_id)
+        );
+    }
+
+    #[test]
+    fn windows_file_ids_with_equal_low_bits_do_not_collide() {
+        let low_bits = 0x0123_4567_89ab_cdef_u128;
+        let low_identity = EntryIdentity::from_windows_file_id(7, low_bits.to_le_bytes());
+        let high_identity = EntryIdentity::from_windows_file_id(
+            7,
+            (low_bits | (0xfedc_ba98_7654_3210_u128 << 64)).to_le_bytes(),
+        );
+
+        assert_ne!(low_identity, high_identity);
+        assert_ne!(
+            fingerprint_for(Some(&low_identity), &EntryKind::File, &known_u128(11)),
+            fingerprint_for(Some(&high_identity), &EntryKind::File, &known_u128(11))
+        );
+
+        let mut hard_links = HashSet::new();
+        assert!(hard_links.insert(HardLinkKey::from(low_identity)));
+        assert!(hard_links.insert(HardLinkKey::from(high_identity)));
+        assert_eq!(hard_links.len(), 2);
     }
 }

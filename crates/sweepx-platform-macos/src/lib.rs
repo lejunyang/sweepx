@@ -303,11 +303,12 @@ mod backend {
 
             let device = observed.stat.st_dev as u64;
             let inode = observed.stat.st_ino;
-            let identity = Some(EntryIdentity { device, inode });
+            let identity = EntryIdentity::from_unix(device, inode);
             let filesystem_identity = Some(FilesystemIdentity { device });
-            let hard_link_key = (kind == EntryKind::File).then_some(HardLinkKey { device, inode });
+            let hard_link_key =
+                (kind == EntryKind::File).then(|| HardLinkKey::from(identity.clone()));
             let hard_link_count = known_count(observed.stat.st_nlink as u128);
-            let fingerprint = fingerprint_for(identity.as_ref(), &kind, &logical_bytes);
+            let fingerprint = fingerprint_for(Some(&identity), &kind, &logical_bytes);
 
             EntryMetadata {
                 path: path.to_path_buf(),
@@ -317,7 +318,7 @@ mod backend {
                 allocated_bytes,
                 hard_link_count,
                 fingerprint,
-                identity,
+                identity: Some(identity),
                 filesystem_identity,
                 mount_identity,
                 hard_link_key,

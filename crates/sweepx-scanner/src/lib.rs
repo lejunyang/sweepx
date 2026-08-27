@@ -1350,8 +1350,8 @@ fn scan_object_identity(
 ) -> ScanObjectIdentity {
     let platform_file_identity = match &metadata.identity {
         Some(identity) => IdentityEvidence::known(PlatformFileIdentity {
-            device: DecimalU128::new(identity.device.into()),
-            inode: DecimalU128::new(identity.inode.into()),
+            device: DecimalU128::new(identity.device().into()),
+            inode: DecimalU128::new(identity.inode()),
         }),
         None => IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
     };
@@ -1515,16 +1515,16 @@ mod tests {
             allocated_bytes: known_u128(0),
             hard_link_count: known_count(1),
             fingerprint: format!("fake:{name}"),
-            identity: Some(EntryIdentity {
-                device: 1,
-                inode: match name {
+            identity: Some(EntryIdentity::from_unix(
+                1,
+                match name {
                     "root" => 1,
                     "child" => 2,
                     "safe" => 3,
                     "evil" => 4,
                     _ => 5,
                 },
-            }),
+            )),
             filesystem_identity: Some(FilesystemIdentity { device: 1 }),
             mount_identity: mount_identity.map(|value| MountIdentity { value }),
             hard_link_key: None,
@@ -1781,6 +1781,110 @@ mod tests {
         assert_eq!(right_aggregate.unique_logical_bytes, known_u128(4));
     }
 
+    #[test]
+    fn hardlink_dedup_uses_all_windows_file_id_bits() {
+        let root = PathBuf::from("/root");
+        let first = root.join("first.bin");
+        let first_hard_link = root.join("first-hard.bin");
+        let second = root.join("second.bin");
+        let shared_low_bits = 0x0123_4567_89ab_cdef_u128;
+        let first_identity = EntryIdentity::from_windows_file_id(9, shared_low_bits.to_le_bytes());
+        let second_identity = EntryIdentity::from_windows_file_id(
+            9,
+            (shared_low_bits | (0xfedc_ba98_7654_3210_u128 << 64)).to_le_bytes(),
+        );
+        let file_metadata =
+            |path: PathBuf, name: &str, identity: EntryIdentity, link_count: u128| {
+                let logical_bytes = known_u128(if name == "second.bin" { 7 } else { 5 });
+                EntryMetadata {
+                    path,
+                    file_name: test_native_name(name),
+                    kind: EntryKind::File,
+                    logical_bytes: logical_bytes.clone(),
+                    allocated_bytes: logical_bytes.clone(),
+                    hard_link_count: known_count(link_count),
+                    fingerprint: sweepx_platform::fingerprint_for(
+                        Some(&identity),
+                        &EntryKind::File,
+                        &logical_bytes,
+                    ),
+                    filesystem_identity: Some(FilesystemIdentity {
+                        device: identity.device(),
+                    }),
+                    mount_identity: Some(MountIdentity { value: 9 }),
+                    hard_link_key: Some(HardLinkKey::from(identity.clone())),
+                    identity: Some(identity),
+                }
+            };
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![
+                    test_entry(&root, "first.bin"),
+                    test_entry(&root, "first-hard.bin"),
+                    test_entry(&root, "second.bin"),
+                ],
+                BTreeMap::from([
+                    (
+                        first.clone(),
+                        WalkEntry::File(file_metadata(
+                            first,
+                            "first.bin",
+                            first_identity.clone(),
+                            2,
+                        )),
+                    ),
+                    (
+                        first_hard_link.clone(),
+                        WalkEntry::File(file_metadata(
+                            first_hard_link,
+                            "first-hard.bin",
+                            first_identity,
+                            2,
+                        )),
+                    ),
+                    (
+                        second.clone(),
+                        WalkEntry::File(file_metadata(
+                            second.clone(),
+                            "second.bin",
+                            second_identity,
+                            1,
+                        )),
+                    ),
+                ]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let aggregate = aggregate_for_path(&result, &root);
+        assert_eq!(aggregate.apparent_logical_bytes, known_u128(17));
+        assert_eq!(aggregate.unique_logical_bytes, known_u128(12));
+        let second_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.display_path == second.display().to_string())
+            .unwrap();
+        assert_eq!(
+            second_entry
+                .identity
+                .as_ref()
+                .unwrap()
+                .platform_file_identity,
+            IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(9),
+                inode: DecimalU128::new(shared_low_bits | (0xfedc_ba98_7654_3210_u128 << 64)),
+            })
+        );
+    }
+
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     #[test]
     fn visited_limit_records_boundary() {
@@ -1889,16 +1993,10 @@ mod tests {
                         allocated_bytes: lower_bound_u128(11, ReasonCode::UnknownLayout),
                         hard_link_count: known_count(1),
                         fingerprint: "fp".to_string(),
-                        identity: Some(EntryIdentity {
-                            device: 1,
-                            inode: 2,
-                        }),
+                        identity: Some(EntryIdentity::from_unix(1, 2)),
                         filesystem_identity: Some(FilesystemIdentity { device: 1 }),
                         mount_identity: Some(MountIdentity { value: 1 }),
-                        hard_link_key: Some(HardLinkKey {
-                            device: 1,
-                            inode: 2,
-                        }),
+                        hard_link_key: Some(HardLinkKey::from_unix(1, 2)),
                     }),
                 )]),
             ),
@@ -1941,16 +2039,10 @@ mod tests {
                         allocated_bytes: unknown_u128(ReasonCode::UnknownLayout),
                         hard_link_count: known_count(1),
                         fingerprint: "fp".to_string(),
-                        identity: Some(EntryIdentity {
-                            device: 1,
-                            inode: 2,
-                        }),
+                        identity: Some(EntryIdentity::from_unix(1, 2)),
                         filesystem_identity: Some(FilesystemIdentity { device: 1 }),
                         mount_identity: Some(MountIdentity { value: 1 }),
-                        hard_link_key: Some(HardLinkKey {
-                            device: 1,
-                            inode: 2,
-                        }),
+                        hard_link_key: Some(HardLinkKey::from_unix(1, 2)),
                     }),
                 )]),
             ),
@@ -2779,10 +2871,7 @@ mod tests {
                     allocated_bytes: known_u128(0),
                     hard_link_count: known_count(1),
                     fingerprint: "root".to_string(),
-                    identity: Some(EntryIdentity {
-                        device: 1,
-                        inode: 1,
-                    }),
+                    identity: Some(EntryIdentity::from_unix(1, 1)),
                     filesystem_identity: Some(FilesystemIdentity { device: 1 }),
                     mount_identity: Some(MountIdentity { value: 1 }),
                     hard_link_key: None,

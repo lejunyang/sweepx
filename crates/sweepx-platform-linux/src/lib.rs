@@ -285,10 +285,10 @@ impl LinuxPlatformScanner {
         };
         let device = stat.st_dev;
         let inode = stat.st_ino;
-        let identity = Some(EntryIdentity { device, inode });
+        let identity = EntryIdentity::from_unix(device, inode);
         let filesystem_identity = Some(FilesystemIdentity { device });
-        let hard_link_key = (kind == EntryKind::File).then_some(HardLinkKey { device, inode });
-        let fingerprint = fingerprint_for(identity.as_ref(), &kind, &logical_bytes);
+        let hard_link_key = (kind == EntryKind::File).then(|| HardLinkKey::from(identity.clone()));
+        let fingerprint = fingerprint_for(Some(&identity), &kind, &logical_bytes);
 
         EntryMetadata {
             path: path.to_path_buf(),
@@ -298,7 +298,7 @@ impl LinuxPlatformScanner {
             allocated_bytes,
             hard_link_count: known_count(stat.st_nlink as u128),
             fingerprint,
-            identity,
+            identity: Some(identity),
             filesystem_identity,
             mount_identity: Some(MountIdentity { value: mount_id }),
             hard_link_key,
