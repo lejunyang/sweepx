@@ -17,14 +17,6 @@ impl WindowsPlatformScanner {
         }
         Ok(())
     }
-
-    #[cfg(windows)]
-    fn unsupported() -> PlatformError {
-        PlatformError::Unsupported(
-            "Windows enumeration and child inspection are disabled until they are implemented entirely through retained no-follow directory handles"
-                .to_string(),
-        )
-    }
 }
 
 #[cfg(windows)]
@@ -36,22 +28,27 @@ mod backend {
     use std::path::{Path, PathBuf};
     use std::ptr;
 
-    use sweepx_model::NativeName;
+    use sweepx_model::{NativeName, ReasonCode};
     use sweepx_platform::{
-        EntryIdentity, EntryKind, FilesystemIdentity, MountIdentity, fingerprint_for, known_count,
-        known_u128,
+        BoundaryKind, BoundaryRecord, EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity,
+        HardLinkKey, MountIdentity, OpenedDirectory, error_kind_for_io, fingerprint_for,
+        known_count, known_u128, reason_for_io, unknown_u128,
     };
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-        NtCreateFile, RtlIsDosDeviceName_U,
+        FILE_DIRECTORY_FILE, FILE_ID_EXTD_DIR_INFORMATION, FILE_OPEN, FILE_OPEN_NO_RECALL,
+        FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileIdExtdDirectoryInformation,
+        NtCreateFile, NtQueryDirectoryFile, RtlIsDosDeviceName_U,
     };
     use windows_sys::Win32::Foundation::{
         HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
-        STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_TYPE_MISMATCH, UNICODE_STRING,
+        STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_FILE_IS_A_DIRECTORY,
+        STATUS_INFO_LENGTH_MISMATCH, STATUS_NO_MORE_FILES, STATUS_NOT_A_DIRECTORY,
+        STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
         FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, FileAttributeTagInfo,
         FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
@@ -67,11 +64,51 @@ mod backend {
     /// An owned, scan-scoped capability for one admitted Windows directory.
     ///
     /// The handle is intentionally not cloneable. `display_path` is reporting data only and is
-    /// never used to regain filesystem authority after admission.
+    /// never used to regain filesystem authority after admission. Native filesystem calls are
+    /// synchronous, so cancellation is cooperative between calls rather than preempting one.
     #[derive(Debug)]
     pub struct WindowsDirectoryHandle {
         handle: OwnedHandle,
         display_path: PathBuf,
+        identity: ObjectIdentity,
+        cursor: DirectoryCursor,
+        inspection_batch: Vec<EnumeratedChildEvidence>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ObjectIdentity {
+        volume: u64,
+        file_id: [u8; 16],
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct EnumeratedIdentity {
+        file_id: [u8; 16],
+        is_directory: bool,
+        is_reparse: bool,
+        reparse_tag: u32,
+    }
+
+    #[derive(Debug)]
+    struct EnumeratedChild {
+        record: DirectoryEntryRecord,
+        identity: EnumeratedIdentity,
+    }
+
+    #[derive(Debug)]
+    struct EnumeratedChildEvidence {
+        file_name: NativeName,
+        identity: EnumeratedIdentity,
+    }
+
+    #[derive(Debug)]
+    enum DirectoryCursor {
+        NotStarted,
+        Active {
+            restart_scan: bool,
+            pending: Option<EnumeratedChild>,
+        },
+        Exhausted,
     }
 
     struct ParsedDrivePath {
@@ -81,6 +118,7 @@ mod backend {
 
     struct ObservedMetadata {
         attributes: u32,
+        reparse_tag: u32,
         standard: FILE_STANDARD_INFO,
         file_id: FILE_ID_INFO,
     }
@@ -99,6 +137,203 @@ mod backend {
                 Self::AdmittedRoot => access | FILE_LIST_DIRECTORY,
             }
         }
+    }
+
+    const DIRECTORY_QUERY_BUFFER_BYTES: usize = 64 * 1024;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DirectoryQueryOutcome {
+        Record { bytes_returned: usize },
+        Exhausted,
+    }
+
+    fn object_identity(observed: &ObservedMetadata) -> ObjectIdentity {
+        ObjectIdentity {
+            volume: observed.file_id.VolumeSerialNumber,
+            file_id: observed.file_id.FileId.Identifier,
+        }
+    }
+
+    fn same_object(left: &ObservedMetadata, right: &ObservedMetadata) -> bool {
+        object_identity(left) == object_identity(right)
+            && (left.attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+                == (right.attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+            && (left.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                == (right.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            && left.reparse_tag == right.reparse_tag
+            && WindowsPlatformScanner::is_provider_boundary(left.attributes)
+                == WindowsPlatformScanner::is_provider_boundary(right.attributes)
+    }
+
+    fn matches_enumerated_identity(
+        volume: u64,
+        expected: &EnumeratedIdentity,
+        observed: &ObservedMetadata,
+    ) -> bool {
+        volume == observed.file_id.VolumeSerialNumber
+            && expected.file_id != [0; 16]
+            && expected.file_id == observed.file_id.FileId.Identifier
+            && expected.is_directory == (observed.attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+            && expected.is_directory == observed.standard.Directory
+            && expected.is_reparse == (observed.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            && (!expected.is_reparse || expected.reparse_tag == observed.reparse_tag)
+    }
+
+    fn verify_enumerated_identity(
+        volume: u64,
+        expected: &EnumeratedIdentity,
+        observed: &ObservedMetadata,
+    ) -> Result<(), io::Error> {
+        if matches_enumerated_identity(volume, expected, observed) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "child identity, type, or reparse tag changed after enumeration",
+            ))
+        }
+    }
+
+    fn take_bounded_entry(
+        pending: &mut Option<EnumeratedChild>,
+        entries: &mut Vec<DirectoryEntryRecord>,
+        admitted: &mut Vec<EnumeratedChildEvidence>,
+        retained_bytes: &mut usize,
+        child: EnumeratedChild,
+        limits: DirectoryReadLimits,
+        directory_path: &Path,
+    ) -> Result<Option<DirectoryEntryBatch>, PlatformError> {
+        let record_bytes = child.record.estimated_retained_bytes().ok_or_else(|| {
+            PlatformError::ResourceLimit(format!(
+                "directory byte accounting overflow at {}",
+                directory_path.display()
+            ))
+        })?;
+        let next_bytes = retained_bytes.checked_add(record_bytes).ok_or_else(|| {
+            PlatformError::ResourceLimit(format!(
+                "directory byte accounting overflow at {}",
+                directory_path.display()
+            ))
+        })?;
+        if entries.is_empty() && record_bytes > limits.max_batch_bytes {
+            *pending = Some(child);
+            return Err(PlatformError::ResourceLimit(format!(
+                "single directory entry exceeds the retained-byte cap at {}",
+                directory_path.display()
+            )));
+        }
+        if entries.len() >= limits.max_batch_entries || next_bytes > limits.max_batch_bytes {
+            *pending = Some(child);
+            return Ok(Some(DirectoryEntryBatch::continued(mem::take(entries))));
+        }
+        *retained_bytes = next_bytes;
+        admitted.push(EnumeratedChildEvidence {
+            file_name: child.record.file_name.clone(),
+            identity: child.identity,
+        });
+        entries.push(child.record);
+        Ok(None)
+    }
+
+    fn validate_directory_query_lengths(
+        record_bytes: usize,
+        next_entry_offset: u32,
+        name_bytes: u32,
+    ) -> Result<(usize, usize), io::Error> {
+        let fixed_bytes = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+        if record_bytes < fixed_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NtQueryDirectoryFile returned an invalid record length",
+            ));
+        }
+        if next_entry_offset != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "single-entry directory query returned an unexpected continuation offset",
+            ));
+        }
+        let name_bytes = usize::try_from(name_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid filename length"))?;
+        if name_bytes % mem::size_of::<u16>() != 0
+            || fixed_bytes
+                .checked_add(name_bytes)
+                .is_none_or(|required| required > record_bytes)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NtQueryDirectoryFile returned a truncated filename",
+            ));
+        }
+        Ok((fixed_bytes, name_bytes))
+    }
+
+    fn read_directory_query_field<T: Copy>(
+        buffer: &[u8],
+        offset: usize,
+        field_name: &str,
+    ) -> Result<T, io::Error> {
+        let end = offset.checked_add(mem::size_of::<T>()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("directory query field offset overflow: {field_name}"),
+            )
+        })?;
+        if end > buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("directory query record omitted field: {field_name}"),
+            ));
+        }
+        // SAFETY: the complete field byte range was bounds-checked above. read_unaligned accepts
+        // arbitrary input alignment and copies the field value without reading adjacent bytes.
+        Ok(unsafe { ptr::read_unaligned(buffer.as_ptr().add(offset).cast::<T>()) })
+    }
+
+    fn directory_query_outcome(
+        status: i32,
+        information: usize,
+        buffer_capacity: usize,
+        cancel: &CancellationToken,
+        directory_path: &Path,
+    ) -> Result<DirectoryQueryOutcome, PlatformError> {
+        // This check intentionally precedes interpreting success, EOF, and failure statuses so
+        // cancellation observed during the synchronous native call always wins.
+        WindowsPlatformScanner::ensure_not_cancelled(cancel)?;
+        if status == STATUS_NO_MORE_FILES || (status == STATUS_SUCCESS && information == 0) {
+            return Ok(DirectoryQueryOutcome::Exhausted);
+        }
+        if matches!(
+            status,
+            STATUS_BUFFER_OVERFLOW | STATUS_BUFFER_TOO_SMALL | STATUS_INFO_LENGTH_MISMATCH
+        ) {
+            return Err(PlatformError::io(
+                directory_path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory entry exceeds the bounded native query buffer",
+                ),
+            ));
+        }
+        if status != STATUS_SUCCESS {
+            return Err(PlatformError::io(
+                directory_path,
+                io_error_from_ntstatus(status),
+            ));
+        }
+        let fixed_bytes = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+        if information < fixed_bytes || information > buffer_capacity {
+            return Err(PlatformError::io(
+                directory_path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NtQueryDirectoryFile returned an invalid record length",
+                ),
+            ));
+        }
+        Ok(DirectoryQueryOutcome::Record {
+            bytes_returned: information,
+        })
     }
 
     fn io_error_from_ntstatus(status: i32) -> io::Error {
@@ -271,12 +506,16 @@ mod backend {
             // Pin the drive designator itself, then require it to identify the same directory as
             // the documented local volume-GUID mapping. This rejects SUBST-style directory roots
             // and avoids using the mutable drive mapping for any descendant lookup.
-            let drive_handle =
-                Self::nt_open_directory(ptr::null_mut(), &nt_root, DirectoryOpenRole::Ancestor)?;
+            let drive_handle = Self::nt_open_directory(
+                ptr::null_mut(),
+                &nt_root,
+                DirectoryOpenRole::Ancestor,
+                true,
+            )?;
             let drive_metadata = Self::reject_reparse_or_nondirectory(&drive_handle)?;
             let volume_root = Self::volume_guid_nt_path(&dos_root)?;
             let volume_handle =
-                Self::nt_open_directory(ptr::null_mut(), &volume_root, volume_role)?;
+                Self::nt_open_directory(ptr::null_mut(), &volume_root, volume_role, true)?;
             let volume_metadata = Self::reject_reparse_or_nondirectory(&volume_handle)?;
             if drive_metadata.file_id.VolumeSerialNumber
                 != volume_metadata.file_id.VolumeSerialNumber
@@ -323,14 +562,87 @@ mod backend {
             parent: &OwnedHandle,
             component: &[u16],
             role: DirectoryOpenRole,
+            case_insensitive: bool,
         ) -> Result<OwnedHandle, RootOpenError> {
-            Self::nt_open_directory(parent.as_raw_handle() as HANDLE, component, role)
+            Self::nt_open_directory(
+                parent.as_raw_handle() as HANDLE,
+                component,
+                role,
+                case_insensitive,
+            )
         }
 
         fn nt_open_directory(
             parent: HANDLE,
             name: &[u16],
             role: DirectoryOpenRole,
+            case_insensitive: bool,
+        ) -> Result<OwnedHandle, RootOpenError> {
+            Self::nt_open_relative(
+                parent,
+                name,
+                role.desired_access(),
+                FILE_DIRECTORY_FILE,
+                case_insensitive,
+            )
+        }
+
+        fn open_child_entry(
+            parent: &OwnedHandle,
+            component: &[u16],
+        ) -> Result<OwnedHandle, io::Error> {
+            Self::nt_open_relative(
+                parent.as_raw_handle() as HANDLE,
+                component,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0,
+                false,
+            )
+            .map_err(|error| match error {
+                RootOpenError::Io(error) => error,
+                RootOpenError::NotDirectory => io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "child type changed during no-follow open",
+                ),
+                RootOpenError::Cancelled
+                | RootOpenError::ReparsePoint
+                | RootOpenError::UnsupportedNamespace => {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid child entry")
+                }
+            })
+        }
+
+        fn open_enumerated_child_directory(
+            parent: &OwnedHandle,
+            component: &[u16],
+        ) -> Result<OwnedHandle, io::Error> {
+            Self::nt_open_relative(
+                parent.as_raw_handle() as HANDLE,
+                component,
+                DirectoryOpenRole::AdmittedRoot.desired_access(),
+                FILE_DIRECTORY_FILE,
+                false,
+            )
+            .map_err(|error| match error {
+                RootOpenError::Io(error) => error,
+                RootOpenError::NotDirectory => io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory entry changed during no-follow open",
+                ),
+                RootOpenError::Cancelled
+                | RootOpenError::ReparsePoint
+                | RootOpenError::UnsupportedNamespace => {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid child directory")
+                }
+            })
+        }
+
+        fn nt_open_relative(
+            parent: HANDLE,
+            name: &[u16],
+            desired_access: u32,
+            type_options: u32,
+            case_insensitive: bool,
         ) -> Result<OwnedHandle, RootOpenError> {
             let byte_length = name
                 .len()
@@ -347,7 +659,11 @@ mod backend {
                     .expect("OBJECT_ATTRIBUTES size fits u32"),
                 RootDirectory: parent,
                 ObjectName: &object_name,
-                Attributes: OBJ_CASE_INSENSITIVE,
+                Attributes: if case_insensitive {
+                    OBJ_CASE_INSENSITIVE
+                } else {
+                    0
+                },
                 SecurityDescriptor: ptr::null(),
                 SecurityQualityOfService: ptr::null(),
             };
@@ -359,20 +675,28 @@ mod backend {
             let status = unsafe {
                 NtCreateFile(
                     &mut handle,
-                    role.desired_access(),
+                    desired_access,
                     &object_attributes,
                     &mut io_status,
                     ptr::null(),
                     0,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     FILE_OPEN,
-                    FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                    type_options
+                        | FILE_OPEN_NO_RECALL
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
                     ptr::null(),
                     0,
                 )
             };
             if status < 0 {
-                return if matches!(status, STATUS_NOT_A_DIRECTORY | STATUS_OBJECT_TYPE_MISMATCH) {
+                return if matches!(
+                    status,
+                    STATUS_FILE_IS_A_DIRECTORY
+                        | STATUS_NOT_A_DIRECTORY
+                        | STATUS_OBJECT_TYPE_MISMATCH
+                ) {
                     Err(RootOpenError::NotDirectory)
                 } else {
                     Err(RootOpenError::Io(io_error_from_ntstatus(status)))
@@ -426,7 +750,7 @@ mod backend {
                 } else {
                     DirectoryOpenRole::Ancestor
                 };
-                let child = Self::open_child_directory(&handle, &component, role)?;
+                let child = Self::open_child_directory(&handle, &component, role, true)?;
                 observed = Self::reject_reparse_or_nondirectory(&child)?;
                 handle = child;
                 if cancel.is_cancelled() {
@@ -443,31 +767,251 @@ mod backend {
             let file_id: FILE_ID_INFO = get_file_information(handle, FileIdInfo)?;
             Ok(ObservedMetadata {
                 attributes: attributes.FileAttributes,
+                reparse_tag: attributes.ReparseTag,
                 standard,
                 file_id,
             })
+        }
+
+        fn assert_directory_identity_current(
+            directory: &WindowsDirectoryHandle,
+        ) -> Result<(), PlatformError> {
+            let observed = Self::query_metadata(&directory.handle)
+                .map_err(|error| PlatformError::io(&directory.display_path, error))?;
+            if Self::is_provider_boundary(observed.attributes)
+                || observed.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || observed.attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || !observed.standard.Directory
+                || object_identity(&observed) != directory.identity
+            {
+                return Err(PlatformError::io(
+                    &directory.display_path,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory identity or type changed after it was opened",
+                    ),
+                ));
+            }
+            Ok(())
+        }
+
+        fn parse_directory_query_record(
+            directory_path: &Path,
+            buffer: &[u8],
+        ) -> Result<Option<EnumeratedChild>, io::Error> {
+            let fixed_bytes = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+            if buffer.len() < fixed_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NtQueryDirectoryFile returned an invalid record length",
+                ));
+            }
+            let next_entry_offset = read_directory_query_field::<u32>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, NextEntryOffset),
+                "NextEntryOffset",
+            )?;
+            let file_name_length = read_directory_query_field::<u32>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileNameLength),
+                "FileNameLength",
+            )?;
+            let file_attributes = read_directory_query_field::<u32>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileAttributes),
+                "FileAttributes",
+            )?;
+            let reparse_tag = read_directory_query_field::<u32>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, ReparsePointTag),
+                "ReparsePointTag",
+            )?;
+            let file_id = read_directory_query_field::<[u8; 16]>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileId),
+                "FileId",
+            )?;
+            let (fixed_bytes, name_bytes) = validate_directory_query_lengths(
+                buffer.len(),
+                next_entry_offset,
+                file_name_length,
+            )?;
+            let name_start = fixed_bytes;
+            let name_end = name_start + name_bytes;
+            let (name_units, remainder) = buffer[name_start..name_end].as_chunks::<2>();
+            debug_assert!(remainder.is_empty());
+            let name = name_units
+                .iter()
+                .map(|bytes| u16::from_ne_bytes(*bytes))
+                .collect::<Vec<_>>();
+            if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
+                return Ok(None);
+            }
+            let record = DirectoryEntryRecord::from_parent_and_name(
+                directory_path,
+                NativeName::windows_utf16(name),
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            Ok(Some(EnumeratedChild {
+                record,
+                identity: EnumeratedIdentity {
+                    file_id,
+                    is_directory: file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    is_reparse: file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                    reparse_tag,
+                },
+            }))
+        }
+
+        fn query_next_directory_entry(
+            directory: &mut WindowsDirectoryHandle,
+            cancel: &CancellationToken,
+        ) -> Result<Option<EnumeratedChild>, PlatformError> {
+            loop {
+                Self::ensure_not_cancelled(cancel)?;
+                let DirectoryCursor::Active {
+                    restart_scan,
+                    pending,
+                } = &mut directory.cursor
+                else {
+                    return Ok(None);
+                };
+                debug_assert!(pending.is_none());
+
+                let mut buffer = vec![0u64; DIRECTORY_QUERY_BUFFER_BYTES / mem::size_of::<u64>()];
+                let buffer_bytes = buffer.len() * mem::size_of::<u64>();
+                let mut io_status = IO_STATUS_BLOCK::default();
+                // SAFETY: the directory handle is live and has FILE_LIST_DIRECTORY access; the
+                // output buffer and IO_STATUS_BLOCK remain writable for this synchronous call.
+                // ReturnSingleEntry advances the cursor by at most one filesystem record.
+                let status = unsafe {
+                    NtQueryDirectoryFile(
+                        directory.handle.as_raw_handle() as HANDLE,
+                        ptr::null_mut(),
+                        None,
+                        ptr::null(),
+                        &mut io_status,
+                        buffer.as_mut_ptr().cast(),
+                        u32::try_from(buffer_bytes).expect("directory query buffer fits u32"),
+                        FileIdExtdDirectoryInformation,
+                        true,
+                        ptr::null(),
+                        *restart_scan,
+                    )
+                };
+                *restart_scan = false;
+                let outcome = directory_query_outcome(
+                    status,
+                    io_status.Information,
+                    buffer_bytes,
+                    cancel,
+                    &directory.display_path,
+                )?;
+                let DirectoryQueryOutcome::Record { bytes_returned } = outcome else {
+                    directory.cursor = DirectoryCursor::Exhausted;
+                    return Ok(None);
+                };
+                // SAFETY: the u64 allocation contains exactly buffer_bytes contiguous bytes and
+                // remains live while the returned byte slice is inspected. The parser is called
+                // only with this aligned allocation, as required by FILE_ID_EXTD_DIR_INFORMATION.
+                let buffer_bytes = unsafe {
+                    std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer_bytes)
+                };
+                if let Some(record) = Self::parse_directory_query_record(
+                    &directory.display_path,
+                    &buffer_bytes[..bytes_returned],
+                )
+                .map_err(|error| PlatformError::io(&directory.display_path, error))?
+                {
+                    Self::ensure_not_cancelled(cancel)?;
+                    return Ok(Some(record));
+                }
+            }
+        }
+
+        fn expected_child_identity<'a>(
+            parent: &'a WindowsDirectoryHandle,
+            child: &DirectoryEntryRecord,
+        ) -> Result<&'a EnumeratedIdentity, PlatformError> {
+            let Some(expected) = parent
+                .inspection_batch
+                .iter()
+                .find(|entry| entry.file_name == child.file_name)
+                .map(|entry| &entry.identity)
+            else {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: parent.display_path.clone(),
+                    detail: "child token was not returned by the most recent enumeration batch"
+                        .to_string(),
+                });
+            };
+            Ok(expected)
+        }
+
+        fn child_units(child: &DirectoryEntryRecord) -> Result<&[u16], PlatformError> {
+            let NativeName::WindowsUtf16(units) = &child.file_name else {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: child
+                        .path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
+                    detail: "Windows child name is not encoded as UTF-16".to_string(),
+                });
+            };
+            child.file_name.validate_basename().map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: child
+                        .path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
+                    detail: error.to_string(),
+                }
+            })?;
+            if Self::is_reserved_dos_device_name(units) {
+                return Err(PlatformError::InvalidDirectoryEntry {
+                    parent: child
+                        .path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
+                    detail: "Windows child name is a reserved DOS device alias".to_string(),
+                });
+            }
+            Ok(units)
         }
 
         fn metadata_to_entry(
             path: &Path,
             file_name: NativeName,
             observed: &ObservedMetadata,
+            kind: EntryKind,
         ) -> EntryMetadata {
-            let logical_bytes = known_u128(0);
-            let allocated_bytes = known_u128(0);
+            let logical_bytes = if kind == EntryKind::File {
+                known_u128(observed.standard.EndOfFile.max(0) as u128)
+            } else {
+                known_u128(0)
+            };
+            let allocated_bytes = if kind == EntryKind::File {
+                // FILE_STANDARD_INFO only covers the unnamed stream. Until all streams and their
+                // allocation are enumerated, an exact filesystem allocation claim is unsafe.
+                unknown_u128(ReasonCode::IncompleteStreamCoverage)
+            } else {
+                known_u128(0)
+            };
             let identity = EntryIdentity::from_windows_file_id(
                 observed.file_id.VolumeSerialNumber,
                 observed.file_id.FileId.Identifier,
             );
-            let fingerprint =
-                fingerprint_for(Some(&identity), &EntryKind::Directory, &logical_bytes);
+            let fingerprint = fingerprint_for(Some(&identity), &kind, &logical_bytes);
+            let hard_link_key =
+                (kind == EntryKind::File).then(|| HardLinkKey::from(identity.clone()));
 
             EntryMetadata {
                 path: path.to_path_buf(),
                 file_name,
-                kind: EntryKind::Directory,
-                // Directories do not contribute file content bytes. File sizes remain a later
-                // child-inspection concern, so root admission reports exact zero conservatively.
+                kind,
                 logical_bytes,
                 allocated_bytes,
                 hard_link_count: known_count(u128::from(observed.standard.NumberOfLinks)),
@@ -479,8 +1023,30 @@ mod backend {
                 mount_identity: Some(MountIdentity {
                     value: observed.file_id.VolumeSerialNumber,
                 }),
-                hard_link_key: None,
+                hard_link_key,
             }
+        }
+
+        fn valid_identity(observed: &ObservedMetadata) -> bool {
+            observed.file_id.VolumeSerialNumber != 0
+                && observed.file_id.FileId.Identifier != [0; 16]
+        }
+
+        fn is_provider_boundary(attributes: u32) -> bool {
+            attributes
+                & (FILE_ATTRIBUTE_OFFLINE
+                    | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+                != 0
+        }
+
+        fn error_entry(path: &Path, error: io::Error) -> WalkEntry<WindowsDirectoryHandle> {
+            WalkEntry::Error(ErrorRecord {
+                path: path.to_path_buf(),
+                kind: error_kind_for_io(&error),
+                reason: reason_for_io(&error),
+                detail: error.to_string(),
+            })
         }
     }
 
@@ -536,23 +1102,35 @@ mod backend {
                     RootOpenError::Io(error) => PlatformError::io(root.path(), error),
                 })?;
             Self::ensure_not_cancelled(cancel)?;
-            if observed.file_id.VolumeSerialNumber == 0
-                || observed.file_id.FileId.Identifier == [0; 16]
-            {
+            if !Self::valid_identity(&observed) {
                 return Err(PlatformError::RootRejected(format!(
                     "root filesystem did not provide an authoritative volume and file identity: {}",
                     root.path().display()
                 )));
             }
+            if Self::is_provider_boundary(observed.attributes) {
+                return Err(PlatformError::RootRejected(format!(
+                    "root is offline or recall-on-access storage: {}",
+                    root.path().display()
+                )));
+            }
 
-            let metadata =
-                Self::metadata_to_entry(root.path(), Self::native_name(root.path()), &observed);
+            let metadata = Self::metadata_to_entry(
+                root.path(),
+                Self::native_name(root.path()),
+                &observed,
+                EntryKind::Directory,
+            );
+            let identity = object_identity(&observed);
             Ok(RootAdmission::new(
                 root.clone(),
                 metadata,
                 WindowsDirectoryHandle {
                     handle,
                     display_path: root.path().to_path_buf(),
+                    identity,
+                    cursor: DirectoryCursor::NotStarted,
+                    inspection_batch: Vec::new(),
                 },
                 root_locator,
             ))
@@ -562,30 +1140,216 @@ mod backend {
             &self,
             directory: &mut Self::DirectoryHandle,
             cancel: &CancellationToken,
-            _limits: DirectoryReadLimits,
+            limits: DirectoryReadLimits,
         ) -> Result<DirectoryEntryBatch, PlatformError> {
             Self::ensure_not_cancelled(cancel)?;
-            let _ = (&directory.handle, &directory.display_path);
-            Err(Self::unsupported())
+            Self::assert_directory_identity_current(directory)?;
+            Self::ensure_not_cancelled(cancel)?;
+            if limits.max_batch_entries == 0 || limits.max_batch_bytes == 0 {
+                return Err(PlatformError::ResourceLimit(format!(
+                    "directory batch limits must be nonzero at {}",
+                    directory.display_path.display()
+                )));
+            }
+            if matches!(directory.cursor, DirectoryCursor::Exhausted) {
+                return Ok(DirectoryEntryBatch::complete(Vec::new()));
+            }
+            if matches!(directory.cursor, DirectoryCursor::NotStarted) {
+                directory.cursor = DirectoryCursor::Active {
+                    restart_scan: true,
+                    pending: None,
+                };
+            }
+
+            let mut entries = Vec::new();
+            directory.inspection_batch.clear();
+            let mut retained_bytes = 0usize;
+            loop {
+                Self::ensure_not_cancelled(cancel)?;
+                let child = match &mut directory.cursor {
+                    DirectoryCursor::Active { pending, .. } => match pending.take() {
+                        Some(child) => Some(child),
+                        None => Self::query_next_directory_entry(directory, cancel)?,
+                    },
+                    DirectoryCursor::Exhausted => None,
+                    DirectoryCursor::NotStarted => {
+                        unreachable!("directory cursor was initialized above")
+                    }
+                };
+                let Some(child) = child else {
+                    return Ok(DirectoryEntryBatch::complete(entries));
+                };
+                Self::ensure_not_cancelled(cancel)?;
+                let DirectoryCursor::Active { pending, .. } = &mut directory.cursor else {
+                    unreachable!("a yielded child requires an active cursor")
+                };
+                if let Some(batch) = take_bounded_entry(
+                    pending,
+                    &mut entries,
+                    &mut directory.inspection_batch,
+                    &mut retained_bytes,
+                    child,
+                    limits,
+                    &directory.display_path,
+                )? {
+                    return Ok(batch);
+                }
+            }
         }
 
         fn inspect_child(
             &self,
             parent: &Self::DirectoryHandle,
-            _child: &DirectoryEntryRecord,
+            child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             Self::ensure_not_cancelled(cancel)?;
-            let _ = (&parent.handle, &parent.display_path);
-            Err(Self::unsupported())
+            child
+                .validate_for_parent(&parent.display_path)
+                .map_err(|error| PlatformError::InvalidDirectoryEntry {
+                    parent: parent.display_path.clone(),
+                    detail: error.to_string(),
+                })?;
+            Self::assert_directory_identity_current(parent)?;
+            Self::ensure_not_cancelled(cancel)?;
+            let units = Self::child_units(child)?;
+            let expected = Self::expected_child_identity(parent, child)?;
+            let handle = match Self::open_child_entry(&parent.handle, units) {
+                Ok(handle) => handle,
+                Err(error) => return Ok(Self::error_entry(&child.path, error)),
+            };
+            Self::ensure_not_cancelled(cancel)?;
+            let observed = match Self::query_metadata(&handle) {
+                Ok(observed) => observed,
+                Err(error) => return Ok(Self::error_entry(&child.path, error)),
+            };
+            Self::ensure_not_cancelled(cancel)?;
+            if !Self::valid_identity(&observed) {
+                return Ok(Self::error_entry(
+                    &child.path,
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "filesystem did not return an authoritative child identity",
+                    ),
+                ));
+            }
+            if let Err(error) =
+                verify_enumerated_identity(parent.identity.volume, expected, &observed)
+            {
+                return Ok(Self::error_entry(&child.path, error));
+            }
+
+            if Self::is_provider_boundary(observed.attributes) {
+                Self::ensure_not_cancelled(cancel)?;
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::OtherFilesystem,
+                    reason: ReasonCode::UnsupportedFilesystem,
+                    detail: "offline or recall-on-access entry recorded without hydration"
+                        .to_string(),
+                }));
+            }
+            if observed.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                Self::ensure_not_cancelled(cancel)?;
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::ReparsePoint,
+                    reason: ReasonCode::UnsupportedFilesystem,
+                    detail: format!(
+                        "Windows reparse point 0x{:08x} recorded and not followed",
+                        observed.reparse_tag
+                    ),
+                }));
+            }
+            if observed.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && observed.standard.Directory {
+                let metadata = Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &observed,
+                    EntryKind::Directory,
+                );
+                Self::ensure_not_cancelled(cancel)?;
+                let directory_handle =
+                    match Self::open_enumerated_child_directory(&parent.handle, units) {
+                        Ok(handle) => handle,
+                        Err(error) => return Ok(Self::error_entry(&child.path, error)),
+                    };
+                Self::ensure_not_cancelled(cancel)?;
+                let reopened = match Self::query_metadata(&directory_handle) {
+                    Ok(observed) => observed,
+                    Err(error) => return Ok(Self::error_entry(&child.path, error)),
+                };
+                Self::ensure_not_cancelled(cancel)?;
+                if Self::is_provider_boundary(reopened.attributes) {
+                    return Ok(WalkEntry::Boundary(BoundaryRecord {
+                        path: child.path.clone(),
+                        kind: BoundaryKind::OtherFilesystem,
+                        reason: ReasonCode::UnsupportedFilesystem,
+                        detail: "directory became offline or recall-on-access during inspection"
+                            .to_string(),
+                    }));
+                }
+                if !Self::valid_identity(&reopened) || !same_object(&observed, &reopened) {
+                    return Ok(Self::error_entry(
+                        &child.path,
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "directory identity changed between pinning and enumerable open",
+                        ),
+                    ));
+                }
+                Self::ensure_not_cancelled(cancel)?;
+                return Ok(WalkEntry::Directory(OpenedDirectory {
+                    metadata,
+                    handle: WindowsDirectoryHandle {
+                        handle: directory_handle,
+                        display_path: child.path.clone(),
+                        identity: object_identity(&reopened),
+                        cursor: DirectoryCursor::NotStarted,
+                        inspection_batch: Vec::new(),
+                    },
+                }));
+            }
+            if observed.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 || observed.standard.Directory {
+                Self::ensure_not_cancelled(cancel)?;
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::OtherFilesystem,
+                    reason: ReasonCode::UnsupportedFilesystem,
+                    detail: "directory metadata was inconsistent during inspection".to_string(),
+                }));
+            }
+            Self::ensure_not_cancelled(cancel)?;
+            Ok(WalkEntry::File(Self::metadata_to_entry(
+                &child.path,
+                child.file_name.clone(),
+                &observed,
+                EntryKind::File,
+            )))
         }
 
         fn is_same_mount(
             &self,
-            _root: &EntryMetadata,
-            _entry: &EntryMetadata,
+            root: &EntryMetadata,
+            entry: &EntryMetadata,
         ) -> Result<bool, PlatformError> {
-            Err(Self::unsupported())
+            let root_mount = root.mount_identity.as_ref().ok_or_else(|| {
+                PlatformError::Unsupported("root volume identity unavailable".to_string())
+            })?;
+            let entry_mount = entry.mount_identity.as_ref().ok_or_else(|| {
+                PlatformError::Unsupported("entry volume identity unavailable".to_string())
+            })?;
+            let root_filesystem = root.filesystem_identity.as_ref().ok_or_else(|| {
+                PlatformError::Unsupported(
+                    "root filesystem object-domain identity unavailable".to_string(),
+                )
+            })?;
+            let entry_filesystem = entry.filesystem_identity.as_ref().ok_or_else(|| {
+                PlatformError::Unsupported(
+                    "entry filesystem object-domain identity unavailable".to_string(),
+                )
+            })?;
+            Ok(root_mount == entry_mount && root_filesystem == entry_filesystem)
         }
     }
 
@@ -594,7 +1358,8 @@ mod backend {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        use sweepx_model::EvidenceValue;
+        use sweepx_model::{EvidenceValue, NativeName};
+        use windows_sys::Win32::Foundation::STATUS_ACCESS_DENIED;
 
         use super::*;
 
@@ -624,6 +1389,57 @@ mod backend {
 
         fn scanner() -> WindowsPlatformScanner {
             WindowsPlatformScanner::new()
+        }
+
+        fn limits(max_entries: usize) -> DirectoryReadLimits {
+            DirectoryReadLimits {
+                max_batch_entries: max_entries,
+                max_batch_bytes: 1024 * 1024,
+            }
+        }
+
+        fn enumerated(record: DirectoryEntryRecord) -> EnumeratedChild {
+            EnumeratedChild {
+                record,
+                identity: EnumeratedIdentity {
+                    file_id: [1; 16],
+                    is_directory: false,
+                    is_reparse: false,
+                    reparse_tag: 0,
+                },
+            }
+        }
+
+        fn collect_children(
+            scanner: &WindowsPlatformScanner,
+            directory: &mut WindowsDirectoryHandle,
+            limits: DirectoryReadLimits,
+        ) -> Vec<DirectoryEntryRecord> {
+            let mut children = Vec::new();
+            loop {
+                let batch = scanner
+                    .enumerate_children(directory, &CancellationToken::new(), limits)
+                    .expect("directory enumeration succeeds");
+                assert!(!batch.entries.is_empty() || batch.end_of_directory);
+                children.extend(batch.entries);
+                if batch.end_of_directory {
+                    return children;
+                }
+            }
+        }
+
+        fn child_by_name(
+            scanner: &WindowsPlatformScanner,
+            directory: &mut WindowsDirectoryHandle,
+            name: &str,
+        ) -> DirectoryEntryRecord {
+            let expected = name.encode_utf16().collect::<Vec<_>>();
+            collect_children(scanner, directory, limits(32))
+                .into_iter()
+                .find(|child| {
+                    matches!(&child.file_name, NativeName::WindowsUtf16(units) if units == &expected)
+                })
+                .unwrap_or_else(|| panic!("enumeration returned {name:?}"))
         }
 
         fn parse(path: &str) -> Result<ParsedDrivePath, RootOpenError> {
@@ -716,6 +1532,409 @@ mod backend {
             assert_eq!(admitted_root & FILE_LIST_DIRECTORY, FILE_LIST_DIRECTORY);
             assert_eq!(ancestor, FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE);
             assert_eq!(admitted_root, ancestor | FILE_LIST_DIRECTORY);
+        }
+
+        #[test]
+        fn metadata_mapping_preserves_full_file_id_and_conservative_sizes() {
+            let mut observed = ObservedMetadata {
+                attributes: 0,
+                reparse_tag: 0,
+                standard: FILE_STANDARD_INFO::default(),
+                file_id: FILE_ID_INFO::default(),
+            };
+            observed.standard.EndOfFile = 987;
+            observed.standard.AllocationSize = 1024;
+            observed.standard.NumberOfLinks = 3;
+            observed.file_id.VolumeSerialNumber = 42;
+            observed.file_id.FileId.Identifier =
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+            let metadata = WindowsPlatformScanner::metadata_to_entry(
+                Path::new(r"C:\root\file"),
+                NativeName::windows_utf16("file".encode_utf16().collect::<Vec<_>>()),
+                &observed,
+                EntryKind::File,
+            );
+
+            let identity = metadata.identity.expect("file identity is present");
+            assert_eq!(identity.device(), 42);
+            assert_eq!(
+                identity.windows_file_id(),
+                observed.file_id.FileId.Identifier
+            );
+            assert_eq!(
+                metadata
+                    .hard_link_key
+                    .as_ref()
+                    .map(HardLinkKey::windows_file_id),
+                Some(observed.file_id.FileId.Identifier)
+            );
+            assert!(matches!(
+                metadata.logical_bytes,
+                EvidenceValue::Known { value } if value.0 == 987
+            ));
+            assert!(matches!(
+                metadata.allocated_bytes,
+                EvidenceValue::Unknown {
+                    reason: ReasonCode::IncompleteStreamCoverage
+                }
+            ));
+            assert!(matches!(
+                metadata.hard_link_count,
+                EvidenceValue::Known { value } if value.0 == 3
+            ));
+        }
+
+        #[test]
+        fn enumerated_identity_rejects_replacement_type_and_tag_changes() {
+            let mut observed = ObservedMetadata {
+                attributes: 0,
+                reparse_tag: 0,
+                standard: FILE_STANDARD_INFO::default(),
+                file_id: FILE_ID_INFO::default(),
+            };
+            observed.file_id.VolumeSerialNumber = 7;
+            observed.file_id.FileId.Identifier = [3; 16];
+            let expected = EnumeratedIdentity {
+                file_id: [3; 16],
+                is_directory: false,
+                is_reparse: false,
+                reparse_tag: 0,
+            };
+            assert!(verify_enumerated_identity(7, &expected, &observed).is_ok());
+
+            observed.file_id.FileId.Identifier = [4; 16];
+            assert!(verify_enumerated_identity(7, &expected, &observed).is_err());
+            observed.file_id.FileId.Identifier = [3; 16];
+            assert!(verify_enumerated_identity(8, &expected, &observed).is_err());
+            observed.attributes = FILE_ATTRIBUTE_DIRECTORY;
+            observed.standard.Directory = true;
+            assert!(verify_enumerated_identity(7, &expected, &observed).is_err());
+
+            observed.attributes = FILE_ATTRIBUTE_REPARSE_POINT;
+            observed.standard.Directory = false;
+            observed.reparse_tag = 0x1122_3344;
+            let expected_reparse = EnumeratedIdentity {
+                file_id: [3; 16],
+                is_directory: false,
+                is_reparse: true,
+                reparse_tag: 0x5566_7788,
+            };
+            assert!(verify_enumerated_identity(7, &expected_reparse, &observed).is_err());
+        }
+
+        #[test]
+        fn directory_reopen_comparison_rejects_provider_state_transition() {
+            let mut before = ObservedMetadata {
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                reparse_tag: 0,
+                standard: FILE_STANDARD_INFO::default(),
+                file_id: FILE_ID_INFO::default(),
+            };
+            before.standard.Directory = true;
+            before.file_id.VolumeSerialNumber = 7;
+            before.file_id.FileId.Identifier = [3; 16];
+            let mut after = ObservedMetadata {
+                attributes: before.attributes,
+                reparse_tag: before.reparse_tag,
+                standard: before.standard,
+                file_id: before.file_id,
+            };
+
+            assert!(same_object(&before, &after));
+            after.attributes |= FILE_ATTRIBUTE_OFFLINE;
+            assert!(WindowsPlatformScanner::is_provider_boundary(
+                after.attributes
+            ));
+            assert!(!same_object(&before, &after));
+        }
+
+        fn directory_record_bytes(
+            name: &[u16],
+            next_entry_offset: u32,
+            file_id: [u8; 16],
+            attributes: u32,
+            reparse_tag: u32,
+        ) -> Vec<u64> {
+            let fixed_bytes = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+            let total_bytes = fixed_bytes + mem::size_of_val(name);
+            let mut storage = vec![0u64; total_bytes.div_ceil(mem::size_of::<u64>())];
+            let record = storage.as_mut_ptr().cast::<FILE_ID_EXTD_DIR_INFORMATION>();
+            // SAFETY: the allocation is 8-byte aligned and large enough for the fixed header plus
+            // every encoded UTF-16 name byte written below.
+            unsafe {
+                (*record).NextEntryOffset = next_entry_offset;
+                (*record).FileNameLength = u32::try_from(name.len() * 2).unwrap();
+                (*record).FileId.Identifier = file_id;
+                (*record).FileAttributes = attributes;
+                (*record).ReparsePointTag = reparse_tag;
+                ptr::copy_nonoverlapping(
+                    name.as_ptr(),
+                    (*record).FileName.as_mut_ptr(),
+                    name.len(),
+                );
+            }
+            storage
+        }
+
+        #[test]
+        fn directory_query_record_parser_preserves_utf16_and_rejects_malformed_records() {
+            let parent = Path::new(r"C:\root");
+            let name = "MiXeD 🚀".encode_utf16().collect::<Vec<_>>();
+            let storage = directory_record_bytes(
+                &name,
+                0,
+                [9; 16],
+                FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                0xa000_000c,
+            );
+            // SAFETY: storage is initialized and viewed over exactly its owned byte extent.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    storage.as_ptr().cast::<u8>(),
+                    storage.len() * mem::size_of::<u64>(),
+                )
+            };
+            let child = WindowsPlatformScanner::parse_directory_query_record(parent, bytes)
+                .expect("valid record parses")
+                .expect("ordinary name is retained");
+            assert_eq!(
+                child.record.file_name,
+                NativeName::windows_utf16(name.clone())
+            );
+            assert_eq!(child.identity.file_id, [9; 16]);
+            assert!(child.identity.is_directory);
+            assert!(child.identity.is_reparse);
+            assert_eq!(child.identity.reparse_tag, 0xa000_000c);
+
+            let dot_storage = directory_record_bytes(&[b'.' as u16], 0, [1; 16], 0, 0);
+            let dot_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    dot_storage.as_ptr().cast::<u8>(),
+                    dot_storage.len() * mem::size_of::<u64>(),
+                )
+            };
+            assert!(
+                WindowsPlatformScanner::parse_directory_query_record(parent, dot_bytes)
+                    .unwrap()
+                    .is_none()
+            );
+
+            let continued = directory_record_bytes(&name, 8, [1; 16], 0, 0);
+            let continued_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    continued.as_ptr().cast::<u8>(),
+                    continued.len() * mem::size_of::<u64>(),
+                )
+            };
+            assert!(
+                WindowsPlatformScanner::parse_directory_query_record(parent, continued_bytes)
+                    .is_err()
+            );
+            assert!(
+                WindowsPlatformScanner::parse_directory_query_record(parent, &bytes[..8]).is_err()
+            );
+        }
+
+        #[test]
+        fn bounded_entry_accounting_preserves_pending_cursor_state() {
+            let path = Path::new(r"C:\root");
+            let first = DirectoryEntryRecord::from_parent_and_name(
+                path,
+                NativeName::windows_utf16("first".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("first record is valid");
+            let second = DirectoryEntryRecord::from_parent_and_name(
+                path,
+                NativeName::windows_utf16("second".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("second record is valid");
+            let first_cost = first.estimated_retained_bytes().unwrap();
+            let second_cost = second.estimated_retained_bytes().unwrap();
+            let mut pending = None;
+            let mut entries = Vec::new();
+            let mut evidence = Vec::new();
+            let mut retained_bytes = 0;
+            let limits = DirectoryReadLimits {
+                max_batch_entries: 1,
+                max_batch_bytes: first_cost.max(second_cost),
+            };
+
+            assert!(
+                take_bounded_entry(
+                    &mut pending,
+                    &mut entries,
+                    &mut evidence,
+                    &mut retained_bytes,
+                    enumerated(first.clone()),
+                    limits,
+                    path,
+                )
+                .expect("first record fits")
+                .is_none()
+            );
+            let page = take_bounded_entry(
+                &mut pending,
+                &mut entries,
+                &mut evidence,
+                &mut retained_bytes,
+                enumerated(second.clone()),
+                limits,
+                path,
+            )
+            .expect("second record becomes pending")
+            .expect("entry cap returns a page");
+            assert_eq!(page.entries, vec![first]);
+            assert!(!page.end_of_directory);
+            assert_eq!(pending.as_ref().map(|child| &child.record), Some(&second));
+            assert_eq!(evidence.len(), 1);
+        }
+
+        #[test]
+        fn oversized_first_entry_remains_pending_after_resource_limit() {
+            let path = Path::new(r"C:\root");
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                path,
+                NativeName::windows_utf16("large-child".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("child record is valid");
+            let mut pending = None;
+            let mut entries = Vec::new();
+            let mut evidence = Vec::new();
+            let mut retained_bytes = 0;
+
+            assert!(matches!(
+                take_bounded_entry(
+                    &mut pending,
+                    &mut entries,
+                    &mut evidence,
+                    &mut retained_bytes,
+                    enumerated(child.clone()),
+                    DirectoryReadLimits {
+                        max_batch_entries: 1,
+                        max_batch_bytes: 1,
+                    },
+                    path,
+                ),
+                Err(PlatformError::ResourceLimit(_))
+            ));
+            assert_eq!(pending.as_ref().map(|child| &child.record), Some(&child));
+            assert!(entries.is_empty());
+            assert!(evidence.is_empty());
+            assert_eq!(retained_bytes, 0);
+        }
+
+        #[test]
+        fn directory_query_length_validation_is_bounded() {
+            let fixed = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+            assert_eq!(
+                validate_directory_query_lengths(fixed + 6, 0, 6).unwrap(),
+                (fixed, 6)
+            );
+            assert!(validate_directory_query_lengths(fixed - 1, 0, 0).is_err());
+            assert!(validate_directory_query_lengths(fixed + 6, 8, 6).is_err());
+            assert!(validate_directory_query_lengths(fixed + 6, 0, 5).is_err());
+            assert!(validate_directory_query_lengths(fixed + 4, 0, 6).is_err());
+        }
+
+        #[test]
+        fn directory_query_parser_never_reads_past_fixed_header_boundary() {
+            let fixed = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+            let mut header = vec![0u8; fixed];
+            let name_length_offset = mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileNameLength);
+            header[name_length_offset..name_length_offset + 4].copy_from_slice(&0u32.to_ne_bytes());
+
+            assert!(
+                WindowsPlatformScanner::parse_directory_query_record(
+                    Path::new(r"C:\root"),
+                    &header,
+                )
+                .is_err()
+            );
+            assert!(
+                read_directory_query_field::<[u8; 16]>(
+                    &header[..mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileId) + 15],
+                    mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileId),
+                    "FileId",
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn cancellation_wins_over_every_directory_query_outcome() {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let path = Path::new(r"C:\root");
+
+            for (status, information) in [
+                (STATUS_SUCCESS, 128),
+                (STATUS_SUCCESS, 0),
+                (STATUS_NO_MORE_FILES, 0),
+                (STATUS_ACCESS_DENIED, 0),
+                (STATUS_BUFFER_OVERFLOW, 0),
+            ] {
+                assert!(matches!(
+                    directory_query_outcome(status, information, 1024, &cancel, path),
+                    Err(PlatformError::Cancelled)
+                ));
+            }
+        }
+
+        #[test]
+        fn same_volume_requires_both_identity_fields() {
+            fn metadata(volume: Option<u64>, filesystem: Option<u64>) -> EntryMetadata {
+                let kind = EntryKind::Directory;
+                let logical_bytes = known_u128(0);
+                EntryMetadata {
+                    path: PathBuf::from(r"C:\root"),
+                    file_name: NativeName::windows_utf16("root".encode_utf16().collect::<Vec<_>>()),
+                    kind: kind.clone(),
+                    logical_bytes: logical_bytes.clone(),
+                    allocated_bytes: known_u128(0),
+                    hard_link_count: known_count(1),
+                    fingerprint: fingerprint_for(None, &kind, &logical_bytes),
+                    identity: None,
+                    filesystem_identity: filesystem.map(|device| FilesystemIdentity { device }),
+                    mount_identity: volume.map(|value| MountIdentity { value }),
+                    hard_link_key: None,
+                }
+            }
+
+            let scanner = scanner();
+            assert!(
+                scanner
+                    .is_same_mount(&metadata(Some(7), Some(7)), &metadata(Some(7), Some(7)))
+                    .unwrap()
+            );
+            assert!(
+                !scanner
+                    .is_same_mount(&metadata(Some(7), Some(7)), &metadata(Some(8), Some(8)))
+                    .unwrap()
+            );
+            assert!(matches!(
+                scanner.is_same_mount(&metadata(Some(7), Some(7)), &metadata(None, Some(7))),
+                Err(PlatformError::Unsupported(_))
+            ));
+            assert!(matches!(
+                scanner.is_same_mount(&metadata(Some(7), Some(7)), &metadata(Some(7), None)),
+                Err(PlatformError::Unsupported(_))
+            ));
+        }
+
+        #[test]
+        fn offline_and_recall_attributes_are_provider_boundaries() {
+            for attributes in [
+                FILE_ATTRIBUTE_OFFLINE,
+                FILE_ATTRIBUTE_RECALL_ON_OPEN,
+                FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+                FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            ] {
+                assert!(WindowsPlatformScanner::is_provider_boundary(attributes));
+            }
+            assert!(!WindowsPlatformScanner::is_provider_boundary(
+                FILE_ATTRIBUTE_DIRECTORY
+            ));
         }
 
         #[test]
@@ -899,6 +2118,37 @@ mod backend {
         }
 
         #[test]
+        fn enumeration_remains_bound_to_renamed_directory_handle() {
+            let container = TempDir::new("retained-enumeration");
+            let original = container.0.join("root");
+            let renamed = container.0.join("renamed");
+            fs::create_dir(&original).expect("original directory is created");
+            fs::write(original.join("retained-child"), b"old").expect("original child is created");
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(
+                    &ScanRoot::new(original.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("original root is admitted");
+
+            fs::rename(&original, &renamed).expect("admitted directory is renamed");
+            fs::create_dir(&original).expect("replacement directory is created");
+            fs::write(original.join("replacement-child"), b"new")
+                .expect("replacement child is created");
+
+            let names = collect_children(&scanner, &mut admission.directory, limits(16))
+                .into_iter()
+                .map(|entry| match entry.file_name {
+                    NativeName::WindowsUtf16(units) => String::from_utf16(&units).unwrap(),
+                    NativeName::UnixBytes(_) => unreachable!("Windows enumeration uses UTF-16"),
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(names.contains("retained-child"));
+            assert!(!names.contains("replacement-child"));
+        }
+
+        #[test]
         fn cancellation_precedes_path_validation_and_io() {
             let cancel = CancellationToken::new();
             cancel.cancel();
@@ -959,35 +2209,298 @@ mod backend {
         }
 
         #[test]
-        fn child_operations_remain_unsupported_after_admission() {
-            let root = TempDir::new("unsupported-children");
+        fn enumerates_with_bounded_continuation_without_loss_or_duplicates() {
+            let root = TempDir::new("bounded-enumeration");
+            for name in ["alpha", "beta", "gamma", "delta", "epsilon"] {
+                fs::write(root.0.join(name), name.as_bytes()).expect("test file is created");
+            }
             let requested = ScanRoot::new(root.0.clone()).expect("root is absolute");
-            let mut admission = scanner()
+            let scanner = scanner();
+            let mut admission = scanner
                 .admit_root(&requested, &CancellationToken::new())
                 .expect("ordinary directory is admitted");
-            let child = DirectoryEntryRecord {
-                path: root.0.join("child"),
-                file_name: NativeName::windows_utf16("child".encode_utf16().collect::<Vec<_>>()),
-            };
+            let entries = collect_children(&scanner, &mut admission.directory, limits(2));
+            let names = entries
+                .iter()
+                .map(|entry| match &entry.file_name {
+                    NativeName::WindowsUtf16(units) => String::from_utf16(units).unwrap(),
+                    NativeName::UnixBytes(_) => unreachable!("Windows enumeration uses UTF-16"),
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                names,
+                ["alpha", "beta", "delta", "epsilon", "gamma"]
+                    .map(String::from)
+                    .into()
+            );
+            assert_eq!(entries.len(), names.len());
 
             assert!(matches!(
-                scanner().enumerate_children(
+                scanner.enumerate_children(
                     &mut admission.directory,
                     &CancellationToken::new(),
                     DirectoryReadLimits {
-                        max_batch_entries: 1,
-                        max_batch_bytes: 1024,
+                        max_batch_entries: 0,
+                        max_batch_bytes: 1,
                     },
                 ),
-                Err(PlatformError::Unsupported(_))
+                Err(PlatformError::ResourceLimit(_))
+            ));
+        }
+
+        #[test]
+        fn enumerate_preserves_pending_entry_across_byte_limited_batches() {
+            let root = TempDir::new("byte-limit");
+            for name in ["alpha", "beta"] {
+                fs::write(root.0.join(name), b"x").expect("test file is created");
+            }
+            let requested = ScanRoot::new(root.0.clone()).expect("root is absolute");
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(&requested, &CancellationToken::new())
+                .expect("ordinary directory is admitted");
+            let first = scanner
+                .enumerate_children(
+                    &mut admission.directory,
+                    &CancellationToken::new(),
+                    limits(1),
+                )
+                .expect("first bounded page succeeds");
+            assert_eq!(first.entries.len(), 1);
+            assert!(!first.end_of_directory);
+            let second = scanner
+                .enumerate_children(
+                    &mut admission.directory,
+                    &CancellationToken::new(),
+                    limits(1),
+                )
+                .expect("second bounded page succeeds");
+            assert_eq!(second.entries.len(), 1);
+
+            let mut too_small = scanner
+                .admit_root(&requested, &CancellationToken::new())
+                .expect("ordinary directory is admitted again");
+            assert!(matches!(
+                scanner.enumerate_children(
+                    &mut too_small.directory,
+                    &CancellationToken::new(),
+                    DirectoryReadLimits {
+                        max_batch_entries: 8,
+                        max_batch_bytes: 1,
+                    },
+                ),
+                Err(PlatformError::ResourceLimit(_))
+            ));
+            assert!(
+                !scanner
+                    .enumerate_children(
+                        &mut too_small.directory,
+                        &CancellationToken::new(),
+                        limits(8),
+                    )
+                    .expect("pending entry remains available")
+                    .entries
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn inspects_file_and_directory_relative_to_retained_parent() {
+            let root = TempDir::new("inspect");
+            fs::write(root.0.join("file"), b"hello world").expect("file is created");
+            fs::hard_link(root.0.join("file"), root.0.join("second"))
+                .expect("hard link is created");
+            fs::create_dir(root.0.join("directory")).expect("directory is created");
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let file = child_by_name(&scanner, &mut admission.directory, "file");
+            let second = DirectoryEntryRecord::from_parent_and_name(
+                &root.0,
+                NativeName::windows_utf16("second".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("second child record is valid");
+            let directory = DirectoryEntryRecord::from_parent_and_name(
+                &root.0,
+                NativeName::windows_utf16("directory".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("directory child record is valid");
+
+            let WalkEntry::File(file_metadata) = scanner
+                .inspect_child(&admission.directory, &file, &CancellationToken::new())
+                .expect("file inspection succeeds")
+            else {
+                panic!("expected file metadata");
+            };
+            let WalkEntry::File(second_metadata) = scanner
+                .inspect_child(&admission.directory, &second, &CancellationToken::new())
+                .expect("hard-link inspection succeeds")
+            else {
+                panic!("expected hard-link metadata");
+            };
+            assert_eq!(file_metadata.identity, second_metadata.identity);
+            assert_eq!(file_metadata.hard_link_key, second_metadata.hard_link_key);
+            assert!(matches!(
+                file_metadata.logical_bytes,
+                EvidenceValue::Known { value } if value.0 == 11
             ));
             assert!(matches!(
-                scanner().inspect_child(&admission.directory, &child, &CancellationToken::new(),),
-                Err(PlatformError::Unsupported(_))
+                file_metadata.allocated_bytes,
+                EvidenceValue::Unknown {
+                    reason: ReasonCode::IncompleteStreamCoverage
+                }
+            ));
+
+            let WalkEntry::Directory(opened) = scanner
+                .inspect_child(&admission.directory, &directory, &CancellationToken::new())
+                .expect("directory inspection succeeds")
+            else {
+                panic!("expected opened directory");
+            };
+            assert!(matches!(
+                scanner.is_same_mount(&admission.metadata, &opened.metadata),
+                Ok(true)
+            ));
+        }
+
+        #[test]
+        fn inspect_child_rejects_forged_record_and_does_not_reopen_display_path() {
+            let root = TempDir::new("forged-child");
+            fs::write(root.0.join("actual"), b"x").expect("test file is created");
+            let scanner = scanner();
+            let admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let forged = DirectoryEntryRecord {
+                path: root.0.join("different"),
+                file_name: NativeName::windows_utf16("actual".encode_utf16().collect::<Vec<_>>()),
+            };
+            assert!(matches!(
+                scanner.inspect_child(&admission.directory, &forged, &CancellationToken::new()),
+                Err(PlatformError::InvalidDirectoryEntry { .. })
+            ));
+        }
+
+        #[test]
+        fn inspect_missing_child_is_a_walk_error() {
+            let root = TempDir::new("missing-child");
+            let scanner = scanner();
+            let admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let missing = DirectoryEntryRecord::from_parent_and_name(
+                &root.0,
+                NativeName::windows_utf16("missing".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("missing child record is valid");
+
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &missing, &CancellationToken::new())
+                    .expect("missing child is represented in-band"),
+                WalkEntry::Error(_)
+            ));
+        }
+
+        #[test]
+        fn child_open_is_case_exact_to_the_enumerated_token() {
+            let root = TempDir::new("case-exact-child");
+            fs::write(root.0.join("MixedCase"), b"x").expect("test file is created");
+            let scanner = scanner();
+            let admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let wrong_case = DirectoryEntryRecord::from_parent_and_name(
+                &root.0,
+                NativeName::windows_utf16("mixedcase".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("case-variant record is valid");
+
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &wrong_case, &CancellationToken::new())
+                    .expect("case mismatch is represented in-band"),
+                WalkEntry::Error(_)
+            ));
+        }
+
+        #[test]
+        fn reparse_child_is_a_boundary_and_is_not_followed_when_creation_is_permitted() {
+            let root = TempDir::new("child-reparse");
+            let target = root.0.join("target");
+            let link = root.0.join("link");
+            fs::create_dir(&target).expect("target directory is created");
+            match std::os::windows::fs::symlink_dir(&target, &link) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("directory symlink creation failed: {error}"),
+            }
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let child = child_by_name(&scanner, &mut admission.directory, "link");
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &child, &CancellationToken::new())
+                    .expect("reparse inspection succeeds"),
+                WalkEntry::Boundary(BoundaryRecord {
+                    kind: BoundaryKind::ReparsePoint,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn cancellation_precedes_enumeration_and_inspection() {
+            let root = TempDir::new("child-cancel");
+            fs::write(root.0.join("file"), b"x").expect("test file is created");
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                &root.0,
+                NativeName::windows_utf16("file".encode_utf16().collect::<Vec<_>>()),
+            )
+            .expect("child record is valid");
+            let forged = DirectoryEntryRecord {
+                path: root.0.join("different"),
+                file_name: child.file_name.clone(),
+            };
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+
+            assert!(matches!(
+                scanner.enumerate_children(&mut admission.directory, &cancel, limits(8)),
+                Err(PlatformError::Cancelled)
             ));
             assert!(matches!(
-                scanner().is_same_mount(&admission.metadata, &admission.metadata),
-                Err(PlatformError::Unsupported(_))
+                scanner.inspect_child(&admission.directory, &child, &cancel),
+                Err(PlatformError::Cancelled)
+            ));
+            assert!(matches!(
+                scanner.inspect_child(&admission.directory, &forged, &cancel),
+                Err(PlatformError::Cancelled)
             ));
         }
     }
