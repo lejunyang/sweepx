@@ -9,6 +9,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub const OUTPUT_SCHEMA: &str = "sweepx.output/v1";
 pub const EVENT_SCHEMA: &str = "sweepx.event/v1";
+pub const AUDIT_PROJECTION_SCHEMA: &str = "sweepx.audit-projection/v1";
 pub const CAPABILITY_RECORD_SCHEMA: &str = "sweepx.capability-record/v1";
 pub const MAX_CAPABILITY_CELL_BYTES: usize = 128;
 pub const MAX_QUALIFICATION_TEXT_BYTES: usize = 512;
@@ -1339,6 +1340,116 @@ pub struct EventCheckpoint {
 impl EventEnvelope {
     pub fn is_terminal_type(&self) -> bool {
         matches!(self.r#type, EventType::OperationTerminal)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditProjectionState {
+    Authorized,
+    Pending,
+    Indeterminate,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditRecoveryDisposition {
+    Pending,
+    Reserved,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStableStatus {
+    TrashSucceededPlatformReported,
+    TrashSucceededLocationReported,
+    PermanentDeleteSucceeded,
+    FailedPlatformError,
+    FailedCancelledByPlatform,
+    FailedSourceUnchanged,
+    VanishedBeforeAction,
+    CancelledBeforeAction,
+    IndeterminateAfterCrash,
+    IndeterminatePlatformResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOutcomeRecoveryState {
+    PlatformTrashReported,
+    TrashLocationReported,
+    InapplicablePermanent,
+    FailedSourceUnchanged,
+    CancelledBeforeAction,
+    VanishedBeforeAction,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditTerminalOutcomeProjection {
+    pub stable_status: AuditStableStatus,
+    pub recovery_state: AuditOutcomeRecoveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditActionProjection {
+    pub authorization_id: String,
+    pub item_id: String,
+    pub action_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    pub state: AuditProjectionState,
+    pub needs_reconciliation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_disposition: Option<AuditRecoveryDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_outcome: Option<AuditTerminalOutcomeProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAuthorizationProjection {
+    pub authorization_id: String,
+    pub state: AuditProjectionState,
+    pub needs_reconciliation: bool,
+    pub actions: Vec<AuditActionProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditItemProjection {
+    pub item_id: String,
+    pub state: AuditProjectionState,
+    pub needs_reconciliation: bool,
+    pub authorizations: Vec<AuditAuthorizationProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditBatchProjection {
+    pub batch_id: String,
+    pub state: AuditProjectionState,
+    pub needs_reconciliation: bool,
+    pub items: Vec<AuditItemProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditProjectionSnapshot {
+    pub schema: String,
+    pub batches: Vec<AuditBatchProjection>,
+}
+
+impl AuditProjectionSnapshot {
+    pub fn new(batches: Vec<AuditBatchProjection>) -> Self {
+        Self {
+            schema: AUDIT_PROJECTION_SCHEMA.to_string(),
+            batches,
+        }
     }
 }
 

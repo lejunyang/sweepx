@@ -15,6 +15,11 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sweepx_protocol::{
+    AuditActionProjection, AuditAuthorizationProjection, AuditBatchProjection, AuditItemProjection,
+    AuditOutcomeRecoveryState, AuditProjectionSnapshot, AuditProjectionState,
+    AuditRecoveryDisposition, AuditStableStatus, AuditTerminalOutcomeProjection,
+};
 use thiserror::Error;
 
 const DATABASE_FILE: &str = "audit.db";
@@ -949,6 +954,27 @@ pub struct IntegritySummary {
     pub latest_sequence: u64,
     pub action_sequence: u64,
     pub latest_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionCorruption {
+    pub message: String,
+}
+
+impl fmt::Display for ProjectionCorruption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProjectionCorruption {}
+
+#[derive(Debug, Error)]
+pub enum ProjectionError {
+    #[error("audit projection corruption: {0}")]
+    Corruption(#[from] ProjectionCorruption),
+    #[error("audit projection unavailable: {0}")]
+    Operational(#[from] AuditError),
 }
 
 #[derive(Debug)]
@@ -1996,6 +2022,45 @@ impl AuditStore {
         }
         let _guard = self.short_lock()?;
         self.integrity_summary_locked()
+    }
+
+    pub fn projection_snapshot(&self) -> Result<AuditProjectionSnapshot, ProjectionError> {
+        self.projection_snapshot_result()
+            .map_err(|error| match error {
+                AuditError::HeadMismatch
+                | AuditError::JournalTampered { .. }
+                | AuditError::IntegrityCheckFailed(_)
+                | AuditError::JournalDecode(_) => {
+                    ProjectionError::Corruption(ProjectionCorruption {
+                        message: format!("audit projection unavailable: {error}"),
+                    })
+                }
+                other => ProjectionError::Operational(other),
+            })
+    }
+
+    fn projection_snapshot_result(&self) -> Result<AuditProjectionSnapshot, AuditError> {
+        self.ensure_process()?;
+        if self.coordinator.active.load(Ordering::Acquire) {
+            let _mutation_guard = self
+                .coordinator
+                .mutation_lock
+                .lock()
+                .map_err(|_| AuditError::SessionLockPoisoned)?;
+            if self.coordinator.active.load(Ordering::Acquire) {
+                return self.projection_snapshot_locked();
+            }
+        }
+        let _guard = self.short_lock()?;
+        self.projection_snapshot_locked()
+    }
+
+    fn projection_snapshot_locked(&self) -> Result<AuditProjectionSnapshot, AuditError> {
+        let connection = self.connection_locked()?;
+        let replayed = replay_projection(&connection)?;
+        verify_replayed_projection(&connection, &replayed)?;
+        self.check_size_budget(true)?;
+        projection_snapshot_from_replay(&replayed)
     }
 
     fn integrity_summary_locked(&self) -> Result<IntegritySummary, AuditError> {
@@ -3078,7 +3143,7 @@ fn parse_event_i64(value: &str) -> Result<i64, AuditError> {
     value.parse().map_err(|_| AuditError::HeadMismatch)
 }
 
-fn verify_database(connection: &Connection) -> Result<IntegritySummary, AuditError> {
+fn replay_projection(connection: &Connection) -> Result<ReplayedProjection, AuditError> {
     verify_connection_pragmas(connection)?;
     verify_initialized_database(connection)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -3171,6 +3236,16 @@ fn verify_database(connection: &Connection) -> Result<IntegritySummary, AuditErr
     if head_sequence != (expected_sequence - 1) as i64 || head_digest != previous {
         return Err(AuditError::HeadMismatch);
     }
+    Ok(replayed)
+}
+
+fn verify_database(connection: &Connection) -> Result<IntegritySummary, AuditError> {
+    let replayed = replay_projection(connection)?;
+    let (head_sequence, head_digest): (i64, Option<String>) = connection.query_row(
+        "SELECT sequence,digest FROM audit_head WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     verify_replayed_projection(connection, &replayed)?;
     let action_sequence: i64 = connection.query_row(
         "SELECT count(*) FROM audit_events WHERE kind IN ('action_intent','action_outcome','recovery_outcome','recovery_classification')",
@@ -3414,6 +3489,288 @@ fn verify_replayed_projection(
         }
     }
     Ok(())
+}
+
+fn projection_state_from_flags(
+    has_authorized: bool,
+    has_pending: bool,
+    has_indeterminate: bool,
+) -> AuditProjectionState {
+    if has_indeterminate {
+        AuditProjectionState::Indeterminate
+    } else if has_pending {
+        AuditProjectionState::Pending
+    } else if has_authorized {
+        AuditProjectionState::Authorized
+    } else {
+        AuditProjectionState::Terminal
+    }
+}
+
+fn recovery_disposition_from_db(value: &str) -> Result<AuditRecoveryDisposition, AuditError> {
+    match value {
+        "pending" => Ok(AuditRecoveryDisposition::Pending),
+        "reserved" => Ok(AuditRecoveryDisposition::Reserved),
+        "indeterminate" => Ok(AuditRecoveryDisposition::Indeterminate),
+        _ => Err(AuditError::HeadMismatch),
+    }
+}
+
+fn action_projection_from_replay(
+    replayed: &ReplayedProjection,
+    attempt_id: &str,
+    intent: &ReplayedIntent,
+) -> Result<AuditActionProjection, AuditError> {
+    let mut state = AuditProjectionState::Terminal;
+    let mut needs_reconciliation = false;
+    let mut recovery_disposition = None;
+
+    let terminal_outcome = replayed
+        .outcomes
+        .get(attempt_id)
+        .map(
+            |json| -> Result<AuditTerminalOutcomeProjection, AuditError> {
+                let outcome: OutcomeEvent =
+                    serde_json::from_str(json).map_err(AuditError::JournalDecode)?;
+                Ok(AuditTerminalOutcomeProjection {
+                    stable_status: match outcome.stable_status {
+                        StableStatus::TrashSucceededPlatformReported => {
+                            AuditStableStatus::TrashSucceededPlatformReported
+                        }
+                        StableStatus::TrashSucceededLocationReported => {
+                            AuditStableStatus::TrashSucceededLocationReported
+                        }
+                        StableStatus::PermanentDeleteSucceeded => {
+                            AuditStableStatus::PermanentDeleteSucceeded
+                        }
+                        StableStatus::FailedPlatformError => AuditStableStatus::FailedPlatformError,
+                        StableStatus::FailedCancelledByPlatform => {
+                            AuditStableStatus::FailedCancelledByPlatform
+                        }
+                        StableStatus::FailedSourceUnchanged => {
+                            AuditStableStatus::FailedSourceUnchanged
+                        }
+                        StableStatus::VanishedBeforeAction => {
+                            AuditStableStatus::VanishedBeforeAction
+                        }
+                        StableStatus::CancelledBeforeAction => {
+                            AuditStableStatus::CancelledBeforeAction
+                        }
+                        StableStatus::IndeterminateAfterCrash => {
+                            AuditStableStatus::IndeterminateAfterCrash
+                        }
+                        StableStatus::IndeterminatePlatformResult => {
+                            AuditStableStatus::IndeterminatePlatformResult
+                        }
+                    },
+                    recovery_state: match outcome.recovery_state {
+                        RecoveryState::PlatformTrashReported => {
+                            AuditOutcomeRecoveryState::PlatformTrashReported
+                        }
+                        RecoveryState::TrashLocationReported => {
+                            AuditOutcomeRecoveryState::TrashLocationReported
+                        }
+                        RecoveryState::InapplicablePermanent => {
+                            AuditOutcomeRecoveryState::InapplicablePermanent
+                        }
+                        RecoveryState::FailedSourceUnchanged => {
+                            AuditOutcomeRecoveryState::FailedSourceUnchanged
+                        }
+                        RecoveryState::CancelledBeforeAction => {
+                            AuditOutcomeRecoveryState::CancelledBeforeAction
+                        }
+                        RecoveryState::VanishedBeforeAction => {
+                            AuditOutcomeRecoveryState::VanishedBeforeAction
+                        }
+                        RecoveryState::Indeterminate => AuditOutcomeRecoveryState::Indeterminate,
+                    },
+                })
+            },
+        )
+        .transpose()?;
+
+    match intent.terminal_state.as_str() {
+        "outcome_recorded" => {
+            if terminal_outcome.as_ref().is_some_and(|outcome| {
+                outcome.recovery_state == AuditOutcomeRecoveryState::Indeterminate
+            }) {
+                state = AuditProjectionState::Indeterminate;
+                needs_reconciliation = true;
+            }
+        }
+        "reserved" | "classified_reserved" => {
+            state = AuditProjectionState::Pending;
+            needs_reconciliation = true;
+            recovery_disposition = if intent.terminal_state == "classified_reserved" {
+                Some(AuditRecoveryDisposition::Reserved)
+            } else {
+                None
+            };
+        }
+        "classified_pending" => {
+            state = AuditProjectionState::Pending;
+            needs_reconciliation = true;
+            recovery_disposition = Some(AuditRecoveryDisposition::Pending);
+        }
+        "classified_indeterminate" => {
+            state = AuditProjectionState::Indeterminate;
+            needs_reconciliation = true;
+            recovery_disposition = Some(AuditRecoveryDisposition::Indeterminate);
+        }
+        _ => return Err(AuditError::HeadMismatch),
+    }
+
+    if let Some((disposition, _)) = replayed.recoveries.get(attempt_id) {
+        recovery_disposition = Some(recovery_disposition_from_db(disposition)?);
+    }
+
+    Ok(AuditActionProjection {
+        authorization_id: intent.authorization_id.clone(),
+        item_id: intent.item_id.clone(),
+        action_id: intent.action_id.clone(),
+        attempt_id: Some(attempt_id.to_string()),
+        state,
+        needs_reconciliation,
+        recovery_disposition,
+        terminal_outcome,
+    })
+}
+
+fn projection_snapshot_from_replay(
+    replayed: &ReplayedProjection,
+) -> Result<AuditProjectionSnapshot, AuditError> {
+    let mut batches =
+        BTreeMap::<String, BTreeMap<String, BTreeMap<String, Vec<AuditActionProjection>>>>::new();
+
+    for authorization in replayed.authorizations.values() {
+        let binding: AuthorizationBinding =
+            serde_json::from_str(&authorization.binding_json).map_err(AuditError::JournalDecode)?;
+        validate_binding(&binding)?;
+        let batch = batches
+            .entry(binding.batch_id.as_str().to_string())
+            .or_default();
+        for item in &binding.item_ids {
+            batch
+                .entry(item.as_str().to_string())
+                .or_default()
+                .entry(binding.authorization_id.as_str().to_string())
+                .or_default();
+        }
+        for action in &binding.action_ids {
+            let item = binding
+                .item_by_action
+                .get(action)
+                .ok_or(AuditError::HeadMismatch)?
+                .as_str()
+                .to_string();
+            batch
+                .entry(item)
+                .or_default()
+                .entry(binding.authorization_id.as_str().to_string())
+                .or_default()
+                .push(AuditActionProjection {
+                    authorization_id: binding.authorization_id.as_str().to_string(),
+                    item_id: binding.item_by_action[action].as_str().to_string(),
+                    action_id: action.as_str().to_string(),
+                    attempt_id: None,
+                    state: AuditProjectionState::Authorized,
+                    needs_reconciliation: false,
+                    recovery_disposition: None,
+                    terminal_outcome: None,
+                });
+        }
+    }
+
+    for (attempt_id, intent) in &replayed.intents {
+        let action = action_projection_from_replay(replayed, attempt_id, intent)?;
+        let authorization = replayed
+            .authorizations
+            .get(&intent.authorization_id)
+            .ok_or(AuditError::HeadMismatch)?;
+        let binding: AuthorizationBinding =
+            serde_json::from_str(&authorization.binding_json).map_err(AuditError::JournalDecode)?;
+        let batch = batches
+            .get_mut(binding.batch_id.as_str())
+            .ok_or(AuditError::HeadMismatch)?;
+        let authorizations = batch
+            .get_mut(&intent.item_id)
+            .ok_or(AuditError::HeadMismatch)?;
+        let actions = authorizations
+            .get_mut(&intent.authorization_id)
+            .ok_or(AuditError::HeadMismatch)?;
+        let slot = actions
+            .iter_mut()
+            .find(|candidate| candidate.action_id == action.action_id)
+            .ok_or(AuditError::HeadMismatch)?;
+        *slot = action;
+    }
+
+    let mut batch_list = Vec::new();
+    for (batch_id, items) in batches {
+        let mut item_list = Vec::new();
+        let mut batch_has_authorized = false;
+        let mut batch_has_pending = false;
+        let mut batch_has_indeterminate = false;
+        for (item_id, authorizations) in items {
+            let mut authorization_list = Vec::new();
+            let mut item_has_authorized = false;
+            let mut item_has_pending = false;
+            let mut item_has_indeterminate = false;
+            for (authorization_id, mut actions) in authorizations {
+                actions.sort_by(|left, right| left.action_id.cmp(&right.action_id));
+                let auth_has_authorized = actions
+                    .iter()
+                    .any(|action| action.state == AuditProjectionState::Authorized);
+                let auth_has_pending = actions
+                    .iter()
+                    .any(|action| action.state == AuditProjectionState::Pending);
+                let auth_has_indeterminate = actions
+                    .iter()
+                    .any(|action| action.state == AuditProjectionState::Indeterminate);
+                item_has_authorized |= auth_has_authorized;
+                item_has_pending |= auth_has_pending;
+                item_has_indeterminate |= auth_has_indeterminate;
+                authorization_list.push(AuditAuthorizationProjection {
+                    authorization_id,
+                    state: projection_state_from_flags(
+                        auth_has_authorized,
+                        auth_has_pending,
+                        auth_has_indeterminate,
+                    ),
+                    needs_reconciliation: auth_has_pending || auth_has_indeterminate,
+                    actions,
+                });
+            }
+            authorization_list
+                .sort_by(|left, right| left.authorization_id.cmp(&right.authorization_id));
+            batch_has_authorized |= item_has_authorized;
+            batch_has_pending |= item_has_pending;
+            batch_has_indeterminate |= item_has_indeterminate;
+            item_list.push(AuditItemProjection {
+                item_id,
+                state: projection_state_from_flags(
+                    item_has_authorized,
+                    item_has_pending,
+                    item_has_indeterminate,
+                ),
+                needs_reconciliation: item_has_pending || item_has_indeterminate,
+                authorizations: authorization_list,
+            });
+        }
+        item_list.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+        batch_list.push(AuditBatchProjection {
+            batch_id,
+            state: projection_state_from_flags(
+                batch_has_authorized,
+                batch_has_pending,
+                batch_has_indeterminate,
+            ),
+            needs_reconciliation: batch_has_pending || batch_has_indeterminate,
+            items: item_list,
+        });
+    }
+    batch_list.sort_by(|left, right| left.batch_id.cmp(&right.batch_id));
+    Ok(AuditProjectionSnapshot::new(batch_list))
 }
 
 fn read_string_map(
@@ -4358,6 +4715,251 @@ mod tests {
             )
             .unwrap();
         store.consume_execution(&recovery).unwrap();
+    }
+
+    #[test]
+    fn projection_snapshot_reports_terminal_state_without_reconciliation() {
+        let (_temp, store) = store();
+        let binding = binding(16, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        store
+            .record_outcome(&claim, &token, permanent_success())
+            .unwrap();
+        store.consume_execution(&claim).unwrap();
+
+        let snapshot = store.projection_snapshot().unwrap();
+        assert_eq!(snapshot.batches.len(), 1);
+        let batch = &snapshot.batches[0];
+        assert_eq!(batch.batch_id, binding.batch_id.as_str());
+        assert_eq!(batch.state, AuditProjectionState::Terminal);
+        assert!(!batch.needs_reconciliation);
+        let item = &batch.items[0];
+        assert_eq!(item.state, AuditProjectionState::Terminal);
+        assert!(!item.needs_reconciliation);
+        let authorization = &item.authorizations[0];
+        assert_eq!(authorization.state, AuditProjectionState::Terminal);
+        let action = &authorization.actions[0];
+        assert_eq!(action.state, AuditProjectionState::Terminal);
+        assert!(!action.needs_reconciliation);
+        assert_eq!(
+            action.terminal_outcome.as_ref().unwrap().stable_status,
+            AuditStableStatus::PermanentDeleteSucceeded
+        );
+    }
+
+    #[test]
+    fn projection_snapshot_distinguishes_pending_and_indeterminate() {
+        let (_temp, store) = store();
+
+        let pending_binding = binding(17, RequestedMode::Trash);
+        register(&store, &pending_binding);
+        let pending_claim = store
+            .claim_execution(
+                &pending_binding.authorization_id,
+                &pending_binding.plan_digest,
+            )
+            .unwrap();
+        reserve(&store, &pending_claim, &pending_binding);
+        drop(pending_claim);
+        let pending_recovery = store
+            .claim_recovery(
+                &pending_binding.authorization_id,
+                &pending_binding.plan_digest,
+            )
+            .unwrap();
+        store
+            .classify_recovery(
+                &pending_recovery,
+                &FixedObserver(RecoveryObservation::SourceAbsentDestinationConfirmed {
+                    destination: Observation {
+                        exists: true,
+                        identity: Some("trash-object".to_string()),
+                    },
+                }),
+            )
+            .unwrap();
+        drop(pending_recovery);
+
+        let indeterminate_binding = binding(18, RequestedMode::Trash);
+        register(&store, &indeterminate_binding);
+        let indeterminate_claim = store
+            .claim_execution(
+                &indeterminate_binding.authorization_id,
+                &indeterminate_binding.plan_digest,
+            )
+            .unwrap();
+        reserve(&store, &indeterminate_claim, &indeterminate_binding);
+        drop(indeterminate_claim);
+        let indeterminate_recovery = store
+            .claim_recovery(
+                &indeterminate_binding.authorization_id,
+                &indeterminate_binding.plan_digest,
+            )
+            .unwrap();
+        store
+            .classify_recovery(
+                &indeterminate_recovery,
+                &FixedObserver(RecoveryObservation::Unknown),
+            )
+            .unwrap();
+
+        let snapshot = store.projection_snapshot().unwrap();
+        assert_eq!(snapshot.batches.len(), 2);
+        let pending_batch = snapshot
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == pending_binding.batch_id.as_str())
+            .unwrap();
+        assert_eq!(pending_batch.state, AuditProjectionState::Pending);
+        assert!(pending_batch.needs_reconciliation);
+        assert_eq!(
+            pending_batch.items[0].authorizations[0].actions[0].recovery_disposition,
+            Some(AuditRecoveryDisposition::Pending)
+        );
+
+        let indeterminate_batch = snapshot
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == indeterminate_binding.batch_id.as_str())
+            .unwrap();
+        assert_eq!(
+            indeterminate_batch.state,
+            AuditProjectionState::Indeterminate
+        );
+        assert!(indeterminate_batch.needs_reconciliation);
+        assert_eq!(
+            indeterminate_batch.items[0].authorizations[0].actions[0].recovery_disposition,
+            Some(AuditRecoveryDisposition::Indeterminate)
+        );
+    }
+
+    #[test]
+    fn projection_snapshot_returns_explicit_corruption_error() {
+        let (_temp, store) = store();
+        let binding = binding(19, RequestedMode::Permanent);
+        register(&store, &binding);
+        {
+            let connection = store.connection().unwrap();
+            connection
+                .execute(
+                    "UPDATE authorizations SET plan_digest='forged-digest' WHERE authorization_id=?1",
+                    [binding.authorization_id.as_str()],
+                )
+                .unwrap();
+        }
+        let error = store.projection_snapshot().unwrap_err();
+        assert!(matches!(error, ProjectionError::Corruption(_)));
+    }
+
+    #[test]
+    fn projection_snapshot_uses_authorized_for_registered_only_actions() {
+        let (_temp, store) = store();
+        let binding = binding(20, RequestedMode::Permanent);
+        register(&store, &binding);
+
+        let snapshot = store.projection_snapshot().unwrap();
+        let batch = &snapshot.batches[0];
+        assert_eq!(batch.state, AuditProjectionState::Authorized);
+        assert!(!batch.needs_reconciliation);
+        let item = &batch.items[0];
+        assert_eq!(item.state, AuditProjectionState::Authorized);
+        let authorization = &item.authorizations[0];
+        assert_eq!(authorization.state, AuditProjectionState::Authorized);
+        let action = &authorization.actions[0];
+        assert_eq!(action.state, AuditProjectionState::Authorized);
+        assert_eq!(action.attempt_id, None);
+        assert!(!action.needs_reconciliation);
+    }
+
+    #[test]
+    fn projection_snapshot_indeterminate_dominates_pending_and_preserves_shared_item_authorizations()
+     {
+        let (_temp, store) = store();
+        let shared_item = ItemId::new("shared-item-sqlite").unwrap();
+
+        let mut first = binding(21, RequestedMode::Permanent);
+        let first_action = first.action_ids.iter().next().unwrap().clone();
+        first.item_ids = BTreeSet::from([shared_item.clone()]);
+        first.item_by_action = BTreeMap::from([(first_action.clone(), shared_item.clone())]);
+        register(&store, &first);
+
+        let mut second = binding(22, RequestedMode::Permanent);
+        let second_action = second.action_ids.iter().next().unwrap().clone();
+        second.batch_id = first.batch_id.clone();
+        second.item_ids = BTreeSet::from([shared_item.clone()]);
+        second.item_by_action = BTreeMap::from([(second_action.clone(), shared_item.clone())]);
+        register(&store, &second);
+
+        let first_claim = store
+            .claim_execution(&first.authorization_id, &first.plan_digest)
+            .unwrap();
+        let first_token = reserve(&store, &first_claim, &first);
+        store
+            .record_outcome(
+                &first_claim,
+                &first_token,
+                SimulatedOutcome::indeterminate_after_crash(
+                    RequestedMode::Permanent,
+                    "adapter-v1",
+                    UNIX_EPOCH + Duration::from_secs(1),
+                    UNIX_EPOCH + Duration::from_secs(2),
+                    Observation {
+                        exists: false,
+                        identity: None,
+                    },
+                    vec![],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        drop(first_claim);
+
+        let second_claim = store
+            .claim_execution(&second.authorization_id, &second.plan_digest)
+            .unwrap();
+        reserve(&store, &second_claim, &second);
+
+        let snapshot = store.projection_snapshot().unwrap();
+        let batch = snapshot
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == first.batch_id.as_str())
+            .unwrap();
+        assert_eq!(batch.state, AuditProjectionState::Indeterminate);
+        assert!(batch.needs_reconciliation);
+        assert_eq!(batch.items.len(), 1);
+        let item = &batch.items[0];
+        assert_eq!(item.item_id, shared_item.as_str());
+        assert_eq!(item.state, AuditProjectionState::Indeterminate);
+        assert_eq!(item.authorizations.len(), 2);
+
+        let first_auth = item
+            .authorizations
+            .iter()
+            .find(|auth| auth.authorization_id == first.authorization_id.as_str())
+            .unwrap();
+        assert_eq!(first_auth.state, AuditProjectionState::Indeterminate);
+        assert!(first_auth.actions[0].needs_reconciliation);
+        assert_eq!(
+            first_auth.actions[0]
+                .terminal_outcome
+                .as_ref()
+                .unwrap()
+                .recovery_state,
+            AuditOutcomeRecoveryState::Indeterminate
+        );
+
+        let second_auth = item
+            .authorizations
+            .iter()
+            .find(|auth| auth.authorization_id == second.authorization_id.as_str())
+            .unwrap();
+        assert_eq!(second_auth.state, AuditProjectionState::Pending);
+        assert!(second_auth.needs_reconciliation);
     }
 
     #[test]

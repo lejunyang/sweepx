@@ -15,6 +15,7 @@ use sweepx_audit::{
     BatchId, DigestString, HostId, IntentRequest, IntentReservation, ItemId, PathHash, PlanId,
     RegisterAuthorization, RequestedMode, RiskTier, SessionId, UserId,
 };
+use sweepx_protocol::{AuditProjectionState, AuditRecoveryDisposition};
 use tempfile::TempDir;
 
 const CHILD_ENV: &str = "SWEEPX_AUDIT_CRASH_CHILD";
@@ -381,4 +382,67 @@ fn sigkill_during_uncommitted_transaction_leaves_no_projection_or_event_fragment
         .claim_execution(&binding.authorization_id, &binding.plan_digest)
         .unwrap();
     assert_eq!(claim.fence_epoch(), 1);
+}
+
+#[test]
+fn reopened_store_projection_marks_committed_intent_as_pending_reconciliation() {
+    let temp = TempDir::new().unwrap();
+    let root = private_root(&temp);
+    let mut child = spawn_child(&root, "committed-intent");
+    wait_until_ready(&root, &mut child);
+    let status = kill_and_wait(&mut child);
+    assert!(!status.success());
+
+    let store = AuditStore::open(&root).unwrap();
+    let snapshot = store.projection_snapshot().unwrap();
+    assert_eq!(snapshot.batches.len(), 1);
+    let batch = &snapshot.batches[0];
+    assert_eq!(batch.state, AuditProjectionState::Pending);
+    assert!(batch.needs_reconciliation);
+    assert_eq!(batch.items.len(), 1);
+    assert_eq!(batch.items[0].authorizations.len(), 1);
+    assert_eq!(batch.items[0].authorizations[0].actions.len(), 1);
+    assert_eq!(
+        batch.items[0].authorizations[0].actions[0].state,
+        AuditProjectionState::Pending
+    );
+    assert!(batch.items[0].authorizations[0].actions[0].needs_reconciliation);
+    assert_eq!(
+        batch.items[0].authorizations[0].actions[0].recovery_disposition,
+        None
+    );
+
+    let binding = binding();
+    let recovery = store
+        .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+        .unwrap();
+    let records = store
+        .classify_recovery(&recovery, &struct_pending_observer())
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let snapshot = store.projection_snapshot().unwrap();
+    assert_eq!(
+        snapshot.batches[0].items[0].authorizations[0].actions[0].recovery_disposition,
+        Some(AuditRecoveryDisposition::Indeterminate)
+    );
+}
+
+fn struct_pending_observer() -> impl sweepx_audit::RecoveryObserver {
+    struct PendingObserver;
+    impl sweepx_audit::RecoveryObserver for PendingObserver {
+        fn observe(
+            &self,
+            _intent: &sweepx_audit::RecoveryIntentView,
+        ) -> Result<sweepx_audit::RecoveryObservation, sweepx_audit::AuditError> {
+            Ok(
+                sweepx_audit::RecoveryObservation::SourceAbsentDestinationConfirmed {
+                    destination: sweepx_audit::Observation {
+                        exists: true,
+                        identity: Some("recovered-trash-object".to_string()),
+                    },
+                },
+            )
+        }
+    }
+    PendingObserver
 }
