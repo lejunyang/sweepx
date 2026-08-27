@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(unix)]
@@ -18,13 +19,20 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table};
 use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
-use sweepx_model::{DirectoryAggregate, ObjectType, ScannedEntry};
+use sweepx_model::{
+    DirectoryAggregate, FieldProvenance, NativeName, ObjectType, ScanEntryId, ScanEntryIdError,
+    ScanObjectIdentity, ScannedEntry,
+};
 use sweepx_protocol::OutputStatus;
 use thiserror::Error;
 
-use crate::{byte_value_label, coverage_label, object_type_label, output_status_label};
+use crate::{
+    MAX_PAGE_ROWS, byte_value_label, coverage_label, object_type_label, output_status_label,
+};
 
 pub const BROWSER_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub const DEFAULT_MAX_BROWSER_ENTRIES: usize = 16_384;
+pub const DEFAULT_MAX_BROWSER_INDEX_BYTES: usize = 48 * 1024 * 1024;
 
 /// One row in the in-memory scan snapshot browser.
 ///
@@ -84,26 +92,158 @@ impl BrowserRow {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserLoadLimits {
+    pub max_level_rows: usize,
+    pub max_entries: usize,
+    pub max_index_bytes: usize,
+}
+
+impl Default for BrowserLoadLimits {
+    fn default() -> Self {
+        Self {
+            max_level_rows: MAX_PAGE_ROWS.max(1),
+            max_entries: DEFAULT_MAX_BROWSER_ENTRIES,
+            max_index_bytes: DEFAULT_MAX_BROWSER_INDEX_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserResourceLimitKind {
+    Entries,
+    IndexBytes,
+}
+
+impl std::fmt::Display for BrowserResourceLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Entries => formatter.write_str("entries"),
+            Self::IndexBytes => formatter.write_str("index_bytes"),
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum BrowserModelError {
+    #[error("browser resource limit exceeded for {kind}: limit={limit}, observed={observed}")]
+    ResourceLimit {
+        kind: BrowserResourceLimitKind,
+        limit: usize,
+        observed: usize,
+    },
+    #[error("invalid scan identity: {0}")]
+    InvalidIdentity(#[from] ScanEntryIdError),
+    #[error("live browser requires validated entry identity for {display_path}")]
+    MissingIdentity { display_path: String },
+    #[error("duplicate scan entry id in browser snapshot: {entry_id}")]
+    DuplicateEntryId { entry_id: String },
+    #[error("root entry must not declare a parent: {entry_id}")]
+    RootEntryMustNotHaveParent { entry_id: String },
+    #[error(
+        "root entry must reference itself as scan root: entry_id={entry_id}, root_id={root_id}"
+    )]
+    RootEntryMustReferenceSelf { entry_id: String, root_id: String },
+    #[error("non-root entry must declare a parent: {entry_id}")]
+    NonRootEntryMustHaveParent { entry_id: String },
+    #[error(
+        "non-root entry must not reference itself as scan root: entry_id={entry_id}, root_id={root_id}"
+    )]
+    NonRootEntryMustNotReferenceSelfAsRoot { entry_id: String, root_id: String },
+    #[error("entry references missing scan root: entry_id={entry_id}, root_id={root_id}")]
+    MissingRoot { entry_id: String, root_id: String },
+    #[error("entry references missing parent: entry_id={entry_id}, parent_id={parent_id}")]
+    MissingParent { entry_id: String, parent_id: String },
+    #[error("entry parent is not a directory: entry_id={entry_id}, parent_id={parent_id}")]
+    ParentNotDirectory { entry_id: String, parent_id: String },
+    #[error(
+        "entry parent belongs to a different root: entry_id={entry_id}, parent_id={parent_id}, root_id={root_id}, parent_root_id={parent_root_id}"
+    )]
+    ParentRootMismatch {
+        entry_id: String,
+        parent_id: String,
+        root_id: String,
+        parent_root_id: String,
+    },
+    #[error("entry is unreachable from its declared root: {entry_id}")]
+    UnreachableEntry { entry_id: String },
+    #[error("duplicate aggregate for scan entry id: {entry_id}")]
+    DuplicateAggregate { entry_id: String },
+    #[error("aggregate target missing from browser snapshot: {entry_id}")]
+    AggregateTargetMissing { entry_id: String },
+    #[error("aggregate target is not a directory: {entry_id}")]
+    AggregateTargetNotDirectory { entry_id: String },
+    #[error(
+        "aggregate scan id does not match target entry scan id: entry_id={entry_id}, aggregate_scan_id={aggregate_scan_id}, entry_scan_id={entry_scan_id}"
+    )]
+    AggregateScanMismatch {
+        entry_id: String,
+        aggregate_scan_id: String,
+        entry_scan_id: String,
+    },
+    #[error(
+        "browser snapshot mixes scan ids: expected={expected_scan_id}, observed={observed_scan_id}"
+    )]
+    SnapshotScanMismatch {
+        expected_scan_id: String,
+        observed_scan_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserNode {
+    entry: ScannedEntry,
+    aggregate: Option<DirectoryAggregate>,
+    root: bool,
+}
+
+impl BrowserNode {
+    fn to_row(&self) -> BrowserRow {
+        BrowserRow::from_owned(self.entry.clone(), self.aggregate.clone(), self.root)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingNode {
+    entry: ScannedEntry,
+    entry_id: ScanEntryId,
+    root_id: ScanEntryId,
+    parent_id: Option<ScanEntryId>,
+    root: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BrowserLevel {
+    directory_index: usize,
     directory: String,
     parent_selection: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct LoadedLevel {
+    total_rows: usize,
+    page_start: usize,
+    row_indices: Vec<usize>,
+    rows: Vec<BrowserRow>,
 }
 
 /// A read-only hierarchy built entirely from one completed scan snapshot.
 ///
 /// It never enumerates or stats the filesystem. The initial level is a
 /// synthetic virtual-roots screen; entered levels expose only direct children
-/// already present in `entries`.
+/// already linked by validated scan identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserModel {
     locale: Locale,
     status: OutputStatus,
     scan_id: Option<String>,
-    roots: Vec<BrowserRow>,
-    children: BTreeMap<String, Vec<BrowserRow>>,
+    limits: BrowserLoadLimits,
+    nodes: Vec<BrowserNode>,
+    roots: Vec<usize>,
+    children_by_index: Vec<Vec<usize>>,
     levels: Vec<BrowserLevel>,
     selected: usize,
+    loaded_level: LoadedLevel,
 }
 
 impl BrowserModel {
@@ -114,14 +254,36 @@ impl BrowserModel {
         roots: &[ScannedEntry],
         entries: &[ScannedEntry],
         aggregates: &[DirectoryAggregate],
-    ) -> BrowserModel {
-        Self::from_owned_scan_parts(
+    ) -> Result<BrowserModel, BrowserModelError> {
+        Self::from_scan_parts_with_limits(
+            locale,
+            status,
+            scan_id,
+            roots,
+            entries,
+            aggregates,
+            BrowserLoadLimits::default(),
+        )
+    }
+
+    pub fn from_scan_parts_with_limits(
+        locale: Locale,
+        status: OutputStatus,
+        scan_id: Option<String>,
+        roots: &[ScannedEntry],
+        entries: &[ScannedEntry],
+        aggregates: &[DirectoryAggregate],
+        limits: BrowserLoadLimits,
+    ) -> Result<BrowserModel, BrowserModelError> {
+        preflight_limits(roots, entries, aggregates, limits)?;
+        Self::from_owned_scan_parts_with_limits(
             locale,
             status,
             scan_id,
             roots.to_vec(),
             entries.to_vec(),
             aggregates.to_vec(),
+            limits,
         )
     }
 
@@ -132,67 +294,209 @@ impl BrowserModel {
         roots: Vec<ScannedEntry>,
         entries: Vec<ScannedEntry>,
         aggregates: Vec<DirectoryAggregate>,
-    ) -> BrowserModel {
-        let mut aggregate_by_identity = highest_revision_aggregates(aggregates);
-        let mut entry_by_path = deduplicate_entries(entries);
-        let (root_by_path, demoted_roots) = normalize_roots(roots);
-        for entry in demoted_roots {
-            insert_preferred_entry(&mut entry_by_path, entry);
-        }
-        for path in root_by_path.keys() {
-            entry_by_path.remove(path);
-        }
-
-        // A parent can expose children only when the snapshot identifies it as
-        // a directory. This prevents navigation through symlink/reparse rows.
-        let directory_keys: BTreeSet<String> = root_by_path
-            .values()
-            .chain(entry_by_path.values())
-            .filter(|entry| matches!(entry.object_type, ObjectType::Directory))
-            .map(|entry| hierarchy_key(&entry.display_path))
-            .collect();
-        let mut children: BTreeMap<String, Vec<BrowserRow>> = directory_keys
-            .iter()
-            .cloned()
-            .map(|key| (key, Vec::new()))
-            .collect();
-
-        for (_, entry) in entry_by_path {
-            let Some(parent) = lexical_parent_key(&entry.display_path) else {
-                continue;
-            };
-            let Some(rows) = children.get_mut(&parent) else {
-                continue;
-            };
-            let aggregate = if matches!(entry.object_type, ObjectType::Directory) {
-                aggregate_by_identity.remove(&hierarchy_key(&entry.display_path))
-            } else {
-                None
-            };
-            rows.push(BrowserRow::from_owned(entry, aggregate, false));
-        }
-        for rows in children.values_mut() {
-            rows.sort_by(browser_row_order);
-        }
-
-        let mut roots: Vec<BrowserRow> = root_by_path
-            .into_values()
-            .map(|entry| {
-                let aggregate = aggregate_by_identity.remove(&hierarchy_key(&entry.display_path));
-                BrowserRow::from_owned(entry, aggregate, true)
-            })
-            .collect();
-        roots.sort_by(browser_row_order);
-
-        BrowserModel {
+    ) -> Result<BrowserModel, BrowserModelError> {
+        Self::from_owned_scan_parts_with_limits(
             locale,
             status,
             scan_id,
             roots,
-            children,
+            entries,
+            aggregates,
+            BrowserLoadLimits::default(),
+        )
+    }
+
+    pub fn from_owned_scan_parts_with_limits(
+        locale: Locale,
+        status: OutputStatus,
+        scan_id: Option<String>,
+        roots: Vec<ScannedEntry>,
+        entries: Vec<ScannedEntry>,
+        aggregates: Vec<DirectoryAggregate>,
+        limits: BrowserLoadLimits,
+    ) -> Result<BrowserModel, BrowserModelError> {
+        preflight_limits(&roots, &entries, &aggregates, limits)?;
+        enforce_snapshot_scan_ids(scan_id.as_deref(), &roots, &entries, &aggregates)?;
+
+        let mut pending_nodes = Vec::with_capacity(roots.len() + entries.len());
+        let mut id_to_index = HashMap::with_capacity(roots.len() + entries.len());
+
+        for entry in roots {
+            let identity = required_identity(&entry)?.clone();
+            if identity.parent_id.is_some() {
+                return Err(BrowserModelError::RootEntryMustNotHaveParent {
+                    entry_id: identity.entry_id.to_string(),
+                });
+            }
+            if identity.entry_id != identity.scan_root_id {
+                return Err(BrowserModelError::RootEntryMustReferenceSelf {
+                    entry_id: identity.entry_id.to_string(),
+                    root_id: identity.scan_root_id.to_string(),
+                });
+            }
+            insert_pending_node(
+                &mut pending_nodes,
+                &mut id_to_index,
+                PendingNode {
+                    entry,
+                    entry_id: identity.entry_id.clone(),
+                    root_id: identity.scan_root_id.clone(),
+                    parent_id: None,
+                    root: true,
+                },
+            )?;
+        }
+
+        for entry in entries {
+            let identity = required_identity(&entry)?.clone();
+            let Some(parent_id) = identity.parent_id.clone() else {
+                return Err(BrowserModelError::NonRootEntryMustHaveParent {
+                    entry_id: identity.entry_id.to_string(),
+                });
+            };
+            if identity.entry_id == identity.scan_root_id {
+                return Err(BrowserModelError::NonRootEntryMustNotReferenceSelfAsRoot {
+                    entry_id: identity.entry_id.to_string(),
+                    root_id: identity.scan_root_id.to_string(),
+                });
+            }
+            insert_pending_node(
+                &mut pending_nodes,
+                &mut id_to_index,
+                PendingNode {
+                    entry,
+                    entry_id: identity.entry_id.clone(),
+                    root_id: identity.scan_root_id.clone(),
+                    parent_id: Some(parent_id),
+                    root: false,
+                },
+            )?;
+        }
+
+        let mut children_by_index = vec![Vec::new(); pending_nodes.len()];
+        let mut roots = Vec::new();
+        for (index, node) in pending_nodes.iter().enumerate() {
+            if node.root {
+                roots.push(index);
+                continue;
+            }
+            let root_index = id_to_index.get(&node.root_id).copied().ok_or_else(|| {
+                BrowserModelError::MissingRoot {
+                    entry_id: node.entry_id.to_string(),
+                    root_id: node.root_id.to_string(),
+                }
+            })?;
+            if !pending_nodes[root_index].root {
+                return Err(BrowserModelError::MissingRoot {
+                    entry_id: node.entry_id.to_string(),
+                    root_id: node.root_id.to_string(),
+                });
+            }
+
+            let parent_id = node.parent_id.as_ref().expect("validated child has parent");
+            let parent_index = id_to_index.get(parent_id).copied().ok_or_else(|| {
+                BrowserModelError::MissingParent {
+                    entry_id: node.entry_id.to_string(),
+                    parent_id: parent_id.to_string(),
+                }
+            })?;
+            let parent = &pending_nodes[parent_index];
+            if !matches!(parent.entry.object_type, ObjectType::Directory) {
+                return Err(BrowserModelError::ParentNotDirectory {
+                    entry_id: node.entry_id.to_string(),
+                    parent_id: parent_id.to_string(),
+                });
+            }
+            if parent.root_id != node.root_id {
+                return Err(BrowserModelError::ParentRootMismatch {
+                    entry_id: node.entry_id.to_string(),
+                    parent_id: parent_id.to_string(),
+                    root_id: node.root_id.to_string(),
+                    parent_root_id: parent.root_id.to_string(),
+                });
+            }
+            children_by_index[parent_index].push(index);
+        }
+
+        let mut aggregate_by_index = vec![None; pending_nodes.len()];
+        for aggregate in aggregates {
+            let entry_id = aggregate.scan_entry_id()?;
+            let index = id_to_index.get(&entry_id).copied().ok_or_else(|| {
+                BrowserModelError::AggregateTargetMissing {
+                    entry_id: entry_id.to_string(),
+                }
+            })?;
+            let node = &pending_nodes[index];
+            if aggregate.scan_id != node.entry.scan_id {
+                return Err(BrowserModelError::AggregateScanMismatch {
+                    entry_id: entry_id.to_string(),
+                    aggregate_scan_id: aggregate.scan_id.to_string(),
+                    entry_scan_id: node.entry.scan_id.to_string(),
+                });
+            }
+            if !matches!(node.entry.object_type, ObjectType::Directory) {
+                return Err(BrowserModelError::AggregateTargetNotDirectory {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+            if aggregate_by_index[index].is_some() {
+                return Err(BrowserModelError::DuplicateAggregate {
+                    entry_id: entry_id.to_string(),
+                });
+            }
+            aggregate_by_index[index] = Some(aggregate);
+        }
+
+        roots.sort_by(|left, right| {
+            browser_path_order(&pending_nodes[*left], &pending_nodes[*right])
+        });
+        for rows in &mut children_by_index {
+            rows.sort_by(|left, right| {
+                browser_path_order(&pending_nodes[*left], &pending_nodes[*right])
+            });
+        }
+
+        let mut visited = vec![false; pending_nodes.len()];
+        let mut stack = roots.clone();
+        while let Some(index) = stack.pop() {
+            if visited[index] {
+                continue;
+            }
+            visited[index] = true;
+            stack.extend(children_by_index[index].iter().copied());
+        }
+        for (index, visited_flag) in visited.iter().enumerate() {
+            if !visited_flag {
+                return Err(BrowserModelError::UnreachableEntry {
+                    entry_id: pending_nodes[index].entry_id.to_string(),
+                });
+            }
+        }
+
+        let nodes = pending_nodes
+            .into_iter()
+            .zip(aggregate_by_index)
+            .map(|(pending, aggregate)| BrowserNode {
+                entry: pending.entry,
+                aggregate,
+                root: pending.root,
+            })
+            .collect();
+
+        let mut model = BrowserModel {
+            locale,
+            status,
+            scan_id,
+            limits: normalized_limits(limits),
+            nodes,
+            roots,
+            children_by_index,
             levels: Vec::new(),
             selected: 0,
-        }
+            loaded_level: LoadedLevel::default(),
+        };
+        model.reload_loaded_level();
+        Ok(model)
     }
 
     pub const fn locale(&self) -> Locale {
@@ -208,22 +512,15 @@ impl BrowserModel {
     }
 
     pub fn visible_rows(&self) -> &[BrowserRow] {
-        match self.levels.last() {
-            Some(level) => self
-                .children
-                .get(&hierarchy_key(&level.directory))
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
-            None => &self.roots,
-        }
+        &self.loaded_level.rows
     }
 
     pub const fn selected_index(&self) -> usize {
-        self.selected
+        self.selected.saturating_sub(self.loaded_level.page_start)
     }
 
     pub fn selected_row(&self) -> Option<&BrowserRow> {
-        self.visible_rows().get(self.selected)
+        self.visible_rows().get(self.selected_index())
     }
 
     pub fn current_directory(&self) -> Option<&str> {
@@ -244,30 +541,53 @@ impl BrowserModel {
             .collect()
     }
 
+    pub const fn current_level_total_rows(&self) -> usize {
+        self.loaded_level.total_rows
+    }
+
+    pub fn current_page_bounds(&self) -> Option<(usize, usize)> {
+        if self.loaded_level.total_rows == 0 {
+            None
+        } else {
+            Some((
+                self.loaded_level.page_start + 1,
+                self.loaded_level.page_start + self.loaded_level.rows.len(),
+            ))
+        }
+    }
+
+    pub const fn max_level_rows(&self) -> usize {
+        self.limits.max_level_rows
+    }
+
     fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let next = self.selected.saturating_sub(1);
+        self.set_selected(next);
     }
 
     fn move_down(&mut self) {
-        if self.selected + 1 < self.visible_rows().len() {
-            self.selected += 1;
+        let limit = self.current_level_total_rows().saturating_sub(1);
+        if self.current_level_total_rows() > 0 && self.selected < limit {
+            self.set_selected(self.selected + 1);
         }
     }
 
     fn enter_selected(&mut self) {
-        let Some(row) = self.selected_row() else {
+        let Some(node_index) = self.selected_node_index() else {
             return;
         };
-        if !row.can_enter() {
+        let node = &self.nodes[node_index];
+        if !matches!(node.entry.object_type, ObjectType::Directory) {
             return;
         }
 
-        let directory = row.display_path().to_string();
+        let directory = node.entry.display_path.clone();
         self.levels.push(BrowserLevel {
+            directory_index: node_index,
             directory,
             parent_selection: self.selected,
         });
-        self.selected = 0;
+        self.set_selected(0);
     }
 
     fn return_to_parent(&mut self) {
@@ -275,119 +595,247 @@ impl BrowserModel {
             return;
         };
         self.selected = level.parent_selection;
+        self.reload_loaded_level();
         self.clamp_selection();
     }
 
     fn clamp_selection(&mut self) {
-        self.selected = self
+        let next = self
             .selected
-            .min(self.visible_rows().len().saturating_sub(1));
+            .min(self.current_level_total_rows().saturating_sub(1));
+        self.set_selected(next);
     }
-}
 
-fn highest_revision_aggregates(
-    aggregates: Vec<DirectoryAggregate>,
-) -> BTreeMap<String, DirectoryAggregate> {
-    let mut by_identity = BTreeMap::new();
-    for aggregate in aggregates {
-        let identity = hierarchy_key(&aggregate.directory_identity);
-        match by_identity.entry(identity) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(aggregate);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let current = entry.get();
-                if aggregate.revision > current.revision
-                    || (aggregate.revision == current.revision
-                        && stable_debug_key(&aggregate) < stable_debug_key(current))
-                {
-                    entry.insert(aggregate);
-                }
-            }
+    fn set_selected(&mut self, selected: usize) {
+        self.selected = selected.min(self.current_level_total_rows().saturating_sub(1));
+        self.reload_loaded_level();
+    }
+
+    fn selected_node_index(&self) -> Option<usize> {
+        self.loaded_level
+            .row_indices
+            .get(self.selected_index())
+            .copied()
+    }
+
+    fn current_level_rows(&self) -> &[usize] {
+        match self.levels.last() {
+            Some(level) => &self.children_by_index[level.directory_index],
+            None => &self.roots,
         }
     }
-    by_identity
-}
 
-fn deduplicate_entries(entries: Vec<ScannedEntry>) -> BTreeMap<String, ScannedEntry> {
-    let mut by_path = BTreeMap::new();
-    for entry in entries {
-        insert_preferred_entry(&mut by_path, entry);
-    }
-    by_path
-}
-
-fn insert_preferred_entry(by_path: &mut BTreeMap<String, ScannedEntry>, candidate: ScannedEntry) {
-    let key = hierarchy_key(&candidate.display_path);
-    match by_path.entry(key) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(candidate);
-        }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            if entry_preference(&candidate, entry.get()).is_lt() {
-                entry.insert(candidate);
-            }
-        }
-    }
-}
-
-fn entry_preference(left: &ScannedEntry, right: &ScannedEntry) -> std::cmp::Ordering {
-    object_safety_rank(&left.object_type)
-        .cmp(&object_safety_rank(&right.object_type))
-        .then_with(|| stable_debug_key(left).cmp(&stable_debug_key(right)))
-}
-
-fn object_safety_rank(object_type: &ObjectType) -> u8 {
-    match object_type {
-        ObjectType::Symlink => 0,
-        ObjectType::ReparsePoint => 1,
-        ObjectType::Other => 2,
-        ObjectType::File => 3,
-        ObjectType::Directory => 4,
-    }
-}
-
-fn stable_debug_key(value: &impl std::fmt::Debug) -> String {
-    format!("{value:?}")
-}
-
-fn normalize_roots(
-    roots: Vec<ScannedEntry>,
-) -> (BTreeMap<String, ScannedEntry>, Vec<ScannedEntry>) {
-    let mut by_path = deduplicate_entries(roots);
-    let root_keys = by_path.keys().cloned().collect::<Vec<_>>();
-    let mut demoted = Vec::new();
-    for candidate in &root_keys {
-        if root_keys
+    fn reload_loaded_level(&mut self) {
+        let total_rows = self.current_level_rows().len();
+        let max_level_rows = self.limits.max_level_rows.max(1);
+        self.selected = self.selected.min(total_rows.saturating_sub(1));
+        let page_start = if total_rows == 0 {
+            0
+        } else {
+            (self.selected / max_level_rows) * max_level_rows
+        };
+        let page_end = total_rows.min(page_start + max_level_rows);
+        let row_indices = self.current_level_rows()[page_start..page_end].to_vec();
+        let rows = row_indices
             .iter()
-            .any(|ancestor| ancestor != candidate && is_path_ancestor(ancestor, candidate))
-            && let Some(entry) = by_path.remove(candidate)
-        {
-            demoted.push(entry);
+            .map(|index| self.nodes[*index].to_row())
+            .collect();
+        self.loaded_level = LoadedLevel {
+            total_rows,
+            page_start,
+            row_indices,
+            rows,
+        };
+    }
+}
+
+fn normalized_limits(limits: BrowserLoadLimits) -> BrowserLoadLimits {
+    BrowserLoadLimits {
+        max_level_rows: limits.max_level_rows.clamp(1, MAX_PAGE_ROWS.max(1)),
+        max_entries: limits.max_entries.clamp(1, DEFAULT_MAX_BROWSER_ENTRIES),
+        max_index_bytes: limits
+            .max_index_bytes
+            .clamp(1, DEFAULT_MAX_BROWSER_INDEX_BYTES),
+    }
+}
+
+fn preflight_limits(
+    roots: &[ScannedEntry],
+    entries: &[ScannedEntry],
+    aggregates: &[DirectoryAggregate],
+    limits: BrowserLoadLimits,
+) -> Result<(), BrowserModelError> {
+    let limits = normalized_limits(limits);
+    let entry_count = roots.len().saturating_add(entries.len());
+    if entry_count > limits.max_entries {
+        return Err(BrowserModelError::ResourceLimit {
+            kind: BrowserResourceLimitKind::Entries,
+            limit: limits.max_entries,
+            observed: entry_count,
+        });
+    }
+
+    let observed = estimate_total_index_bytes(roots, entries, aggregates, limits);
+    if observed > limits.max_index_bytes {
+        return Err(BrowserModelError::ResourceLimit {
+            kind: BrowserResourceLimitKind::IndexBytes,
+            limit: limits.max_index_bytes,
+            observed,
+        });
+    }
+    Ok(())
+}
+
+fn estimate_total_index_bytes(
+    roots: &[ScannedEntry],
+    entries: &[ScannedEntry],
+    aggregates: &[DirectoryAggregate],
+    limits: BrowserLoadLimits,
+) -> usize {
+    let limits = normalized_limits(limits);
+    let entry_count = roots.len().saturating_add(entries.len());
+    let persistent = entry_count
+        .saturating_mul(size_of::<BrowserNode>())
+        .saturating_add(entry_count.saturating_mul(size_of::<Vec<usize>>()))
+        .saturating_add(entry_count.saturating_mul(size_of::<usize>()))
+        .saturating_add(roots.len().saturating_mul(size_of::<usize>()))
+        .saturating_add(
+            limits
+                .max_level_rows
+                .saturating_mul(size_of::<BrowserRow>() + size_of::<usize>()),
+        );
+    let transient = entry_count
+        .saturating_mul(size_of::<PendingNode>())
+        .saturating_add(entry_count.saturating_mul(size_of::<(ScanEntryId, usize)>()))
+        .saturating_add(entry_count.saturating_mul(size_of::<Option<DirectoryAggregate>>()))
+        .saturating_add(entry_count.saturating_mul(size_of::<bool>()));
+    let mut total = persistent.max(transient);
+    for entry in roots.iter().chain(entries.iter()) {
+        total = total.saturating_add(estimate_entry_bytes(entry));
+    }
+    for aggregate in aggregates {
+        total = total.saturating_add(estimate_aggregate_bytes(aggregate));
+    }
+    total
+}
+
+fn estimate_entry_bytes(entry: &ScannedEntry) -> usize {
+    let mut total = size_of::<ScannedEntry>();
+    total = total.saturating_add(entry.scan_id.len());
+    total = total.saturating_add(entry.display_path.len());
+    total = total.saturating_add(entry.metadata_fingerprint.len());
+    total = total.saturating_add(estimate_native_name_bytes(&entry.native_basename));
+    total = total.saturating_add(estimate_field_provenance_bytes(&entry.provenance));
+    if let Some(identity) = &entry.identity {
+        total = total.saturating_add(estimate_identity_bytes(identity));
+    }
+    total
+}
+
+fn estimate_identity_bytes(identity: &ScanObjectIdentity) -> usize {
+    identity.entry_id.as_str().len()
+        + identity.scan_root_id.as_str().len()
+        + identity
+            .parent_id
+            .as_ref()
+            .map(|id| id.as_str().len())
+            .unwrap_or_default()
+}
+
+fn estimate_aggregate_bytes(aggregate: &DirectoryAggregate) -> usize {
+    size_of::<DirectoryAggregate>()
+        .saturating_add(aggregate.scan_id.len())
+        .saturating_add(aggregate.directory_identity.len())
+        .saturating_add(estimate_field_provenance_bytes(
+            &aggregate.coverage.provenance,
+        ))
+}
+
+fn estimate_native_name_bytes(name: &NativeName) -> usize {
+    match name {
+        NativeName::UnixBytes(bytes) => bytes.len(),
+        NativeName::WindowsUtf16(units) => units.len().saturating_mul(2),
+    }
+}
+
+fn estimate_field_provenance_bytes(provenance: &FieldProvenance) -> usize {
+    match provenance {
+        FieldProvenance::LiveObservation {
+            observed_at,
+            method: _,
+        } => observed_at.len(),
+        FieldProvenance::ValidatedCache {
+            observed_at,
+            validation: _,
+            token,
+        } => observed_at.len().saturating_add(token.len()),
+        FieldProvenance::DerivedFromCurrent { inputs, algorithm } => {
+            inputs.iter().fold(algorithm.len(), |total, input| {
+                total.saturating_add(input.len())
+            })
+        }
+        FieldProvenance::StalePreview { observed_at } => observed_at.len(),
+        FieldProvenance::Unknown { reason: _ } => 0,
+    }
+}
+
+fn required_identity(entry: &ScannedEntry) -> Result<&ScanObjectIdentity, BrowserModelError> {
+    entry
+        .validated_identity()?
+        .ok_or_else(|| BrowserModelError::MissingIdentity {
+            display_path: entry.display_path.clone(),
+        })
+}
+
+fn insert_pending_node(
+    pending_nodes: &mut Vec<PendingNode>,
+    id_to_index: &mut HashMap<ScanEntryId, usize>,
+    node: PendingNode,
+) -> Result<(), BrowserModelError> {
+    if id_to_index.contains_key(&node.entry_id) {
+        return Err(BrowserModelError::DuplicateEntryId {
+            entry_id: node.entry_id.to_string(),
+        });
+    }
+    let index = pending_nodes.len();
+    id_to_index.insert(node.entry_id.clone(), index);
+    pending_nodes.push(node);
+    Ok(())
+}
+
+fn browser_path_order(left: &PendingNode, right: &PendingNode) -> std::cmp::Ordering {
+    left.entry.display_path.cmp(&right.entry.display_path)
+}
+
+fn enforce_snapshot_scan_ids(
+    requested_scan_id: Option<&str>,
+    roots: &[ScannedEntry],
+    entries: &[ScannedEntry],
+    aggregates: &[DirectoryAggregate],
+) -> Result<(), BrowserModelError> {
+    let mut expected = requested_scan_id.map(ToOwned::to_owned);
+    for observed in roots
+        .iter()
+        .map(|entry| entry.scan_id.to_string())
+        .chain(entries.iter().map(|entry| entry.scan_id.to_string()))
+        .chain(
+            aggregates
+                .iter()
+                .map(|aggregate| aggregate.scan_id.to_string()),
+        )
+    {
+        match &expected {
+            Some(expected_scan_id) if expected_scan_id != &observed => {
+                return Err(BrowserModelError::SnapshotScanMismatch {
+                    expected_scan_id: expected_scan_id.clone(),
+                    observed_scan_id: observed,
+                });
+            }
+            Some(_) => {}
+            None => expected = Some(observed),
         }
     }
-    (by_path, demoted)
-}
-
-fn is_path_ancestor(ancestor: &str, candidate: &str) -> bool {
-    if ancestor == candidate {
-        return false;
-    }
-    let Some(separator) = separator_for(candidate) else {
-        return false;
-    };
-    let ancestor = hierarchy_key(ancestor);
-    let candidate = hierarchy_key(candidate);
-    if ancestor == separator.to_string() {
-        return candidate.starts_with(separator);
-    }
-    candidate
-        .strip_prefix(&ancestor)
-        .is_some_and(|suffix| suffix.starts_with(separator))
-}
-
-fn browser_row_order(left: &BrowserRow, right: &BrowserRow) -> std::cmp::Ordering {
-    left.display_path().cmp(right.display_path())
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -843,9 +1291,14 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
     });
 
     let empty_title = if rows.is_empty() {
-        empty_label(model.locale())
+        empty_label(model.locale()).to_string()
     } else {
-        contents_label(model.locale())
+        contents_title(
+            model.locale(),
+            model.current_page_bounds(),
+            model.current_level_total_rows(),
+            model.max_level_rows(),
+        )
     };
     let table = Table::new(
         table_rows,
@@ -887,16 +1340,6 @@ fn hierarchy_key(path: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn lexical_parent_key(path: &str) -> Option<String> {
-    let separator = separator_for(path)?;
-    let cleaned = hierarchy_key(path);
-    let index = cleaned.rfind(separator)?;
-    if index == 0 {
-        return Some(separator.to_string());
-    }
-    Some(hierarchy_key(&cleaned[..index]))
 }
 
 fn display_basename(path: &str) -> String {
@@ -1019,6 +1462,22 @@ fn empty_label(locale: Locale) -> &'static str {
     }
 }
 
+fn contents_title(
+    locale: Locale,
+    page_bounds: Option<(usize, usize)>,
+    total_rows: usize,
+    max_level_rows: usize,
+) -> String {
+    let base = contents_label(locale);
+    match page_bounds {
+        Some((start, end)) if total_rows > max_level_rows => match locale {
+            Locale::ZhCn => format!("{base} ({start}-{end}/{total_rows})"),
+            Locale::EnUs => format!("{base} ({start}-{end}/{total_rows})"),
+        },
+        _ => base.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1027,10 +1486,20 @@ mod tests {
     use ratatui::backend::TestBackend;
     use sweepx_model::{
         ArithmeticState, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
-        MethodId, NativeName, ReasonCode, ScanId,
+        FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, NativeName,
+        PlatformFileIdentity, ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity,
+        VolumeOrMountIdentity,
     };
 
     use super::*;
+
+    fn scan_id() -> ScanId {
+        ScanId::new("scan-live")
+    }
+
+    fn other_scan_id() -> ScanId {
+        ScanId::new("scan-other")
+    }
 
     fn coverage() -> Coverage {
         Coverage {
@@ -1045,9 +1514,51 @@ mod tests {
         }
     }
 
-    fn entry(path: &str, object_type: ObjectType) -> ScannedEntry {
+    fn entry_id(scan_id: &ScanId, ordinal: u128) -> ScanEntryId {
+        ScanEntryId::for_scan_ordinal(scan_id, ordinal).unwrap()
+    }
+
+    fn identity(
+        scan_id: &ScanId,
+        entry_ordinal: u128,
+        root_ordinal: u128,
+        parent_ordinal: Option<u128>,
+    ) -> ScanObjectIdentity {
+        ScanObjectIdentity {
+            entry_id: entry_id(scan_id, entry_ordinal),
+            scan_root_id: entry_id(scan_id, root_ordinal),
+            parent_id: parent_ordinal.map(|ordinal| entry_id(scan_id, ordinal)),
+            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(root_ordinal),
+                inode: DecimalU128::new(entry_ordinal),
+            }),
+            filesystem_object_domain_identity: IdentityEvidence::known(
+                FilesystemObjectDomainIdentity {
+                    device: DecimalU128::new(root_ordinal),
+                },
+            ),
+            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
+                value: DecimalU128::new(1),
+            }),
+        }
+    }
+
+    fn entry_with_scan(
+        scan_id: ScanId,
+        path: &str,
+        object_type: ObjectType,
+        entry_ordinal: u128,
+        root_ordinal: u128,
+        parent_ordinal: Option<u128>,
+    ) -> ScannedEntry {
         ScannedEntry {
-            scan_id: ScanId::new("scan-live"),
+            scan_id: scan_id.clone(),
+            identity: Some(identity(
+                &scan_id,
+                entry_ordinal,
+                root_ordinal,
+                parent_ordinal,
+            )),
             display_path: path.to_string(),
             native_basename: NativeName::unix(display_basename(path).into_bytes()),
             object_type,
@@ -1069,10 +1580,52 @@ mod tests {
         }
     }
 
-    fn aggregate(path: &str) -> DirectoryAggregate {
+    fn entry(
+        path: &str,
+        object_type: ObjectType,
+        entry_ordinal: u128,
+        root_ordinal: u128,
+        parent_ordinal: Option<u128>,
+    ) -> ScannedEntry {
+        entry_with_scan(
+            scan_id(),
+            path,
+            object_type,
+            entry_ordinal,
+            root_ordinal,
+            parent_ordinal,
+        )
+    }
+
+    fn legacy_entry(path: &str, object_type: ObjectType) -> ScannedEntry {
+        ScannedEntry {
+            scan_id: scan_id(),
+            identity: None,
+            display_path: path.to_string(),
+            native_basename: NativeName::unix(display_basename(path).into_bytes()),
+            object_type,
+            logical_bytes: EvidenceValue::Known {
+                value: DecimalU128::new(7),
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: DecimalU128::new(8),
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: DecimalU128::new(5),
+            },
+            metadata_fingerprint: format!("fingerprint:{path}"),
+            coverage: coverage(),
+            provenance: FieldProvenance::LiveObservation {
+                observed_at: "2026-08-27T00:00:00Z".to_string(),
+                method: MethodId::MetadataNoFollow,
+            },
+        }
+    }
+
+    fn aggregate_with_scan(scan_id: ScanId, entry_ordinal: u128) -> DirectoryAggregate {
         DirectoryAggregate {
-            scan_id: ScanId::new("scan-live"),
-            directory_identity: path.to_string(),
+            scan_id: scan_id.clone(),
+            directory_identity: entry_id(&scan_id, entry_ordinal).to_string(),
             revision: DecimalU128::new(1),
             apparent_logical_bytes: EvidenceValue::Known {
                 value: DecimalU128::new(70),
@@ -1098,19 +1651,50 @@ mod tests {
         }
     }
 
+    fn aggregate(entry_ordinal: u128) -> DirectoryAggregate {
+        aggregate_with_scan(scan_id(), entry_ordinal)
+    }
+
     fn model() -> BrowserModel {
         BrowserModel::from_scan_parts(
             Locale::EnUs,
             OutputStatus::Ok,
             Some("scan-live".to_string()),
-            &[entry("/root", ObjectType::Directory)],
+            &[entry("/root", ObjectType::Directory, 1, 1, None)],
             &[
-                entry("/root/file.txt", ObjectType::File),
-                entry("/root/sub", ObjectType::Directory),
-                entry("/root/sub/deep.txt", ObjectType::File),
+                entry("/root/file.txt", ObjectType::File, 2, 1, Some(1)),
+                entry("/root/sub", ObjectType::Directory, 3, 1, Some(1)),
+                entry("/root/sub/deep.txt", ObjectType::File, 4, 1, Some(3)),
             ],
-            &[aggregate("/root"), aggregate("/root/sub")],
+            &[aggregate(1), aggregate(3)],
         )
+        .unwrap()
+    }
+
+    fn paged_model(limit: usize, rows: usize) -> BrowserModel {
+        BrowserModel::from_owned_scan_parts_with_limits(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            vec![entry("/root", ObjectType::Directory, 1, 1, None)],
+            (0..rows)
+                .map(|index| {
+                    entry(
+                        &format!("/root/file-{index:04}"),
+                        ObjectType::File,
+                        index as u128 + 2,
+                        1,
+                        Some(1),
+                    )
+                })
+                .collect(),
+            vec![aggregate(1)],
+            BrowserLoadLimits {
+                max_level_rows: limit,
+                ..BrowserLoadLimits::default()
+            },
+        )
+        .unwrap()
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1150,7 +1734,7 @@ mod tests {
                 .aggregate()
                 .unwrap()
                 .directory_identity,
-            "/root"
+            entry_id(&scan_id(), 1).to_string()
         );
 
         model.enter_selected();
@@ -1161,7 +1745,7 @@ mod tests {
                 .aggregate()
                 .unwrap()
                 .directory_identity,
-            "/root/sub"
+            entry_id(&scan_id(), 3).to_string()
         );
     }
 
@@ -1173,12 +1757,13 @@ mod tests {
             OutputStatus::Partial,
             None,
             &[
-                entry("/first", ObjectType::Directory),
-                entry("/second", ObjectType::Directory),
+                entry("/first", ObjectType::Directory, 1, 1, None),
+                entry("/second", ObjectType::Directory, 2, 2, None),
             ],
-            &[entry("/second/file", ObjectType::File)],
+            &[entry("/second/file", ObjectType::File, 3, 2, Some(2))],
             &[],
-        );
+        )
+        .unwrap();
 
         reducer.reduce(&mut model, BrowserAction::MoveDown);
         assert_eq!(model.selected_index(), 1);
@@ -1202,18 +1787,36 @@ mod tests {
                 Locale::EnUs,
                 OutputStatus::Ok,
                 None,
-                &[entry("/root", ObjectType::Directory)],
-                &[
-                    entry("/root/link", object_type),
-                    entry("/root/link/hidden", ObjectType::File),
-                ],
+                &[entry("/root", ObjectType::Directory, 1, 1, None)],
+                &[entry("/root/link", object_type.clone(), 2, 1, Some(1))],
                 &[],
-            );
+            )
+            .unwrap();
             model.enter_selected();
             assert_eq!(model.visible_rows().len(), 1);
             assert!(!model.selected_row().unwrap().can_enter());
             model.enter_selected();
             assert_eq!(model.current_directory(), Some("/root"));
+
+            let error = BrowserModel::from_scan_parts(
+                Locale::EnUs,
+                OutputStatus::Ok,
+                None,
+                &[entry("/root", ObjectType::Directory, 1, 1, None)],
+                &[
+                    entry("/root/link", object_type.clone(), 2, 1, Some(1)),
+                    entry("/root/link/hidden", ObjectType::File, 3, 1, Some(2)),
+                ],
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                BrowserModelError::ParentNotDirectory {
+                    entry_id: entry_id(&scan_id(), 3).to_string(),
+                    parent_id: entry_id(&scan_id(), 2).to_string(),
+                }
+            );
         }
     }
 
@@ -1448,36 +2051,23 @@ mod tests {
     }
 
     #[test]
-    fn owned_constructor_deduplicates_sorts_and_uses_highest_aggregate_revision() {
-        let mut old = aggregate("/root/dir");
-        old.revision = DecimalU128::new(1);
-        old.apparent_logical_bytes = EvidenceValue::Known {
-            value: DecimalU128::new(10),
-        };
-        let mut newest = aggregate("/root/dir");
-        newest.revision = DecimalU128::new(9);
-        newest.apparent_logical_bytes = EvidenceValue::Known {
-            value: DecimalU128::new(90),
-        };
-
+    fn aggregates_are_joined_by_scan_entry_id() {
         let mut model = BrowserModel::from_owned_scan_parts(
             Locale::EnUs,
             OutputStatus::Ok,
             None,
             vec![
-                entry("/root/subroot", ObjectType::Directory),
-                entry("/z-root", ObjectType::Directory),
-                entry("/root", ObjectType::Directory),
-                entry("/root", ObjectType::Directory),
+                entry("/root", ObjectType::Directory, 1, 1, None),
+                entry("/z-root", ObjectType::Directory, 2, 2, None),
             ],
             vec![
-                entry("/root/z.txt", ObjectType::File),
-                entry("/root/dir", ObjectType::Directory),
-                entry("/root/a.txt", ObjectType::File),
-                entry("/root/a.txt", ObjectType::File),
+                entry("/elsewhere/z.txt", ObjectType::File, 3, 1, Some(1)),
+                entry("/not-lexical/dir", ObjectType::Directory, 4, 1, Some(1)),
+                entry("/elsewhere/a.txt", ObjectType::File, 5, 1, Some(1)),
             ],
-            vec![newest, old],
-        );
+            vec![aggregate(4)],
+        )
+        .unwrap();
 
         assert_eq!(
             model
@@ -1495,75 +2085,163 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             paths,
-            ["/root/a.txt", "/root/dir", "/root/subroot", "/root/z.txt"]
+            ["/elsewhere/a.txt", "/elsewhere/z.txt", "/not-lexical/dir"]
         );
-        let directory = &model.visible_rows()[1];
-        assert_eq!(directory.aggregate().unwrap().revision, DecimalU128::new(9));
+        let directory = &model.visible_rows()[2];
         assert_eq!(
-            directory.aggregate().unwrap().apparent_logical_bytes,
-            EvidenceValue::Known {
-                value: DecimalU128::new(90)
+            directory.aggregate().unwrap().directory_identity,
+            entry_id(&scan_id(), 4).to_string()
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_legacy_entries_without_identity() {
+        let error = BrowserModel::from_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            &[legacy_entry("/root", ObjectType::Directory)],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            BrowserModelError::MissingIdentity {
+                display_path: "/root".to_string()
             }
         );
     }
 
     #[test]
-    fn normalization_is_independent_of_input_order() {
-        let roots = vec![
-            entry("/root/nested", ObjectType::Directory),
-            entry("/other", ObjectType::Directory),
-            entry("/root/", ObjectType::Directory),
-            entry("/root", ObjectType::Directory),
-        ];
-        let entries = vec![
-            entry("/root/z", ObjectType::File),
-            entry("/root/a", ObjectType::File),
-            entry("/root/a/", ObjectType::File),
-            entry("/root/z", ObjectType::File),
-        ];
-        let aggregates = vec![aggregate("/root"), aggregate("/root/nested")];
-        let forward = BrowserModel::from_owned_scan_parts(
+    fn constructor_rejects_entry_limit_before_building() {
+        let error = BrowserModel::from_scan_parts_with_limits(
             Locale::EnUs,
             OutputStatus::Ok,
-            None,
-            roots.clone(),
-            entries.clone(),
-            aggregates.clone(),
-        );
-        let reverse = BrowserModel::from_owned_scan_parts(
-            Locale::EnUs,
-            OutputStatus::Ok,
-            None,
-            roots.into_iter().rev().collect(),
-            entries.into_iter().rev().collect(),
-            aggregates.into_iter().rev().collect(),
-        );
+            Some("scan-live".to_string()),
+            &[entry("/root", ObjectType::Directory, 1, 1, None)],
+            &[entry("/root/file.txt", ObjectType::File, 2, 1, Some(1))],
+            &[],
+            BrowserLoadLimits {
+                max_level_rows: 10,
+                max_entries: 1,
+                max_index_bytes: DEFAULT_MAX_BROWSER_INDEX_BYTES,
+            },
+        )
+        .unwrap_err();
 
-        assert_eq!(forward, reverse);
-        assert_eq!(forward.visible_rows().len(), 2);
+        assert_eq!(
+            error,
+            BrowserModelError::ResourceLimit {
+                kind: BrowserResourceLimitKind::Entries,
+                limit: 1,
+                observed: 2,
+            }
+        );
     }
 
     #[test]
-    fn windows_style_paths_use_lexical_direct_children() {
-        let mut model = BrowserModel::from_scan_parts(
+    fn caller_limits_can_only_tighten_architectural_caps() {
+        let normalized = normalized_limits(BrowserLoadLimits {
+            max_level_rows: usize::MAX,
+            max_entries: usize::MAX,
+            max_index_bytes: usize::MAX,
+        });
+
+        assert_eq!(normalized.max_level_rows, MAX_PAGE_ROWS);
+        assert_eq!(normalized.max_entries, DEFAULT_MAX_BROWSER_ENTRIES);
+        assert_eq!(normalized.max_index_bytes, DEFAULT_MAX_BROWSER_INDEX_BYTES);
+    }
+
+    #[test]
+    fn constructor_rejects_index_byte_limit_before_building() {
+        let error = BrowserModel::from_scan_parts_with_limits(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            &[entry("/root", ObjectType::Directory, 1, 1, None)],
+            &[entry("/root/file.txt", ObjectType::File, 2, 1, Some(1))],
+            &[aggregate(1)],
+            BrowserLoadLimits {
+                max_level_rows: 1,
+                max_entries: 10,
+                max_index_bytes: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrowserModelError::ResourceLimit {
+                kind: BrowserResourceLimitKind::IndexBytes,
+                limit: 1,
+                observed: _,
+            }
+        ));
+    }
+
+    #[test]
+    fn constructor_rejects_duplicate_aggregate_targets() {
+        let error = BrowserModel::from_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            &[entry("/root", ObjectType::Directory, 1, 1, None)],
+            &[],
+            &[aggregate(1), aggregate(1)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            BrowserModelError::DuplicateAggregate {
+                entry_id: entry_id(&scan_id(), 1).to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_explicit_scan_id_mismatch() {
+        let error = BrowserModel::from_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-other".to_string()),
+            &[entry("/root", ObjectType::Directory, 1, 1, None)],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrowserModelError::SnapshotScanMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn constructor_rejects_mixed_scan_payloads() {
+        let error = BrowserModel::from_owned_scan_parts(
             Locale::EnUs,
             OutputStatus::Ok,
             None,
-            &[entry("C:\\", ObjectType::Directory)],
-            &[
-                entry("C:\\file", ObjectType::File),
-                entry("C:\\dir", ObjectType::Directory),
-                entry("C:\\dir\\nested", ObjectType::File),
-            ],
-            &[],
-        );
-        model.enter_selected();
-        let paths = model
-            .visible_rows()
-            .iter()
-            .map(BrowserRow::display_path)
-            .collect::<Vec<_>>();
-        assert_eq!(paths, ["C:\\dir", "C:\\file"]);
+            vec![entry("/root", ObjectType::Directory, 1, 1, None)],
+            vec![entry_with_scan(
+                other_scan_id(),
+                "/root/file.txt",
+                ObjectType::File,
+                2,
+                1,
+                Some(1),
+            )],
+            vec![],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrowserModelError::SnapshotScanMismatch { .. }
+        ));
     }
 
     #[test]
@@ -1573,10 +2251,11 @@ mod tests {
             Locale::EnUs,
             OutputStatus::Ok,
             None,
-            &[entry(malicious, ObjectType::Directory)],
+            &[entry(malicious, ObjectType::Directory, 1, 1, None)],
             &[],
             &[],
-        );
+        )
+        .unwrap();
 
         assert!(!model.visible_rows()[0].label().contains('\u{1b}'));
         assert!(!model.visible_rows()[0].label().contains('\u{7}'));
@@ -1587,5 +2266,115 @@ mod tests {
                 .iter()
                 .all(|part| !part.chars().any(char::is_control))
         );
+    }
+
+    #[test]
+    fn large_directory_keeps_only_a_bounded_page_loaded() {
+        let mut model = paged_model(5, 13);
+        model.enter_selected();
+
+        assert_eq!(model.current_level_total_rows(), 13);
+        assert_eq!(model.visible_rows().len(), 5);
+        assert_eq!(model.current_page_bounds(), Some((1, 5)));
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/file-0000");
+        assert_eq!(model.visible_rows()[4].display_path(), "/root/file-0004");
+
+        for _ in 0..5 {
+            model.move_down();
+        }
+
+        assert_eq!(model.selected_index(), 0);
+        assert_eq!(model.current_page_bounds(), Some((6, 10)));
+        assert_eq!(
+            model.selected_row().unwrap().display_path(),
+            "/root/file-0005"
+        );
+        assert_eq!(model.visible_rows().len(), 5);
+
+        for _ in 0..5 {
+            model.move_down();
+        }
+
+        assert_eq!(model.current_page_bounds(), Some((11, 13)));
+        assert_eq!(model.visible_rows().len(), 3);
+        assert_eq!(
+            model.selected_row().unwrap().display_path(),
+            "/root/file-0010"
+        );
+    }
+
+    #[test]
+    fn returning_to_parent_restores_selection_across_root_pages() {
+        let mut roots = Vec::new();
+        for index in 0..8 {
+            let ordinal = index as u128 + 1;
+            roots.push(entry(
+                &format!("/root-{index:04}"),
+                ObjectType::Directory,
+                ordinal,
+                ordinal,
+                None,
+            ));
+        }
+        let mut model = BrowserModel::from_owned_scan_parts_with_limits(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            None,
+            roots,
+            vec![entry(
+                "/root-0005/file.txt",
+                ObjectType::File,
+                9,
+                6,
+                Some(6),
+            )],
+            vec![],
+            BrowserLoadLimits {
+                max_level_rows: 3,
+                ..BrowserLoadLimits::default()
+            },
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            model.move_down();
+        }
+        assert_eq!(model.current_page_bounds(), Some((4, 6)));
+        assert_eq!(model.selected_row().unwrap().display_path(), "/root-0005");
+
+        model.enter_selected();
+        assert_eq!(model.current_directory(), Some("/root-0005"));
+        assert_eq!(model.visible_rows().len(), 1);
+        assert_eq!(
+            model.visible_rows()[0].display_path(),
+            "/root-0005/file.txt"
+        );
+
+        model.return_to_parent();
+        assert!(model.is_virtual_roots());
+        assert_eq!(model.current_page_bounds(), Some((4, 6)));
+        assert_eq!(model.selected_index(), 2);
+        assert_eq!(model.selected_row().unwrap().display_path(), "/root-0005");
+    }
+
+    #[test]
+    fn render_shows_current_page_window_for_large_levels() {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = paged_model(4, 10);
+        model.enter_selected();
+        for _ in 0..4 {
+            model.move_down();
+        }
+
+        terminal
+            .draw(|frame| render_live_browser(frame, frame.area(), &model))
+            .unwrap();
+
+        let rendered = rendered_text(terminal.backend());
+        assert!(rendered.contains("Contents (5-8/10)"));
+        assert!(rendered.contains("file-0004"));
+        assert!(rendered.contains("file-0007"));
+        assert!(!rendered.contains("file-0003"));
     }
 }

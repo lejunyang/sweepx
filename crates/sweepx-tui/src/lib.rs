@@ -22,9 +22,10 @@ mod live;
 
 pub use live::{
     BrowserAction, BrowserControl, BrowserError, BrowserEventSource, BrowserExit, BrowserKeyMapper,
-    BrowserModel, BrowserReducer, BrowserRow, CrosstermEventSource, DefaultBrowserKeyMapper,
-    NeverTerminate, ReadOnlyBrowserReducer, TerminalGuard, TerminationFlag, render_live_browser,
-    run_browser_loop, run_browser_loop_until, run_live_browser,
+    BrowserLoadLimits, BrowserModel, BrowserModelError, BrowserReducer, BrowserResourceLimitKind,
+    BrowserRow, CrosstermEventSource, DefaultBrowserKeyMapper, NeverTerminate,
+    ReadOnlyBrowserReducer, TerminalGuard, TerminationFlag, render_live_browser, run_browser_loop,
+    run_browser_loop_until, run_live_browser,
 };
 
 pub const MAX_PAGE_ROWS: usize = 500;
@@ -1285,6 +1286,7 @@ mod tests {
     fn entry(path: String) -> ScannedEntry {
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
+            identity: None,
             display_path: path,
             native_basename: NativeName::unix(b"demo".to_vec()),
             object_type: ObjectType::File,

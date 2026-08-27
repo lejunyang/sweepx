@@ -282,14 +282,21 @@ fn finish_tui_scan(
         aggregates,
         ..
     } = summary;
-    let model = BrowserModel::from_owned_scan_parts(
+    let model = match BrowserModel::from_owned_scan_parts(
         context.locale(),
         status,
         scan_id,
         roots,
         entries,
         aggregates,
-    );
+    ) {
+        Ok(model) => model,
+        Err(error) => {
+            println!("{human_output}");
+            eprintln!("interactive browser setup failed: {error}");
+            return ProcessExitCode::from(8);
+        }
+    };
     let browser_result = run_live_browser(model);
     // The browser restores the terminal before returning, so this report
     // remains visible even though the interactive view used the alternate
