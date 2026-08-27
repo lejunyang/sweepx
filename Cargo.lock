@@ -1387,6 +1387,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sweepx-event-journal"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "getrandom 0.4.3",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "sweepx-model",
+ "sweepx-protocol",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "sweepx-executor"
 version = "0.1.0"
 dependencies = [

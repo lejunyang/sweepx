@@ -83,27 +83,28 @@ Before creating the Git tag, `scripts/publish-crates.sh` publishes the crates in
 this dependency order:
 
 ```text
-sweepx-model
 sweepx-canonical
 sweepx-i18n
-sweepx-cleaner-schema
-sweepx-audit
-sweepx-protocol
-sweepx-platform
+sweepx-model
 sweepx-cache
+sweepx-cleaner-schema
 sweepx-fixtures
-sweepx-cleaner-vm
+sweepx-platform
+sweepx-protocol
+sweepx-audit
 sweepx-catalog
-sweepx-safety
+sweepx-cleaner-vm
+sweepx-event-journal
 sweepx-platform-linux
 sweepx-platform-macos
 sweepx-platform-windows
 sweepx-tui
-sweepx-executor
 sweepx-scanner
 sweepx-analysis
 sweepx-core
+sweepx-safety
 sweepx-cli
+sweepx-executor
 ```
 
 The helper verifies that this list exactly covers the workspace, that every

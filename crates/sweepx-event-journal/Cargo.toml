@@ -1,0 +1,29 @@
+[package]
+name = "sweepx-event-journal"
+version.workspace = true
+description = "Linux-only durable replayable event journal for SweepX event streams"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fs2 = "0.4.3"
+getrandom = "0.4.3"
+libc = "0.2.177"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_jcs.workspace = true
+sha2 = "0.10.9"
+sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
+thiserror = "2.0.16"
+time.workspace = true
+
+[dev-dependencies]
+sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+tempfile = "3.21.0"

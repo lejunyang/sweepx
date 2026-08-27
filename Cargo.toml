@@ -3,6 +3,7 @@ members = [
   "crates/sweepx-model",
   "crates/sweepx-canonical",
   "crates/sweepx-protocol",
+  "crates/sweepx-event-journal",
   "crates/sweepx-i18n",
   "crates/sweepx-platform",
   "crates/sweepx-platform-linux",
