@@ -156,6 +156,15 @@ pub struct JournalAppendPosition {
     pub last_durable_sequence: u64,
 }
 
+impl JournalAppendPosition {
+    pub fn apply_to(&self, event: &mut EventEnvelope) {
+        event.sequence = u128::from(self.sequence).into();
+        event.cursor = self.cursor.as_str().to_string();
+        event.checkpoint.durable = true;
+        event.checkpoint.last_durable_sequence = u128::from(self.last_durable_sequence).into();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalSnapshotMetadata {
     snapshot_digest: String,
