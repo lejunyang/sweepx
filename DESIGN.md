@@ -1,8 +1,8 @@
 # SweepX 总体设计
 
-状态：implementation-ready architecture，尚未实现。设计与证据截点：2026-08-26。
+状态：设计基线与部分开发实现。设计与外部证据截点：2026-08-26；实现快照：2026-08-27。
 
-本文把扫描、专项 Cleaner、CLI/TUI、人工审批和跨平台删除收束为一个安全核心。它不授权、模拟或执行任何清理；v1 只以当前普通用户身份工作，未通过真实平台发布门槛的能力必须保持 `report-only` 或只提供扫描、解释和计划导出。
+本文把扫描、专项 Cleaner、CLI/TUI、人工审批和跨平台删除收束为一个安全核心。当前仓库已有开发级只读 CLI/TUI：Linux 与 macOS live scan 均为 `degraded`，Windows 只读 live scan 仍为 `unsupported`；另有只读解释与 Cleaner 元数据，以及 library-only 的不可变计划、simulation-only 授权、Unix 审计/恢复和确定性 fake execution。这些实现不代表阶段、发布或 mutation qualification；当前没有 native Trash/Permanent adapter、mutation CLI 或审批 UI，所有 native mutation capability 仍为 `disabled`。v1 只以当前普通用户身份工作，未通过真实平台发布门槛的能力必须保持 `report-only` 或只提供扫描、解释和计划导出。
 
 ## 0. 文档约定、范围与导航
 
