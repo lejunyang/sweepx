@@ -23,6 +23,7 @@ use sweepx_protocol::{
 use thiserror::Error;
 
 const DATABASE_FILE: &str = "audit.db";
+#[cfg(unix)]
 const LOCK_FILE: &str = "audit.lock";
 const SCHEMA_VERSION: &str = "sweepx.audit.sqlite.v1";
 const APPLICATION_ID: i64 = 0x5357_5841;
@@ -1429,7 +1430,7 @@ impl AuditStore {
         #[cfg(not(unix))]
         {
             let _ = root;
-            return Err(AuditError::UnsupportedPlatform);
+            Err(AuditError::UnsupportedPlatform)
         }
         #[cfg(unix)]
         {
@@ -2388,6 +2389,7 @@ impl Drop for ShortStoreLock {
     }
 }
 
+#[cfg(unix)]
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE store_meta(
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -2543,6 +2545,11 @@ fn validate_private_directory_metadata(
             return Err(AuditError::StateDirNotPrivate(path.display().to_string()));
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = metadata;
+    }
     Ok(())
 }
 
@@ -2600,6 +2607,11 @@ fn ensure_local_filesystem(_file: &File) -> Result<(), AuditError> {
     Err(AuditError::UnsupportedPlatform)
 }
 
+#[cfg(not(unix))]
+fn ensure_local_filesystem(_file: &File) -> Result<(), AuditError> {
+    Err(AuditError::UnsupportedPlatform)
+}
+
 fn ensure_same_local_filesystem(first: &File, second: &File) -> Result<(), AuditError> {
     ensure_local_filesystem(first)?;
     ensure_local_filesystem(second)?;
@@ -2635,6 +2647,7 @@ fn open_lock_file(path: &Path) -> Result<File, AuditError> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)?;
     ensure_private_file_handle(&file, path)?;
     Ok(file)
@@ -2679,6 +2692,7 @@ fn validate_held_lock(
     }
 }
 
+#[cfg(unix)]
 fn create_private_database_file(path: &Path) -> Result<(), AuditError> {
     #[cfg(unix)]
     {
@@ -2692,13 +2706,6 @@ fn create_private_database_file(path: &Path) -> Result<(), AuditError> {
             .open(path)?
             .sync_all()?;
     }
-    #[cfg(not(unix))]
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)?
-        .sync_all()?;
     sync_directory(
         path.parent()
             .ok_or_else(|| AuditError::UnsafeStateDir(path.display().to_string()))?,
@@ -2732,7 +2739,12 @@ fn ensure_private_file_handle(file: &File, path: &Path) -> Result<(), AuditError
     Ok(())
 }
 
-fn lock_identity(file: &File, _path: &Path) -> Result<LockIdentity, AuditError> {
+fn lock_identity(
+    #[cfg(unix)] file: &File,
+    #[cfg(not(unix))] _file: &File,
+    #[cfg(unix)] _path: &Path,
+    #[cfg(not(unix))] path: &Path,
+) -> Result<LockIdentity, AuditError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -2745,7 +2757,7 @@ fn lock_identity(file: &File, _path: &Path) -> Result<LockIdentity, AuditError> 
     #[cfg(not(unix))]
     {
         Ok(LockIdentity {
-            canonical_path: fs::canonicalize(_path)?,
+            canonical_path: fs::canonicalize(path)?,
         })
     }
 }
@@ -2780,6 +2792,7 @@ fn ensure_sqlite_sidecars_private(root: &Path) -> Result<(), AuditError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), AuditError> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
@@ -2836,6 +2849,7 @@ fn verify_connection_pragmas(connection: &Connection) -> Result<(), AuditError> 
     Ok(())
 }
 
+#[cfg(unix)]
 fn initialize_database(connection: &mut Connection) -> Result<(), AuditError> {
     connection.pragma_update(None, "page_size", PAGE_SIZE as i64)?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT as i64)?;
