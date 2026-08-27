@@ -7,7 +7,7 @@
     "id": "org.sweepx",
     "keyId": "builtin-cleaner-key-2026"
   },
-  "packageDigest": "sha256:12c2ea41aa31d4637537c93f5848ce675ba9b1c6bc590374f3937fe790b77fcb",
+  "packageDigest": "sha256:3f15fdee5d47443228ad00ee8c68fda79c07104616129149d92f69d096747884",
   "requires": {
     "core": ">=1.0.0, <2.0.0",
     "scannerSemantics": [

@@ -4,16 +4,19 @@ use std::fmt;
 use schemars::JsonSchema;
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sweepx_canonical::canonicalize_value;
 use thiserror::Error;
 
 pub const CLEANER_MANIFEST_SCHEMA: &str = "sweepx.cleaner-manifest/v1";
 pub const CLEANER_RULE_SCHEMA: &str = "sweepx.cleaner-rule/v1";
 pub const CLEANER_EVIDENCE_SCHEMA: &str = "sweepx.cleaner-evidence/v1";
+pub const CLEANER_SIGNATURE_SCHEMA: &str = "sweepx.cleaner-signature/v1";
 pub const MAX_AST_DEPTH: usize = 32;
 pub const MAX_AST_NODES: usize = 1024;
-const PACKAGE_DIGEST_PREFIX: &str = "SweepX cleaner package digest v1\0";
+pub const PACKAGE_DIGEST_DOMAIN: &[u8] = b"SweepX cleaner package v1\0";
+pub const PACKAGE_SIGNATURE_DOMAIN: &[u8] = b"SweepX cleaner signature v1\0";
 const PLACEHOLDER_DIGESTS: [&str; 16] = [
     "0000000000000000000000000000000000000000000000000000000000000000",
     "1111111111111111111111111111111111111111111111111111111111111111",
@@ -62,6 +65,32 @@ pub struct CleanerManifest {
 pub struct PublisherRef {
     pub id: String,
     pub key_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanerSignatureEnvelope {
+    pub schema: String,
+    pub algorithm: SignatureAlgorithm,
+    pub key_id: String,
+    pub publisher_id: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub package_digest: String,
+    pub manifest_schema: String,
+    pub signed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparency_proof: Option<Value>,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureAlgorithm {
+    Ed25519,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -616,40 +645,86 @@ impl CleanerManifest {
         let mut value = serde_json::to_value(self)
             .map_err(|_| ValidationError::UnsupportedFeature("cannot serialize manifest".into()))?;
         if let Value::Object(object) = &mut value {
-            object.insert("packageDigest".into(), Value::String(String::new()));
+            object.remove("packageDigest");
         }
-        serde_json::to_vec(&value).map_err(|_| {
+        canonicalize_value(&value).map_err(|_| {
             ValidationError::UnsupportedFeature("cannot encode canonical manifest".into())
         })
+    }
+}
+
+impl CleanerSignatureEnvelope {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.schema != CLEANER_SIGNATURE_SCHEMA {
+            return Err(ValidationError::SchemaMismatch {
+                expected: CLEANER_SIGNATURE_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        if self.manifest_schema != CLEANER_MANIFEST_SCHEMA {
+            return Err(ValidationError::SchemaMismatch {
+                expected: CLEANER_MANIFEST_SCHEMA,
+                actual: self.manifest_schema.clone(),
+            });
+        }
+        validate_identifier(&self.key_id, "signature.keyId")?;
+        validate_identifier(&self.publisher_id, "signature.publisherId")?;
+        validate_identifier(&self.package_id, "signature.packageId")?;
+        validate_version(&self.package_version, "signature.packageVersion")?;
+        validate_sha256_prefixed(&self.package_digest, "signature.packageDigest")?;
+        validate_non_placeholder_sha256_prefixed(&self.package_digest, "signature.packageDigest")?;
+        if self.signed_at.is_empty() {
+            return Err(ValidationError::EmptyField("signature.signed_at"));
+        }
+        if matches!(self.expires_at.as_deref(), Some("")) {
+            return Err(ValidationError::EmptyField("signature.expires_at"));
+        }
+        if self.transparency_proof.is_some() {
+            return Err(ValidationError::UnsupportedFeature(
+                "signature.transparencyProof is not supported".into(),
+            ));
+        }
+        validate_base64url_nopad_exact_len(&self.signature, "signature.signature", 64)?;
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct PackageDigestEntry {
     pub path: String,
+    pub bytes: String,
     pub sha256: String,
 }
 
 pub fn compute_package_digest(
-    manifest: &CleanerManifest,
-    entries: &[PackageDigestEntry],
+    file_table: &[PackageDigestEntry],
 ) -> Result<String, ValidationError> {
-    let payload = json!({
-        "manifestWithoutPackageDigest": String::from_utf8_lossy(&manifest.canonical_without_package_digest()?),
-        "entries": entries.iter().map(|entry| {
-            json!({
-                "path": entry.path,
-                "sha256": entry.sha256
-            })
-        }).collect::<Vec<_>>()
-    });
-    let payload_bytes = serde_json::to_vec(&payload).map_err(|_| {
+    let payload = serde_json::to_value(file_table)
+        .map_err(|_| ValidationError::UnsupportedFeature("cannot serialize file table".into()))?;
+    let payload_bytes = canonicalize_value(&payload).map_err(|_| {
         ValidationError::UnsupportedFeature("cannot encode package digest payload".into())
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(PACKAGE_DIGEST_PREFIX.as_bytes());
+    hasher.update(PACKAGE_DIGEST_DOMAIN);
     hasher.update(payload_bytes);
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub fn canonical_signature_payload(
+    statement: &CleanerSignatureEnvelope,
+) -> Result<Vec<u8>, ValidationError> {
+    let mut payload = serde_json::to_value(statement)
+        .map_err(|_| ValidationError::UnsupportedFeature("cannot serialize signature".into()))?;
+    if let Value::Object(object) = &mut payload {
+        object.remove("signature");
+    }
+    let payload_bytes = canonicalize_value(&payload).map_err(|_| {
+        ValidationError::UnsupportedFeature("cannot encode signature payload".into())
+    })?;
+    let mut framed = Vec::with_capacity(PACKAGE_SIGNATURE_DOMAIN.len() + payload_bytes.len());
+    framed.extend_from_slice(PACKAGE_SIGNATURE_DOMAIN);
+    framed.extend_from_slice(&payload_bytes);
+    Ok(framed)
 }
 
 impl CleanerRule {
@@ -961,6 +1036,47 @@ fn validate_sha256(value: &str, path: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_base64url_nopad_exact_len(
+    value: &str,
+    path: &str,
+    expected_len: usize,
+) -> Result<(), ValidationError> {
+    if value.is_empty() {
+        return Err(ValidationError::EmptyDynamicField(path.into()));
+    }
+    if value.contains('=') {
+        return Err(ValidationError::InvalidBase64(path.into()));
+    }
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let decoded = base64::Engine::decode(&engine, value)
+        .map_err(|_| ValidationError::InvalidBase64(path.into()))?;
+    let canonical = base64::Engine::encode(&engine, &decoded);
+    if canonical != value {
+        return Err(ValidationError::InvalidBase64(path.into()));
+    }
+    if decoded.len() != expected_len {
+        return Err(ValidationError::InvalidSignatureLength {
+            path: path.into(),
+            expected: expected_len,
+            actual: decoded.len(),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_decimal_string(value: &str, path: &str) -> Result<(), ValidationError> {
+    if value.is_empty() {
+        return Err(ValidationError::EmptyDynamicField(path.into()));
+    }
+    if value != "0" && value.starts_with('0') {
+        return Err(ValidationError::InvalidDecimal(path.into()));
+    }
+    value
+        .parse::<u64>()
+        .map(|_| ())
+        .map_err(|_| ValidationError::InvalidDecimal(path.into()))
+}
+
 fn validate_relative_package_path(path: &str, field: &str) -> Result<(), ValidationError> {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return Err(ValidationError::InvalidPackagePath(field.into()));
@@ -1033,6 +1149,10 @@ pub enum ValidationError {
     InvalidVersionReq(String),
     #[error("invalid digest: {0}")]
     InvalidDigest(String),
+    #[error("invalid base64url without padding: {0}")]
+    InvalidBase64(String),
+    #[error("invalid decimal string: {0}")]
+    InvalidDecimal(String),
     #[error("placeholder or repeated digest is not allowed: {0}")]
     PlaceholderDigest(String),
     #[error("invalid package path: {0}")]
@@ -1068,6 +1188,14 @@ pub enum ValidationError {
     },
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
+    #[error("signature binding mismatch: {0}")]
+    SignatureBindingMismatch(String),
+    #[error("invalid signature length for {path}: expected {expected}, got {actual}")]
+    InvalidSignatureLength {
+        path: String,
+        expected: usize,
+        actual: usize,
+    },
     #[error("invalid numeric field: {0}")]
     InvalidNumber(&'static str),
 }
@@ -1274,5 +1402,58 @@ mod tests {
             .validate()
             .expect_err("placeholder digest must fail");
         assert!(matches!(err, ValidationError::PlaceholderDigest(_)));
+    }
+
+    #[test]
+    fn rejects_unsupported_transparency_proof() {
+        let envelope = CleanerSignatureEnvelope {
+            schema: CLEANER_SIGNATURE_SCHEMA.into(),
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_id: "key-1".into(),
+            publisher_id: "org.sweepx".into(),
+            package_id: "org.sweepx.test".into(),
+            package_version: "1.0.0".into(),
+            package_digest:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            manifest_schema: CLEANER_MANIFEST_SCHEMA.into(),
+            signed_at: "2026-08-27T00:00:00Z".into(),
+            expires_at: Some("2027-08-27T00:00:00Z".into()),
+            transparency_proof: Some(json!({"kind": "rekor"})),
+            signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        };
+        let err = envelope
+            .validate()
+            .expect_err("transparencyProof must fail closed");
+        assert!(matches!(err, ValidationError::UnsupportedFeature(_)));
+    }
+
+    #[test]
+    fn rejects_noncanonical_decimal_bytes_and_short_signature() {
+        let err = validate_decimal_string("001", "signature.files[].bytes")
+            .expect_err("bytes must be canonical decimal");
+        assert!(matches!(err, ValidationError::InvalidDecimal(_)));
+
+        let envelope = CleanerSignatureEnvelope {
+            schema: CLEANER_SIGNATURE_SCHEMA.into(),
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_id: "key-1".into(),
+            publisher_id: "org.sweepx".into(),
+            package_id: "org.sweepx.test".into(),
+            package_version: "1.0.0".into(),
+            package_digest:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            manifest_schema: CLEANER_MANIFEST_SCHEMA.into(),
+            signed_at: "2026-08-27T00:00:00Z".into(),
+            expires_at: Some("2027-08-27T00:00:00Z".into()),
+            transparency_proof: None,
+            signature: "AQ".into(),
+        };
+        let err = envelope
+            .validate()
+            .expect_err("signature must decode to exactly 64 bytes");
+        assert!(matches!(
+            err,
+            ValidationError::InvalidSignatureLength { .. }
+        ));
     }
 }
