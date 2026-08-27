@@ -1,3 +1,5 @@
+mod cargo_cleaner_detect;
+
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::BTreeSet;
@@ -288,6 +290,11 @@ pub struct ExplainRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanerShowRequest {
     pub cleaner_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanerCargoDetectRequest {
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1296,6 +1303,58 @@ pub fn cleaner_show(
         "command": "cleaner.show",
         "cleaner": entry,
     });
+    Ok(CleanerSuccess { output })
+}
+
+pub fn cleaner_cargo_detect(
+    context: &CoreContext,
+    request: &CleanerCargoDetectRequest,
+) -> Result<CleanerSuccess, CoreError> {
+    let scan = scan_with_store(
+        context,
+        &ScanRequest {
+            roots: request.roots.clone(),
+            state_dir: None,
+        },
+        Option::<&MemorySnapshotStore>::None,
+    )?;
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
+        &scan.summary,
+        &cleaner_catalog.cleaners,
+    )?;
+
+    let ids = fresh_operation_ids("cleaner-cargo-detect", &request.roots);
+    let mut output = OutputEnvelope::new(
+        OutputKind::CleanerResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Partial,
+        ExitCode::Partial,
+        compat_snapshot_with_digest(
+            current_os_family(),
+            cleaner_catalog.cleaner_set_digest.clone(),
+        ),
+    );
+    output.summary = json!({
+        "command": "cleaner.cargo-detect",
+        "cleanerId": "org.sweepx.cargo-target",
+        "experimental": true,
+        "liveOnly": true,
+        "matchCount": DecimalU128::new(detected.matches.len() as u128),
+        "rootCount": DecimalU128::new(request.roots.len() as u128),
+        "reasonCode": "builtin_manifest_incompatible",
+        "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
+    });
+    output.data = cargo_cleaner_detect::experimental_cargo_detect_json(&detected);
+    output.warnings.push(protocol_error(
+        "cleaner.cargo_detect.experimental",
+        "cleaner",
+        "cleaner.cargo_detect.experimental",
+        false,
+        [("reasonCode", "builtin_manifest_incompatible".to_string())],
+    ));
     Ok(CleanerSuccess { output })
 }
 

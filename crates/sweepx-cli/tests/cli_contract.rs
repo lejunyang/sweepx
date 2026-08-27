@@ -445,6 +445,51 @@ fn cleaner_show_reports_incompatible_builtin_with_exit_12() {
     assert!(stderr.contains("cleaner is incompatible with this core"));
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn experimental_cargo_detect_stays_read_only_and_reports_incompatible_builtin() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("cleaner")
+        .arg("cargo-detect")
+        .arg(&root);
+
+    let output = cmd.assert().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "cleaner.result");
+    assert_eq!(json["summary"]["command"], "cleaner.cargo-detect");
+    assert_eq!(json["summary"]["experimental"], true);
+    assert_eq!(json["summary"]["liveOnly"], true);
+    assert_eq!(
+        json["summary"]["reasonCode"],
+        "builtin_manifest_incompatible"
+    );
+    assert_eq!(json["data"]["readOnly"], true);
+    assert_eq!(json["data"]["planAllowed"], false);
+    assert_eq!(json["data"]["approvalAllowed"], false);
+    assert_eq!(json["data"]["executionAllowed"], false);
+    assert_eq!(json["data"]["builtinManifestCompatible"], false);
+    assert_eq!(json["data"]["reasons"][0], "builtin_manifest_incompatible");
+    let matches = json["data"]["matches"].as_array().unwrap();
+    if let Some(first) = matches.first() {
+        assert_eq!(first["disposition"], "report_only");
+        assert_eq!(first["reasonCode"], "builtin_manifest_incompatible");
+        assert_eq!(first["executable"], false);
+    }
+}
+
 #[test]
 fn old_public_tui_subcommand_is_removed() {
     let mut cmd = cli_command();

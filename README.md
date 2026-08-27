@@ -17,6 +17,7 @@
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
+| `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 检测，复用内置 Cargo 规则字节做只读评估 | 仅用于检测；当前必须报告 `report_only` 且 reason=`builtin_manifest_incompatible`，不会产生 executable candidate、计划、授权或执行 |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；要求终端 stdin/stdout |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
@@ -82,6 +83,9 @@ cargo run -p sweepx-cli -- \
 cargo run -p sweepx-cli -- --format json cleaner list
 cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
+# 实验性 live-only Cargo target 检测；当前保持 report_only
+cargo run -p sweepx-cli -- --format json cleaner cargo-detect /absolute/path/to/workspace
+
 ```
 
 `scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝，直到 durable event journal、replay 和 durable terminal event 都实现。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
@@ -100,6 +104,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 
 - `cleaner list`：列出内置 package 及兼容性；
 - `cleaner show`：仅在兼容性检查通过后展示 manifest 与规则元数据；
+- `cleaner cargo-detect`：仅对 live admitted workspace root 做实验性 Cargo target 检测，当前始终只读且 `report_only`；
 - 对不兼容、未知版本或证据不足的内容保持 partial、report-only 或失败关闭。
 
 当前 `0.1.0` Core 与仓库内要求 `>=1.0.0, <2.0.0` 的内置 Cleaner 不兼容，这是刻意可见的兼容性门，而不是可绕过的错误。没有 Cleaner 执行接口，也不会调用包管理器、浏览器或其他外部清理命令。

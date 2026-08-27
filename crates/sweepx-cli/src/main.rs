@@ -5,12 +5,12 @@ use std::process::ExitCode as ProcessExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sweepx_core::{
-    CancelRequest, CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat,
-    SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest, cancel_with_store,
-    capabilities, cleaner_list, cleaner_show, core_error_exit_code, durable_store,
-    explain_from_scan_json, parse_locale_override, render_human_output, scan_ndjson_supported,
-    scan_with_store, serialize_json, serialize_ndjson, state_dir_from_explicit_or_default,
-    status_with_store, validate_absolute_root,
+    CancelRequest, CleanerCargoDetectRequest, CleanerShowRequest, CoreContext, ExplainRequest,
+    OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest,
+    cancel_with_store, capabilities, cleaner_cargo_detect, cleaner_list, cleaner_show,
+    core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
+    render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
+    state_dir_from_explicit_or_default, status_with_store, validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
@@ -84,7 +84,13 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum CleanerCommands {
     List,
-    Show { cleaner_ref: String },
+    Show {
+        cleaner_ref: String,
+    },
+    CargoDetect {
+        #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
+        roots: Vec<OsString>,
+    },
 }
 
 fn main() -> ProcessExitCode {
@@ -222,6 +228,17 @@ fn main() -> ProcessExitCode {
             CleanerCommands::List => cleaner_list(&context).map(RenderedResult::Cleaner),
             CleanerCommands::Show { cleaner_ref } => {
                 cleaner_show(&context, &CleanerShowRequest { cleaner_ref })
+                    .map(RenderedResult::Cleaner)
+            }
+            CleanerCommands::CargoDetect { roots } => {
+                let roots = match normalize_roots(&roots) {
+                    Ok(roots) => roots,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return ProcessExitCode::from(2);
+                    }
+                };
+                cleaner_cargo_detect(&context, &CleanerCargoDetectRequest { roots })
                     .map(RenderedResult::Cleaner)
             }
         },
