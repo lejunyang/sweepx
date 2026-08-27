@@ -457,6 +457,32 @@ impl DeletionPlan {
     }
 
     pub fn from_validated_value(value: Value) -> Result<Self, CanonicalPlanError> {
+        ensure_allowed_object_keys(
+            &value,
+            "plan",
+            &[
+                "schema",
+                "plan_id",
+                "nonce",
+                "created_at_unix_ms",
+                "expires_at_unix_ms",
+                "host_instance_id",
+                "user_identity",
+                "scan_id",
+                "scan_root_identity",
+                "mode",
+                "candidate_version",
+                "scanner_version",
+                "safety_policy_version",
+                "safety_policy_digest",
+                "protected_anchor_snapshot_digest",
+                "adapter_capabilities_digest",
+                "cleaner_set_digest",
+                "items",
+                "aggregate_risk",
+                "canonical_digest",
+            ],
+        )?;
         let schema = required_string(&value, "schema")?;
         if schema != PLAN_SCHEMA {
             return Err(CanonicalPlanError::InvalidField {
@@ -809,6 +835,53 @@ fn domain_separated_digest<T: Serialize>(value: &T) -> Result<String, CanonicalP
     Ok(format!("sha256:{}", plan_digest_hex(value)?))
 }
 
+fn ensure_allowed_object_keys(
+    value: &Value,
+    field: &'static str,
+    allowed: &[&str],
+) -> Result<(), CanonicalPlanError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| CanonicalPlanError::InvalidField {
+            field,
+            reason: "expected object".to_string(),
+        })?;
+    if let Some(unknown) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(CanonicalPlanError::InvalidField {
+            field,
+            reason: format!("unknown field {unknown}"),
+        });
+    }
+    Ok(())
+}
+
+fn required_nested_object<'a>(
+    root: &'a Value,
+    key: &str,
+    field: &'static str,
+) -> Result<&'a Value, CanonicalPlanError> {
+    root.get(key)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| CanonicalPlanError::InvalidField {
+            field,
+            reason: "expected object".to_string(),
+        })
+}
+
+fn required_nested_array<'a>(
+    root: &'a Value,
+    key: &str,
+    field: &'static str,
+) -> Result<&'a [Value], CanonicalPlanError> {
+    root.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| CanonicalPlanError::InvalidField {
+            field,
+            reason: "expected array".to_string(),
+        })
+}
+
 fn required_string(root: &Value, field: &'static str) -> Result<String, CanonicalPlanError> {
     root.get(field)
         .and_then(Value::as_str)
@@ -894,6 +967,7 @@ fn parse_risk_tier(field: &'static str, raw: &str) -> Result<RiskTier, Canonical
 }
 
 fn parse_aggregate_risk(value: &Value) -> Result<AggregateRisk, CanonicalPlanError> {
+    ensure_allowed_object_keys(value, "aggregate_risk", &["tier", "factors"])?;
     let tier = parse_risk_tier("aggregate_risk.tier", &required_string(value, "tier")?)?;
     let factors = required_array(value, "factors")?
         .iter()
@@ -915,6 +989,23 @@ fn parse_items(entries: &[Value]) -> Result<Vec<PlanItem>, CanonicalPlanError> {
 }
 
 fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "item",
+        &[
+            "item_id",
+            "candidate_id",
+            "explanation_digest",
+            "top_level_action_id",
+            "target",
+            "native_target",
+            "risk_tier",
+            "risk_factors",
+            "subtree_complete",
+            "descendant_manifest_digest",
+            "actions",
+        ],
+    )?;
     let actions = required_array(value, "actions")?
         .iter()
         .map(parse_action)
@@ -951,6 +1042,11 @@ fn parse_item(value: &Value) -> Result<PlanItem, CanonicalPlanError> {
 }
 
 fn parse_action(value: &Value) -> Result<PlanAction, CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "action",
+        &["action_id", "manifest_digest", "risk_tier"],
+    )?;
     Ok(PlanAction {
         action_id: required_string(value, "action_id")?,
         manifest_digest: optional_manifest_digest(value, "manifest_digest")?,
@@ -983,6 +1079,7 @@ fn optional_native_target(root: &Value) -> Result<Option<NativePlanTarget>, Cano
 }
 
 fn parse_native_target(value: &Value) -> Result<NativePlanTarget, CanonicalPlanError> {
+    validate_native_target_wire_shape(value)?;
     Ok(NativePlanTarget {
         scan_id: required_string(value, "scan_id")?,
         scan_root_identity: required_string(value, "scan_root_identity")?,
@@ -1020,6 +1117,214 @@ fn parse_native_target(value: &Value) -> Result<NativePlanTarget, CanonicalPlanE
         metadata_fingerprint: required_string(value, "metadata_fingerprint")?,
         candidate_digest: required_string(value, "candidate_digest")?,
     })
+}
+
+fn validate_native_target_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "native_target",
+        &[
+            "scan_id",
+            "scan_root_identity",
+            "stable_identity",
+            "scan_object_identity",
+            "native_locator",
+            "native_basename",
+            "object_type",
+            "metadata_fingerprint",
+            "candidate_digest",
+        ],
+    )?;
+    validate_scan_object_identity_wire_shape(required_nested_object(
+        value,
+        "scan_object_identity",
+        "native_target.scan_object_identity",
+    )?)?;
+    validate_native_locator_wire_shape(required_nested_object(
+        value,
+        "native_locator",
+        "native_target.native_locator",
+    )?)?;
+    validate_native_name_wire_shape(required_nested_object(
+        value,
+        "native_basename",
+        "native_target.native_basename",
+    )?)?;
+    Ok(())
+}
+
+fn validate_scan_object_identity_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "native_target.scan_object_identity",
+        &[
+            "entry_id",
+            "scan_root_id",
+            "parent_id",
+            "platform_file_identity",
+            "filesystem_object_domain_identity",
+            "volume_or_mount_identity",
+        ],
+    )?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "platform_file_identity",
+            "native_target.scan_object_identity.platform_file_identity",
+        )?,
+        "native_target.scan_object_identity.platform_file_identity",
+        "native_target.scan_object_identity.platform_file_identity.value",
+        &["device", "inode"],
+    )?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "filesystem_object_domain_identity",
+            "native_target.scan_object_identity.filesystem_object_domain_identity",
+        )?,
+        "native_target.scan_object_identity.filesystem_object_domain_identity",
+        "native_target.scan_object_identity.filesystem_object_domain_identity.value",
+        &["device"],
+    )?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "volume_or_mount_identity",
+            "native_target.scan_object_identity.volume_or_mount_identity",
+        )?,
+        "native_target.scan_object_identity.volume_or_mount_identity",
+        "native_target.scan_object_identity.volume_or_mount_identity.value",
+        &["value"],
+    )?;
+    Ok(())
+}
+
+fn validate_native_locator_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "native_target.native_locator",
+        &[
+            "scan_root",
+            "scan_root_absolute_path",
+            "parent_reopen_recipe",
+            "entry",
+        ],
+    )?;
+    validate_native_path_component_wire_shape(required_nested_object(
+        value,
+        "scan_root",
+        "native_target.native_locator.scan_root",
+    )?)?;
+    match value.get("scan_root_absolute_path") {
+        None | Some(Value::Null) => {}
+        Some(path) => validate_native_absolute_path_wire_shape(path)?,
+    }
+    for component in required_nested_array(
+        value,
+        "parent_reopen_recipe",
+        "native_target.native_locator.parent_reopen_recipe",
+    )? {
+        validate_native_path_component_wire_shape(component)?;
+    }
+    validate_native_path_component_wire_shape(required_nested_object(
+        value,
+        "entry",
+        "native_target.native_locator.entry",
+    )?)?;
+    Ok(())
+}
+
+fn validate_native_path_component_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "native_target.native_locator.component",
+        &[
+            "entry_id",
+            "native_basename",
+            "object_type",
+            "platform_file_identity",
+            "filesystem_object_domain_identity",
+            "volume_or_mount_identity",
+            "metadata_fingerprint",
+        ],
+    )?;
+    validate_native_name_wire_shape(required_nested_object(
+        value,
+        "native_basename",
+        "native_target.native_locator.component.native_basename",
+    )?)?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "platform_file_identity",
+            "native_target.native_locator.component.platform_file_identity",
+        )?,
+        "native_target.native_locator.component.platform_file_identity",
+        "native_target.native_locator.component.platform_file_identity.value",
+        &["device", "inode"],
+    )?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "filesystem_object_domain_identity",
+            "native_target.native_locator.component.filesystem_object_domain_identity",
+        )?,
+        "native_target.native_locator.component.filesystem_object_domain_identity",
+        "native_target.native_locator.component.filesystem_object_domain_identity.value",
+        &["device"],
+    )?;
+    validate_identity_evidence_wire_shape(
+        required_nested_object(
+            value,
+            "volume_or_mount_identity",
+            "native_target.native_locator.component.volume_or_mount_identity",
+        )?,
+        "native_target.native_locator.component.volume_or_mount_identity",
+        "native_target.native_locator.component.volume_or_mount_identity.value",
+        &["value"],
+    )?;
+    Ok(())
+}
+
+fn validate_identity_evidence_wire_shape(
+    value: &Value,
+    field: &'static str,
+    known_value_field: &'static str,
+    known_value_keys: &[&str],
+) -> Result<(), CanonicalPlanError> {
+    let state = value.get("state").and_then(Value::as_str).ok_or_else(|| {
+        CanonicalPlanError::InvalidField {
+            field,
+            reason: "expected state string".to_string(),
+        }
+    })?;
+    match state {
+        "known" => {
+            ensure_allowed_object_keys(value, field, &["state", "value"])?;
+            ensure_allowed_object_keys(
+                required_nested_object(value, "value", known_value_field)?,
+                known_value_field,
+                known_value_keys,
+            )
+        }
+        "unknown" => ensure_allowed_object_keys(value, field, &["state", "reason"]),
+        _ => Err(CanonicalPlanError::InvalidField {
+            field,
+            reason: format!("unknown identity evidence state {state}"),
+        }),
+    }
+}
+
+fn validate_native_name_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(value, "native_target.native_name", &["kind", "value"])
+}
+
+fn validate_native_absolute_path_wire_shape(value: &Value) -> Result<(), CanonicalPlanError> {
+    ensure_allowed_object_keys(
+        value,
+        "native_target.native_locator.scan_root_absolute_path",
+        &["kind", "value"],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2011,6 +2316,103 @@ mod tests {
 
         let error = DeletionPlan::from_validated_value(value).unwrap_err();
         assert!(matches!(error, CanonicalPlanError::CanonicalDigestMismatch));
+    }
+
+    fn assert_unknown_field_rejected(value: Value, expected_field: &'static str) {
+        let error = DeletionPlan::from_validated_value(value).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalPlanError::InvalidField { field, ref reason }
+                if field == expected_field && reason.starts_with("unknown field "),
+        ));
+    }
+
+    fn native_plan_value() -> Value {
+        let candidate = live_candidate();
+        let mut input = base_input();
+        input.scan_root_identity = candidate
+            .locator
+            .scan_object_identity
+            .as_ref()
+            .unwrap()
+            .scan_root_id
+            .to_string();
+        input.items = vec![
+            plan_item_from_live_candidate(
+                "scan-1",
+                &input.scan_root_identity,
+                &candidate,
+                ExplanationDigest::new("explain-live"),
+                "action-live",
+                TargetIdentity::new("target-live"),
+                vec![PlanAction::new("action-live", RiskTier::R2)],
+                None,
+            )
+            .unwrap(),
+        ];
+        serde_json::to_value(DeletionPlan::from_input(input).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn validated_loader_rejects_unknown_plan_field_before_digest_verification() {
+        let mut value =
+            serde_json::to_value(DeletionPlan::from_input(base_input()).unwrap()).unwrap();
+        value["unexpected"] = json!(true);
+        value["canonical_digest"] = json!("not-the-plan-digest");
+
+        assert_unknown_field_rejected(value, "plan");
+    }
+
+    #[test]
+    fn validated_loader_rejects_unknown_item_field() {
+        let mut value =
+            serde_json::to_value(DeletionPlan::from_input(base_input()).unwrap()).unwrap();
+        value["items"][0]["unexpected"] = json!(true);
+
+        assert_unknown_field_rejected(value, "item");
+    }
+
+    #[test]
+    fn validated_loader_rejects_unknown_action_field() {
+        let mut value =
+            serde_json::to_value(DeletionPlan::from_input(base_input()).unwrap()).unwrap();
+        value["items"][0]["actions"][0]["unexpected"] = json!(true);
+
+        assert_unknown_field_rejected(value, "action");
+    }
+
+    #[test]
+    fn validated_loader_rejects_unknown_native_target_field() {
+        let mut value = native_plan_value();
+        value["items"][0]["native_target"]["unexpected"] = json!(true);
+
+        assert_unknown_field_rejected(value, "native_target");
+    }
+
+    #[test]
+    fn validated_loader_rejects_unknown_nested_locator_field() {
+        let mut value = native_plan_value();
+        value["items"][0]["native_target"]["native_locator"]["entry"]["native_basename"]["unexpected"] =
+            json!(true);
+
+        assert_unknown_field_rejected(value, "native_target.native_name");
+    }
+
+    #[test]
+    fn validated_loader_preserves_legacy_non_native_plan_shapes() {
+        let plan = DeletionPlan::from_input(base_input()).unwrap();
+        let missing_native_target = {
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value["items"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("native_target");
+            value
+        };
+        let null_native_target = serde_json::to_value(&plan).unwrap();
+
+        assert!(DeletionPlan::from_validated_value(missing_native_target).is_ok());
+        assert!(DeletionPlan::from_validated_value(null_native_target).is_ok());
     }
 
     #[test]
