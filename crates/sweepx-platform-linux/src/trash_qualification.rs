@@ -1,11 +1,11 @@
 //! Linux-only Trash qualification state-machine substrate.
 //!
-//! This module is deliberately compiled only for this crate's tests. It is not
-//! a platform adapter, contains no native Trash call, and cannot be reached by
-//! the CLI, core, or executor. The fake backend only exercises admission,
-//! one-shot intent ordering, and conservative reconciliation semantics.
+//! This module is deliberately compiled only for this crate's Linux tests and
+//! cannot be reached by the CLI, core, executor, or a normal/all-features
+//! library build. Deterministic fakes exercise its state machine; an optional
+//! nested GIO adapter can act only on a sealed generated disposable fixture.
 
-use std::ffi::{CString, OsString, c_int};
+use std::ffi::{CStr, CString, OsString, c_int};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use sweepx_fixtures::{GeneratedFixture, LinuxTrashTargetQualification};
+
+mod gio_trash;
 
 const INTENT_FILE: &str = "action-intent-v1";
 const OUTCOME_FILE: &str = "action-outcome-v1";
@@ -74,6 +76,49 @@ trait RuntimeInspector {
     fn effective_uid(&self) -> Result<u32, QualificationError>;
     fn capability_sets(&self) -> Result<CapabilitySets, QualificationError>;
     fn xdg_data_home(&self) -> Option<OsString>;
+}
+
+#[derive(Debug)]
+struct ProcessRuntime;
+
+impl RuntimeInspector for ProcessRuntime {
+    fn effective_uid(&self) -> Result<u32, QualificationError> {
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        Ok(unsafe { libc::geteuid() })
+    }
+
+    fn capability_sets(&self) -> Result<CapabilitySets, QualificationError> {
+        let status = fs::read_to_string("/proc/self/status")
+            .map_err(|error| QualificationError::io("read /proc/self/status", error))?;
+        Ok(CapabilitySets {
+            permitted: parse_proc_status_hex(&status, "CapPrm")?,
+            effective: parse_proc_status_hex(&status, "CapEff")?,
+            ambient: parse_proc_status_hex(&status, "CapAmb")?,
+        })
+    }
+
+    fn xdg_data_home(&self) -> Option<OsString> {
+        std::env::var_os("XDG_DATA_HOME")
+    }
+}
+
+fn parse_proc_status_hex(status: &str, field: &str) -> Result<u64, QualificationError> {
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
+        .map(str::trim)
+        .ok_or_else(|| {
+            QualificationError::new(
+                QualificationErrorKind::Admission,
+                format!("/proc/self/status omitted {field}"),
+            )
+        })?;
+    u64::from_str_radix(value, 16).map_err(|error| {
+        QualificationError::new(
+            QualificationErrorKind::Admission,
+            format!("invalid {field} in /proc/self/status: {error}"),
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +297,18 @@ impl NativeIdentity {
             && self.uid == other.uid
             && self.gid == other.gid
     }
+
+    fn same_directory_object_and_policy(self, other: Self) -> bool {
+        self.device_major == other.device_major
+            && self.device_minor == other.device_minor
+            && self.inode == other.inode
+            && self.mount_id == other.mount_id
+            && self.mode == other.mode
+            && self.uid == other.uid
+            && self.gid == other.gid
+            && (u32::from(self.mode) & libc::S_IFMT) == libc::S_IFDIR
+            && (u32::from(other.mode) & libc::S_IFMT) == libc::S_IFDIR
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +383,50 @@ impl PrivateDirectory {
         }
         Ok(DirectorySnapshot {
             identity: identity_after,
+            entries,
+        })
+    }
+
+    /// Observes an admitted directory after an operation is expected to add
+    /// entries. Directory size, timestamps, and link count may legitimately
+    /// change; identity, mount, type, ownership, mode, pathname binding, and a
+    /// stable enumeration window remain mandatory.
+    fn held_snapshot_after_content_change(
+        &self,
+        label: &str,
+    ) -> Result<DirectorySnapshot, QualificationError> {
+        let held_before = NativeIdentity::from_fd(&self.fd)?;
+        if !held_before.same_directory_object_and_policy(self.identity) {
+            return Err(QualificationError::new(
+                QualificationErrorKind::Evidence,
+                format!("held {label} identity or access policy changed"),
+            ));
+        }
+        let reopened = open_absolute_directory(&self.path)?;
+        if !NativeIdentity::from_fd(&reopened)?.same_directory_object_and_policy(self.identity) {
+            return Err(QualificationError::new(
+                QualificationErrorKind::Evidence,
+                format!("{label} pathname no longer names the admitted directory"),
+            ));
+        }
+        let mut entries = fs::read_dir(self.fd_path())
+            .map_err(|error| QualificationError::io(&format!("enumerate {label}"), error))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name())
+                    .map_err(|error| QualificationError::io(&format!("enumerate {label}"), error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+        let held_after = NativeIdentity::from_fd(&self.fd)?;
+        if held_after != held_before {
+            return Err(QualificationError::new(
+                QualificationErrorKind::Evidence,
+                format!("{label} changed while it was observed"),
+            ));
+        }
+        Ok(DirectorySnapshot {
+            identity: held_after,
             entries,
         })
     }
@@ -725,13 +826,17 @@ fn manifest_target_path(
 
 enum BackendSubmission {
     ReportedSuccess,
-    Error(BackendError),
+    ReportedFailure(BackendError),
+    Ambiguous(BackendError),
+    NotSubmitted(BackendError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendErrorClass {
+    Unavailable,
     NotSupported,
     Other,
+    Ambiguous,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -748,6 +853,24 @@ impl BackendError {
             domain: 0,
             code: -1,
             class: BackendErrorClass::Other,
+            detail: detail.into(),
+        }
+    }
+
+    fn unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            domain: 0,
+            code: -1,
+            class: BackendErrorClass::Unavailable,
+            detail: detail.into(),
+        }
+    }
+
+    fn ambiguous(detail: impl Into<String>) -> Self {
+        Self {
+            domain: 0,
+            code: -1,
+            class: BackendErrorClass::Ambiguous,
             detail: detail.into(),
         }
     }
@@ -770,9 +893,10 @@ trait TrashBackend {
 }
 
 trait BoundTrashBackend {
-    /// Consumes the sealed fake target binding and observes an already verified
-    /// durable intent. This private test contract must never be implemented by
-    /// a native adapter; real platform work requires a separate reviewed API.
+    /// Consumes a sealed, qualification-only target binding after observing an
+    /// already verified durable intent. This contract is private to a Linux
+    /// `cfg(test)` module; no product caller can construct a target or reach a
+    /// native implementation. It deliberately has only a Trash operation.
     fn submit_trash(self, intent: &DurableIntentToken) -> BackendSubmission;
     fn adapter_label(&self) -> &'static str;
 }
@@ -846,14 +970,102 @@ impl DurableIntentToken {
 }
 
 struct PrivateNativeTarget {
-    _identity: NativeIdentity,
+    identity: NativeIdentity,
+    parent_identity: NativeIdentity,
+    parent_fd: OwnedFd,
+    gio_parent_path: PathBuf,
+    basename: OsString,
+    gio_path: CString,
 }
 
 impl PrivateNativeTarget {
-    fn new(identity: NativeIdentity) -> Self {
-        Self {
-            _identity: identity,
+    /// Seals the only pathname accepted by the qualification adapter. GIO has
+    /// no dirfd-relative Trash API, so the final call must receive a pathname.
+    /// That pathname is derived here from the generated manifest (never caller
+    /// input), while the held parent plus exact basename remain authoritative
+    /// and are revalidated immediately before the GIO handoff. The lookup GIO
+    /// performs after that check is an unavoidable residual qualification race.
+    fn new(
+        identity: NativeIdentity,
+        parent_identity: NativeIdentity,
+        parent_fd: &OwnedFd,
+        target_path: &Path,
+    ) -> Result<Self, QualificationError> {
+        let gio_parent_path = target_path.parent().ok_or_else(|| {
+            QualificationError::new(
+                QualificationErrorKind::Admission,
+                "manifest-derived target has no parent",
+            )
+        })?;
+        let basename = target_path.file_name().ok_or_else(|| {
+            QualificationError::new(
+                QualificationErrorKind::Admission,
+                "manifest-derived target has no basename",
+            )
+        })?;
+        if !matches!(
+            target_path.components().next_back(),
+            Some(std::path::Component::Normal(_))
+        ) {
+            return Err(QualificationError::new(
+                QualificationErrorKind::Admission,
+                "manifest-derived target does not end in one normal basename",
+            ));
         }
+        let basename = basename.to_owned();
+        path_to_cstring(Path::new(&basename))?;
+        let gio_path = path_to_cstring(target_path)?;
+        // SAFETY: F_DUPFD_CLOEXEC duplicates the live, held parent descriptor
+        // and returns a new descriptor owned exclusively by this binding.
+        let parent_fd = unsafe { libc::fcntl(parent_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        let parent_fd = owned_fd(parent_fd, "duplicate held Trash parent")?;
+        let sealed = Self {
+            identity,
+            parent_identity,
+            parent_fd,
+            gio_parent_path: gio_parent_path.to_path_buf(),
+            basename,
+            gio_path,
+        };
+        sealed.verify_exact_binding()?;
+        Ok(sealed)
+    }
+
+    fn verify_exact_binding(&self) -> Result<(), QualificationError> {
+        if NativeIdentity::from_fd(&self.parent_fd)? != self.parent_identity {
+            return Err(QualificationError::new(
+                QualificationErrorKind::StaleBeforeSubmit,
+                "held Trash parent identity changed",
+            ));
+        }
+        let selected = open_beneath(&self.parent_fd, Path::new(&self.basename), false)?;
+        if NativeIdentity::from_fd(&selected)? != self.identity {
+            return Err(QualificationError::new(
+                QualificationErrorKind::StaleBeforeSubmit,
+                "exact Trash basename no longer resolves to the admitted target",
+            ));
+        }
+        // GIO cannot consume `parent_fd`, so separately require the pathname
+        // parent that GIO will traverse to resolve to this exact held parent.
+        let path_parent = open_absolute_directory(&self.gio_parent_path)?;
+        if NativeIdentity::from_fd(&path_parent)? != self.parent_identity {
+            return Err(QualificationError::new(
+                QualificationErrorKind::StaleBeforeSubmit,
+                "GIO pathname parent no longer resolves to the held Trash parent",
+            ));
+        }
+        let path_selected = open_beneath(&path_parent, Path::new(&self.basename), false)?;
+        if NativeIdentity::from_fd(&path_selected)? != self.identity {
+            return Err(QualificationError::new(
+                QualificationErrorKind::StaleBeforeSubmit,
+                "GIO pathname no longer resolves to the admitted target",
+            ));
+        }
+        Ok(())
+    }
+
+    fn gio_path(&self) -> &CStr {
+        &self.gio_path
     }
 }
 
@@ -970,11 +1182,15 @@ impl<B: TrashBackend> FixtureTrashScope<B> {
             admitted_euid,
             containment,
         } = self;
-        let backend = backend
-            .probe_and_bind(PrivateNativeTarget::new(containment.target_identity))
-            .map_err(|error| {
-                QualificationError::new(QualificationErrorKind::Probe, error.to_string())
-            })?;
+        let native_target = PrivateNativeTarget::new(
+            containment.target_identity,
+            containment.parent_identity,
+            &containment.parent_fd,
+            &target_path,
+        )?;
+        let backend = backend.probe_and_bind(native_target).map_err(|error| {
+            QualificationError::new(QualificationErrorKind::Probe, error.to_string())
+        })?;
         let scope = FixtureTrashScope {
             target,
             top_dir,
@@ -1044,6 +1260,51 @@ fn verify_runtime_binding(
     xdg_data_home.verify_path_binding("XDG data home")
 }
 
+fn verify_runtime_after_submit(
+    runtime: &dyn RuntimeInspector,
+    admitted_euid: u32,
+    xdg_data_home: &PrivateDirectory,
+) -> Result<(), QualificationError> {
+    let euid = runtime.effective_uid()?;
+    if euid != admitted_euid || !runtime.capability_sets()?.is_empty() {
+        return Err(QualificationError::new(
+            QualificationErrorKind::Evidence,
+            "exact ordinary-user runtime evidence changed after submission",
+        ));
+    }
+    let configured = runtime.xdg_data_home().ok_or_else(|| {
+        QualificationError::new(
+            QualificationErrorKind::Evidence,
+            "XDG_DATA_HOME disappeared after submission",
+        )
+    })?;
+    let configured = PathBuf::from(configured)
+        .canonicalize()
+        .map_err(|error| QualificationError::io("canonicalize XDG_DATA_HOME", error))?;
+    if configured != xdg_data_home.path {
+        return Err(QualificationError::new(
+            QualificationErrorKind::Evidence,
+            "XDG_DATA_HOME changed after submission",
+        ));
+    }
+    let current = NativeIdentity::from_fd(&xdg_data_home.fd)?;
+    if !current.same_directory_object_and_policy(xdg_data_home.identity) {
+        return Err(QualificationError::new(
+            QualificationErrorKind::Evidence,
+            "held XDG data home identity or access policy changed after submission",
+        ));
+    }
+    let reopened = open_absolute_directory(&xdg_data_home.path)?;
+    if !NativeIdentity::from_fd(&reopened)?.same_directory_object_and_policy(xdg_data_home.identity)
+    {
+        return Err(QualificationError::new(
+            QualificationErrorKind::Evidence,
+            "XDG data home pathname was rebound after submission",
+        ));
+    }
+    Ok(())
+}
+
 struct ProbedFixtureTrash<B: BoundTrashBackend> {
     scope: FixtureTrashScope<B>,
 }
@@ -1080,6 +1341,7 @@ impl<B: BoundTrashBackend> ProbedFixtureTrash<B> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrashOutcomeKind {
     NotSubmittedStale,
+    PlatformReportedSourceRemoved,
     Indeterminate,
 }
 
@@ -1136,8 +1398,8 @@ impl<B: BoundTrashBackend> ArmedFixtureTrash<B> {
 
         let intent = write_intent(&self.evidence_root, &self.scope)?;
 
-        // Audit durability can take time. Repeat the full check immediately after
-        // fsync and directly before the one and only fake submission.
+        // Audit durability can take time. Repeat the full check immediately
+        // after fsync and before the one and only qualification submission.
         if let Err(error) = self
             .scope
             .recheck(QualificationErrorKind::StaleBeforeSubmit)
@@ -1203,28 +1465,46 @@ impl<B: BoundTrashBackend> ArmedFixtureTrash<B> {
                 ),
             )
         })?;
-        let _runtime_stable = verify_runtime_binding(
-            runtime.as_ref(),
-            admitted_euid,
-            &xdg_data_home,
-            QualificationErrorKind::Evidence,
-        )
-        .is_ok();
-        let _xdg_unchanged = xdg_data_home
-            .held_snapshot("XDG data home")
-            .is_ok_and(|snapshot| snapshot == xdg_before);
-        let _source_unchanged =
+        let runtime_stable =
+            verify_runtime_after_submit(runtime.as_ref(), admitted_euid, &xdg_data_home).is_ok();
+        let xdg_changed = xdg_data_home
+            .held_snapshot_after_content_change("XDG data home")
+            .is_ok_and(|snapshot| snapshot.entries != xdg_before.entries);
+        let source_removed = target.verify_target_removed_and_rest_unchanged().is_ok();
+        let source_unchanged =
             target.verify_unchanged().is_ok() && containment.verify(&top_dir, &target_path).is_ok();
 
         let outcome = match platform_result {
+            BackendSubmission::ReportedSuccess
+                if runtime_stable && xdg_changed && source_removed =>
+            {
+                TrashOutcome {
+                    kind: TrashOutcomeKind::PlatformReportedSourceRemoved,
+                    detail: "platform reported Trash success, the exact fixture source was removed, the remaining fixture matched its oracle, and the isolated XDG namespace changed".to_string(),
+                }
+            }
             BackendSubmission::ReportedSuccess => TrashOutcome {
                 kind: TrashOutcomeKind::Indeterminate,
-                detail: "fake backend reported success, but this no-mutation substrate has no native adapter or conclusive stable Trash evidence".to_string(),
+                detail: format!(
+                    "Trash backend reported success without complete qualification evidence: runtime_stable={runtime_stable} xdg_changed={xdg_changed} source_removed={source_removed}"
+                ),
             },
-            BackendSubmission::Error(error) => TrashOutcome {
+            BackendSubmission::ReportedFailure(error) => TrashOutcome {
                 kind: TrashOutcomeKind::Indeterminate,
                 detail: format!(
-                    "fake backend error; this substrate has no native non-submission proof: {error}"
+                    "Trash backend reported failure after submission; source_unchanged={source_unchanged}, but reconciliation remains conservative: {error}"
+                ),
+            },
+            BackendSubmission::Ambiguous(error) => TrashOutcome {
+                kind: TrashOutcomeKind::Indeterminate,
+                detail: format!(
+                    "Trash backend returned a contradictory or incomplete result; source_unchanged={source_unchanged}; reconciliation is required: {error}"
+                ),
+            },
+            BackendSubmission::NotSubmitted(error) => TrashOutcome {
+                kind: TrashOutcomeKind::Indeterminate,
+                detail: format!(
+                    "Trash backend did not submit; source_unchanged={source_unchanged}, but this post-intent seam does not promote that report without a durable no-submit attestation: {error}"
                 ),
             },
         };
@@ -1476,6 +1756,8 @@ fn create_new_synced(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::CStr;
+    use std::process::Command;
     use std::rc::Rc;
 
     use sweepx_fixtures::{generate_from_manifest, linux_p4_trash_manifest};
@@ -1544,6 +1826,75 @@ mod tests {
         intent_observed: Rc<Cell<bool>>,
     }
 
+    struct FakeGioCalls {
+        can_trash: Result<bool, BackendError>,
+        submission: BackendSubmission,
+        probe_calls: Rc<Cell<usize>>,
+        trash_calls: Rc<Cell<usize>>,
+    }
+
+    struct RebindGioParentOnProbe {
+        top_dir: PathBuf,
+        trash_calls: Rc<Cell<usize>>,
+    }
+
+    impl gio_trash::GioCalls for RebindGioParentOnProbe {
+        fn can_trash(&self, _path: &CStr) -> Result<bool, BackendError> {
+            let parent = self.top_dir.parent().expect("fixture top has a parent");
+            let displaced = parent.join("displaced-linux-trash-top");
+            fs::rename(&self.top_dir, &displaced).expect("displace admitted target parent");
+            fs::create_dir(&self.top_dir).expect("replace target parent pathname");
+            fs::set_permissions(&self.top_dir, fs::Permissions::from_mode(0o700))
+                .expect("make replacement parent private");
+            Ok(true)
+        }
+
+        fn trash(&self, _path: &CStr) -> BackendSubmission {
+            self.trash_calls.set(self.trash_calls.get() + 1);
+            BackendSubmission::ReportedSuccess
+        }
+    }
+
+    impl gio_trash::GioCalls for FakeGioCalls {
+        fn can_trash(&self, _path: &CStr) -> Result<bool, BackendError> {
+            self.probe_calls.set(self.probe_calls.get() + 1);
+            match &self.can_trash {
+                Ok(value) => Ok(*value),
+                Err(error) => Err(BackendError {
+                    domain: error.domain,
+                    code: error.code,
+                    class: error.class,
+                    detail: error.detail.clone(),
+                }),
+            }
+        }
+
+        fn trash(&self, _path: &CStr) -> BackendSubmission {
+            self.trash_calls.set(self.trash_calls.get() + 1);
+            match &self.submission {
+                BackendSubmission::ReportedSuccess => BackendSubmission::ReportedSuccess,
+                BackendSubmission::ReportedFailure(error) => {
+                    BackendSubmission::ReportedFailure(clone_backend_error(error))
+                }
+                BackendSubmission::Ambiguous(error) => {
+                    BackendSubmission::Ambiguous(clone_backend_error(error))
+                }
+                BackendSubmission::NotSubmitted(error) => {
+                    BackendSubmission::NotSubmitted(clone_backend_error(error))
+                }
+            }
+        }
+    }
+
+    fn clone_backend_error(error: &BackendError) -> BackendError {
+        BackendError {
+            domain: error.domain,
+            code: error.code,
+            class: error.class,
+            detail: error.detail.clone(),
+        }
+    }
+
     impl FakeBackend {
         fn new(behavior: FakeBehavior) -> Self {
             Self {
@@ -1583,7 +1934,7 @@ mod tests {
             self.submit_calls.set(self.submit_calls.get() + 1);
             match self.behavior {
                 FakeBehavior::ErrorUnchanged => {
-                    BackendSubmission::Error(BackendError::synthetic("synthetic failure"))
+                    BackendSubmission::ReportedFailure(BackendError::synthetic("synthetic failure"))
                 }
                 FakeBehavior::ReportedSuccessUnchanged => BackendSubmission::ReportedSuccess,
             }
@@ -1825,6 +2176,182 @@ mod tests {
         assert_eq!(error.kind, QualificationErrorKind::Probe);
         assert_eq!(probe_calls.get(), 1);
         assert_eq!(submit_calls.get(), 0);
+    }
+
+    #[test]
+    fn gio_backend_unavailable_never_submits() {
+        let fixture = HarnessFixture::new();
+        let loader_calls = Rc::new(Cell::new(0));
+        let observed_loader_calls = Rc::clone(&loader_calls);
+        let backend = gio_trash::GioTrashBackend::with_loader(move || {
+            observed_loader_calls.set(observed_loader_calls.get() + 1);
+            Err::<FakeGioCalls, _>(BackendError::unavailable("GIO runtime unavailable"))
+        });
+        let error = FixtureTrashScope::admit_with(
+            &fixture.generated,
+            TARGET_ENTRY_ID,
+            &fixture.xdg,
+            backend,
+            Box::new(FakeRuntime::ordinary(&fixture.xdg)),
+        )
+        .expect("admit fixture scope")
+        .probe()
+        .err()
+        .expect("unavailable backend must fail at probe");
+        assert_eq!(error.kind, QualificationErrorKind::Probe);
+        assert!(error.detail.contains("GIO runtime unavailable"));
+        assert_eq!(loader_calls.get(), 1);
+        assert!(
+            fixture
+                .generated
+                .top_dir()
+                .join("trash-target.txt")
+                .is_file()
+        );
+        assert!(!fixture.evidence.join(INTENT_FILE).exists());
+    }
+
+    #[test]
+    fn gio_can_trash_false_never_submits() {
+        let fixture = HarnessFixture::new();
+        let probe_calls = Rc::new(Cell::new(0));
+        let trash_calls = Rc::new(Cell::new(0));
+        let calls = FakeGioCalls {
+            can_trash: Ok(false),
+            submission: BackendSubmission::ReportedSuccess,
+            probe_calls: Rc::clone(&probe_calls),
+            trash_calls: Rc::clone(&trash_calls),
+        };
+        let backend = gio_trash::GioTrashBackend::with_loader(move || Ok(calls));
+        let error = FixtureTrashScope::admit_with(
+            &fixture.generated,
+            TARGET_ENTRY_ID,
+            &fixture.xdg,
+            backend,
+            Box::new(FakeRuntime::ordinary(&fixture.xdg)),
+        )
+        .expect("admit fixture scope")
+        .probe()
+        .err()
+        .expect("can-trash=false must fail at probe");
+        assert_eq!(error.kind, QualificationErrorKind::Probe);
+        assert!(error.detail.contains("NotSupported"));
+        assert_eq!(probe_calls.get(), 1);
+        assert_eq!(trash_calls.get(), 0);
+        assert!(!fixture.evidence.join(INTENT_FILE).exists());
+    }
+
+    fn assert_gio_submitted_result_is_indeterminate(submission: BackendSubmission) -> String {
+        let fixture = HarnessFixture::new();
+        let probe_calls = Rc::new(Cell::new(0));
+        let trash_calls = Rc::new(Cell::new(0));
+        let calls = FakeGioCalls {
+            can_trash: Ok(true),
+            submission,
+            probe_calls: Rc::clone(&probe_calls),
+            trash_calls: Rc::clone(&trash_calls),
+        };
+        let backend = gio_trash::GioTrashBackend::with_loader(move || Ok(calls));
+        let outcome = FixtureTrashScope::admit_with(
+            &fixture.generated,
+            TARGET_ENTRY_ID,
+            &fixture.xdg,
+            backend,
+            Box::new(FakeRuntime::ordinary(&fixture.xdg)),
+        )
+        .expect("admit fixture scope")
+        .probe()
+        .expect("probe GIO backend")
+        .arm(&fixture.evidence)
+        .expect("arm fixture scope")
+        .trash()
+        .expect("record conservative outcome");
+        assert_eq!(outcome.kind, TrashOutcomeKind::Indeterminate);
+        assert_eq!(probe_calls.get(), 1);
+        assert_eq!(trash_calls.get(), 1);
+        assert!(fixture.evidence.join(INTENT_FILE).is_file());
+        assert!(fixture.evidence.join(OUTCOME_FILE).is_file());
+        assert!(
+            fixture
+                .generated
+                .top_dir()
+                .join("trash-target.txt")
+                .is_file(),
+            "mocked failure or ambiguity must never trigger a fallback mutation"
+        );
+        outcome.detail
+    }
+
+    #[test]
+    fn gio_not_supported_after_submit_is_indeterminate_and_never_falls_back() {
+        let detail = assert_gio_submitted_result_is_indeterminate(
+            BackendSubmission::ReportedFailure(BackendError {
+                domain: 9,
+                code: 15,
+                class: BackendErrorClass::NotSupported,
+                detail: "synthetic G_IO_ERROR_NOT_SUPPORTED".to_string(),
+            }),
+        );
+        assert!(detail.contains("NotSupported"));
+    }
+
+    #[test]
+    fn gio_exdev_after_submit_is_indeterminate_and_never_falls_back() {
+        let detail = assert_gio_submitted_result_is_indeterminate(
+            BackendSubmission::ReportedFailure(BackendError {
+                domain: 9,
+                code: libc::EXDEV,
+                class: BackendErrorClass::Other,
+                detail: "synthetic cross-device GIO failure".to_string(),
+            }),
+        );
+        assert!(detail.contains(&format!("code={}", libc::EXDEV)));
+    }
+
+    #[test]
+    fn gio_generic_failure_is_indeterminate_and_never_falls_back() {
+        let detail = assert_gio_submitted_result_is_indeterminate(
+            BackendSubmission::ReportedFailure(BackendError {
+                domain: 9,
+                code: 13,
+                class: BackendErrorClass::Other,
+                detail: "synthetic GIO failure".to_string(),
+            }),
+        );
+        assert!(detail.contains("synthetic GIO failure"));
+    }
+
+    #[test]
+    fn gio_ambiguous_result_is_indeterminate_and_never_falls_back() {
+        let detail = assert_gio_submitted_result_is_indeterminate(BackendSubmission::Ambiguous(
+            BackendError::ambiguous("contradictory GIO result"),
+        ));
+        assert!(detail.contains("reconciliation is required"));
+    }
+
+    #[test]
+    fn gio_parent_path_rebind_is_rejected_before_submission() {
+        let fixture = HarnessFixture::new();
+        let trash_calls = Rc::new(Cell::new(0));
+        let calls = RebindGioParentOnProbe {
+            top_dir: fixture.generated.top_dir().to_path_buf(),
+            trash_calls: Rc::clone(&trash_calls),
+        };
+        let backend = gio_trash::GioTrashBackend::with_loader(move || Ok(calls));
+        let error = FixtureTrashScope::admit_with(
+            &fixture.generated,
+            TARGET_ENTRY_ID,
+            &fixture.xdg,
+            backend,
+            Box::new(FakeRuntime::ordinary(&fixture.xdg)),
+        )
+        .expect("admit fixture scope")
+        .probe()
+        .err()
+        .expect("rebound GIO parent must fail before submission");
+        assert_eq!(error.kind, QualificationErrorKind::Probe);
+        assert_eq!(trash_calls.get(), 0);
+        assert!(!fixture.evidence.join(INTENT_FILE).exists());
     }
 
     #[test]
@@ -2079,5 +2606,155 @@ mod tests {
         assert_eq!(outcome.kind, TrashOutcomeKind::NotSubmittedStale);
         assert_eq!(submit_calls.get(), 0);
         assert!(!fixture.evidence.join(INTENT_FILE).exists());
+    }
+
+    /// This is the sole real OS mutation test. It is ignored unless a human
+    /// explicitly starts it with `SWEEPX_RUN_REAL_GIO_TRASH=1`. The parent test
+    /// creates a private temporary root and starts an isolated child with XDG
+    /// configured before GLib initialization. The child refuses root/capabilities,
+    /// nonempty XDG roots, unqualified filesystems, non-generated targets, and
+    /// any isolation-root marker that does not name its actual parent process.
+    #[test]
+    #[ignore = "requires explicit opt-in; test generates an isolated child/XDG fixture"]
+    fn real_gio_trash_only_generated_disposable_fixture() {
+        if std::env::var_os("SWEEPX_REAL_GIO_CHILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            run_real_gio_trash_child();
+            return;
+        }
+        assert_eq!(
+            std::env::var_os("SWEEPX_RUN_REAL_GIO_TRASH").as_deref(),
+            Some(std::ffi::OsStr::new("1")),
+            "set SWEEPX_RUN_REAL_GIO_TRASH=1 to create a disposable isolated child process"
+        );
+
+        let isolated_parent = std::env::current_dir().expect("current test directory");
+        let isolated = tempfile::Builder::new()
+            .prefix(".sweepx-real-gio-")
+            .tempdir_in(isolated_parent)
+            .expect("generated real-GIO isolation root");
+        fs::set_permissions(isolated.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let xdg = isolated.path().join("xdg-data");
+        fs::create_dir(&xdg).expect("generated isolated XDG_DATA_HOME");
+        fs::set_permissions(&xdg, fs::Permissions::from_mode(0o700)).unwrap();
+        let parent_pid = std::process::id().to_string();
+        fs::write(isolated.path().join("parent.pid"), &parent_pid)
+            .expect("write generated-child marker");
+
+        // Spawn this test binary directly (never a shell or gio CLI), so GLib
+        // sees its generated XDG_DATA_HOME before it can initialize or cache it.
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--ignored",
+                "--exact",
+                "trash_qualification::tests::real_gio_trash_only_generated_disposable_fixture",
+                "--nocapture",
+            ])
+            .env("SWEEPX_REAL_GIO_CHILD", "1")
+            .env("SWEEPX_REAL_GIO_ROOT", isolated.path())
+            .env("XDG_DATA_HOME", &xdg)
+            .env_remove("SWEEPX_RUN_REAL_GIO_TRASH")
+            .output()
+            .expect("run isolated real-GIO child");
+        assert!(
+            output.status.success(),
+            "isolated real-GIO child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn run_real_gio_trash_child() {
+        let isolated = std::env::var_os("SWEEPX_REAL_GIO_ROOT")
+            .map(PathBuf::from)
+            .expect("parent supplied generated real-GIO root")
+            .canonicalize()
+            .expect("canonical generated real-GIO root");
+        let isolated_metadata =
+            fs::symlink_metadata(&isolated).expect("inspect generated real-GIO root");
+        // SAFETY: geteuid/getppid have no preconditions and do not mutate state.
+        let (euid, parent_pid) = unsafe { (libc::geteuid(), libc::getppid()) };
+        assert!(
+            isolated_metadata.is_dir()
+                && isolated_metadata.uid() == euid
+                && isolated_metadata.mode() & 0o077 == 0,
+            "generated isolation root must be a private runtime-owned directory"
+        );
+        let recorded_parent = fs::read_to_string(isolated.join("parent.pid"))
+            .expect("read generated-child marker")
+            .parse::<libc::pid_t>()
+            .expect("parse generated-child marker");
+        assert_eq!(
+            recorded_parent, parent_pid,
+            "real GIO child must be attached to the process that generated its fixture"
+        );
+
+        let xdg = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .expect("parent supplied generated XDG_DATA_HOME")
+            .canonicalize()
+            .expect("canonical generated XDG_DATA_HOME");
+        assert_eq!(xdg.parent(), Some(isolated.as_path()));
+        let xdg_metadata = fs::symlink_metadata(&xdg).expect("inspect isolated XDG_DATA_HOME");
+        assert!(
+            xdg_metadata.is_dir() && xdg_metadata.uid() == euid && xdg_metadata.mode() & 0o077 == 0
+        );
+        assert!(
+            fs::read_dir(&xdg)
+                .expect("enumerate isolated XDG_DATA_HOME")
+                .next()
+                .is_none(),
+            "isolated XDG_DATA_HOME must start empty"
+        );
+
+        let fixture_root = isolated.join("fixture-root");
+        let evidence_root = isolated.join("evidence");
+        fs::create_dir(&fixture_root).expect("generated fixture root");
+        fs::create_dir(&evidence_root).expect("generated evidence root");
+        fs::set_permissions(&fixture_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&evidence_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let filesystem = MountRecord::for_path(&fixture_root)
+            .expect("fixture mount")
+            .filesystem;
+        assert!(is_qualified_local_filesystem(&filesystem));
+        let manifest = linux_p4_trash_manifest(filesystem);
+        let generated = generate_from_manifest(&fixture_root, &manifest).expect("generate fixture");
+
+        let outcome = FixtureTrashScope::admit_with(
+            &generated,
+            TARGET_ENTRY_ID,
+            &xdg,
+            gio_trash::GioTrashBackend::dynamically_loaded(),
+            Box::new(ProcessRuntime),
+        )
+        .expect("admit generated fixture only")
+        .probe()
+        .expect("probe GIO Trash")
+        .arm(&evidence_root)
+        .expect("arm durable qualification evidence")
+        .trash()
+        .expect("submit once and persist conservative outcome");
+
+        assert_eq!(
+            outcome.kind,
+            TrashOutcomeKind::PlatformReportedSourceRemoved,
+            "real GIO qualification was not conclusive: {}",
+            outcome.detail
+        );
+        assert!(
+            !generated.top_dir().join("trash-target.txt").exists(),
+            "the exact generated fixture target must be absent"
+        );
+        assert!(
+            fs::read_dir(&xdg)
+                .expect("enumerate isolated XDG_DATA_HOME after GIO")
+                .next()
+                .is_some(),
+            "GIO must create evidence inside the isolated XDG namespace"
+        );
+        generated
+            .select_linux_trash_target(TARGET_ENTRY_ID)
+            .expect_err("single-use authority must already be consumed");
+        assert!(evidence_root.join(INTENT_FILE).is_file());
+        assert!(evidence_root.join(OUTCOME_FILE).is_file());
     }
 }
