@@ -1853,8 +1853,23 @@ mod tests {
                 CARGO_TARGET.rule_files,
                 CARGO_TARGET.evidence_files
             ),
-            Err(CatalogError::UnknownOrDefaultedField(path))
-                if path.starts_with("cleaner.json:")
+            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_top_level_rule_field_is_rejected() {
+        let mut rule: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
+        rule["unexpectedField"] = Value::Bool(true);
+        let rule_bytes = to_vec(&rule).unwrap();
+        assert!(matches!(
+            CARGO_TARGET.load_with(
+                CARGO_TARGET.manifest_bytes,
+                CARGO_TARGET.signature_bytes,
+                &[("rules/cargo-target.json", &rule_bytes)],
+                CARGO_TARGET.evidence_files
+            ),
+            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
         ));
     }
 
@@ -1870,8 +1885,7 @@ mod tests {
                 &[("rules/cargo-target.json", &rule_bytes)],
                 CARGO_TARGET.evidence_files
             ),
-            Err(CatalogError::UnknownOrDefaultedField(path))
-                if path.starts_with("rules/cargo-target.json:")
+            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
         ));
 
         let mut signature: Value = from_slice(CARGO_TARGET.signature_bytes).unwrap();
@@ -1886,6 +1900,29 @@ mod tests {
             ),
             Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
         ));
+    }
+
+    #[test]
+    fn unknown_nested_ast_fields_are_rejected_by_catalog_loader() {
+        let mut call: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
+        call["analysis"]["factPredicates"][0]["unexpectedField"] = Value::Bool(true);
+
+        let mut field_ref: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
+        field_ref["analysis"]["factPredicates"][0]["args"][0]["unexpectedField"] =
+            Value::Bool(true);
+
+        for rule in [call, field_ref] {
+            let rule_bytes = to_vec(&rule).unwrap();
+            assert!(matches!(
+                CARGO_TARGET.load_with(
+                    CARGO_TARGET.manifest_bytes,
+                    CARGO_TARGET.signature_bytes,
+                    &[("rules/cargo-target.json", &rule_bytes)],
+                    CARGO_TARGET.evidence_files
+                ),
+                Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
+            ));
+        }
     }
 
     #[test]

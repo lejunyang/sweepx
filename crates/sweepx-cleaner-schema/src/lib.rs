@@ -39,7 +39,7 @@ const PLACEHOLDER_DIGESTS: [&str; 16] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CleanerManifest {
     pub schema: String,
     pub id: String,
@@ -63,7 +63,7 @@ pub struct CleanerManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublisherRef {
     pub id: String,
     pub key_id: String,
@@ -169,7 +169,7 @@ pub enum CleanerRevocationTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestRequirements {
     pub core: String,
     pub scanner_semantics: Vec<u32>,
@@ -179,14 +179,14 @@ pub struct ManifestRequirements {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformSpec {
     pub os: Os,
     pub arch: Vec<Arch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TargetVersions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo: Option<String>,
@@ -196,7 +196,7 @@ pub struct TargetVersions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestCapabilities {
     pub discover: ManifestCapabilityStage,
     pub semantic_query: Vec<String>,
@@ -207,14 +207,14 @@ pub struct ManifestCapabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestCapabilityStage {
     pub required: Vec<String>,
     pub optional: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RootRef {
     KnownFolder { id: String },
     ExplicitScanRoot,
@@ -224,7 +224,7 @@ pub enum RootRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfigDecoder {
     pub id: String,
     pub schema: String,
@@ -239,7 +239,7 @@ pub struct ConfigDecoder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestRuleRef {
     pub id: String,
     pub path: String,
@@ -247,7 +247,7 @@ pub struct ManifestRuleRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CleanerRule {
     pub schema: String,
     pub id: String,
@@ -271,7 +271,7 @@ pub struct CleanerRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DiscoverySpec {
     pub effect_class: EffectClass,
     pub capabilities: Vec<String>,
@@ -283,7 +283,7 @@ pub struct DiscoverySpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Selector {
     ExactBasename {
         values: Vec<String>,
@@ -303,7 +303,7 @@ pub enum Selector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnalysisSpec {
     pub fact_predicates: Vec<Predicate>,
     pub inference_predicates: Vec<Predicate>,
@@ -311,21 +311,21 @@ pub struct AnalysisSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RiskSpec {
     pub floor: RiskTier,
     pub monotonic_raises: Vec<MonotonicRaise>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MonotonicRaise {
     pub when: Predicate,
     pub to: RiskTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposalSpec {
     pub disposition: Disposition,
     pub supported_action: SupportedAction,
@@ -395,7 +395,7 @@ pub enum TaggedU64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeProbeDescriptor {
     pub schema: String,
     pub id: String,
@@ -416,7 +416,7 @@ pub struct NativeProbeDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProbeArtifact {
     pub os: Os,
     pub arch: Arch,
@@ -429,7 +429,7 @@ pub struct ProbeArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficialCommandDescriptor {
     pub schema: String,
     pub id: String,
@@ -459,7 +459,7 @@ pub struct OfficialCommandDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandExecutable {
     pub absolute_path_source: Value,
     pub owner_policy: Value,
@@ -468,8 +468,7 @@ pub struct CommandExecutable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase", untagged, deny_unknown_fields)]
 pub enum ArgvSegment {
     Literal {
         literal: String,
@@ -481,14 +480,14 @@ pub enum ArgvSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WriteMonitor {
     pub allowed_disposable_scopes: Vec<String>,
     pub fail_on_other_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandOutput {
     pub schema: String,
     pub parser_id: String,
@@ -496,7 +495,7 @@ pub struct CommandOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RetryPolicy {
     pub max_retries: u32,
 }
@@ -620,7 +619,7 @@ pub enum Arch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum Predicate {
     Call {
         op: PredicateOp,
@@ -629,7 +628,7 @@ pub enum Predicate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum PredicateArg {
     FieldRef { field: String },
     Predicate(Box<Predicate>),
@@ -1471,10 +1470,91 @@ mod tests {
         })
     }
 
+    fn cleaner_manifest_json() -> Value {
+        json!({
+            "schema": CLEANER_MANIFEST_SCHEMA,
+            "id": "org.sweepx.test",
+            "version": "1.0.0",
+            "description": "test cleaner",
+            "publisher": {"id": "org.sweepx", "keyId": "key-1"},
+            "packageDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "requires": {
+                "core": ">=1.0.0, <2.0.0",
+                "scannerSemantics": [1],
+                "candidateSchema": [1],
+                "ruleSchema": [1],
+                "nativeProbeAbi": [1]
+            },
+            "platforms": [{"os": "linux", "arch": ["x86_64"]}],
+            "targetVersions": {"unknown": "report_only"},
+            "capabilities": {
+                "discover": {"required": [], "optional": []},
+                "semanticQuery": [],
+                "analyze": [],
+                "planProposal": [],
+                "officialMutation": [],
+                "postActionVerification": []
+            },
+            "roots": [],
+            "configDecoders": [],
+            "rules": [{
+                "id": "cargo-target-v1",
+                "path": "rules/cargo-target.json",
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }],
+            "probes": [],
+            "officialCommands": [],
+            "riskFloor": "R1",
+            "supportedActions": ["report"],
+            "references": [],
+            "expiresAt": "2027-08-26T00:00:00Z"
+        })
+    }
+
     #[test]
     fn valid_rule_passes_validation() {
         let rule: CleanerRule = serde_json::from_value(cargo_rule_json()).expect("parse rule");
         assert_eq!(rule.validate(), Ok(()));
+    }
+
+    #[test]
+    fn manifest_deserialization_rejects_unknown_top_level_and_tagged_variant_fields() {
+        let mut top_level = cleaner_manifest_json();
+        top_level["unexpectedField"] = json!(true);
+        serde_json::from_value::<CleanerManifest>(top_level)
+            .expect_err("unknown top-level manifest field must fail");
+
+        let mut tagged_variant = cleaner_manifest_json();
+        tagged_variant["roots"] = json!([{
+            "kind": "known-folder",
+            "id": "cache",
+            "unexpectedField": true
+        }]);
+        serde_json::from_value::<CleanerManifest>(tagged_variant)
+            .expect_err("unknown internally tagged root field must fail");
+    }
+
+    #[test]
+    fn rule_deserialization_rejects_unknown_top_level_and_nested_ast_fields() {
+        let mut top_level = cargo_rule_json();
+        top_level["unexpectedField"] = json!(true);
+        serde_json::from_value::<CleanerRule>(top_level)
+            .expect_err("unknown top-level rule field must fail");
+
+        let mut tagged_variant = cargo_rule_json();
+        tagged_variant["selectors"][0]["unexpectedField"] = json!(true);
+        serde_json::from_value::<CleanerRule>(tagged_variant)
+            .expect_err("unknown internally tagged selector field must fail");
+
+        let mut call = cargo_rule_json();
+        call["analysis"]["factPredicates"][0]["unexpectedField"] = json!(true);
+        serde_json::from_value::<CleanerRule>(call)
+            .expect_err("unknown predicate call field must fail");
+
+        let mut field_ref = cargo_rule_json();
+        field_ref["analysis"]["factPredicates"][0]["args"][0]["unexpectedField"] = json!(true);
+        serde_json::from_value::<CleanerRule>(field_ref)
+            .expect_err("unknown predicate argument field must fail");
     }
 
     #[test]
