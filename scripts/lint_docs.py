@@ -12,6 +12,7 @@ The checks intentionally cover only repository-local invariants:
 from __future__ import annotations
 
 import argparse
+import bisect
 import datetime as dt
 import html
 import re
@@ -66,8 +67,10 @@ CHINESE_NEGATION_RE = re.compile(
 )
 SENTENCE_BOUNDARY_RE = re.compile(r"[.!?;|。！？；]")
 CLAUSE_BOUNDARY_RE = re.compile(
-    r"(?:[,，:]\s*|\b)(?:but|yet|however|whereas|and)\b"
-    r"|(?:[,，:]\s*)?(?:但是|但|然而|不过|而且|并且|且)",
+    r"(?:[,，:]\s*|\b)(?:but|yet|however|whereas|while|although|though)\b"
+    r"|\band\s+(?=(?:this|that|the|an?|it|we|they|he|she)\b)"
+    r"|(?:[,，:]\s*)?(?:但是|然而|不过|但(?!作)|而(?!不是))"
+    r"|(?:而且|并且|且)\s*(?=(?:这|该|它|其|本))",
     re.IGNORECASE,
 )
 CLAIM_REPORTING_VERB_RE = re.compile(
@@ -151,8 +154,10 @@ def _find_label_end(text: str, opening: int) -> int | None:
     return None
 
 
-def _skip_link_whitespace(text: str, index: int) -> int | None:
-    """Skip spaces and at most one line ending inside link syntax."""
+def _skip_link_whitespace(
+    text: str, index: int, *, max_line_endings: int = 1
+) -> int | None:
+    """Skip spaces and a bounded number of line endings in link syntax."""
 
     line_endings = 0
     while index < len(text):
@@ -167,7 +172,7 @@ def _skip_link_whitespace(text: str, index: int) -> int | None:
             index += 1
         else:
             break
-        if line_endings > 1:
+        if line_endings > max_line_endings:
             return None
     return index
 
@@ -286,7 +291,7 @@ def _reference_definitions(
         label = _normalize_reference_label(text[opening + 1 : label_end])
         if not label:
             continue
-        index = _skip_link_whitespace(text, label_end + 2)
+        index = _skip_link_whitespace(text, label_end + 2, max_line_endings=1)
         if index is None or index >= len(text):
             continue
         parsed_destination = _parse_destination(text, index)
@@ -295,11 +300,34 @@ def _reference_definitions(
         destination, destination_end = parsed_destination
         if not destination:
             continue
-        definition_end = text.find("\n", destination_end)
-        if definition_end < 0:
-            definition_end = len(text)
-        else:
-            definition_end += 1
+        definition_end = destination_end
+        trailing = destination_end
+        while trailing < len(text) and text[trailing] in " \t":
+            trailing += 1
+        if trailing < len(text) and text[trailing] not in "\r\n":
+            if text[trailing] not in "'\"(":
+                continue
+            title_close = ")" if text[trailing] == "(" else text[trailing]
+            trailing += 1
+            while trailing < len(text):
+                if text[trailing] == "\\" and trailing + 1 < len(text):
+                    trailing += 2
+                    continue
+                if text[trailing] == title_close:
+                    break
+                if text[trailing] in "\r\n":
+                    break
+                trailing += 1
+            if trailing >= len(text) or text[trailing] != title_close:
+                continue
+            trailing += 1
+            while trailing < len(text) and text[trailing] in " \t":
+                trailing += 1
+            if trailing < len(text) and text[trailing] not in "\r\n":
+                continue
+            definition_end = trailing
+        newline = text.find("\n", definition_end)
+        definition_end = len(text) if newline < 0 else newline + 1
         ranges.append((start, definition_end))
         definitions.setdefault(
             label, ReferenceDefinition(destination, start, definition_end)
@@ -686,11 +714,7 @@ def _lint_links(
         for link in iter_markdown_links(text):
             if link.is_image:
                 continue
-            line_index = max(0, len(line_starts) - 1)
-            for candidate, line_start in enumerate(line_starts):
-                if line_start > link.start:
-                    line_index = candidate - 1
-                    break
+            line_index = bisect.bisect_right(line_starts, link.start) - 1
             line_number = line_index + 1
             column = link.start - line_starts[line_index] + 1
             target, fragment, error = _resolve_local_link(document, link.destination, root)
