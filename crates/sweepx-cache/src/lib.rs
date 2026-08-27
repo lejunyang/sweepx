@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -173,6 +173,8 @@ pub enum CacheError {
     MissingGenerationData,
     #[error("generation file name is invalid")]
     InvalidGenerationName,
+    #[error("preview cache path is insecure: {0}")]
+    InsecurePath(PathBuf),
     #[error("stored preview schema is invalid: {0}")]
     InvalidStoredSchema(String),
     #[error("stored preview provenance is invalid: {0}")]
@@ -228,7 +230,8 @@ impl AtomicGenerationStore {
     pub fn write_generation(&self, generation: &StoredGeneration) -> Result<(), CacheError> {
         validate_generation_id(&generation.generation)?;
         validate_stored_generation(generation)?;
-        fs::create_dir_all(self.generations_dir())?;
+        self.prepare_secure_root()?;
+        self.prepare_private_subdir(&self.generations_dir())?;
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),
             checksum_sha256: checksum_hex(generation)?,
@@ -238,22 +241,23 @@ impl AtomicGenerationStore {
         let bytes = serde_json::to_vec_pretty(&envelope)?;
         let generation_path = self.generation_path(&generation.generation);
         let tmp_generation = temp_path(&generation_path, "tmp");
-        fs::write(&tmp_generation, &bytes)?;
-        fs::rename(&tmp_generation, &generation_path)?;
+        self.atomic_write_file(&tmp_generation, &bytes)?;
+        self.rename_checked(&tmp_generation, &generation_path)?;
 
         let pointer = CurrentPointer {
             generation: generation.generation.clone(),
         };
         let pointer_path = self.current_pointer_path();
         let tmp_pointer = temp_path(&pointer_path, "tmp");
-        fs::write(&tmp_pointer, serde_json::to_vec_pretty(&pointer)?)?;
-        fs::rename(&tmp_pointer, &pointer_path)?;
+        self.atomic_write_file(&tmp_pointer, &serde_json::to_vec_pretty(&pointer)?)?;
+        self.rename_checked(&tmp_pointer, &pointer_path)?;
         Ok(())
     }
 
     pub fn load_current(&self) -> Result<LoadResult, CacheError> {
+        self.prepare_secure_root()?;
         let pointer_path = self.current_pointer_path();
-        let pointer_bytes = match fs::read(&pointer_path) {
+        let pointer_bytes = match self.read_checked(&pointer_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(LoadResult::Miss),
             Err(error) => return Err(CacheError::Io(error)),
@@ -271,7 +275,7 @@ impl AtomicGenerationStore {
         validate_generation_id(&pointer.generation)?;
 
         let generation_path = self.generation_path(&pointer.generation);
-        let bytes = match fs::read(&generation_path) {
+        let bytes = match self.read_checked(&generation_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(LoadResult::Miss),
             Err(error) => return Err(CacheError::Io(error)),
@@ -322,14 +326,84 @@ impl AtomicGenerationStore {
     }
 
     fn quarantine(&self, name: &str, bytes: &[u8]) -> Result<(), CacheError> {
-        fs::create_dir_all(self.quarantine_dir())?;
-        fs::write(self.quarantine_path(name), bytes)?;
+        self.prepare_private_subdir(&self.quarantine_dir())?;
+        let path = self.quarantine_path(name);
+        self.atomic_write_file(&path, bytes)?;
         Ok(())
     }
 
     fn quarantine_generation(&self, generation: &str, bytes: &[u8]) -> Result<(), CacheError> {
         self.quarantine(&format!("{generation}.corrupt.json"), bytes)
     }
+
+    fn prepare_secure_root(&self) -> Result<(), CacheError> {
+        ensure_no_symlink_ancestors(&self.root)?;
+        if self.root.exists() {
+            let metadata = fs::symlink_metadata(&self.root)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(CacheError::InsecurePath(self.root.clone()));
+            }
+        } else {
+            fs::create_dir_all(&self.root)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_private_subdir(&self, path: &Path) -> Result<(), CacheError> {
+        ensure_no_symlink_ancestors(path)?;
+        if path.exists() {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(CacheError::InsecurePath(path.to_path_buf()));
+            }
+        } else {
+            fs::create_dir_all(path)?;
+        }
+        Ok(())
+    }
+
+    fn atomic_write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+        if let Some(parent) = path.parent() {
+            self.prepare_private_subdir(parent)?;
+        }
+        if path.exists() && fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(CacheError::InsecurePath(path.to_path_buf()));
+        }
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        use std::io::Write as _;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn rename_checked(&self, from: &Path, to: &Path) -> Result<(), CacheError> {
+        if to.exists() && fs::symlink_metadata(to)?.file_type().is_symlink() {
+            return Err(CacheError::InsecurePath(to.to_path_buf()));
+        }
+        fs::rename(from, to)?;
+        Ok(())
+    }
+
+    fn read_checked(&self, path: &Path) -> Result<Vec<u8>, std::io::Error> {
+        if path.exists() && fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(std::io::Error::other("preview cache path is symlink"));
+        }
+        fs::read(path)
+    }
+}
+
+fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), CacheError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.exists() {
+            let metadata = fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink() {
+                return Err(CacheError::InsecurePath(current));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn admit_preview(
@@ -1073,6 +1147,78 @@ mod tests {
             fs::read(temp.path().join("quarantine/gen-a.corrupt.json")).unwrap(),
             envelope_bytes
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_json_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let target = temp.path().join("target.json");
+        fs::write(&target, br#"{"generation":"gen-1"}"#).unwrap();
+        symlink(&target, temp.path().join("current.json")).unwrap();
+
+        let error = store.load_current().unwrap_err();
+        assert!(matches!(error, CacheError::Io(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generations_or_quarantine_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let generation = StoredGeneration {
+            generation: "gen-1".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+        };
+
+        let real_generations = temp.path().join("real-generations");
+        fs::create_dir(&real_generations).unwrap();
+        symlink(&real_generations, temp.path().join("generations")).unwrap();
+        let error = store.write_generation(&generation).unwrap_err();
+        assert!(matches!(error, CacheError::InsecurePath(_)));
+
+        fs::remove_file(temp.path().join("generations")).unwrap();
+        fs::create_dir(temp.path().join("generations")).unwrap();
+        fs::write(temp.path().join("generations/gen-1.json"), b"{not-json").unwrap();
+        fs::write(
+            temp.path().join("current.json"),
+            br#"{"generation":"gen-1"}"#,
+        )
+        .unwrap();
+        let real_quarantine = temp.path().join("real-quarantine");
+        fs::create_dir(&real_quarantine).unwrap();
+        symlink(&real_quarantine, temp.path().join("quarantine")).unwrap();
+        let error = store.load_current().unwrap_err();
+        assert!(matches!(error, CacheError::InsecurePath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_symlink_in_store_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestTempDir::new();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = temp.path().join("linked");
+        symlink(&real, &link).unwrap();
+        let store = AtomicGenerationStore::new(link.join("preview"));
+
+        let generation = StoredGeneration {
+            generation: "gen-1".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+        };
+        let error = store.write_generation(&generation).unwrap_err();
+        assert!(matches!(error, CacheError::InsecurePath(_)));
     }
 
     #[test]

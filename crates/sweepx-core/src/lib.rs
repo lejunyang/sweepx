@@ -1768,13 +1768,25 @@ fn store_stale_preview(
         &digest_hex(scan_id.as_ref())[..12]
     );
     let preview_rows = preview_summaries_from_scan(summary);
+    let state_directory_bytes = match state_dir_bytes(store.root()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return CachePreviewStoreResult {
+                status: CACHE_STORE_MODE_SKIPPED,
+                generation: None,
+                preview_bytes: 0,
+                resource_limit: true,
+                warnings: vec!["cache.preview.state_accounting_failed".to_string()],
+            };
+        }
+    };
     let admission = match admit_preview(
         preview_rows,
         &PreviewBudgets::default(),
         &BudgetUsage {
             operation_spill_bytes: 0,
             global_spill_bytes: 0,
-            state_directory_bytes: state_dir_bytes(store.root()).unwrap_or(0),
+            state_directory_bytes,
         },
     ) {
         Ok(admission) => admission,
@@ -1887,8 +1899,10 @@ fn preview_generation_store(
     let Some(path) = state_dir else {
         return Ok(None);
     };
+    validate_or_prepare_private_ancestor_chain(path)?;
     validate_or_prepare_state_dir(path)?;
     let preview_root = path.join(PREVIEW_GENERATION_POINTER_DIR);
+    validate_or_prepare_private_ancestor_chain(&preview_root)?;
     validate_or_prepare_private_subdir(&preview_root)?;
     Ok(Some(AtomicGenerationStore::new(preview_root)))
 }
@@ -2113,6 +2127,20 @@ fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
         let text = name.to_string_lossy().into_owned();
         Some(sweepx_model::NativeName::unix(text.into_bytes()))
     }
+}
+
+fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.exists() {
+            let meta = fs::symlink_metadata(&current)?;
+            if meta.file_type().is_symlink() {
+                return Err(StateError::SymlinkStateDir(current));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn serialize_json(output: &OutputEnvelope) -> String {
