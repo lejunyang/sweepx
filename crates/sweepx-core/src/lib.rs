@@ -1,4 +1,11 @@
 mod cargo_cleaner_detect;
+mod catalog_trust;
+
+pub use catalog_trust::{
+    MAX_PRODUCTION_TRUST_ROOT_ANCHORS, MAX_PRODUCTION_TRUST_SNAPSHOT_BYTES,
+    ProductionCatalogDisposition, ProductionCleanerCatalogTrust, ProductionTrustDisposition,
+    ProductionTrustFreshness, resolve_production_catalog_trust,
+};
 
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -400,6 +407,8 @@ pub enum CoreError {
     CandidateNotFound(String),
     #[error("cleaner catalog failed: {0}")]
     Catalog(#[from] sweepx_catalog::CatalogError),
+    #[error("production cleaner catalog trust failed: {0}")]
+    ProductionCatalogTrust(#[source] sweepx_catalog::CatalogError),
     #[error("cleaner rule evaluation failed: {0}")]
     CleanerVm(#[from] sweepx_cleaner_vm::VmError),
     #[error("cleaner reference is invalid: {0}")]
@@ -3522,9 +3531,9 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         | CoreError::CandidateNotFound(_)
         | CoreError::InvalidCleanerRef(_)
         | CoreError::TuiInput(_) => ExitCode::UsageError,
-        CoreError::CleanerCompat { .. } | CoreError::CleanerCatalogTrust(_) => {
-            ExitCode::CleanerTrustOrCompat
-        }
+        CoreError::CleanerCompat { .. }
+        | CoreError::CleanerCatalogTrust(_)
+        | CoreError::ProductionCatalogTrust(_) => ExitCode::CleanerTrustOrCompat,
         CoreError::State(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::AuditProjection(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::Scan(_)
