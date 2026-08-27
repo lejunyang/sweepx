@@ -1360,6 +1360,7 @@ dependencies = [
  "sha2",
  "sweepx-analysis",
  "sweepx-audit",
+ "sweepx-cache",
  "sweepx-canonical",
  "sweepx-catalog",
  "sweepx-cleaner-schema",
