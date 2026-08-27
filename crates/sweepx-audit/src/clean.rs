@@ -1,38 +1,45 @@
+// SQLite implementation.
+
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use rusqlite::config::DbConfig;
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SNAPSHOT_FILE: &str = "audit.snapshot";
-const ANCHOR_FILE: &str = "audit.anchor";
+const DATABASE_FILE: &str = "audit.db";
 const LOCK_FILE: &str = "audit.lock";
-const RECORD_DOMAIN: &str = "SweepX audit simulated v3\0";
-const PATH_HASH_DOMAIN: &str = "SweepX native path hash v1\0";
-const SNAPSHOT_VERSION: &str = "sweepx.audit.snapshot.v1";
-const ANCHOR_VERSION: &str = "sweepx.audit.anchor.v1";
-const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_ANCHOR_BYTES: usize = 1024;
-const MAX_EVENT_BYTES: usize = 16 * 1024;
+const SCHEMA_VERSION: &str = "sweepx.audit.sqlite.v1";
+const APPLICATION_ID: i64 = 0x5357_5841;
+const USER_VERSION: i64 = 1;
+const PAGE_SIZE: u64 = 4096;
+const MAX_PAGE_COUNT: u64 = 16_384;
+const MAX_DATABASE_BYTES: u64 = PAGE_SIZE * MAX_PAGE_COUNT;
+const MAX_WAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TOTAL_DATABASE_BYTES: u64 = MAX_DATABASE_BYTES + MAX_WAL_BYTES + 1024 * 1024;
+const MAX_RECORD_BYTES: usize = 256 * 1024;
+const MAX_BINDING_BYTES: usize = 192 * 1024;
+const MAX_ID_BYTES: usize = 160;
+const MAX_SHORT_FIELD_BYTES: usize = 512;
+const MAX_RESULT_FIELD_BYTES: usize = 4096;
 const MAX_NOTES: usize = 16;
 const MAX_NOTE_BYTES: usize = 512;
-const MAX_TEXT_BYTES: usize = 4096;
-const MAX_POLICY_VERSION_BYTES: usize = 512;
-const MAX_BINDING_ACTIONS: usize = 1_024;
-const MAX_BINDING_ITEMS: usize = 1_024;
-const MAX_EVENTS: usize = 8_192;
-const MAX_AUTHORIZATIONS: usize = 128;
-const MAX_INTENTS: usize = 4_096;
-const MAX_EVENT_COMMIT_GROWTH: usize = 2 * MAX_EVENT_BYTES + 2_048;
-static TEMP_ORDINAL: AtomicU64 = AtomicU64::new(0);
+const MAX_ACTIONS_PER_AUTHORIZATION: usize = 256;
+const MAX_AUTHORIZATIONS: i64 = 4096;
+const MAX_EVENTS: i64 = 100_000;
+const RECORD_DOMAIN: &[u8] = b"SweepX SQLite audit event v1\0";
+const PATH_HASH_DOMAIN: &[u8] = b"SweepX native path hash v1\0";
 
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -49,11 +56,7 @@ mod decimal_u64 {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let parsed = value.parse::<u64>().map_err(serde::de::Error::custom)?;
-        if parsed.to_string() != value {
-            return Err(serde::de::Error::custom("non-canonical decimal u64"));
-        }
-        Ok(parsed)
+        value.parse::<u64>().map_err(serde::de::Error::custom)
     }
 }
 
@@ -120,6 +123,7 @@ id_type!(PathHash, "path_hash");
 pub enum AuthorizationSource {
     HumanApproval,
     ExplicitDangerousDelete,
+    /// Authority issued only by the deterministic P3 simulation path.
     DeterministicSimulation,
 }
 
@@ -137,28 +141,6 @@ pub enum RiskTier {
     R2,
     R3,
     R4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum AuthorizationState {
-    Unused,
-    Claimed {
-        #[serde(with = "decimal_u64")]
-        fence_epoch: u64,
-    },
-    Consumed {
-        #[serde(with = "decimal_u64")]
-        fence_epoch: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum IntentTerminalState {
-    Reserved,
-    IndeterminateRecorded,
-    OutcomeRecorded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,9 +189,11 @@ pub struct AuthorizationBinding {
     pub requested_mode: RequestedMode,
     pub item_ids: BTreeSet<ItemId>,
     pub action_ids: BTreeSet<ActionId>,
-    pub item_by_action: BTreeMap<ActionId, ItemId>,
     #[serde(with = "decimal_u64")]
     pub action_count: u64,
+    /// The authoritative exact action-to-item relation. The keys must equal
+    /// `action_ids`, and its values must cover exactly `item_ids`.
+    pub item_by_action: BTreeMap<ActionId, ItemId>,
     pub risk_by_action: BTreeMap<ActionId, RiskTier>,
     pub policy_version: String,
     pub policy_digest: DigestString,
@@ -221,103 +205,88 @@ pub struct AuthorizationBinding {
     pub workflow_session: SessionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthorizationRecord {
-    binding: AuthorizationBinding,
-    state: AuthorizationState,
-}
-
 pub struct ClaimedExecution {
     binding: AuthorizationBinding,
     fence_epoch: u64,
-    store_root: PathBuf,
-    batch_lock: File,
+    database_id: String,
+    execution_id: String,
+    database_path: PathBuf,
+    lock_identity: LockIdentity,
+    lock_file: File,
+    lock_held: Cell<bool>,
+    owner_pid: u32,
     session_active: Arc<AtomicBool>,
     mutation_lock: Arc<Mutex<()>>,
-    owner_pid: u32,
 }
 
-impl std::fmt::Debug for ClaimedExecution {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ClaimedExecution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ClaimedExecution")
             .field("authorization_id", &self.binding.authorization_id)
             .field("batch_id", &self.binding.batch_id)
             .field("fence_epoch", &self.fence_epoch)
+            .field("execution_id", &self.execution_id)
+            .field("lock_held", &self.lock_held.get())
             .finish_non_exhaustive()
-    }
-}
-
-impl ClaimedExecution {
-    pub fn binding(&self) -> &AuthorizationBinding {
-        &self.binding
-    }
-
-    pub fn authorization_id(&self) -> &AuthorizationId {
-        &self.binding.authorization_id
-    }
-
-    pub fn batch_id(&self) -> &BatchId {
-        &self.binding.batch_id
-    }
-
-    pub fn plan_id(&self) -> &PlanId {
-        &self.binding.plan_id
-    }
-
-    pub fn plan_digest(&self) -> &DigestString {
-        &self.binding.plan_digest
-    }
-
-    pub fn requested_mode(&self) -> RequestedMode {
-        self.binding.requested_mode
-    }
-
-    pub fn fence_epoch(&self) -> u64 {
-        self.fence_epoch
-    }
-
-    pub fn authorization_source(&self) -> AuthorizationSource {
-        self.binding.authorization_source
-    }
-
-    pub fn risk_for_action(&self, action_id: &ActionId) -> Option<RiskTier> {
-        self.binding.risk_by_action.get(action_id).copied()
-    }
-
-    pub fn validate_current_process(&self) -> Result<(), AuditError> {
-        if self.owner_pid != std::process::id() {
-            return Err(AuditError::ForkedProcess);
-        }
-        Ok(())
-    }
-
-    fn validates_store(&self, root: &Path) -> bool {
-        self.store_root == root
-    }
-
-    fn lock_mutation(&self) -> Result<MutexGuard<'_, ()>, AuditError> {
-        if self.owner_pid != std::process::id() {
-            return Err(AuditError::ForkedProcess);
-        }
-        self.mutation_lock
-            .lock()
-            .map_err(|_| AuditError::SessionLockPoisoned)
     }
 }
 
 impl Drop for ClaimedExecution {
     fn drop(&mut self) {
-        if self.owner_pid != std::process::id() {
-            return;
+        if self.owner_pid == std::process::id() {
+            let _guard = self
+                .mutation_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.lock_held.replace(false) {
+                let _ = FileExt::unlock(&self.lock_file);
+            }
+            self.session_active.store(false, Ordering::Release);
         }
-        let _guard = self
-            .mutation_lock
+    }
+}
+
+impl ClaimedExecution {
+    pub fn authorization_id(&self) -> &AuthorizationId {
+        &self.binding.authorization_id
+    }
+    pub fn batch_id(&self) -> &BatchId {
+        &self.binding.batch_id
+    }
+    pub fn plan_id(&self) -> &PlanId {
+        &self.binding.plan_id
+    }
+    pub fn plan_digest(&self) -> &DigestString {
+        &self.binding.plan_digest
+    }
+    pub fn requested_mode(&self) -> RequestedMode {
+        self.binding.requested_mode
+    }
+    pub fn fence_epoch(&self) -> u64 {
+        self.fence_epoch
+    }
+    pub fn authorization_source(&self) -> AuthorizationSource {
+        self.binding.authorization_source
+    }
+    pub fn risk_for_action(&self, action_id: &ActionId) -> Option<RiskTier> {
+        self.binding.risk_by_action.get(action_id).copied()
+    }
+    pub fn binding(&self) -> &AuthorizationBinding {
+        &self.binding
+    }
+    pub fn validate_current_process(&self) -> Result<(), AuditError> {
+        if self.owner_pid == std::process::id() {
+            Ok(())
+        } else {
+            Err(AuditError::ForkedProcess)
+        }
+    }
+    fn lock_mutation(&self) -> Result<MutexGuard<'_, ()>, AuditError> {
+        self.validate_current_process()?;
+        self.mutation_lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = FileExt::unlock(&self.batch_lock);
-        self.session_active.store(false, Ordering::Release);
+            .map_err(|_| AuditError::SessionLockPoisoned)
     }
 }
 
@@ -325,7 +294,10 @@ impl Drop for ClaimedExecution {
 pub struct DurableIntentToken {
     attempt_id: AttemptId,
     nonce: NonceId,
+    database_id: String,
+    execution_id: String,
     authorization_id: AuthorizationId,
+    authorization_source: AuthorizationSource,
     batch_id: BatchId,
     plan_id: PlanId,
     plan_digest: DigestString,
@@ -336,14 +308,23 @@ pub struct DurableIntentToken {
     source_path_hash: PathHash,
     before_revalidation_digest: DigestString,
     fence_epoch: u64,
+    policy_version: String,
+    policy_digest: DigestString,
+    protected_anchor_snapshot_digest: DigestString,
+    adapter_capabilities_digest: DigestString,
+    cleaner_set_digest: DigestString,
+    host_instance_id: HostId,
+    user_identity: UserId,
+    workflow_session: SessionId,
     creator_pid: u32,
 }
 
-impl std::fmt::Debug for DurableIntentToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DurableIntentToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DurableIntentToken")
             .field("attempt_id", &self.attempt_id)
+            .field("nonce", &"<redacted>")
             .field("authorization_id", &self.authorization_id)
             .field("batch_id", &self.batch_id)
             .field("plan_id", &self.plan_id)
@@ -356,243 +337,51 @@ impl std::fmt::Debug for DurableIntentToken {
     }
 }
 
-/// The result of reserving an action exactly once.
-///
-/// Only `Created` carries execution authority. Existing reservations expose diagnostics without
-/// the nonce-bearing token, so a repeated lookup cannot mint a second one-shot permit.
-///
-/// ```compile_fail
-/// use sweepx_audit::{DurableIntentToken, IntentReservation};
-/// fn replay(reservation: IntentReservation) -> DurableIntentToken {
-///     match reservation {
-///         IntentReservation::Created(token) => token,
-///         IntentReservation::Existing(info) | IntentReservation::Conflicting(info) => info,
-///     }
-/// }
-/// ```
-#[derive(Debug, PartialEq, Eq)]
-pub enum IntentReservation {
-    Created(DurableIntentToken),
-    Existing(IntentReservationInfo),
-    Conflicting(IntentReservationInfo),
-}
-
-impl IntentReservation {
-    fn into_legacy_result(self) -> Result<DurableIntentToken, AuditError> {
-        match self {
-            Self::Created(token) => Ok(token),
-            Self::Existing(info) | Self::Conflicting(info) => Err(
-                AuditError::ActionAlreadyReserved(info.action_id().as_str().to_string()),
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentReservationInfo {
-    attempt_id: AttemptId,
-    item_id: ItemId,
-    action_id: ActionId,
-}
-
-impl IntentReservationInfo {
-    pub fn attempt_id(&self) -> &AttemptId {
-        &self.attempt_id
-    }
-
-    pub fn item_id(&self) -> &ItemId {
-        &self.item_id
-    }
-
-    pub fn action_id(&self) -> &ActionId {
-        &self.action_id
-    }
-}
-
 impl DurableIntentToken {
     pub fn attempt_id(&self) -> &AttemptId {
         &self.attempt_id
     }
-
     pub fn nonce(&self) -> &NonceId {
         &self.nonce
     }
-
     pub fn authorization_id(&self) -> &AuthorizationId {
         &self.authorization_id
     }
-
     pub fn batch_id(&self) -> &BatchId {
         &self.batch_id
     }
-
     pub fn plan_id(&self) -> &PlanId {
         &self.plan_id
     }
-
     pub fn plan_digest(&self) -> &DigestString {
         &self.plan_digest
     }
-
     pub fn action_id(&self) -> &ActionId {
         &self.action_id
     }
-
     pub fn item_id(&self) -> &ItemId {
         &self.item_id
     }
-
     pub fn requested_mode(&self) -> RequestedMode {
         self.requested_mode
     }
-
     pub fn risk_tier(&self) -> RiskTier {
         self.risk_tier
     }
-
     pub fn source_path_hash(&self) -> &PathHash {
         &self.source_path_hash
     }
-
     pub fn before_revalidation_digest(&self) -> &DigestString {
         &self.before_revalidation_digest
     }
-
     pub fn fence_epoch(&self) -> u64 {
         self.fence_epoch
     }
-
     pub fn validate_current_process(&self) -> Result<(), AuditError> {
-        if self.creator_pid != std::process::id() {
-            return Err(AuditError::ForkedProcess);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IntentAuthority {
-    attempt_id: AttemptId,
-    nonce: NonceId,
-    authorization_id: AuthorizationId,
-    batch_id: BatchId,
-    plan_id: PlanId,
-    plan_digest: DigestString,
-    item_id: ItemId,
-    action_id: ActionId,
-    requested_mode: RequestedMode,
-    risk_tier: RiskTier,
-    source_path_hash: PathHash,
-    before_revalidation_digest: DigestString,
-    #[serde(with = "decimal_u64")]
-    fence_epoch: u64,
-    #[serde(with = "decimal_u64")]
-    attempt_ordinal: u64,
-    terminal_state: IntentTerminalState,
-}
-
-impl IntentAuthority {
-    fn as_token(&self) -> DurableIntentToken {
-        DurableIntentToken {
-            attempt_id: self.attempt_id.clone(),
-            nonce: self.nonce.clone(),
-            authorization_id: self.authorization_id.clone(),
-            batch_id: self.batch_id.clone(),
-            plan_id: self.plan_id.clone(),
-            plan_digest: self.plan_digest.clone(),
-            item_id: self.item_id.clone(),
-            action_id: self.action_id.clone(),
-            requested_mode: self.requested_mode,
-            risk_tier: self.risk_tier,
-            source_path_hash: self.source_path_hash.clone(),
-            before_revalidation_digest: self.before_revalidation_digest.clone(),
-            fence_epoch: self.fence_epoch,
-            creator_pid: std::process::id(),
-        }
-    }
-
-    fn reservation_info(&self) -> IntentReservationInfo {
-        IntentReservationInfo {
-            attempt_id: self.attempt_id.clone(),
-            item_id: self.item_id.clone(),
-            action_id: self.action_id.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct Projection {
-    #[serde(with = "decimal_u64")]
-    latest_fence_epoch: u64,
-    #[serde(with = "decimal_u64")]
-    next_attempt_ordinal: u64,
-    authorizations: BTreeMap<AuthorizationId, AuthorizationRecord>,
-    intents: BTreeMap<AttemptId, IntentAuthority>,
-    outcomes: BTreeMap<AttemptId, OutcomeEvent>,
-    recoveries: BTreeMap<AttemptId, RecoveryRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotFile {
-    version: String,
-    projection: Projection,
-    events: Vec<JournalRecord>,
-    head: ChainHead,
-}
-
-impl Default for SnapshotFile {
-    fn default() -> Self {
-        Self {
-            version: SNAPSHOT_VERSION.to_string(),
-            projection: Projection::default(),
-            events: Vec::new(),
-            head: ChainHead::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ChainHead {
-    #[serde(with = "decimal_u64")]
-    latest_sequence: u64,
-    latest_digest: Option<String>,
-    #[serde(with = "decimal_u64")]
-    action_sequence: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DurableAnchor {
-    version: String,
-    #[serde(with = "decimal_u64")]
-    latest_sequence: u64,
-    latest_digest: Option<String>,
-    #[serde(with = "decimal_u64")]
-    action_sequence: u64,
-}
-
-impl Default for DurableAnchor {
-    fn default() -> Self {
-        Self {
-            version: ANCHOR_VERSION.to_string(),
-            latest_sequence: 0,
-            latest_digest: None,
-            action_sequence: 0,
-        }
-    }
-}
-
-impl From<&ChainHead> for DurableAnchor {
-    fn from(head: &ChainHead) -> Self {
-        Self {
-            version: ANCHOR_VERSION.to_string(),
-            latest_sequence: head.latest_sequence,
-            latest_digest: head.latest_digest.clone(),
-            action_sequence: head.action_sequence,
+        if self.creator_pid == std::process::id() {
+            Ok(())
+        } else {
+            Err(AuditError::ForkedProcess)
         }
     }
 }
@@ -606,70 +395,6 @@ pub struct Observation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IntentEvent {
-    batch_id: BatchId,
-    authorization_id: AuthorizationId,
-    authorization_source: AuthorizationSource,
-    plan_id: PlanId,
-    plan_digest: DigestString,
-    item_id: ItemId,
-    action_id: ActionId,
-    attempt_id: AttemptId,
-    nonce: NonceId,
-    requested_mode: RequestedMode,
-    risk_tier: RiskTier,
-    #[serde(with = "decimal_u64")]
-    fence_epoch: u64,
-    #[serde(with = "decimal_u64")]
-    attempt_ordinal: u64,
-    before_revalidation_digest: DigestString,
-    source_path_hash: PathHash,
-    policy_version: String,
-    policy_digest: DigestString,
-    protected_anchor_snapshot_digest: DigestString,
-    adapter_capabilities_digest: DigestString,
-    cleaner_set_digest: DigestString,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutcomeEvent {
-    batch_id: BatchId,
-    authorization_id: AuthorizationId,
-    authorization_source: AuthorizationSource,
-    plan_id: PlanId,
-    plan_digest: DigestString,
-    item_id: ItemId,
-    action_id: ActionId,
-    attempt_id: AttemptId,
-    nonce: NonceId,
-    requested_mode: RequestedMode,
-    risk_tier: RiskTier,
-    actual_platform_operation: String,
-    policy_version: String,
-    policy_digest: DigestString,
-    adapter_version: String,
-    started_at_unix_ms: String,
-    finished_at_unix_ms: String,
-    before_revalidation_digest: DigestString,
-    source_path_hash: PathHash,
-    #[serde(with = "decimal_u64")]
-    intent_fence_epoch: u64,
-    #[serde(with = "decimal_u64")]
-    claim_fence_epoch: u64,
-    stable_status: StableStatus,
-    recovery_state: RecoveryState,
-    source_postcheck: Observation,
-    destination_postcheck: Option<Observation>,
-    resulting_trash_locator: Option<String>,
-    platform_result: Option<String>,
-    platform_error_domain: Option<String>,
-    platform_error_code: Option<String>,
-    notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RecoveryRecord {
     pub batch_id: BatchId,
     pub authorization_id: AuthorizationId,
@@ -677,53 +402,6 @@ pub struct RecoveryRecord {
     pub attempt_id: AttemptId,
     pub disposition: RecoveryDisposition,
     pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum EventPayload {
-    AuthorizationRegistered {
-        binding: AuthorizationBinding,
-    },
-    ExecutionClaimed {
-        authorization_id: AuthorizationId,
-        expected_plan_digest: DigestString,
-        #[serde(with = "decimal_u64")]
-        fence_epoch: u64,
-    },
-    RecoveryClaimed {
-        authorization_id: AuthorizationId,
-        expected_plan_digest: DigestString,
-        #[serde(with = "decimal_u64")]
-        previous_fence_epoch: u64,
-        #[serde(with = "decimal_u64")]
-        fence_epoch: u64,
-    },
-    ActionIntent(IntentEvent),
-    ActionOutcome(OutcomeEvent),
-    RecoveryOutcome(OutcomeEvent),
-    RecoveryClassification {
-        record: RecoveryRecord,
-        #[serde(with = "decimal_u64")]
-        claim_fence_epoch: u64,
-    },
-    ExecutionConsumed {
-        authorization_id: AuthorizationId,
-        #[serde(with = "decimal_u64")]
-        fence_epoch: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JournalRecord {
-    #[serde(with = "decimal_u64")]
-    sequence: u64,
-    recorded_at_unix_ms: String,
-    monotonic_elapsed_ms: String,
-    previous_digest: Option<String>,
-    digest: String,
-    payload: EventPayload,
 }
 
 #[derive(Debug, Clone)]
@@ -739,21 +417,56 @@ pub struct IntentRequest {
     pub before_revalidation_digest: DigestString,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Public API compatibility: Created transfers the opaque token by value.
+pub enum IntentReservation {
+    Created(DurableIntentToken),
+    Existing(IntentReservationInfo),
+    Conflicting(IntentReservationInfo),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentReservationInfo {
+    attempt_id: AttemptId,
+    item_id: ItemId,
+    action_id: ActionId,
+    source_path_hash: PathHash,
+    before_revalidation_digest: DigestString,
+}
+
+impl IntentReservationInfo {
+    pub fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+    pub fn item_id(&self) -> &ItemId {
+        &self.item_id
+    }
+    pub fn action_id(&self) -> &ActionId {
+        &self.action_id
+    }
+    fn matches_request(&self, request: &IntentRequest) -> bool {
+        self.item_id == request.item_id
+            && self.action_id == request.action_id
+            && self.source_path_hash == request.source_path_hash
+            && self.before_revalidation_digest == request.before_revalidation_digest
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SimulatedOutcome {
-    actual_platform_operation: &'static str,
-    adapter_version: String,
-    started_at: SystemTime,
-    finished_at: SystemTime,
-    stable_status: StableStatus,
-    recovery_state: RecoveryState,
-    source_postcheck: Observation,
-    destination_postcheck: Option<Observation>,
-    resulting_trash_locator: Option<String>,
-    platform_result: Option<String>,
-    platform_error_domain: Option<String>,
-    platform_error_code: Option<String>,
-    notes: Vec<String>,
+    pub actual_platform_operation: String,
+    pub adapter_version: String,
+    pub started_at: SystemTime,
+    pub finished_at: SystemTime,
+    pub stable_status: StableStatus,
+    pub recovery_state: RecoveryState,
+    pub source_postcheck: Observation,
+    pub destination_postcheck: Option<Observation>,
+    pub resulting_trash_locator: Option<String>,
+    pub platform_result: Option<String>,
+    pub platform_error_domain: Option<String>,
+    pub platform_error_code: Option<String>,
+    pub notes: Vec<String>,
 }
 
 impl SimulatedOutcome {
@@ -768,39 +481,35 @@ impl SimulatedOutcome {
         platform_result: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        let destination_reported = destination_postcheck.exists
+        let located = destination_postcheck.exists
             || resulting_trash_locator
                 .as_ref()
                 .is_some_and(|value| !value.is_empty());
-        let (stable_status, recovery_state) = if destination_reported {
-            (
-                StableStatus::TrashSucceededLocationReported,
-                RecoveryState::TrashLocationReported,
-            )
-        } else {
-            (
-                StableStatus::TrashSucceededPlatformReported,
-                RecoveryState::PlatformTrashReported,
-            )
-        };
-        Self::validated(
-            Self {
-                actual_platform_operation: "simulated_trash",
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status,
-                recovery_state,
-                source_postcheck,
-                destination_postcheck: Some(destination_postcheck),
-                resulting_trash_locator,
-                platform_result: Some(platform_result.into()),
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
+        let outcome = Self {
+            actual_platform_operation: "simulated_trash".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status: if located {
+                StableStatus::TrashSucceededLocationReported
+            } else {
+                StableStatus::TrashSucceededPlatformReported
             },
-            RequestedMode::Trash,
-        )
+            recovery_state: if located {
+                RecoveryState::TrashLocationReported
+            } else {
+                RecoveryState::PlatformTrashReported
+            },
+            source_postcheck,
+            destination_postcheck: Some(destination_postcheck),
+            resulting_trash_locator,
+            platform_result: Some(platform_result.into()),
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Trash, &outcome)?;
+        Ok(outcome)
     }
 
     pub fn permanent_success(
@@ -811,24 +520,23 @@ impl SimulatedOutcome {
         platform_result: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: "simulated_permanent_delete",
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::PermanentDeleteSucceeded,
-                recovery_state: RecoveryState::InapplicablePermanent,
-                source_postcheck,
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: Some(platform_result.into()),
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
-            RequestedMode::Permanent,
-        )
+        let outcome = Self {
+            actual_platform_operation: "simulated_permanent_delete".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status: StableStatus::PermanentDeleteSucceeded,
+            recovery_state: RecoveryState::InapplicablePermanent,
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: Some(platform_result.into()),
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Permanent, &outcome)?;
+        Ok(outcome)
     }
 
     pub fn failed_source_unchanged(
@@ -840,26 +548,21 @@ impl SimulatedOutcome {
         platform_result: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::FailedSourceUnchanged,
-                recovery_state: RecoveryState::FailedSourceUnchanged,
-                source_postcheck: Observation {
-                    exists: true,
-                    identity: Some(source_identity.into()),
-                },
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: Some(platform_result.into()),
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            started_at,
+            finished_at,
+            StableStatus::FailedSourceUnchanged,
+            RecoveryState::FailedSourceUnchanged,
+            Observation {
+                exists: true,
+                identity: Some(source_identity.into()),
+            },
+            Some(platform_result.into()),
+            None,
+            None,
+            notes,
         )
     }
 
@@ -870,26 +573,21 @@ impl SimulatedOutcome {
         source_identity: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at: at,
-                finished_at: at,
-                stable_status: StableStatus::CancelledBeforeAction,
-                recovery_state: RecoveryState::CancelledBeforeAction,
-                source_postcheck: Observation {
-                    exists: true,
-                    identity: Some(source_identity.into()),
-                },
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: None,
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            at,
+            at,
+            StableStatus::CancelledBeforeAction,
+            RecoveryState::CancelledBeforeAction,
+            Observation {
+                exists: true,
+                identity: Some(source_identity.into()),
+            },
+            None,
+            None,
+            None,
+            notes,
         )
     }
 
@@ -899,26 +597,21 @@ impl SimulatedOutcome {
         at: SystemTime,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at: at,
-                finished_at: at,
-                stable_status: StableStatus::VanishedBeforeAction,
-                recovery_state: RecoveryState::VanishedBeforeAction,
-                source_postcheck: Observation {
-                    exists: false,
-                    identity: None,
-                },
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: None,
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            at,
+            at,
+            StableStatus::VanishedBeforeAction,
+            RecoveryState::VanishedBeforeAction,
+            Observation {
+                exists: false,
+                identity: None,
+            },
+            None,
+            None,
+            None,
+            notes,
         )
     }
 
@@ -930,23 +623,18 @@ impl SimulatedOutcome {
         source_postcheck: Observation,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::IndeterminateAfterCrash,
-                recovery_state: RecoveryState::Indeterminate,
-                source_postcheck,
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: None,
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            started_at,
+            finished_at,
+            StableStatus::IndeterminateAfterCrash,
+            RecoveryState::Indeterminate,
+            source_postcheck,
+            None,
+            None,
+            None,
+            notes,
         )
     }
 
@@ -962,33 +650,23 @@ impl SimulatedOutcome {
         platform_result: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        let recovery_state = if source_postcheck.exists
-            && source_postcheck
-                .identity
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-        {
+        let recovery = if source_postcheck.exists {
             RecoveryState::FailedSourceUnchanged
         } else {
             RecoveryState::Indeterminate
         };
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::FailedPlatformError,
-                recovery_state,
-                source_postcheck,
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: Some(platform_result.into()),
-                platform_error_domain: Some(error_domain.into()),
-                platform_error_code: Some(error_code.into()),
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            started_at,
+            finished_at,
+            StableStatus::FailedPlatformError,
+            recovery,
+            source_postcheck,
+            Some(platform_result.into()),
+            Some(error_domain.into()),
+            Some(error_code.into()),
+            notes,
         )
     }
 
@@ -1004,33 +682,23 @@ impl SimulatedOutcome {
         platform_result: impl Into<String>,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        let recovery_state = if source_postcheck.exists
-            && source_postcheck
-                .identity
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-        {
+        let recovery = if source_postcheck.exists {
             RecoveryState::FailedSourceUnchanged
         } else {
             RecoveryState::Indeterminate
         };
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::FailedCancelledByPlatform,
-                recovery_state,
-                source_postcheck,
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: Some(platform_result.into()),
-                platform_error_domain: Some(error_domain.into()),
-                platform_error_code: Some(error_code.into()),
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            started_at,
+            finished_at,
+            StableStatus::FailedCancelledByPlatform,
+            recovery,
+            source_postcheck,
+            Some(platform_result.into()),
+            Some(error_domain.into()),
+            Some(error_code.into()),
+            notes,
         )
     }
 
@@ -1042,28 +710,51 @@ impl SimulatedOutcome {
         source_postcheck: Observation,
         notes: Vec<String>,
     ) -> Result<Self, AuditError> {
-        Self::validated(
-            Self {
-                actual_platform_operation: operation_for_mode(mode),
-                adapter_version: adapter_version.into(),
-                started_at,
-                finished_at,
-                stable_status: StableStatus::IndeterminatePlatformResult,
-                recovery_state: RecoveryState::Indeterminate,
-                source_postcheck,
-                destination_postcheck: None,
-                resulting_trash_locator: None,
-                platform_result: None,
-                platform_error_domain: None,
-                platform_error_code: None,
-                notes,
-            },
+        Self::constructed(
             mode,
+            adapter_version,
+            started_at,
+            finished_at,
+            StableStatus::IndeterminatePlatformResult,
+            RecoveryState::Indeterminate,
+            source_postcheck,
+            None,
+            None,
+            None,
+            notes,
         )
     }
 
-    fn validated(outcome: Self, mode: RequestedMode) -> Result<Self, AuditError> {
-        validate_outcome_values(mode, &outcome)?;
+    #[allow(clippy::too_many_arguments)]
+    fn constructed(
+        mode: RequestedMode,
+        adapter_version: impl Into<String>,
+        started_at: SystemTime,
+        finished_at: SystemTime,
+        stable_status: StableStatus,
+        recovery_state: RecoveryState,
+        source_postcheck: Observation,
+        platform_result: Option<String>,
+        platform_error_domain: Option<String>,
+        platform_error_code: Option<String>,
+        notes: Vec<String>,
+    ) -> Result<Self, AuditError> {
+        let outcome = Self {
+            actual_platform_operation: operation_for_mode(mode).to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status,
+            recovery_state,
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result,
+            platform_error_domain,
+            platform_error_code,
+            notes,
+        };
+        validate_outcome_shape(mode, &outcome)?;
         Ok(outcome)
     }
 }
@@ -1085,15 +776,12 @@ impl RecoveryIntentView {
     pub fn attempt_id(&self) -> &AttemptId {
         self.info.attempt_id()
     }
-
     pub fn item_id(&self) -> &ItemId {
         self.info.item_id()
     }
-
     pub fn action_id(&self) -> &ActionId {
         self.info.action_id()
     }
-
     pub fn authorization_source(&self) -> AuthorizationSource {
         self.authorization_source
     }
@@ -1118,851 +806,230 @@ pub struct IntegritySummary {
     pub latest_digest: Option<String>,
 }
 
-/// Simulation-only audit persistence.
-///
-/// The separate anchor detects accidental single-file rollback and interrupted anchor updates.
-/// It is not a trusted anti-replay boundary: a same-UID attacker who can replace and rehash both
-/// files can roll them back together. Callers must validate the full safety-sealed binding before
-/// treating a claim as executable authority.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AuditStore {
     root: PathBuf,
-    state_dir: File,
+    database_path: PathBuf,
+    lock_path: PathBuf,
+    database_id: String,
+    lock_identity: LockIdentity,
+    database_identity: FileIdentity,
+    owner_pid: u32,
     active_session: Arc<AtomicBool>,
     active_mutation_lock: Arc<Mutex<()>>,
-    owner_pid: u32,
 }
 
-impl AuditStore {
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, AuditError> {
-        #[cfg(not(unix))]
-        {
-            let _ = root;
-            return Err(AuditError::UnsupportedPlatform);
-        }
-        #[cfg(unix)]
-        {
-            let root = root.as_ref().to_path_buf();
-            ensure_private_state_dir(&root)?;
-            let state_dir = open_directory_nofollow(&root)?;
-            let lock_exists = regular_file_exists_at(&state_dir, LOCK_FILE)?;
-            let snapshot_exists = regular_file_exists_at(&state_dir, SNAPSHOT_FILE)?;
-            let anchor_exists = regular_file_exists_at(&state_dir, ANCHOR_FILE)?;
-            if !snapshot_exists && !anchor_exists {
-                ensure_regular_file_at(&state_dir, LOCK_FILE, b"lock\n")?;
-            } else if !lock_exists || !snapshot_exists && anchor_exists {
-                return Err(AuditError::RollbackDetected);
-            }
-            let store = Self {
-                root,
-                state_dir,
-                active_session: Arc::new(AtomicBool::new(false)),
-                active_mutation_lock: Arc::new(Mutex::new(())),
-                owner_pid: std::process::id(),
-            };
-            let _guard = store.lock()?;
-            cleanup_stale_snapshot_temps(&store.state_dir, &store.root)?;
-            if !snapshot_exists && !anchor_exists {
-                ensure_regular_file_at(
-                    &store.state_dir,
-                    SNAPSHOT_FILE,
-                    canonical_json(&SnapshotFile::default())?.as_bytes(),
-                )?;
-                ensure_regular_file_at(
-                    &store.state_dir,
-                    ANCHOR_FILE,
-                    canonical_json(&DurableAnchor::default())?.as_bytes(),
-                )?;
-            } else if snapshot_exists && !anchor_exists {
-                let snapshot: SnapshotFile =
-                    read_json_file_at(&store.state_dir, SNAPSHOT_FILE, MAX_SNAPSHOT_BYTES)
-                        .map_err(AuditError::StateDecode)?;
-                verify_snapshot(&snapshot)?;
-                if snapshot.head != ChainHead::default() {
-                    return Err(AuditError::RollbackDetected);
-                }
-                ensure_regular_file_at(
-                    &store.state_dir,
-                    ANCHOR_FILE,
-                    canonical_json(&DurableAnchor::default())?.as_bytes(),
-                )?;
-            }
-            store.read_verified_snapshot()?;
-            Ok(store)
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LockIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    canonical_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn database_file_identity(path: &Path) -> Result<FileIdentity, AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        ensure_private_file_handle(&file, path)?;
+        file_identity(&file)
     }
-
-    pub fn register_authorization(&self, request: RegisterAuthorization) -> Result<(), AuditError> {
-        let _guard = self.lock()?;
-        validate_binding(&request.binding)?;
-        if request.binding.authorization_source != AuthorizationSource::DeterministicSimulation {
-            return Err(AuditError::NonSimulationAuthorizationRejected);
-        }
-        let mut snapshot = self.read_verified_snapshot()?;
-        if let Some(existing) = snapshot
-            .projection
-            .authorizations
-            .get(&request.binding.authorization_id)
-        {
-            return if existing.binding == request.binding {
-                Ok(())
-            } else {
-                Err(AuditError::AuthorizationAlreadyExists(
-                    request.binding.authorization_id.as_str().to_string(),
-                ))
-            };
-        }
-        self.commit_event(
-            &mut snapshot,
-            EventPayload::AuthorizationRegistered {
-                binding: request.binding,
-            },
-            false,
-        )
-    }
-
-    pub fn claim_execution(
-        &self,
-        authorization_id: &AuthorizationId,
-        expected_plan_digest: &DigestString,
-    ) -> Result<ClaimedExecution, AuditError> {
-        let guard = self.lock()?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        let next_epoch = snapshot
-            .projection
-            .latest_fence_epoch
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let record = snapshot
-            .projection
-            .authorizations
-            .get(authorization_id)
-            .ok_or_else(|| {
-                AuditError::AuthorizationUnknown(authorization_id.as_str().to_string())
-            })?;
-        if &record.binding.plan_digest != expected_plan_digest {
-            return Err(AuditError::PlanDigestMismatch);
-        }
-        match record.state {
-            AuthorizationState::Unused => {}
-            AuthorizationState::Claimed { .. } => {
-                return Err(AuditError::AuthorizationAlreadyClaimed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            AuthorizationState::Consumed { .. } => {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-        }
-        let binding = record.binding.clone();
-        self.commit_event(
-            &mut snapshot,
-            EventPayload::ExecutionClaimed {
-                authorization_id: authorization_id.clone(),
-                expected_plan_digest: expected_plan_digest.clone(),
-                fence_epoch: next_epoch,
-            },
-            false,
-        )?;
-        self.active_session.store(true, Ordering::Release);
-        let claimed = ClaimedExecution {
-            binding,
-            fence_epoch: next_epoch,
-            store_root: self.root.clone(),
-            batch_lock: guard.into_file(),
-            session_active: Arc::clone(&self.active_session),
-            mutation_lock: Arc::clone(&self.active_mutation_lock),
-            owner_pid: self.owner_pid,
-        };
-        Ok(claimed)
-    }
-
-    pub fn claim_recovery(
-        &self,
-        authorization_id: &AuthorizationId,
-        expected_plan_digest: &DigestString,
-    ) -> Result<ClaimedExecution, AuditError> {
-        let guard = self.lock()?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        let next_epoch = snapshot
-            .projection
-            .latest_fence_epoch
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let record = snapshot
-            .projection
-            .authorizations
-            .get(authorization_id)
-            .ok_or_else(|| {
-                AuditError::AuthorizationUnknown(authorization_id.as_str().to_string())
-            })?;
-        if &record.binding.plan_digest != expected_plan_digest {
-            return Err(AuditError::PlanDigestMismatch);
-        }
-        match record.state {
-            AuthorizationState::Claimed { fence_epoch } => fence_epoch,
-            AuthorizationState::Unused => {
-                return Err(AuditError::AuthorizationNotClaimed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            AuthorizationState::Consumed { .. } => {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-        };
-        let previous_fence_epoch = match record.state {
-            AuthorizationState::Claimed { fence_epoch } => fence_epoch,
-            _ => unreachable!("state checked above"),
-        };
-        let binding = record.binding.clone();
-        self.commit_event(
-            &mut snapshot,
-            EventPayload::RecoveryClaimed {
-                authorization_id: authorization_id.clone(),
-                expected_plan_digest: expected_plan_digest.clone(),
-                previous_fence_epoch,
-                fence_epoch: next_epoch,
-            },
-            false,
-        )?;
-        self.active_session.store(true, Ordering::Release);
-        let claimed = ClaimedExecution {
-            binding,
-            fence_epoch: next_epoch,
-            store_root: self.root.clone(),
-            batch_lock: guard.into_file(),
-            session_active: Arc::clone(&self.active_session),
-            mutation_lock: Arc::clone(&self.active_mutation_lock),
-            owner_pid: self.owner_pid,
-        };
-        Ok(claimed)
-    }
-
-    pub fn reserve_intent(
-        &self,
-        claimed: &ClaimedExecution,
-        request: IntentRequest,
-    ) -> Result<DurableIntentToken, AuditError> {
-        self.reserve_intent_once(claimed, request)
-            .and_then(IntentReservation::into_legacy_result)
-    }
-
-    pub fn reserve_intent_once(
-        &self,
-        claimed: &ClaimedExecution,
-        request: IntentRequest,
-    ) -> Result<IntentReservation, AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.ensure_claimed_store(claimed)?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        let auth = snapshot
-            .projection
-            .authorizations
-            .get(&claimed.binding.authorization_id)
-            .cloned()
-            .ok_or_else(|| {
-                AuditError::AuthorizationUnknown(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                )
-            })?;
-        match auth.state {
-            AuthorizationState::Claimed { fence_epoch } if fence_epoch == claimed.fence_epoch => {}
-            AuthorizationState::Claimed { .. } => return Err(AuditError::FenceEpochMismatch),
-            AuthorizationState::Unused => {
-                return Err(AuditError::AuthorizationNotClaimed(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                ));
-            }
-            AuthorizationState::Consumed { .. } => {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                ));
-            }
-        }
-        validate_intent_binding(&claimed.binding, &request)?;
-        if let Some(intent) = snapshot.projection.intents.values().find(|intent| {
-            intent.source_path_hash == request.source_path_hash
-                && intent.authorization_id != claimed.binding.authorization_id
-                && matches!(
-                    intent.terminal_state,
-                    IntentTerminalState::Reserved | IntentTerminalState::IndeterminateRecorded
-                )
-        }) {
-            return Ok(IntentReservation::Conflicting(intent.reservation_info()));
-        }
-        if let Some(intent) = snapshot.projection.intents.values().find(|intent| {
-            intent.authorization_id == claimed.binding.authorization_id
-                && intent.action_id == request.action_id
-        }) {
-            return if intent.item_id == request.item_id
-                && intent.source_path_hash == request.source_path_hash
-                && intent.before_revalidation_digest == request.before_revalidation_digest
-            {
-                Ok(IntentReservation::Existing(intent.reservation_info()))
-            } else {
-                Ok(IntentReservation::Conflicting(intent.reservation_info()))
-            };
-        }
-
-        let ordinal = snapshot
-            .projection
-            .next_attempt_ordinal
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let attempt_id = AttemptId::new(derive_digest_id(
-            "attempt",
-            &claimed.binding.authorization_id,
-            claimed.fence_epoch,
-            ordinal,
-        ))?;
-        let nonce = NonceId::new(derive_digest_id(
-            "nonce",
-            &claimed.binding.authorization_id,
-            claimed.fence_epoch,
-            ordinal,
-        ))?;
-        if snapshot.projection.intents.contains_key(&attempt_id) {
-            return Err(AuditError::AttemptAlreadyExists(
-                attempt_id.as_str().to_string(),
-            ));
-        }
-        let risk_tier = *claimed
-            .binding
-            .risk_by_action
-            .get(&request.action_id)
-            .ok_or(AuditError::ActionNotAuthorized)?;
-        let payload = EventPayload::ActionIntent(IntentEvent {
-            batch_id: claimed.binding.batch_id.clone(),
-            authorization_id: claimed.binding.authorization_id.clone(),
-            authorization_source: claimed.binding.authorization_source,
-            plan_id: claimed.binding.plan_id.clone(),
-            plan_digest: claimed.binding.plan_digest.clone(),
-            item_id: request.item_id,
-            action_id: request.action_id,
-            attempt_id: attempt_id.clone(),
-            nonce,
-            requested_mode: claimed.binding.requested_mode,
-            risk_tier,
-            fence_epoch: claimed.fence_epoch,
-            attempt_ordinal: ordinal,
-            before_revalidation_digest: request.before_revalidation_digest,
-            source_path_hash: request.source_path_hash,
-            policy_version: claimed.binding.policy_version.clone(),
-            policy_digest: claimed.binding.policy_digest.clone(),
-            protected_anchor_snapshot_digest: claimed
-                .binding
-                .protected_anchor_snapshot_digest
-                .clone(),
-            adapter_capabilities_digest: claimed.binding.adapter_capabilities_digest.clone(),
-            cleaner_set_digest: claimed.binding.cleaner_set_digest.clone(),
-        });
-        self.commit_event(&mut snapshot, payload, true)?;
-        Ok(IntentReservation::Created(
-            snapshot
-                .projection
-                .intents
-                .get(&attempt_id)
-                .expect("reducer inserted intent")
-                .as_token(),
-        ))
-    }
-
-    pub fn record_outcome(
-        &self,
-        claimed: &ClaimedExecution,
-        token: &DurableIntentToken,
-        outcome: SimulatedOutcome,
-    ) -> Result<(), AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.ensure_claimed_store(claimed)?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        ensure_claim_matches_token(claimed, token)?;
-        let auth = snapshot
-            .projection
-            .authorizations
-            .get(&claimed.binding.authorization_id)
-            .cloned()
-            .ok_or_else(|| {
-                AuditError::AuthorizationUnknown(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                )
-            })?;
-        match auth.state {
-            AuthorizationState::Claimed { fence_epoch } if fence_epoch == claimed.fence_epoch => {}
-            AuthorizationState::Claimed { .. } => return Err(AuditError::FenceEpochMismatch),
-            AuthorizationState::Unused => {
-                return Err(AuditError::AuthorizationNotClaimed(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                ));
-            }
-            AuthorizationState::Consumed { .. } => {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                ));
-            }
-        }
-        let authority = snapshot
-            .projection
-            .intents
-            .get(&token.attempt_id)
-            .ok_or_else(|| AuditError::IntentNotFound(token.attempt_id.as_str().to_string()))?;
-        validate_token_authority(token, authority)?;
-        let payload = EventPayload::ActionOutcome(make_outcome_event(
-            &claimed.binding,
-            claimed.fence_epoch,
-            authority,
-            outcome,
-        )?);
-        if let EventPayload::ActionOutcome(proposed) = &payload
-            && let Some(existing) = snapshot.projection.outcomes.get(&token.attempt_id)
-        {
-            return if existing == proposed {
-                Ok(())
-            } else {
-                Err(AuditError::OutcomeAlreadyExists(
-                    token.attempt_id.as_str().to_string(),
-                ))
-            };
-        }
-        self.commit_event(&mut snapshot, payload, false)
-    }
-
-    /// Records a reconciled terminal outcome without recreating the original intent capability.
-    ///
-    /// This is accepted only under a later recovery fence for an unresolved attempt belonging to
-    /// the exact claimed authorization.
-    pub fn record_recovery_outcome(
-        &self,
-        claimed: &ClaimedExecution,
-        attempt_id: &AttemptId,
-        outcome: SimulatedOutcome,
-    ) -> Result<(), AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.ensure_claimed_store(claimed)?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        validate_current_claim(
-            &snapshot.projection,
-            &claimed.binding.authorization_id,
-            claimed.fence_epoch,
-        )?;
-        let authority = snapshot
-            .projection
-            .intents
-            .get(attempt_id)
-            .ok_or_else(|| AuditError::IntentNotFound(attempt_id.as_str().to_string()))?;
-        if authority.authorization_id != claimed.binding.authorization_id
-            || authority.batch_id != claimed.binding.batch_id
-            || claimed.binding.item_by_action.get(&authority.action_id) != Some(&authority.item_id)
-            || claimed.fence_epoch <= authority.fence_epoch
-        {
-            return Err(AuditError::RecoveryClaimRequired);
-        }
-        let payload = EventPayload::RecoveryOutcome(make_outcome_event(
-            &claimed.binding,
-            claimed.fence_epoch,
-            authority,
-            outcome,
-        )?);
-        if let EventPayload::RecoveryOutcome(proposed) = &payload
-            && let Some(existing) = snapshot.projection.outcomes.get(attempt_id)
-        {
-            if existing == proposed {
-                return Ok(());
-            }
-            if !outcome_is_indeterminate(existing) {
-                return Err(AuditError::OutcomeAlreadyExists(
-                    attempt_id.as_str().to_string(),
-                ));
-            }
-        }
-        self.commit_event(&mut snapshot, payload, false)
-    }
-
-    pub fn unresolved_recovery_intents(
-        &self,
-        claimed: &ClaimedExecution,
-    ) -> Result<Vec<IntentReservationInfo>, AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.ensure_claimed_store(claimed)?;
-        let snapshot = self.read_verified_snapshot()?;
-        validate_current_claim(
-            &snapshot.projection,
-            &claimed.binding.authorization_id,
-            claimed.fence_epoch,
-        )?;
-        Ok(snapshot
-            .projection
-            .intents
-            .values()
-            .filter(|intent| {
-                intent.authorization_id == claimed.binding.authorization_id
-                    && intent.terminal_state != IntentTerminalState::OutcomeRecorded
-            })
-            .map(IntentAuthority::reservation_info)
-            .collect())
-    }
-
-    pub fn classify_recovery(
-        &self,
-        claimed: &ClaimedExecution,
-        observer: &dyn RecoveryObserver,
-    ) -> Result<Vec<RecoveryRecord>, AuditError> {
-        let attempt_ids: Vec<AttemptId> = {
-            let _mutation_guard = claimed.lock_mutation()?;
-            self.ensure_claimed_store(claimed)?;
-            let snapshot = self.read_verified_snapshot()?;
-            validate_current_claim(
-                &snapshot.projection,
-                &claimed.binding.authorization_id,
-                claimed.fence_epoch,
-            )?;
-            snapshot
-                .projection
-                .intents
-                .values()
-                .filter(|intent| intent.authorization_id == claimed.binding.authorization_id)
-                .map(|intent| intent.attempt_id.clone())
-                .collect()
-        };
-        let mut appended = Vec::new();
-        for attempt_id in attempt_ids {
-            let view = {
-                let _mutation_guard = claimed.lock_mutation()?;
-                self.ensure_claimed_store(claimed)?;
-                let snapshot = self.read_verified_snapshot()?;
-                validate_current_claim(
-                    &snapshot.projection,
-                    &claimed.binding.authorization_id,
-                    claimed.fence_epoch,
-                )?;
-                let authority = snapshot
-                    .projection
-                    .intents
-                    .get(&attempt_id)
-                    .ok_or_else(|| AuditError::IntentNotFound(attempt_id.as_str().to_string()))?;
-                if authority.terminal_state == IntentTerminalState::OutcomeRecorded {
-                    continue;
-                }
-                RecoveryIntentView {
-                    info: authority.reservation_info(),
-                    authorization_source: claimed.binding.authorization_source,
-                }
-            };
-            let observation = observer.observe(&view)?;
-            let (disposition, reason) =
-                classify_observation(claimed.requested_mode(), observation)?;
-            let _mutation_guard = claimed.lock_mutation()?;
-            self.ensure_claimed_store(claimed)?;
-            let mut snapshot = self.read_verified_snapshot()?;
-            let authority = snapshot
-                .projection
-                .intents
-                .get(&attempt_id)
-                .ok_or_else(|| AuditError::IntentNotFound(attempt_id.as_str().to_string()))?;
-            validate_current_claim(
-                &snapshot.projection,
-                &claimed.binding.authorization_id,
-                claimed.fence_epoch,
-            )?;
-            if authority.terminal_state == IntentTerminalState::OutcomeRecorded {
-                continue;
-            }
-            let record = RecoveryRecord {
-                batch_id: authority.batch_id.clone(),
-                authorization_id: authority.authorization_id.clone(),
-                action_id: authority.action_id.clone(),
-                attempt_id: authority.attempt_id.clone(),
-                disposition,
-                reason,
-            };
-            if snapshot.projection.recoveries.get(&attempt_id) != Some(&record) {
-                self.commit_event(
-                    &mut snapshot,
-                    EventPayload::RecoveryClassification {
-                        record: record.clone(),
-                        claim_fence_epoch: claimed.fence_epoch,
-                    },
-                    true,
-                )?;
-            }
-            appended.push(record);
-        }
-        Ok(appended)
-    }
-
-    pub fn consume_execution(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
-        let _mutation_guard = claimed.lock_mutation()?;
-        self.ensure_claimed_store(claimed)?;
-        let mut snapshot = self.read_verified_snapshot()?;
-        let record = snapshot
-            .projection
-            .authorizations
-            .get(&claimed.binding.authorization_id)
-            .ok_or_else(|| {
-                AuditError::AuthorizationUnknown(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                )
-            })?;
-        match record.state {
-            AuthorizationState::Claimed { fence_epoch } if fence_epoch == claimed.fence_epoch => {}
-            AuthorizationState::Claimed { .. } => return Err(AuditError::FenceEpochMismatch),
-            AuthorizationState::Unused => {
-                return Err(AuditError::AuthorizationNotClaimed(
-                    claimed.binding.authorization_id.as_str().to_string(),
-                ));
-            }
-            AuthorizationState::Consumed { fence_epoch } => {
-                return if fence_epoch == claimed.fence_epoch {
-                    Ok(())
-                } else {
-                    Err(AuditError::AuthorizationAlreadyConsumed(
-                        claimed.binding.authorization_id.as_str().to_string(),
-                    ))
-                };
-            }
-        }
-        let unresolved = snapshot.projection.intents.values().any(|intent| {
-            intent.authorization_id == claimed.binding.authorization_id
-                && intent.terminal_state != IntentTerminalState::OutcomeRecorded
-        });
-        if unresolved {
-            return Err(AuditError::UnresolvedIntentsRemain);
-        }
-        self.commit_event(
-            &mut snapshot,
-            EventPayload::ExecutionConsumed {
-                authorization_id: claimed.binding.authorization_id.clone(),
-                fence_epoch: claimed.fence_epoch,
-            },
-            false,
-        )
-    }
-
-    pub fn verify_integrity(&self) -> Result<IntegritySummary, AuditError> {
-        self.ensure_process()?;
-        if self.active_session.load(Ordering::Acquire) {
-            let session_guard = self
-                .active_mutation_lock
-                .lock()
-                .map_err(|_| AuditError::SessionLockPoisoned)?;
-            if self.active_session.load(Ordering::Acquire) {
-                return self.integrity_summary();
-            }
-            drop(session_guard);
-        }
-        let _store_guard = self.lock()?;
-        self.integrity_summary()
-    }
-
-    fn integrity_summary(&self) -> Result<IntegritySummary, AuditError> {
-        let snapshot = self.read_verified_snapshot()?;
-        Ok(IntegritySummary {
-            latest_sequence: snapshot.head.latest_sequence,
-            action_sequence: snapshot.head.action_sequence,
-            latest_digest: snapshot.head.latest_digest,
-        })
-    }
-
-    fn ensure_claimed_store(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
-        self.ensure_process()?;
-        claimed.validate_current_process()?;
-        if !claimed.validates_store(&self.root) {
-            return Err(AuditError::AuthorizationBindingMismatch);
-        }
-        if !claimed.session_active.load(Ordering::Acquire) {
-            return Err(AuditError::FenceEpochMismatch);
-        }
-        validate_directory_descriptor(&self.state_dir, &self.root)?;
-        validate_lock_descriptor(&claimed.batch_lock, &self.state_dir)?;
-        Ok(())
-    }
-
-    fn read_verified_snapshot(&self) -> Result<SnapshotFile, AuditError> {
-        validate_directory_descriptor(&self.state_dir, &self.root)?;
-        let snapshot = read_json_file_at(&self.state_dir, SNAPSHOT_FILE, MAX_SNAPSHOT_BYTES)
-            .map_err(AuditError::StateDecode)?;
-        verify_snapshot(&snapshot)?;
-        let anchor: DurableAnchor =
-            read_json_file_at(&self.state_dir, ANCHOR_FILE, MAX_ANCHOR_BYTES)
-                .map_err(AuditError::AnchorDecode)?;
-        verify_anchor(&anchor)?;
-        match compare_anchor(&snapshot, &anchor)? {
-            AnchorComparison::Current => {}
-            AnchorComparison::SnapshotOneAhead => {
-                self.write_anchor(&DurableAnchor::from(&snapshot.head))?;
-            }
-        }
-        Ok(snapshot)
-    }
-
-    fn write_anchor(&self, anchor: &DurableAnchor) -> Result<(), AuditError> {
-        let bytes = canonical_json(anchor)?;
-        if bytes.len() > MAX_ANCHOR_BYTES {
-            return Err(AuditError::StateTooLarge);
-        }
-        atomic_replace_named_at(&self.state_dir, ANCHOR_FILE, bytes.as_bytes())
-    }
-
-    fn commit_event(
-        &self,
-        snapshot: &mut SnapshotFile,
-        payload: EventPayload,
-        reserve_outcome_capacity: bool,
-    ) -> Result<(), AuditError> {
-        verify_snapshot(snapshot)?;
-        let sequence = snapshot
-            .head
-            .latest_sequence
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let previous_digest = snapshot.head.latest_digest.clone();
-        let recorded_at = unix_ms_string(SystemTime::now())?;
-        let monotonic = monotonic_elapsed_ms_string();
-        let payload_json = canonical_json(&payload)?;
-        let digest = digest_record(
-            sequence,
-            &recorded_at,
-            &monotonic,
-            previous_digest.as_deref(),
-            &payload_json,
-        );
-        let record = JournalRecord {
-            sequence,
-            recorded_at_unix_ms: recorded_at,
-            monotonic_elapsed_ms: monotonic,
-            previous_digest,
-            digest: digest.clone(),
-            payload: payload.clone(),
-        };
-        let mut candidate_projection = snapshot.projection.clone();
-        apply_payload(&mut candidate_projection, &record.payload)?;
-        let required_future_events =
-            required_future_event_slots(&candidate_projection, &record.payload)?;
-        let candidate_event_count = snapshot
-            .events
-            .len()
-            .checked_add(1)
-            .ok_or(AuditError::StateTooLarge)?;
-        if candidate_event_count > MAX_EVENTS
-            || candidate_event_count
-                .checked_add(required_future_events)
-                .is_none_or(|count| count > MAX_EVENTS)
-        {
-            return Err(AuditError::StateTooLarge);
-        }
-        if canonical_json(&record)?.len() > MAX_EVENT_BYTES {
-            return Err(AuditError::RecordTooLarge);
-        }
-        snapshot.projection = candidate_projection;
-        if matches!(
-            record.payload,
-            EventPayload::ActionIntent(_)
-                | EventPayload::ActionOutcome(_)
-                | EventPayload::RecoveryOutcome(_)
-        ) {
-            snapshot.head.action_sequence = snapshot
-                .head
-                .action_sequence
-                .checked_add(1)
-                .ok_or(AuditError::FenceEpochOverflow)?;
-        }
-        snapshot.events.push(record);
-        snapshot.head.latest_sequence = sequence;
-        snapshot.head.latest_digest = Some(digest);
-        verify_snapshot(snapshot)?;
-        let bytes = canonical_json(snapshot)?;
-        let reserved_bytes = required_future_events
-            .checked_mul(MAX_EVENT_COMMIT_GROWTH)
-            .ok_or(AuditError::StateTooLarge)?;
-        if bytes.len() > MAX_SNAPSHOT_BYTES
-            || (reserve_outcome_capacity || required_future_events != 0)
-                && bytes
-                    .len()
-                    .checked_add(reserved_bytes)
-                    .is_none_or(|size| size > MAX_SNAPSHOT_BYTES)
-        {
-            return Err(AuditError::StateTooLarge);
-        }
-        validate_directory_descriptor(&self.state_dir, &self.root)?;
-        atomic_replace_named_at(&self.state_dir, SNAPSHOT_FILE, bytes.as_bytes())?;
-        self.write_anchor(&DurableAnchor::from(&snapshot.head))
-    }
-
-    fn lock(&self) -> Result<StoreLock, AuditError> {
-        self.ensure_process()?;
-        validate_directory_descriptor(&self.state_dir, &self.root)?;
-        let file = openat_file(&self.state_dir, LOCK_FILE, true)?;
-        validate_lock_descriptor(&file, &self.state_dir)?;
-        file.try_lock_exclusive()
-            .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-        Ok(StoreLock { _file: file })
-    }
-
-    fn ensure_process(&self) -> Result<(), AuditError> {
-        if self.owner_pid != std::process::id() {
-            return Err(AuditError::ForkedProcess);
-        }
-        Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(AuditError::UnsupportedPlatform)
     }
 }
 
-fn required_future_event_slots(
-    projection: &Projection,
-    committed_payload: &EventPayload,
-) -> Result<usize, AuditError> {
-    if matches!(committed_payload, EventPayload::ExecutionConsumed { .. }) {
-        return Ok(0);
-    }
-    let has_claimed_authorization = projection
-        .authorizations
-        .values()
-        .any(|record| matches!(record.state, AuthorizationState::Claimed { .. }));
-    if !has_claimed_authorization {
-        return Ok(0);
-    }
-    let reserved = projection
-        .intents
-        .values()
-        .filter(|intent| intent.terminal_state == IntentTerminalState::Reserved)
-        .count();
-    let indeterminate = projection
-        .intents
-        .values()
-        .filter(|intent| intent.terminal_state == IntentTerminalState::IndeterminateRecorded)
-        .count();
-    // A reserved intent may first produce an indeterminate outcome and then require a recovery
-    // outcome. An already-indeterminate intent still needs one recovery outcome. Preserve one
-    // eventual consume event as well. Before recovery starts, preserve one recovery-claim event;
-    // recovery events spend that reserved claim slot instead of recursively reserving unbounded
-    // crash cycles. Every non-consume commit is checked so unrelated events cannot steal slots.
-    let terminal_outcomes = reserved
-        .checked_mul(2)
-        .and_then(|count| count.checked_add(indeterminate))
-        .ok_or(AuditError::StateTooLarge)?;
-    let recovery_claim = usize::from(!matches!(
-        committed_payload,
-        EventPayload::RecoveryClaimed { .. }
-            | EventPayload::RecoveryOutcome(_)
-            | EventPayload::RecoveryClassification { .. }
-    ));
-    terminal_outcomes
-        .checked_add(1)
-        .and_then(|count| count.checked_add(recovery_claim))
-        .ok_or(AuditError::StateTooLarge)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntentAuthority {
+    attempt_id: AttemptId,
+    nonce: NonceId,
+    database_id: String,
+    execution_id: String,
+    authorization_id: AuthorizationId,
+    authorization_source: AuthorizationSource,
+    batch_id: BatchId,
+    plan_id: PlanId,
+    plan_digest: DigestString,
+    item_id: ItemId,
+    action_id: ActionId,
+    requested_mode: RequestedMode,
+    risk_tier: RiskTier,
+    source_path_hash: PathHash,
+    before_revalidation_digest: DigestString,
+    #[serde(with = "decimal_u64")]
+    fence_epoch: u64,
+    policy_version: String,
+    policy_digest: DigestString,
+    protected_anchor_snapshot_digest: DigestString,
+    adapter_capabilities_digest: DigestString,
+    cleaner_set_digest: DigestString,
+    host_instance_id: HostId,
+    user_identity: UserId,
+    workflow_session: SessionId,
 }
 
-#[derive(Debug)]
-struct StoreLock {
-    _file: File,
+impl IntentAuthority {
+    fn to_token(&self) -> DurableIntentToken {
+        DurableIntentToken {
+            attempt_id: self.attempt_id.clone(),
+            nonce: self.nonce.clone(),
+            database_id: self.database_id.clone(),
+            execution_id: self.execution_id.clone(),
+            authorization_id: self.authorization_id.clone(),
+            authorization_source: self.authorization_source,
+            batch_id: self.batch_id.clone(),
+            plan_id: self.plan_id.clone(),
+            plan_digest: self.plan_digest.clone(),
+            item_id: self.item_id.clone(),
+            action_id: self.action_id.clone(),
+            requested_mode: self.requested_mode,
+            risk_tier: self.risk_tier,
+            source_path_hash: self.source_path_hash.clone(),
+            before_revalidation_digest: self.before_revalidation_digest.clone(),
+            fence_epoch: self.fence_epoch,
+            policy_version: self.policy_version.clone(),
+            policy_digest: self.policy_digest.clone(),
+            protected_anchor_snapshot_digest: self.protected_anchor_snapshot_digest.clone(),
+            adapter_capabilities_digest: self.adapter_capabilities_digest.clone(),
+            cleaner_set_digest: self.cleaner_set_digest.clone(),
+            host_instance_id: self.host_instance_id.clone(),
+            user_identity: self.user_identity.clone(),
+            workflow_session: self.workflow_session.clone(),
+            creator_pid: std::process::id(),
+        }
+    }
 }
 
-impl StoreLock {
-    fn into_file(self) -> File {
-        self._file
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutcomeEvent {
+    authority: IntentAuthority,
+    actual_platform_operation: String,
+    adapter_version: String,
+    started_at_unix_ms: String,
+    finished_at_unix_ms: String,
+    stable_status: StableStatus,
+    recovery_state: RecoveryState,
+    source_postcheck: Observation,
+    destination_postcheck: Option<Observation>,
+    resulting_trash_locator: Option<String>,
+    platform_result: Option<String>,
+    platform_error_domain: Option<String>,
+    platform_error_code: Option<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EventPayload {
+    AuthorizationRegistered {
+        binding: AuthorizationBinding,
+    },
+    ExecutionClaimed {
+        authorization_id: AuthorizationId,
+        execution_id: String,
+        #[serde(with = "decimal_u64")]
+        fence_epoch: u64,
+        started_at_unix_ms: String,
+    },
+    RecoveryClaimed {
+        authorization_id: AuthorizationId,
+        previous_execution_id: String,
+        execution_id: String,
+        #[serde(with = "decimal_u64")]
+        fence_epoch: u64,
+        started_at_unix_ms: String,
+    },
+    ActionIntent {
+        authority: IntentAuthority,
+    },
+    ActionOutcome {
+        outcome: OutcomeEvent,
+    },
+    RecoveryOutcome {
+        outcome: OutcomeEvent,
+        #[serde(with = "decimal_u64")]
+        recovery_fence_epoch: u64,
+    },
+    RecoveryClassification {
+        authority: IntentAuthority,
+        record: RecoveryRecord,
+    },
+    ExecutionConsumed {
+        authorization_id: AuthorizationId,
+        execution_id: String,
+        #[serde(with = "decimal_u64")]
+        fence_epoch: u64,
+        ended_at_unix_ms: String,
+    },
+}
+
+impl EventPayload {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::AuthorizationRegistered { .. } => "authorization_registered",
+            Self::ExecutionClaimed { .. } => "execution_claimed",
+            Self::RecoveryClaimed { .. } => "recovery_claimed",
+            Self::ActionIntent { .. } => "action_intent",
+            Self::ActionOutcome { .. } => "action_outcome",
+            Self::RecoveryOutcome { .. } => "recovery_outcome",
+            Self::RecoveryClassification { .. } => "recovery_classification",
+            Self::ExecutionConsumed { .. } => "execution_consumed",
+        }
+    }
+
+    fn indexed_ids(&self) -> (Option<&str>, Option<&str>, Option<&str>) {
+        match self {
+            Self::AuthorizationRegistered { binding } => {
+                (Some(binding.authorization_id.as_str()), None, None)
+            }
+            Self::ExecutionClaimed {
+                authorization_id, ..
+            }
+            | Self::RecoveryClaimed {
+                authorization_id, ..
+            }
+            | Self::ExecutionConsumed {
+                authorization_id, ..
+            } => (Some(authorization_id.as_str()), None, None),
+            Self::ActionIntent { authority } => (
+                Some(authority.authorization_id.as_str()),
+                Some(authority.action_id.as_str()),
+                Some(authority.attempt_id.as_str()),
+            ),
+            Self::ActionOutcome { outcome } => (
+                Some(outcome.authority.authorization_id.as_str()),
+                Some(outcome.authority.action_id.as_str()),
+                Some(outcome.authority.attempt_id.as_str()),
+            ),
+            Self::RecoveryOutcome { outcome, .. } => (
+                Some(outcome.authority.authorization_id.as_str()),
+                Some(outcome.authority.action_id.as_str()),
+                Some(outcome.authority.attempt_id.as_str()),
+            ),
+            Self::RecoveryClassification { authority, .. } => (
+                Some(authority.authorization_id.as_str()),
+                Some(authority.action_id.as_str()),
+                Some(authority.attempt_id.as_str()),
+            ),
+        }
     }
 }
 
@@ -1970,10 +1037,6 @@ impl StoreLock {
 pub enum AuditError {
     #[error("audit store is unsupported on this platform")]
     UnsupportedPlatform,
-    #[error("claimed execution mutation lock is poisoned")]
-    SessionLockPoisoned,
-    #[error("audit handles cannot be reused after process fork")]
-    ForkedProcess,
     #[error("state directory must be absolute")]
     StateDirNotAbsolute,
     #[error("state directory {0} contains unsafe components")]
@@ -1982,6 +1045,12 @@ pub enum AuditError {
     SymlinkRejected(String),
     #[error("state directory {0} is not private enough")]
     StateDirNotPrivate(String),
+    #[error("state file {0} is not a private regular single-link file")]
+    UnsafeStateFile(String),
+    #[error("audit handles cannot be reused after process fork")]
+    ForkedProcess,
+    #[error("claimed execution mutation lock is poisoned")]
+    SessionLockPoisoned,
     #[error("stable identifier field {field} is invalid")]
     InvalidStableId { field: &'static str },
     #[error("authorization {0} already exists")]
@@ -2000,8 +1069,10 @@ pub enum AuditError {
     AuthorizationBindingMismatch,
     #[error("raw audit registration accepts deterministic simulation authority only")]
     NonSimulationAuthorizationRejected,
-    #[error("action is not authorized")]
+    #[error("action is not authorized for the requested item")]
     ActionNotAuthorized,
+    #[error("action {0} already has a reserved or completed attempt")]
+    ActionAlreadyReserved(String),
     #[error("fence epoch mismatch")]
     FenceEpochMismatch,
     #[error("a later recovery claim is required for tokenless outcome recording")]
@@ -2010,8 +1081,8 @@ pub enum AuditError {
     FenceEpochOverflow,
     #[error("attempt {0} already exists")]
     AttemptAlreadyExists(String),
-    #[error("action {0} already has a reserved or completed attempt")]
-    ActionAlreadyReserved(String),
+    #[error("an intent already exists for authorization/action {0}")]
+    DuplicateActionIntent(String),
     #[error("attempt {0} has no durable matching intent")]
     IntentNotFound(String),
     #[error("outcome already exists for attempt {0}")]
@@ -2020,8 +1091,6 @@ pub enum AuditError {
     UnresolvedIntentsRemain,
     #[error("tail truncation or durable head mismatch detected")]
     HeadMismatch,
-    #[error("snapshot rollback or divergence from durable anchor detected")]
-    RollbackDetected,
     #[error("journal tampering detected at sequence {sequence}: {reason}")]
     JournalTampered { sequence: u64, reason: String },
     #[error("state file is too large")]
@@ -2030,61 +1099,2124 @@ pub enum AuditError {
     JournalTooLarge,
     #[error("record exceeds bounded maximum size")]
     RecordTooLarge,
-    #[error("outcome fields, timestamps, or status tuple are invalid")]
-    InvalidOutcome,
-    #[error("recovery observation contradicts its evidence")]
-    InvalidObservation,
+    #[error("database quota has been reached")]
+    DatabaseTooLarge,
     #[error("successful outcome requires source absence")]
     SuccessRequiresSourceAbsent,
     #[error("trash success requires confirmed destination or trash locator evidence")]
     TrashSuccessRequiresDestinationEvidence,
     #[error("permanent success must not claim destination or trash locator")]
     PermanentSuccessMustNotClaimDestination,
-    #[error("state file decode failed: {0}")]
-    StateDecode(std::io::Error),
-    #[error("head file decode failed: {0}")]
-    HeadDecode(std::io::Error),
-    #[error("anchor file decode failed: {0}")]
-    AnchorDecode(std::io::Error),
-    #[error("journal decode failed: {0}")]
-    JournalDecode(serde_json::Error),
+    #[error("outcome fields are contradictory: {0}")]
+    InvalidOutcome(&'static str),
+    #[error("recovery observation is contradictory")]
+    InvalidRecoveryObservation,
     #[error("invalid clock value")]
     InvalidClock,
     #[error("concurrent writer denied by exclusive store lock")]
     ConcurrentWriterDenied,
+    #[error("claim belongs to a different audit store")]
+    StoreMismatch,
+    #[error("claim session is no longer active")]
+    ClaimNotActive,
+    #[error("audit lock file was replaced")]
+    LockReplaced,
+    #[error("SQLite integrity check failed: {0}")]
+    IntegrityCheckFailed(String),
+    #[error("SQLite schema or pragma mismatch: {0}")]
+    DatabaseConfiguration(String),
+    #[error("state file decode failed: {0}")]
+    StateDecode(std::io::Error),
+    #[error("head file decode failed: {0}")]
+    HeadDecode(std::io::Error),
+    #[error("journal decode failed: {0}")]
+    JournalDecode(serde_json::Error),
+    #[error(transparent)]
+    Database(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-fn validate_binding(binding: &AuthorizationBinding) -> Result<(), AuditError> {
-    let represented_items: BTreeSet<_> = binding.item_by_action.values().cloned().collect();
-    if binding.authorization_source != AuthorizationSource::DeterministicSimulation {
-        return Err(AuditError::NonSimulationAuthorizationRejected);
+impl AuditStore {
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, AuditError> {
+        #[cfg(not(unix))]
+        {
+            let _ = root;
+            return Err(AuditError::UnsupportedPlatform);
+        }
+        #[cfg(unix)]
+        {
+            let root = root.as_ref().to_path_buf();
+            ensure_private_state_dir(&root)?;
+            let lock_path = root.join(LOCK_FILE);
+            let lock_file = open_lock_file(&lock_path)?;
+            let lock_identity = lock_identity(&lock_file, &lock_path)?;
+            let database_path = root.join(DATABASE_FILE);
+            let database_preexisting = database_path.exists();
+            if !database_preexisting {
+                lock_file
+                    .try_lock_exclusive()
+                    .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+                create_private_database_file(&database_path)?;
+            } else {
+                lock_file
+                    .try_lock_shared()
+                    .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+            }
+            ensure_sqlite_sidecars_private(&root)?;
+            ensure_private_regular_file(&database_path)?;
+            let mut connection = open_connection(&database_path)?;
+            if database_preexisting {
+                verify_initialized_database(&connection)?;
+            } else {
+                initialize_database(&mut connection)?;
+            }
+            ensure_sqlite_sidecars_private(&root)?;
+            let database_id: String = connection.query_row(
+                "SELECT database_id FROM store_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
+            let database_identity = database_file_identity(&database_path)?;
+            FileExt::unlock(&lock_file)?;
+            Ok(Self {
+                root,
+                database_path,
+                lock_path,
+                database_id,
+                lock_identity,
+                database_identity,
+                owner_pid: std::process::id(),
+                active_session: Arc::new(AtomicBool::new(false)),
+                active_mutation_lock: Arc::new(Mutex::new(())),
+            })
+        }
     }
-    if binding.action_count != binding.action_ids.len() as u64
-        || binding.action_ids.is_empty()
-        || binding.item_ids.is_empty()
-        || binding.action_ids.len() > MAX_BINDING_ACTIONS
-        || binding.item_ids.len() > MAX_BINDING_ITEMS
-        || binding.policy_version.is_empty()
-        || binding.policy_version.len() > MAX_POLICY_VERSION_BYTES
-        || binding.risk_by_action.len() != binding.action_ids.len()
-        || binding.item_by_action.len() != binding.action_ids.len()
-        || represented_items != binding.item_ids
-        || binding
+
+    pub fn register_authorization(&self, request: RegisterAuthorization) -> Result<(), AuditError> {
+        self.ensure_process()?;
+        validate_binding(&request.binding)?;
+        let binding_json = canonical_json(&request.binding)?;
+        if binding_json.len() > MAX_BINDING_BYTES {
+            return Err(AuditError::RecordTooLarge);
+        }
+        let _guard = self.short_lock()?;
+        self.check_size_budget(false)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count: i64 =
+            transaction.query_row("SELECT count(*) FROM authorizations", [], |row| row.get(0))?;
+        if count >= MAX_AUTHORIZATIONS {
+            return Err(AuditError::StateTooLarge);
+        }
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM authorizations WHERE authorization_id=?1)",
+            [request.binding.authorization_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(AuditError::AuthorizationAlreadyExists(
+                request.binding.authorization_id.as_str().to_string(),
+            ));
+        }
+        insert_authorization(&transaction, &request.binding, &binding_json)?;
+        append_event(
+            &transaction,
+            &EventPayload::AuthorizationRegistered {
+                binding: request.binding,
+            },
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn claim_execution(
+        &self,
+        authorization_id: &AuthorizationId,
+        expected_plan_digest: &DigestString,
+    ) -> Result<ClaimedExecution, AuditError> {
+        self.ensure_process()?;
+        let lock_file = self.acquire_lifetime_lock()?;
+        self.claim_session(lock_file, authorization_id, expected_plan_digest, false)
+    }
+
+    pub fn claim_recovery(
+        &self,
+        authorization_id: &AuthorizationId,
+        expected_plan_digest: &DigestString,
+    ) -> Result<ClaimedExecution, AuditError> {
+        self.ensure_process()?;
+        let lock_file = self.acquire_lifetime_lock()?;
+        self.claim_session(lock_file, authorization_id, expected_plan_digest, true)
+    }
+
+    fn claim_session(
+        &self,
+        lock_file: File,
+        authorization_id: &AuthorizationId,
+        expected_plan_digest: &DigestString,
+        recovery: bool,
+    ) -> Result<ClaimedExecution, AuditError> {
+        self.check_size_budget(false)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (binding, state, current_fence, current_execution) =
+            load_authorization(&transaction, authorization_id)?;
+        if &binding.plan_digest != expected_plan_digest {
+            return Err(AuditError::PlanDigestMismatch);
+        }
+        let latest_fence: i64 = transaction.query_row(
+            "SELECT next_fence_epoch FROM store_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_fence = latest_fence
+            .checked_add(1)
+            .ok_or(AuditError::FenceEpochOverflow)?;
+        let execution_id = random_id(&transaction, "execution")?;
+        let now = unix_ms_i64(SystemTime::now())?;
+        let payload = if recovery {
+            if state == "unused" {
+                return Err(AuditError::AuthorizationNotClaimed(
+                    authorization_id.as_str().to_string(),
+                ));
+            }
+            if state == "consumed" {
+                return Err(AuditError::AuthorizationAlreadyConsumed(
+                    authorization_id.as_str().to_string(),
+                ));
+            }
+            let previous_execution = current_execution.ok_or(AuditError::HeadMismatch)?;
+            let previous_fence = current_fence.ok_or(AuditError::HeadMismatch)?;
+            let changed = transaction.execute(
+                "UPDATE executions SET state='superseded', ended_at_ms=?1 WHERE execution_id=?2 AND fence_epoch=?3 AND state='active'",
+                params![now, previous_execution, previous_fence],
+            )?;
+            if changed != 1 {
+                return Err(AuditError::FenceEpochMismatch);
+            }
+            EventPayload::RecoveryClaimed {
+                authorization_id: authorization_id.clone(),
+                previous_execution_id: previous_execution,
+                execution_id: execution_id.clone(),
+                fence_epoch: next_fence as u64,
+                started_at_unix_ms: now.to_string(),
+            }
+        } else {
+            if state == "claimed" {
+                return Err(AuditError::AuthorizationAlreadyClaimed(
+                    authorization_id.as_str().to_string(),
+                ));
+            }
+            if state == "consumed" {
+                return Err(AuditError::AuthorizationAlreadyConsumed(
+                    authorization_id.as_str().to_string(),
+                ));
+            }
+            EventPayload::ExecutionClaimed {
+                authorization_id: authorization_id.clone(),
+                execution_id: execution_id.clone(),
+                fence_epoch: next_fence as u64,
+                started_at_unix_ms: now.to_string(),
+            }
+        };
+        transaction.execute(
+            "UPDATE executions SET state='superseded',ended_at_ms=?1 WHERE state='active'",
+            [now],
+        )?;
+        transaction.execute(
+            "INSERT INTO executions(execution_id,authorization_id,fence_epoch,kind,state,started_at_ms) VALUES(?1,?2,?3,?4,'active',?5)",
+            params![execution_id, authorization_id.as_str(), next_fence, if recovery { "recovery" } else { "execution" }, now],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE authorizations SET state='claimed',current_fence_epoch=?1,current_execution_id=?2 WHERE authorization_id=?3 AND state=?4",
+            params![next_fence, execution_id, authorization_id.as_str(), if recovery { "claimed" } else { "unused" }],
+        )?;
+        if changed != 1 {
+            return Err(AuditError::FenceEpochMismatch);
+        }
+        transaction.execute(
+            "UPDATE store_meta SET next_fence_epoch=?1 WHERE singleton=1 AND next_fence_epoch=?2",
+            params![next_fence, latest_fence],
+        )?;
+        append_event(&transaction, &payload)?;
+        transaction.commit()?;
+        self.active_session.store(true, Ordering::Release);
+        Ok(ClaimedExecution {
+            binding,
+            fence_epoch: next_fence as u64,
+            database_id: self.database_id.clone(),
+            execution_id,
+            database_path: self.database_path.clone(),
+            lock_identity: self.lock_identity.clone(),
+            lock_file,
+            lock_held: Cell::new(true),
+            owner_pid: std::process::id(),
+            session_active: Arc::clone(&self.active_session),
+            mutation_lock: Arc::clone(&self.active_mutation_lock),
+        })
+    }
+
+    pub fn reserve_intent(
+        &self,
+        claimed: &ClaimedExecution,
+        request: IntentRequest,
+    ) -> Result<DurableIntentToken, AuditError> {
+        match self.reserve_intent_once(claimed, request)? {
+            IntentReservation::Created(token) => Ok(token),
+            IntentReservation::Existing(info) | IntentReservation::Conflicting(info) => Err(
+                AuditError::ActionAlreadyReserved(info.action_id.as_str().to_string()),
+            ),
+        }
+    }
+
+    pub fn reserve_intent_once(
+        &self,
+        claimed: &ClaimedExecution,
+        request: IntentRequest,
+    ) -> Result<IntentReservation, AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        validate_intent_binding(&claimed.binding, &request)?;
+        self.check_size_budget(false)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_live_claim(&transaction, claimed)?;
+        {
+            let mut statement = transaction.prepare(
+                "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id<>?1 AND terminal_state IN ('reserved','classified_indeterminate') ORDER BY ordinal",
+            )?;
+            let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (attempt_id, item_id, action_id, authority_json) = row?;
+                let authority: IntentAuthority =
+                    serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+                if authority.source_path_hash == request.source_path_hash {
+                    return Ok(IntentReservation::Conflicting(IntentReservationInfo {
+                        attempt_id: AttemptId::new(attempt_id)?,
+                        item_id: ItemId::new(item_id)?,
+                        action_id: ActionId::new(action_id)?,
+                        source_path_hash: authority.source_path_hash.clone(),
+                        before_revalidation_digest: authority.before_revalidation_digest.clone(),
+                    }));
+                }
+            }
+        }
+        let existing: Option<(String, String, String, String)> = transaction.query_row(
+            "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id=?1 AND action_id=?2",
+            params![
+                claimed.authorization_id().as_str(),
+                request.action_id.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        if let Some((attempt_id, item_id, action_id, authority_json)) = existing {
+            let authority: IntentAuthority =
+                serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+            let info = IntentReservationInfo {
+                attempt_id: AttemptId::new(attempt_id)?,
+                item_id: ItemId::new(item_id)?,
+                action_id: ActionId::new(action_id)?,
+                source_path_hash: authority.source_path_hash.clone(),
+                before_revalidation_digest: authority.before_revalidation_digest.clone(),
+            };
+            return if info.matches_request(&request) {
+                Ok(IntentReservation::Existing(info))
+            } else {
+                Ok(IntentReservation::Conflicting(info))
+            };
+        }
+        let ordinal: i64 = transaction.query_row(
+            "SELECT next_attempt_ordinal FROM store_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or(AuditError::FenceEpochOverflow)?;
+        let attempt_id = AttemptId::new(random_id(&transaction, "attempt")?)?;
+        let nonce = NonceId::new(random_id(&transaction, "nonce")?)?;
+        let risk_tier = claimed
+            .binding
+            .risk_by_action
+            .get(&request.action_id)
+            .copied()
+            .ok_or(AuditError::ActionNotAuthorized)?;
+        let authority = IntentAuthority {
+            attempt_id: attempt_id.clone(),
+            nonce: nonce.clone(),
+            database_id: self.database_id.clone(),
+            execution_id: claimed.execution_id.clone(),
+            authorization_id: claimed.binding.authorization_id.clone(),
+            authorization_source: claimed.binding.authorization_source,
+            batch_id: claimed.binding.batch_id.clone(),
+            plan_id: claimed.binding.plan_id.clone(),
+            plan_digest: claimed.binding.plan_digest.clone(),
+            item_id: request.item_id,
+            action_id: request.action_id,
+            requested_mode: claimed.binding.requested_mode,
+            risk_tier,
+            source_path_hash: request.source_path_hash,
+            before_revalidation_digest: request.before_revalidation_digest,
+            fence_epoch: claimed.fence_epoch,
+            policy_version: claimed.binding.policy_version.clone(),
+            policy_digest: claimed.binding.policy_digest.clone(),
+            protected_anchor_snapshot_digest: claimed
+                .binding
+                .protected_anchor_snapshot_digest
+                .clone(),
+            adapter_capabilities_digest: claimed.binding.adapter_capabilities_digest.clone(),
+            cleaner_set_digest: claimed.binding.cleaner_set_digest.clone(),
+            host_instance_id: claimed.binding.host_instance_id.clone(),
+            user_identity: claimed.binding.user_identity.clone(),
+            workflow_session: claimed.binding.workflow_session.clone(),
+        };
+        let authority_json = canonical_json(&authority)?;
+        if authority_json.len() > MAX_RECORD_BYTES {
+            return Err(AuditError::RecordTooLarge);
+        }
+        transaction.execute(
+            "INSERT INTO intents(attempt_id,ordinal,nonce,authorization_id,execution_id,fence_epoch,item_id,action_id,source_path_hash,before_revalidation_digest,authority_json,terminal_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'reserved')",
+            params![attempt_id.as_str(), next_ordinal, nonce.as_str(), authority.authorization_id.as_str(), authority.execution_id, authority.fence_epoch as i64, authority.item_id.as_str(), authority.action_id.as_str(), authority.source_path_hash.as_str(), authority.before_revalidation_digest.as_str(), authority_json],
+        )?;
+        transaction.execute("UPDATE store_meta SET next_attempt_ordinal=?1 WHERE singleton=1 AND next_attempt_ordinal=?2", params![next_ordinal, ordinal])?;
+        append_event(
+            &transaction,
+            &EventPayload::ActionIntent {
+                authority: authority.clone(),
+            },
+        )?;
+        transaction.commit()?;
+        Ok(IntentReservation::Created(authority.to_token()))
+    }
+
+    pub fn record_outcome(
+        &self,
+        claimed: &ClaimedExecution,
+        token: &DurableIntentToken,
+        outcome: SimulatedOutcome,
+    ) -> Result<(), AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        ensure_claim_matches_token(claimed, token)?;
+        let validated = validate_outcome(token, outcome)?;
+        self.check_size_budget(true)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_live_claim(&transaction, claimed)?;
+        let (authority, terminal_state) = load_intent(&transaction, token.attempt_id())?;
+        validate_token_authority(token, &authority)?;
+        if terminal_state != "reserved" {
+            return Err(AuditError::OutcomeAlreadyExists(
+                token.attempt_id().as_str().to_string(),
+            ));
+        }
+        let event = outcome_event(authority.clone(), validated);
+        let outcome_json = canonical_json(&event)?;
+        if outcome_json.len() > MAX_RECORD_BYTES {
+            return Err(AuditError::RecordTooLarge);
+        }
+        transaction.execute(
+            "INSERT INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
+            params![token.attempt_id().as_str(), outcome_json],
+        )?;
+        let changed = transaction.execute("UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state='reserved'", [token.attempt_id().as_str()])?;
+        if changed != 1 {
+            return Err(AuditError::OutcomeAlreadyExists(
+                token.attempt_id().as_str().to_string(),
+            ));
+        }
+        append_event(
+            &transaction,
+            &EventPayload::ActionOutcome { outcome: event },
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_recovery_outcome(
+        &self,
+        claimed: &ClaimedExecution,
+        attempt_id: &AttemptId,
+        outcome: SimulatedOutcome,
+    ) -> Result<(), AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        self.check_size_budget(true)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_live_claim(&transaction, claimed)?;
+        let (authority, terminal_state) = load_intent(&transaction, attempt_id)?;
+        if authority.authorization_id != claimed.binding.authorization_id
+            || authority.batch_id != claimed.binding.batch_id
+            || claimed.binding.item_by_action.get(&authority.action_id) != Some(&authority.item_id)
+            || claimed.fence_epoch <= authority.fence_epoch
+        {
+            return Err(AuditError::RecoveryClaimRequired);
+        }
+        if terminal_state == "outcome_recorded" {
+            return Err(AuditError::OutcomeAlreadyExists(
+                attempt_id.as_str().to_string(),
+            ));
+        }
+        let validated = validate_outcome_for_mode(authority.requested_mode, outcome)?;
+        let event = outcome_event(authority, validated);
+        let outcome_json = canonical_json(&event)?;
+        if outcome_json.len() > MAX_RECORD_BYTES {
+            return Err(AuditError::RecordTooLarge);
+        }
+        transaction.execute(
+            "INSERT OR REPLACE INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
+            params![attempt_id.as_str(), outcome_json],
+        )?;
+        transaction.execute(
+            "DELETE FROM recoveries WHERE attempt_id=?1",
+            [attempt_id.as_str()],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state<>'outcome_recorded'",
+            [attempt_id.as_str()],
+        )?;
+        if changed != 1 {
+            return Err(AuditError::OutcomeAlreadyExists(
+                attempt_id.as_str().to_string(),
+            ));
+        }
+        append_event(
+            &transaction,
+            &EventPayload::RecoveryOutcome {
+                outcome: event,
+                recovery_fence_epoch: claimed.fence_epoch,
+            },
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn unresolved_recovery_intents(
+        &self,
+        claimed: &ClaimedExecution,
+    ) -> Result<Vec<IntentReservationInfo>, AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        let connection = self.connection()?;
+        verify_database(&connection)?;
+        validate_live_claim_connection(&connection, claimed)?;
+        let mut statement = connection.prepare(
+            "SELECT attempt_id,item_id,action_id,source_path_hash,before_revalidation_digest FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded' ORDER BY ordinal",
+        )?;
+        let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (attempt, item, action, source_path_hash, before_revalidation_digest) = row?;
+            Ok(IntentReservationInfo {
+                attempt_id: AttemptId::new(attempt)?,
+                item_id: ItemId::new(item)?,
+                action_id: ActionId::new(action)?,
+                source_path_hash: PathHash::new(source_path_hash)?,
+                before_revalidation_digest: DigestString::new(before_revalidation_digest)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn classify_recovery(
+        &self,
+        claimed: &ClaimedExecution,
+        observer: &dyn RecoveryObserver,
+    ) -> Result<Vec<RecoveryRecord>, AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        let connection = self.connection()?;
+        verify_database(&connection)?;
+        validate_live_claim_connection(&connection, claimed)?;
+        let (reserved, mut existing) =
+            load_recovery_candidates(&connection, claimed.authorization_id())?;
+        drop(connection);
+        let mut pending = Vec::new();
+        for authority in reserved {
+            let view = RecoveryIntentView {
+                info: IntentReservationInfo {
+                    attempt_id: authority.attempt_id.clone(),
+                    item_id: authority.item_id.clone(),
+                    action_id: authority.action_id.clone(),
+                    source_path_hash: authority.source_path_hash.clone(),
+                    before_revalidation_digest: authority.before_revalidation_digest.clone(),
+                },
+                authorization_source: authority.authorization_source,
+            };
+            let observation = observer.observe(&view)?;
+            let (disposition, reason) =
+                classify_observation(authority.requested_mode, &observation)?;
+            pending.push((authority, observation, disposition, reason));
+        }
+        if pending.is_empty() {
+            return Ok(existing);
+        }
+        self.check_size_budget(true)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_live_claim(&transaction, claimed)?;
+        for (authority, _observation, disposition, reason) in pending {
+            let (_, state) = load_intent(&transaction, &authority.attempt_id)?;
+            if state != "reserved" {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    authority.attempt_id.as_str().to_string(),
+                ));
+            }
+            let record = RecoveryRecord {
+                batch_id: authority.batch_id.clone(),
+                authorization_id: authority.authorization_id.clone(),
+                action_id: authority.action_id.clone(),
+                attempt_id: authority.attempt_id.clone(),
+                disposition,
+                reason,
+            };
+            let record_json = canonical_json(&record)?;
+            transaction.execute(
+                "INSERT INTO recoveries(attempt_id,disposition,record_json) VALUES(?1,?2,?3)",
+                params![
+                    authority.attempt_id.as_str(),
+                    disposition_db(disposition),
+                    record_json
+                ],
+            )?;
+            let changed = transaction.execute("UPDATE intents SET terminal_state=?1 WHERE attempt_id=?2 AND terminal_state='reserved'", params![terminal_for_disposition(disposition), authority.attempt_id.as_str()])?;
+            if changed != 1 {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    authority.attempt_id.as_str().to_string(),
+                ));
+            }
+            append_event(
+                &transaction,
+                &EventPayload::RecoveryClassification {
+                    authority,
+                    record: record.clone(),
+                },
+            )?;
+            existing.push(record);
+        }
+        transaction.commit()?;
+        existing.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
+        Ok(existing)
+    }
+
+    pub fn consume_execution(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
+        let _mutation_guard = claimed.lock_mutation()?;
+        self.validate_claim_guard(claimed)?;
+        self.check_size_budget(true)?;
+        let mut connection = self.connection()?;
+        verify_database(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<(String, Option<i64>, Option<String>)> = transaction.query_row(
+            "SELECT state,current_fence_epoch,current_execution_id FROM authorizations WHERE authorization_id=?1",
+            [claimed.authorization_id().as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((state, fence, execution)) = state else {
+            return Err(AuditError::AuthorizationUnknown(
+                claimed.authorization_id().as_str().to_string(),
+            ));
+        };
+        if state == "consumed" && fence == Some(claimed.fence_epoch as i64) {
+            if claimed.lock_held.replace(false) {
+                FileExt::unlock(&claimed.lock_file)?;
+            }
+            return Ok(());
+        }
+        if state != "claimed"
+            || fence != Some(claimed.fence_epoch as i64)
+            || execution.as_deref() != Some(&claimed.execution_id)
+        {
+            return Err(AuditError::FenceEpochMismatch);
+        }
+        let unresolved: i64 = transaction.query_row(
+            "SELECT count(*) FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded'",
+            [claimed.authorization_id().as_str()], |row| row.get(0),
+        )?;
+        if unresolved != 0 {
+            return Err(AuditError::UnresolvedIntentsRemain);
+        }
+        let changed = transaction.execute(
+            "UPDATE authorizations SET state='consumed',current_execution_id=NULL WHERE authorization_id=?1 AND state='claimed' AND current_execution_id=?2 AND current_fence_epoch=?3",
+            params![claimed.authorization_id().as_str(), claimed.execution_id, claimed.fence_epoch as i64],
+        )?;
+        if changed != 1 {
+            return Err(AuditError::FenceEpochMismatch);
+        }
+        let now = unix_ms_i64(SystemTime::now())?;
+        transaction.execute("UPDATE executions SET state='consumed',ended_at_ms=?1 WHERE execution_id=?2 AND state='active'", params![now, claimed.execution_id])?;
+        append_event(
+            &transaction,
+            &EventPayload::ExecutionConsumed {
+                authorization_id: claimed.authorization_id().clone(),
+                execution_id: claimed.execution_id.clone(),
+                fence_epoch: claimed.fence_epoch,
+                ended_at_unix_ms: now.to_string(),
+            },
+        )?;
+        transaction.commit()?;
+        if claimed.lock_held.replace(false) {
+            let _ = FileExt::unlock(&claimed.lock_file);
+        }
+        claimed.session_active.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn verify_integrity(&self) -> Result<IntegritySummary, AuditError> {
+        self.ensure_process()?;
+        if self.active_session.load(Ordering::Acquire) {
+            let _mutation_guard = self
+                .active_mutation_lock
+                .lock()
+                .map_err(|_| AuditError::SessionLockPoisoned)?;
+            if self.active_session.load(Ordering::Acquire) {
+                return self.integrity_summary_locked();
+            }
+        }
+        let _guard = self.short_lock()?;
+        self.integrity_summary_locked()
+    }
+
+    fn integrity_summary_locked(&self) -> Result<IntegritySummary, AuditError> {
+        let connection = self.connection_locked()?;
+        let summary = verify_database(&connection)?;
+        self.check_size_budget(true)?;
+        Ok(summary)
+    }
+
+    fn connection(&self) -> Result<Connection, AuditError> {
+        self.ensure_process()?;
+        // Claimed operations already retain the exclusive lifetime lock.
+        self.connection_locked()
+    }
+
+    fn connection_locked(&self) -> Result<Connection, AuditError> {
+        ensure_private_state_dir(&self.root)?;
+        ensure_private_regular_file(&self.database_path)?;
+        if database_file_identity(&self.database_path)? != self.database_identity {
+            return Err(AuditError::StoreMismatch);
+        }
+        ensure_sqlite_sidecars_private(&self.root)?;
+        let connection = open_connection(&self.database_path)?;
+        ensure_private_regular_file(&self.database_path)?;
+        if database_file_identity(&self.database_path)? != self.database_identity {
+            return Err(AuditError::StoreMismatch);
+        }
+        ensure_sqlite_sidecars_private(&self.root)?;
+        let database_id: String = connection.query_row(
+            "SELECT database_id FROM store_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if database_id != self.database_id {
+            return Err(AuditError::StoreMismatch);
+        }
+        Ok(connection)
+    }
+
+    fn short_lock(&self) -> Result<ShortStoreLock, AuditError> {
+        self.ensure_process()?;
+        let file = open_lock_file(&self.lock_path)?;
+        if lock_identity(&file, &self.lock_path)? != self.lock_identity {
+            return Err(AuditError::LockReplaced);
+        }
+        file.try_lock_exclusive()
+            .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+        self.validate_lock_path_identity(&file)?;
+        ensure_sqlite_sidecars_private(&self.root)?;
+        Ok(ShortStoreLock { file })
+    }
+
+    fn acquire_lifetime_lock(&self) -> Result<File, AuditError> {
+        self.ensure_process()?;
+        let file = open_lock_file(&self.lock_path)?;
+        if lock_identity(&file, &self.lock_path)? != self.lock_identity {
+            return Err(AuditError::LockReplaced);
+        }
+        file.try_lock_exclusive()
+            .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+        self.validate_lock_path_identity(&file)?;
+        ensure_sqlite_sidecars_private(&self.root)?;
+        Ok(file)
+    }
+
+    fn validate_claim_guard(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
+        claimed.validate_current_process()?;
+        if !claimed.lock_held.get() {
+            return Err(AuditError::ClaimNotActive);
+        }
+        if claimed.database_id != self.database_id || claimed.database_path != self.database_path {
+            return Err(AuditError::AuthorizationBindingMismatch);
+        }
+        if claimed.lock_identity != self.lock_identity {
+            return Err(AuditError::LockReplaced);
+        }
+        self.validate_lock_path_identity(&claimed.lock_file)?;
+        ensure_sqlite_sidecars_private(&self.root)?;
+        Ok(())
+    }
+
+    fn validate_lock_path_identity(&self, held_file: &File) -> Result<(), AuditError> {
+        let held = lock_identity(held_file, &self.lock_path)?;
+        let current = open_lock_file(&self.lock_path)?;
+        let current_identity = lock_identity(&current, &self.lock_path)?;
+        if held != self.lock_identity || current_identity != self.lock_identity {
+            return Err(AuditError::LockReplaced);
+        }
+        Ok(())
+    }
+
+    fn ensure_process(&self) -> Result<(), AuditError> {
+        if self.owner_pid == std::process::id() {
+            Ok(())
+        } else {
+            Err(AuditError::ForkedProcess)
+        }
+    }
+
+    fn check_size_budget(&self, allow_emergency: bool) -> Result<(), AuditError> {
+        let db = file_len_if_exists(&self.database_path)?;
+        let wal = file_len_if_exists(&self.root.join(format!("{DATABASE_FILE}-wal")))?;
+        let shm = file_len_if_exists(&self.root.join(format!("{DATABASE_FILE}-shm")))?;
+        if db > MAX_DATABASE_BYTES
+            || wal > MAX_WAL_BYTES
+            || db.saturating_add(wal).saturating_add(shm) > MAX_TOTAL_DATABASE_BYTES
+        {
+            return Err(AuditError::DatabaseTooLarge);
+        }
+        if !allow_emergency
+            && db.saturating_add(wal).saturating_add(shm)
+                > MAX_TOTAL_DATABASE_BYTES - 8 * 1024 * 1024
+        {
+            return Err(AuditError::DatabaseTooLarge);
+        }
+        Ok(())
+    }
+}
+
+struct ShortStoreLock {
+    file: File,
+}
+impl Drop for ShortStoreLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+const SCHEMA_SQL: &str = r#"
+CREATE TABLE store_meta(
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  schema_version TEXT NOT NULL,
+  database_id TEXT NOT NULL,
+  next_fence_epoch INTEGER NOT NULL CHECK(next_fence_epoch>=0),
+  next_attempt_ordinal INTEGER NOT NULL CHECK(next_attempt_ordinal>=0)
+) STRICT;
+CREATE TABLE audit_head(
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  sequence INTEGER NOT NULL CHECK(sequence>=0),
+  digest TEXT
+) STRICT;
+CREATE TABLE authorizations(
+  authorization_id TEXT PRIMARY KEY,
+  plan_digest TEXT NOT NULL,
+  binding_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('unused','claimed','consumed')),
+  current_fence_epoch INTEGER,
+  current_execution_id TEXT
+) STRICT;
+CREATE TABLE authorization_items(
+  authorization_id TEXT NOT NULL REFERENCES authorizations(authorization_id),
+  item_id TEXT NOT NULL,
+  PRIMARY KEY(authorization_id,item_id)
+) STRICT;
+CREATE TABLE authorization_actions(
+  authorization_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  risk TEXT NOT NULL CHECK(risk IN ('r1','r2','r3','r4')),
+  PRIMARY KEY(authorization_id,action_id),
+  FOREIGN KEY(authorization_id,item_id) REFERENCES authorization_items(authorization_id,item_id)
+) STRICT;
+CREATE TABLE executions(
+  execution_id TEXT PRIMARY KEY,
+  authorization_id TEXT NOT NULL REFERENCES authorizations(authorization_id),
+  fence_epoch INTEGER NOT NULL UNIQUE CHECK(fence_epoch>0),
+  kind TEXT NOT NULL CHECK(kind IN ('execution','recovery')),
+  state TEXT NOT NULL CHECK(state IN ('active','superseded','consumed')),
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms>=0),
+  ended_at_ms INTEGER
+) STRICT;
+CREATE UNIQUE INDEX one_active_execution ON executions((1)) WHERE state='active';
+CREATE TABLE intents(
+  attempt_id TEXT PRIMARY KEY,
+  ordinal INTEGER NOT NULL UNIQUE CHECK(ordinal>0),
+  nonce TEXT NOT NULL UNIQUE,
+  authorization_id TEXT NOT NULL REFERENCES authorizations(authorization_id),
+  execution_id TEXT NOT NULL REFERENCES executions(execution_id),
+  fence_epoch INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  source_path_hash TEXT NOT NULL,
+  before_revalidation_digest TEXT NOT NULL,
+  authority_json TEXT NOT NULL,
+  terminal_state TEXT NOT NULL CHECK(terminal_state IN ('reserved','outcome_recorded','classified_pending','classified_reserved','classified_indeterminate')),
+  UNIQUE(authorization_id,action_id),
+  FOREIGN KEY(authorization_id,action_id) REFERENCES authorization_actions(authorization_id,action_id)
+) STRICT;
+CREATE TABLE outcomes(
+  attempt_id TEXT PRIMARY KEY REFERENCES intents(attempt_id),
+  outcome_json TEXT NOT NULL
+) STRICT;
+CREATE TABLE recoveries(
+  attempt_id TEXT PRIMARY KEY REFERENCES intents(attempt_id),
+  disposition TEXT NOT NULL CHECK(disposition IN ('pending','reserved','indeterminate')),
+  record_json TEXT NOT NULL
+) STRICT;
+CREATE TABLE audit_events(
+  sequence INTEGER PRIMARY KEY CHECK(sequence>0),
+  recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0),
+  monotonic_elapsed_ns TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  authorization_id TEXT,
+  action_id TEXT,
+  attempt_id TEXT,
+  previous_digest TEXT,
+  payload_json TEXT NOT NULL,
+  digest TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'audit events are append-only'); END;
+CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit events are append-only'); END;
+"#;
+
+fn ensure_private_state_dir(root: &Path) -> Result<(), AuditError> {
+    if !root.is_absolute() {
+        return Err(AuditError::StateDirNotAbsolute);
+    }
+    let mut saw_root = false;
+    for component in root.components() {
+        match component {
+            Component::Prefix(_) if !saw_root => {}
+            Component::RootDir if !saw_root => saw_root = true,
+            Component::Normal(_) if saw_root => {}
+            _ => return Err(AuditError::UnsafeStateDir(root.display().to_string())),
+        }
+    }
+    if !saw_root {
+        return Err(AuditError::StateDirNotAbsolute);
+    }
+    ensure_existing_ancestors_not_symlinks(root)?;
+    match fs::symlink_metadata(root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(AuditError::SymlinkRejected(root.display().to_string()));
+            }
+            if !metadata.is_dir() {
+                return Err(AuditError::UnsafeStateDir(root.display().to_string()));
+            }
+            validate_private_directory_metadata(root, &metadata)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(0o700).recursive(false).create(root)?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir(root)?;
+            let metadata = fs::symlink_metadata(root)?;
+            validate_private_directory_metadata(root, &metadata)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn ensure_existing_ancestors_not_symlinks(path: &Path) -> Result<(), AuditError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(AuditError::SymlinkRejected(current.display().to_string()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_private_directory_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(AuditError::StateDirNotPrivate(path.display().to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn open_lock_file(path: &Path) -> Result<File, AuditError> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(AuditError::SymlinkRejected(path.display().to_string()));
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    ensure_private_file_handle(&file, path)?;
+    Ok(file)
+}
+
+fn create_private_database_file(path: &Path) -> Result<(), AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?
+            .sync_all()?;
+    }
+    #[cfg(not(unix))]
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .sync_all()?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| AuditError::UnsafeStateDir(path.display().to_string()))?,
+    )
+}
+
+fn ensure_private_regular_file(path: &Path) -> Result<(), AuditError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(AuditError::SymlinkRejected(path.display().to_string()));
+    }
+    let file = OpenOptions::new().read(true).open(path)?;
+    ensure_private_file_handle(&file, path)
+}
+
+fn ensure_private_file_handle(file: &File, path: &Path) -> Result<(), AuditError> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(AuditError::UnsafeStateFile(path.display().to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
+            return Err(AuditError::UnsafeStateFile(path.display().to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn lock_identity(file: &File, _path: &Path) -> Result<LockIdentity, AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(LockIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(LockIdentity {
+            canonical_path: fs::canonicalize(_path)?,
+        })
+    }
+}
+
+fn file_identity(file: &File) -> Result<FileIdentity, AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Err(AuditError::UnsupportedPlatform)
+    }
+}
+
+fn ensure_sqlite_sidecars_private(root: &Path) -> Result<(), AuditError> {
+    for name in [
+        format!("{DATABASE_FILE}-wal"),
+        format!("{DATABASE_FILE}-shm"),
+    ] {
+        let path = root.join(name);
+        if path.exists() {
+            ensure_private_regular_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), AuditError> {
+    #[cfg(unix)]
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+fn open_connection(path: &Path) -> Result<Connection, AuditError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(Duration::ZERO)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    connection.execute_batch(
+        "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF; PRAGMA read_uncommitted=OFF; PRAGMA locking_mode=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=16777216;",
+    )?;
+    let journal: String =
+        connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        return Err(AuditError::DatabaseConfiguration(
+            "journal_mode is not WAL".to_string(),
+        ));
+    }
+    verify_connection_pragmas(&connection)?;
+    Ok(connection)
+}
+
+fn verify_connection_pragmas(connection: &Connection) -> Result<(), AuditError> {
+    let foreign_keys: i64 =
+        connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    let synchronous: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    let mmap_size: i64 = connection.pragma_query_value(None, "mmap_size", |row| row.get(0))?;
+    let trusted: i64 = connection.pragma_query_value(None, "trusted_schema", |row| row.get(0))?;
+    let read_uncommitted: i64 =
+        connection.pragma_query_value(None, "read_uncommitted", |row| row.get(0))?;
+    let journal: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if foreign_keys != 1
+        || synchronous != 2
+        || mmap_size != 0
+        || trusted != 0
+        || read_uncommitted != 0
+        || !journal.eq_ignore_ascii_case("wal")
+        || !connection.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)?
+        || connection.db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA)?
+    {
+        return Err(AuditError::DatabaseConfiguration(
+            "required SQLite safety settings are not active".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn initialize_database(connection: &mut Connection) -> Result<(), AuditError> {
+    connection.pragma_update(None, "page_size", PAGE_SIZE as i64)?;
+    connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT as i64)?;
+    connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+    connection.pragma_update(None, "user_version", USER_VERSION)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(SCHEMA_SQL)?;
+    let database_id = random_id(&transaction, "database")?;
+    transaction.execute(
+        "INSERT INTO store_meta VALUES(1,?1,?2,0,0)",
+        params![SCHEMA_VERSION, database_id],
+    )?;
+    transaction.execute("INSERT INTO audit_head VALUES(1,0,NULL)", [])?;
+    transaction.commit()?;
+    verify_initialized_database(connection)?;
+    sync_directory(
+        connection
+            .path()
+            .and_then(|path| Path::new(path).parent())
+            .ok_or_else(|| {
+                AuditError::DatabaseConfiguration("database path unavailable".to_string())
+            })?,
+    )
+}
+
+fn verify_initialized_database(connection: &Connection) -> Result<(), AuditError> {
+    let app_id: i64 = connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let user_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let page_size: i64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    let mut max_pages: i64 =
+        connection.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+    if max_pages > MAX_PAGE_COUNT as i64 {
+        connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT as i64)?;
+        max_pages = connection.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+    }
+    if app_id != APPLICATION_ID
+        || user_version != USER_VERSION
+        || page_size != PAGE_SIZE as i64
+        || max_pages != MAX_PAGE_COUNT as i64
+    {
+        return Err(AuditError::DatabaseConfiguration(
+            "database header values do not match the audit schema".to_string(),
+        ));
+    }
+    let schema: String = connection.query_row(
+        "SELECT schema_version FROM store_meta WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    if schema != SCHEMA_VERSION {
+        return Err(AuditError::DatabaseConfiguration(
+            "unsupported audit schema".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn insert_authorization(
+    transaction: &Transaction<'_>,
+    binding: &AuthorizationBinding,
+    binding_json: &str,
+) -> Result<(), AuditError> {
+    transaction.execute(
+        "INSERT INTO authorizations(authorization_id,plan_digest,binding_json,state) VALUES(?1,?2,?3,'unused')",
+        params![binding.authorization_id.as_str(), binding.plan_digest.as_str(), binding_json],
+    )?;
+    for item_id in &binding.item_ids {
+        transaction.execute(
+            "INSERT INTO authorization_items VALUES(?1,?2)",
+            params![binding.authorization_id.as_str(), item_id.as_str()],
+        )?;
+    }
+    for action_id in &binding.action_ids {
+        let item_id = binding
+            .item_by_action
+            .get(action_id)
+            .ok_or(AuditError::AuthorizationBindingMismatch)?;
+        let risk = binding
+            .risk_by_action
+            .get(action_id)
+            .copied()
+            .ok_or(AuditError::AuthorizationBindingMismatch)?;
+        transaction.execute(
+            "INSERT INTO authorization_actions VALUES(?1,?2,?3,?4)",
+            params![
+                binding.authorization_id.as_str(),
+                action_id.as_str(),
+                item_id.as_str(),
+                risk_db(risk)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_authorization(
+    transaction: &Transaction<'_>,
+    authorization_id: &AuthorizationId,
+) -> Result<(AuthorizationBinding, String, Option<i64>, Option<String>), AuditError> {
+    transaction.query_row(
+        "SELECT binding_json,state,current_fence_epoch,current_execution_id FROM authorizations WHERE authorization_id=?1",
+        [authorization_id.as_str()],
+        |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?.map(|(json, state, fence, execution)| -> Result<_, AuditError> {
+        let binding: AuthorizationBinding = serde_json::from_str(&json).map_err(AuditError::JournalDecode)?;
+        validate_binding(&binding)?;
+        Ok((binding, state, fence, execution))
+    }).transpose()?.ok_or_else(|| AuditError::AuthorizationUnknown(authorization_id.as_str().to_string()))
+}
+
+fn load_intent(
+    transaction: &Transaction<'_>,
+    attempt_id: &AttemptId,
+) -> Result<(IntentAuthority, String), AuditError> {
+    transaction
+        .query_row(
+            "SELECT authority_json,terminal_state FROM intents WHERE attempt_id=?1",
+            [attempt_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .map(|(json, state)| -> Result<_, AuditError> {
+            let authority = serde_json::from_str(&json).map_err(AuditError::JournalDecode)?;
+            Ok((authority, state))
+        })
+        .transpose()?
+        .ok_or_else(|| AuditError::IntentNotFound(attempt_id.as_str().to_string()))
+}
+
+fn load_recovery_candidates(
+    connection: &Connection,
+    authorization_id: &AuthorizationId,
+) -> Result<(Vec<IntentAuthority>, Vec<RecoveryRecord>), AuditError> {
+    let mut statement = connection.prepare("SELECT authority_json,terminal_state FROM intents WHERE authorization_id=?1 ORDER BY ordinal")?;
+    let rows = statement.query_map([authorization_id.as_str()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut reserved = Vec::new();
+    let mut existing = Vec::new();
+    for row in rows {
+        let (json, state) = row?;
+        let authority: IntentAuthority =
+            serde_json::from_str(&json).map_err(AuditError::JournalDecode)?;
+        if state == "reserved" {
+            reserved.push(authority);
+        } else if state.starts_with("classified_") {
+            let record_json: String = connection.query_row(
+                "SELECT record_json FROM recoveries WHERE attempt_id=?1",
+                [authority.attempt_id.as_str()],
+                |row| row.get(0),
+            )?;
+            existing.push(serde_json::from_str(&record_json).map_err(AuditError::JournalDecode)?);
+        }
+    }
+    Ok((reserved, existing))
+}
+
+fn validate_live_claim(
+    transaction: &Transaction<'_>,
+    claimed: &ClaimedExecution,
+) -> Result<(), AuditError> {
+    let valid: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM authorizations a JOIN executions e ON e.execution_id=a.current_execution_id WHERE a.authorization_id=?1 AND a.state='claimed' AND a.current_execution_id=?2 AND a.current_fence_epoch=?3 AND e.state='active' AND e.fence_epoch=?3)",
+        params![claimed.authorization_id().as_str(), claimed.execution_id, claimed.fence_epoch as i64], |row| row.get(0),
+    )?;
+    if valid {
+        Ok(())
+    } else {
+        Err(AuditError::FenceEpochMismatch)
+    }
+}
+
+fn validate_live_claim_connection(
+    connection: &Connection,
+    claimed: &ClaimedExecution,
+) -> Result<(), AuditError> {
+    let valid: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM authorizations a JOIN executions e ON e.execution_id=a.current_execution_id WHERE a.authorization_id=?1 AND a.state='claimed' AND a.current_execution_id=?2 AND a.current_fence_epoch=?3 AND e.state='active' AND e.fence_epoch=?3)",
+        params![claimed.authorization_id().as_str(), claimed.execution_id, claimed.fence_epoch as i64], |row| row.get(0),
+    )?;
+    if valid {
+        Ok(())
+    } else {
+        Err(AuditError::FenceEpochMismatch)
+    }
+}
+
+fn append_event(transaction: &Transaction<'_>, payload: &EventPayload) -> Result<u64, AuditError> {
+    let event_count: i64 =
+        transaction.query_row("SELECT count(*) FROM audit_events", [], |row| row.get(0))?;
+    if event_count >= MAX_EVENTS {
+        return Err(AuditError::JournalTooLarge);
+    }
+    let (sequence, previous_digest): (i64, Option<String>) = transaction.query_row(
+        "SELECT sequence,digest FROM audit_head WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let next = sequence
+        .checked_add(1)
+        .ok_or(AuditError::FenceEpochOverflow)?;
+    let recorded_at_ms = unix_ms_i64(SystemTime::now())?;
+    let monotonic_elapsed_ns = monotonic_elapsed_ns().to_string();
+    let payload_json = canonical_json(payload)?;
+    if payload_json.len() > MAX_RECORD_BYTES {
+        return Err(AuditError::RecordTooLarge);
+    }
+    let (authorization_id, action_id, attempt_id) = payload.indexed_ids();
+    let digest = digest_event(
+        next as u64,
+        recorded_at_ms,
+        &monotonic_elapsed_ns,
+        payload.kind(),
+        authorization_id,
+        action_id,
+        attempt_id,
+        previous_digest.as_deref(),
+        payload_json.as_bytes(),
+    );
+    transaction.execute(
+        "INSERT INTO audit_events(sequence,recorded_at_ms,monotonic_elapsed_ns,kind,authorization_id,action_id,attempt_id,previous_digest,payload_json,digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![next, recorded_at_ms, monotonic_elapsed_ns, payload.kind(), authorization_id, action_id, attempt_id, previous_digest, payload_json, digest],
+    )?;
+    let changed = transaction.execute(
+        "UPDATE audit_head SET sequence=?1,digest=?2 WHERE singleton=1 AND sequence=?3",
+        params![next, digest, sequence],
+    )?;
+    if changed != 1 {
+        return Err(AuditError::HeadMismatch);
+    }
+    Ok(next as u64)
+}
+
+#[derive(Default)]
+struct ReplayedProjection {
+    authorizations: BTreeMap<String, ReplayedAuthorization>,
+    executions: BTreeMap<String, ReplayedExecution>,
+    intents: BTreeMap<String, ReplayedIntent>,
+    outcomes: BTreeMap<String, String>,
+    recoveries: BTreeMap<String, (String, String)>,
+    next_fence_epoch: i64,
+    next_attempt_ordinal: i64,
+}
+
+struct ReplayedAuthorization {
+    plan_digest: String,
+    binding_json: String,
+    state: String,
+    current_fence_epoch: Option<i64>,
+    current_execution_id: Option<String>,
+}
+
+struct ReplayedExecution {
+    authorization_id: String,
+    fence_epoch: i64,
+    kind: String,
+    state: String,
+    started_at_ms: i64,
+    ended_at_ms: Option<i64>,
+}
+
+struct ReplayedIntent {
+    ordinal: i64,
+    nonce: String,
+    authorization_id: String,
+    execution_id: String,
+    fence_epoch: i64,
+    item_id: String,
+    action_id: String,
+    source_path_hash: String,
+    before_revalidation_digest: String,
+    authority_json: String,
+    terminal_state: String,
+}
+
+fn replay_event(
+    projection: &mut ReplayedProjection,
+    payload: &EventPayload,
+) -> Result<(), AuditError> {
+    match payload {
+        EventPayload::AuthorizationRegistered { binding } => {
+            let authorization_id = binding.authorization_id.as_str().to_string();
+            if projection
+                .authorizations
+                .insert(
+                    authorization_id,
+                    ReplayedAuthorization {
+                        plan_digest: binding.plan_digest.as_str().to_string(),
+                        binding_json: canonical_json(binding)?,
+                        state: "unused".to_string(),
+                        current_fence_epoch: None,
+                        current_execution_id: None,
+                    },
+                )
+                .is_some()
+            {
+                return Err(AuditError::HeadMismatch);
+            }
+        }
+        EventPayload::ExecutionClaimed {
+            authorization_id,
+            execution_id,
+            fence_epoch,
+            started_at_unix_ms,
+        } => {
+            replay_claim(
+                projection,
+                authorization_id,
+                execution_id,
+                *fence_epoch,
+                "execution",
+                started_at_unix_ms,
+                None,
+            )?;
+        }
+        EventPayload::RecoveryClaimed {
+            authorization_id,
+            previous_execution_id,
+            execution_id,
+            fence_epoch,
+            started_at_unix_ms,
+        } => {
+            replay_claim(
+                projection,
+                authorization_id,
+                execution_id,
+                *fence_epoch,
+                "recovery",
+                started_at_unix_ms,
+                Some(previous_execution_id),
+            )?;
+        }
+        EventPayload::ActionIntent { authority } => {
+            projection.next_attempt_ordinal = projection
+                .next_attempt_ordinal
+                .checked_add(1)
+                .ok_or(AuditError::HeadMismatch)?;
+            let attempt_id = authority.attempt_id.as_str().to_string();
+            if projection.intents.values().any(|intent| {
+                intent.authorization_id == authority.authorization_id.as_str()
+                    && intent.action_id == authority.action_id.as_str()
+            }) {
+                return Err(AuditError::HeadMismatch);
+            }
+            if projection
+                .intents
+                .insert(
+                    attempt_id,
+                    ReplayedIntent {
+                        ordinal: projection.next_attempt_ordinal,
+                        nonce: authority.nonce.as_str().to_string(),
+                        authorization_id: authority.authorization_id.as_str().to_string(),
+                        execution_id: authority.execution_id.clone(),
+                        fence_epoch: authority.fence_epoch as i64,
+                        item_id: authority.item_id.as_str().to_string(),
+                        action_id: authority.action_id.as_str().to_string(),
+                        source_path_hash: authority.source_path_hash.as_str().to_string(),
+                        before_revalidation_digest: authority
+                            .before_revalidation_digest
+                            .as_str()
+                            .to_string(),
+                        authority_json: canonical_json(authority)?,
+                        terminal_state: "reserved".to_string(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(AuditError::HeadMismatch);
+            }
+        }
+        EventPayload::ActionOutcome { outcome } | EventPayload::RecoveryOutcome { outcome, .. } => {
+            let attempt = outcome.authority.attempt_id.as_str().to_string();
+            let intent = projection
+                .intents
+                .get_mut(&attempt)
+                .ok_or(AuditError::HeadMismatch)?;
+            intent.terminal_state = "outcome_recorded".to_string();
+            projection.recoveries.remove(&attempt);
+            projection
+                .outcomes
+                .insert(attempt, canonical_json(outcome)?);
+        }
+        EventPayload::RecoveryClassification { authority, record } => {
+            let attempt = authority.attempt_id.as_str().to_string();
+            let intent = projection
+                .intents
+                .get_mut(&attempt)
+                .ok_or(AuditError::HeadMismatch)?;
+            intent.terminal_state = terminal_for_disposition(record.disposition).to_string();
+            projection.recoveries.insert(
+                attempt,
+                (
+                    disposition_db(record.disposition).to_string(),
+                    canonical_json(record)?,
+                ),
+            );
+        }
+        EventPayload::ExecutionConsumed {
+            authorization_id,
+            execution_id,
+            fence_epoch,
+            ended_at_unix_ms,
+        } => {
+            let authorization = projection
+                .authorizations
+                .get_mut(authorization_id.as_str())
+                .ok_or(AuditError::HeadMismatch)?;
+            if authorization.current_execution_id.as_deref() != Some(execution_id)
+                || authorization.current_fence_epoch != Some(*fence_epoch as i64)
+            {
+                return Err(AuditError::HeadMismatch);
+            }
+            authorization.state = "consumed".to_string();
+            authorization.current_execution_id = None;
+            let execution = projection
+                .executions
+                .get_mut(execution_id)
+                .ok_or(AuditError::HeadMismatch)?;
+            execution.state = "consumed".to_string();
+            execution.ended_at_ms = Some(parse_event_i64(ended_at_unix_ms)?);
+        }
+    }
+    Ok(())
+}
+
+fn replay_claim(
+    projection: &mut ReplayedProjection,
+    authorization_id: &AuthorizationId,
+    execution_id: &str,
+    fence_epoch: u64,
+    kind: &str,
+    started_at: &str,
+    previous_execution: Option<&String>,
+) -> Result<(), AuditError> {
+    let fence = i64::try_from(fence_epoch).map_err(|_| AuditError::HeadMismatch)?;
+    if fence
+        != projection
+            .next_fence_epoch
+            .checked_add(1)
+            .ok_or(AuditError::HeadMismatch)?
+    {
+        return Err(AuditError::HeadMismatch);
+    }
+    if let Some(previous) = previous_execution {
+        let previous = projection
+            .executions
+            .get_mut(previous)
+            .ok_or(AuditError::HeadMismatch)?;
+        previous.state = "superseded".to_string();
+        previous.ended_at_ms = Some(parse_event_i64(started_at)?);
+    } else if projection
+        .authorizations
+        .get(authorization_id.as_str())
+        .is_none_or(|authorization| authorization.state != "unused")
+    {
+        return Err(AuditError::HeadMismatch);
+    }
+    for execution in projection
+        .executions
+        .values_mut()
+        .filter(|execution| execution.state == "active")
+    {
+        execution.state = "superseded".to_string();
+        execution.ended_at_ms = Some(parse_event_i64(started_at)?);
+    }
+    projection.next_fence_epoch = fence;
+    projection.executions.insert(
+        execution_id.to_string(),
+        ReplayedExecution {
+            authorization_id: authorization_id.as_str().to_string(),
+            fence_epoch: fence,
+            kind: kind.to_string(),
+            state: "active".to_string(),
+            started_at_ms: parse_event_i64(started_at)?,
+            ended_at_ms: None,
+        },
+    );
+    let authorization = projection
+        .authorizations
+        .get_mut(authorization_id.as_str())
+        .ok_or(AuditError::HeadMismatch)?;
+    authorization.state = "claimed".to_string();
+    authorization.current_fence_epoch = Some(fence);
+    authorization.current_execution_id = Some(execution_id.to_string());
+    Ok(())
+}
+
+fn parse_event_i64(value: &str) -> Result<i64, AuditError> {
+    value.parse().map_err(|_| AuditError::HeadMismatch)
+}
+
+fn verify_database(connection: &Connection) -> Result<IntegritySummary, AuditError> {
+    verify_connection_pragmas(connection)?;
+    verify_initialized_database(connection)?;
+    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(AuditError::IntegrityCheckFailed(integrity));
+    }
+    let foreign_violation: Option<(String, i64)> = connection
+        .query_row("PRAGMA foreign_key_check", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?;
+    if let Some((table, row)) = foreign_violation {
+        return Err(AuditError::IntegrityCheckFailed(format!(
+            "foreign key violation in {table} row {row}"
+        )));
+    }
+    let mut statement = connection.prepare("SELECT sequence,recorded_at_ms,monotonic_elapsed_ns,kind,authorization_id,action_id,attempt_id,previous_digest,payload_json,digest FROM audit_events ORDER BY sequence")?;
+    let mut rows = statement.query([])?;
+    let mut expected_sequence = 1_u64;
+    let mut previous: Option<String> = None;
+    let mut replayed = ReplayedProjection::default();
+    while let Some(row) = rows.next()? {
+        let sequence: i64 = row.get(0)?;
+        if sequence < 1 || sequence as u64 != expected_sequence {
+            return Err(AuditError::JournalTampered {
+                sequence: sequence.max(0) as u64,
+                reason: "non-contiguous sequence".to_string(),
+            });
+        }
+        let recorded_at_ms: i64 = row.get(1)?;
+        let monotonic: String = row.get(2)?;
+        let kind: String = row.get(3)?;
+        let authorization_id: Option<String> = row.get(4)?;
+        let action_id: Option<String> = row.get(5)?;
+        let attempt_id: Option<String> = row.get(6)?;
+        let stored_previous: Option<String> = row.get(7)?;
+        let payload_json: String = row.get(8)?;
+        let stored_digest: String = row.get(9)?;
+        if stored_previous != previous {
+            return Err(AuditError::JournalTampered {
+                sequence: expected_sequence,
+                reason: "previous digest mismatch".to_string(),
+            });
+        }
+        let payload: EventPayload =
+            serde_json::from_str(&payload_json).map_err(AuditError::JournalDecode)?;
+        let canonical = canonical_json(&payload)?;
+        if canonical != payload_json || payload.kind() != kind {
+            return Err(AuditError::JournalTampered {
+                sequence: expected_sequence,
+                reason: "payload or event kind mismatch".to_string(),
+            });
+        }
+        let indexed = payload.indexed_ids();
+        if indexed.0 != authorization_id.as_deref()
+            || indexed.1 != action_id.as_deref()
+            || indexed.2 != attempt_id.as_deref()
+        {
+            return Err(AuditError::JournalTampered {
+                sequence: expected_sequence,
+                reason: "indexed event fields mismatch".to_string(),
+            });
+        }
+        let expected_digest = digest_event(
+            expected_sequence,
+            recorded_at_ms,
+            &monotonic,
+            &kind,
+            indexed.0,
+            indexed.1,
+            indexed.2,
+            stored_previous.as_deref(),
+            payload_json.as_bytes(),
+        );
+        if stored_digest != expected_digest {
+            return Err(AuditError::JournalTampered {
+                sequence: expected_sequence,
+                reason: "event digest mismatch".to_string(),
+            });
+        }
+        replay_event(&mut replayed, &payload)?;
+        previous = Some(stored_digest);
+        expected_sequence += 1;
+    }
+    let (head_sequence, head_digest): (i64, Option<String>) = connection.query_row(
+        "SELECT sequence,digest FROM audit_head WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if head_sequence != (expected_sequence - 1) as i64 || head_digest != previous {
+        return Err(AuditError::HeadMismatch);
+    }
+    verify_replayed_projection(connection, &replayed)?;
+    let action_sequence: i64 = connection.query_row(
+        "SELECT count(*) FROM audit_events WHERE kind IN ('action_intent','action_outcome','recovery_outcome','recovery_classification')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(IntegritySummary {
+        latest_sequence: head_sequence as u64,
+        action_sequence: action_sequence as u64,
+        latest_digest: head_digest,
+    })
+}
+
+fn verify_replayed_projection(
+    connection: &Connection,
+    replayed: &ReplayedProjection,
+) -> Result<(), AuditError> {
+    let meta: (i64, i64) = connection.query_row(
+        "SELECT next_fence_epoch,next_attempt_ordinal FROM store_meta WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if meta != (replayed.next_fence_epoch, replayed.next_attempt_ordinal) {
+        return Err(AuditError::HeadMismatch);
+    }
+
+    let mut actual_authorizations = BTreeMap::new();
+    let mut statement = connection.prepare("SELECT authorization_id,plan_digest,binding_json,state,current_fence_epoch,current_execution_id FROM authorizations ORDER BY authorization_id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })? {
+        let (id, plan, binding, state, fence, execution) = row?;
+        actual_authorizations.insert(id, (plan, binding, state, fence, execution));
+    }
+    let expected_authorizations = replayed
+        .authorizations
+        .iter()
+        .map(|(id, value)| {
+            (
+                id.clone(),
+                (
+                    value.plan_digest.clone(),
+                    value.binding_json.clone(),
+                    value.state.clone(),
+                    value.current_fence_epoch,
+                    value.current_execution_id.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if actual_authorizations != expected_authorizations {
+        return Err(AuditError::HeadMismatch);
+    }
+
+    let mut actual_executions = BTreeMap::new();
+    let mut statement = connection.prepare("SELECT execution_id,authorization_id,fence_epoch,kind,state,started_at_ms,ended_at_ms FROM executions ORDER BY execution_id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+        ))
+    })? {
+        let (id, auth, fence, kind, state, started, ended) = row?;
+        actual_executions.insert(id, (auth, fence, kind, state, started, ended));
+    }
+    let expected_executions = replayed
+        .executions
+        .iter()
+        .map(|(id, value)| {
+            (
+                id.clone(),
+                (
+                    value.authorization_id.clone(),
+                    value.fence_epoch,
+                    value.kind.clone(),
+                    value.state.clone(),
+                    value.started_at_ms,
+                    value.ended_at_ms,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if actual_executions != expected_executions {
+        return Err(AuditError::HeadMismatch);
+    }
+
+    let mut actual_intents = BTreeMap::new();
+    let mut statement = connection.prepare("SELECT attempt_id,ordinal,nonce,authorization_id,execution_id,fence_epoch,item_id,action_id,source_path_hash,before_revalidation_digest,authority_json,terminal_state FROM intents ORDER BY attempt_id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?,
+        ))
+    })? {
+        let (
+            id,
+            ordinal,
+            nonce,
+            auth,
+            execution,
+            fence,
+            item,
+            action,
+            path_hash,
+            revalidation,
+            authority,
+            terminal,
+        ) = row?;
+        actual_intents.insert(
+            id,
+            (
+                ordinal,
+                nonce,
+                auth,
+                execution,
+                fence,
+                item,
+                action,
+                path_hash,
+                revalidation,
+                authority,
+                terminal,
+            ),
+        );
+    }
+    let expected_intents = replayed
+        .intents
+        .iter()
+        .map(|(id, value)| {
+            (
+                id.clone(),
+                (
+                    value.ordinal,
+                    value.nonce.clone(),
+                    value.authorization_id.clone(),
+                    value.execution_id.clone(),
+                    value.fence_epoch,
+                    value.item_id.clone(),
+                    value.action_id.clone(),
+                    value.source_path_hash.clone(),
+                    value.before_revalidation_digest.clone(),
+                    value.authority_json.clone(),
+                    value.terminal_state.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if actual_intents != expected_intents {
+        return Err(AuditError::HeadMismatch);
+    }
+
+    let actual_outcomes = read_string_map(
+        connection,
+        "SELECT attempt_id,outcome_json FROM outcomes ORDER BY attempt_id",
+    )?;
+    if actual_outcomes != replayed.outcomes {
+        return Err(AuditError::HeadMismatch);
+    }
+    let mut actual_recoveries = BTreeMap::new();
+    let mut statement = connection
+        .prepare("SELECT attempt_id,disposition,record_json FROM recoveries ORDER BY attempt_id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (id, disposition, record) = row?;
+        actual_recoveries.insert(id, (disposition, record));
+    }
+    if actual_recoveries != replayed.recoveries {
+        return Err(AuditError::HeadMismatch);
+    }
+
+    for authorization in replayed.authorizations.values() {
+        let binding: AuthorizationBinding =
+            serde_json::from_str(&authorization.binding_json).map_err(AuditError::JournalDecode)?;
+        let actual_items = read_string_set(
+            connection,
+            "SELECT item_id FROM authorization_items WHERE authorization_id=?1 ORDER BY item_id",
+            binding.authorization_id.as_str(),
+        )?;
+        let expected_items = binding
+            .item_ids
+            .iter()
+            .map(|item| item.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        if actual_items != expected_items {
+            return Err(AuditError::HeadMismatch);
+        }
+        let mut actual_actions = BTreeMap::new();
+        let mut statement = connection.prepare("SELECT action_id,item_id,risk FROM authorization_actions WHERE authorization_id=?1 ORDER BY action_id")?;
+        for row in statement.query_map([binding.authorization_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (action, item, risk) = row?;
+            actual_actions.insert(action, (item, risk));
+        }
+        let expected_actions = binding
             .action_ids
             .iter()
-            .any(|action_id| !binding.risk_by_action.contains_key(action_id))
-        || binding.item_by_action.iter().any(|(action_id, item_id)| {
-            !binding.action_ids.contains(action_id) || !binding.item_ids.contains(item_id)
-        })
-        || binding.requested_mode == RequestedMode::Permanent
-            && binding
-                .risk_by_action
-                .values()
-                .any(|risk| *risk != RiskTier::R4)
+            .map(|action| {
+                (
+                    action.as_str().to_string(),
+                    (
+                        binding.item_by_action[action].as_str().to_string(),
+                        risk_db(binding.risk_by_action[action]).to_string(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if actual_actions != expected_actions {
+            return Err(AuditError::HeadMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn read_string_map(
+    connection: &Connection,
+    sql: &str,
+) -> Result<BTreeMap<String, String>, AuditError> {
+    let mut statement = connection.prepare(sql)?;
+    let mut values = BTreeMap::new();
+    for row in statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (key, value) = row?;
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
+fn read_string_set(
+    connection: &Connection,
+    sql: &str,
+    parameter: &str,
+) -> Result<BTreeSet<String>, AuditError> {
+    let mut statement = connection.prepare(sql)?;
+    let mut values = BTreeSet::new();
+    for row in statement.query_map([parameter], |row| row.get::<_, String>(0))? {
+        values.insert(row?);
+    }
+    Ok(values)
+}
+
+#[allow(clippy::too_many_arguments)] // Every indexed field is explicitly committed into the hash envelope.
+fn digest_event(
+    sequence: u64,
+    recorded_at_ms: i64,
+    monotonic: &str,
+    kind: &str,
+    authorization_id: Option<&str>,
+    action_id: Option<&str>,
+    attempt_id: Option<&str>,
+    previous: Option<&str>,
+    payload: &[u8],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(RECORD_DOMAIN);
+    hash_part(&mut hasher, &sequence.to_be_bytes());
+    hash_part(&mut hasher, &recorded_at_ms.to_be_bytes());
+    hash_part(&mut hasher, monotonic.as_bytes());
+    hash_part(&mut hasher, kind.as_bytes());
+    for part in [authorization_id, action_id, attempt_id, previous] {
+        hash_part(&mut hasher, part.unwrap_or("").as_bytes());
+    }
+    hash_part(&mut hasher, payload);
+    format!("sha256:{}", hex_encode(&hasher.finalize()))
+}
+
+fn hash_part(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+struct ValidatedOutcome {
+    actual_platform_operation: String,
+    adapter_version: String,
+    started_at_ms: i64,
+    finished_at_ms: i64,
+    stable_status: StableStatus,
+    recovery_state: RecoveryState,
+    source_postcheck: Observation,
+    destination_postcheck: Option<Observation>,
+    resulting_trash_locator: Option<String>,
+    platform_result: Option<String>,
+    platform_error_domain: Option<String>,
+    platform_error_code: Option<String>,
+    notes: Vec<String>,
+}
+
+fn validate_binding(binding: &AuthorizationBinding) -> Result<(), AuditError> {
+    let action_len = binding.action_ids.len();
+    if action_len == 0
+        || action_len > MAX_ACTIONS_PER_AUTHORIZATION
+        || binding.item_ids.is_empty()
+        || binding.item_ids.len() > MAX_ACTIONS_PER_AUTHORIZATION
+        || binding.action_count != action_len as u64
+        || binding.item_by_action.len() != action_len
+        || binding.risk_by_action.len() != action_len
+        || binding.item_by_action.keys().ne(binding.action_ids.iter())
+        || binding.risk_by_action.keys().ne(binding.action_ids.iter())
+        || binding
+            .item_by_action
+            .values()
+            .any(|item| !binding.item_ids.contains(item))
+        || binding
+            .item_by_action
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != binding.item_ids
     {
         return Err(AuditError::AuthorizationBindingMismatch);
+    }
+    validate_bounded_field(
+        &binding.policy_version,
+        "policy_version",
+        MAX_SHORT_FIELD_BYTES,
+    )?;
+    if binding.policy_version.is_empty() {
+        return Err(AuditError::AuthorizationBindingMismatch);
+    }
+    match (binding.authorization_source, binding.requested_mode) {
+        (AuthorizationSource::ExplicitDangerousDelete, RequestedMode::Permanent)
+            if binding
+                .risk_by_action
+                .values()
+                .all(|risk| *risk == RiskTier::R4) => {}
+        (AuthorizationSource::ExplicitDangerousDelete, _) => {
+            return Err(AuditError::AuthorizationBindingMismatch);
+        }
+        _ => {}
+    }
+    if binding.authorization_source != AuthorizationSource::DeterministicSimulation {
+        return Err(AuditError::NonSimulationAuthorizationRejected);
     }
     Ok(())
 }
@@ -2093,31 +3225,10 @@ fn validate_intent_binding(
     binding: &AuthorizationBinding,
     request: &IntentRequest,
 ) -> Result<(), AuditError> {
-    if binding.item_by_action.get(&request.action_id) != Some(&request.item_id) {
-        return Err(AuditError::AuthorizationBindingMismatch);
-    }
-    Ok(())
-}
-
-fn validate_intent_event(
-    binding: &AuthorizationBinding,
-    event: &IntentEvent,
-) -> Result<(), AuditError> {
-    if event.authorization_id != binding.authorization_id
-        || event.authorization_source != binding.authorization_source
-        || event.batch_id != binding.batch_id
-        || event.plan_id != binding.plan_id
-        || event.plan_digest != binding.plan_digest
-        || event.requested_mode != binding.requested_mode
-        || binding.item_by_action.get(&event.action_id) != Some(&event.item_id)
-        || binding.risk_by_action.get(&event.action_id) != Some(&event.risk_tier)
-        || event.policy_version != binding.policy_version
-        || event.policy_digest != binding.policy_digest
-        || event.protected_anchor_snapshot_digest != binding.protected_anchor_snapshot_digest
-        || event.adapter_capabilities_digest != binding.adapter_capabilities_digest
-        || event.cleaner_set_digest != binding.cleaner_set_digest
+    if binding.item_by_action.get(&request.action_id) != Some(&request.item_id)
+        || !binding.risk_by_action.contains_key(&request.action_id)
     {
-        return Err(AuditError::AuthorizationBindingMismatch);
+        return Err(AuditError::ActionNotAuthorized);
     }
     Ok(())
 }
@@ -2126,13 +3237,26 @@ fn ensure_claim_matches_token(
     claimed: &ClaimedExecution,
     token: &DurableIntentToken,
 ) -> Result<(), AuditError> {
-    token.validate_current_process()?;
-    if token.authorization_id != claimed.binding.authorization_id
+    if token.database_id != claimed.database_id
+        || token.execution_id != claimed.execution_id
+        || token.authorization_id != claimed.binding.authorization_id
+        || token.authorization_source != claimed.binding.authorization_source
         || token.batch_id != claimed.binding.batch_id
         || token.plan_id != claimed.binding.plan_id
         || token.plan_digest != claimed.binding.plan_digest
         || token.requested_mode != claimed.binding.requested_mode
         || token.fence_epoch != claimed.fence_epoch
+        || token.policy_version != claimed.binding.policy_version
+        || token.policy_digest != claimed.binding.policy_digest
+        || token.protected_anchor_snapshot_digest
+            != claimed.binding.protected_anchor_snapshot_digest
+        || token.adapter_capabilities_digest != claimed.binding.adapter_capabilities_digest
+        || token.cleaner_set_digest != claimed.binding.cleaner_set_digest
+        || token.host_instance_id != claimed.binding.host_instance_id
+        || token.user_identity != claimed.binding.user_identity
+        || token.workflow_session != claimed.binding.workflow_session
+        || claimed.binding.item_by_action.get(&token.action_id) != Some(&token.item_id)
+        || claimed.binding.risk_by_action.get(&token.action_id) != Some(&token.risk_tier)
     {
         return Err(AuditError::AuthorizationBindingMismatch);
     }
@@ -2145,7 +3269,10 @@ fn validate_token_authority(
 ) -> Result<(), AuditError> {
     if token.attempt_id != authority.attempt_id
         || token.nonce != authority.nonce
+        || token.database_id != authority.database_id
+        || token.execution_id != authority.execution_id
         || token.authorization_id != authority.authorization_id
+        || token.authorization_source != authority.authorization_source
         || token.batch_id != authority.batch_id
         || token.plan_id != authority.plan_id
         || token.plan_digest != authority.plan_digest
@@ -2156,6 +3283,14 @@ fn validate_token_authority(
         || token.source_path_hash != authority.source_path_hash
         || token.before_revalidation_digest != authority.before_revalidation_digest
         || token.fence_epoch != authority.fence_epoch
+        || token.policy_version != authority.policy_version
+        || token.policy_digest != authority.policy_digest
+        || token.protected_anchor_snapshot_digest != authority.protected_anchor_snapshot_digest
+        || token.adapter_capabilities_digest != authority.adapter_capabilities_digest
+        || token.cleaner_set_digest != authority.cleaner_set_digest
+        || token.host_instance_id != authority.host_instance_id
+        || token.user_identity != authority.user_identity
+        || token.workflow_session != authority.workflow_session
     {
         return Err(AuditError::AuthorizationBindingMismatch);
     }
@@ -2164,92 +3299,17 @@ fn validate_token_authority(
 
 fn validate_outcome(
     token: &DurableIntentToken,
-    outcome: &SimulatedOutcome,
-) -> Result<(), AuditError> {
-    let started_at = unix_ms_string(outcome.started_at)?;
-    let finished_at = unix_ms_string(outcome.finished_at)?;
-    if parse_decimal_u64(&started_at)? > parse_decimal_u64(&finished_at)?
-        || outcome.actual_platform_operation.is_empty()
-        || outcome.actual_platform_operation.len() > MAX_TEXT_BYTES
-        || outcome.actual_platform_operation != operation_for_mode(token.requested_mode)
-        || outcome.adapter_version.is_empty()
-        || outcome.adapter_version.len() > MAX_TEXT_BYTES
-        || outcome
-            .source_postcheck
-            .identity
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
-        || outcome
-            .destination_postcheck
-            .as_ref()
-            .and_then(|observation| observation.identity.as_ref())
-            .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
-        || [
-            outcome.resulting_trash_locator.as_ref(),
-            outcome.platform_result.as_ref(),
-            outcome.platform_error_domain.as_ref(),
-            outcome.platform_error_code.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value.len() > MAX_TEXT_BYTES)
-        || outcome
-            .platform_result
-            .as_ref()
-            .is_some_and(String::is_empty)
-        || outcome
-            .platform_error_domain
-            .as_ref()
-            .is_some_and(String::is_empty)
-        || outcome
-            .platform_error_code
-            .as_ref()
-            .is_some_and(String::is_empty)
-    {
-        return Err(AuditError::InvalidOutcome);
-    }
-    validate_outcome_tuple(
-        token.requested_mode,
-        outcome.stable_status,
-        outcome.recovery_state,
-        &outcome.source_postcheck,
-        outcome.destination_postcheck.as_ref(),
-        outcome.resulting_trash_locator.as_ref(),
-        outcome.platform_result.as_ref(),
-        outcome.platform_error_domain.as_ref(),
-        outcome.platform_error_code.as_ref(),
-    )
-}
-
-fn make_outcome_event(
-    binding: &AuthorizationBinding,
-    claim_fence_epoch: u64,
-    authority: &IntentAuthority,
     outcome: SimulatedOutcome,
-) -> Result<OutcomeEvent, AuditError> {
-    validate_outcome_values(authority.requested_mode, &outcome)?;
-    Ok(OutcomeEvent {
-        batch_id: authority.batch_id.clone(),
-        authorization_id: authority.authorization_id.clone(),
-        authorization_source: binding.authorization_source,
-        plan_id: authority.plan_id.clone(),
-        plan_digest: authority.plan_digest.clone(),
-        item_id: authority.item_id.clone(),
-        action_id: authority.action_id.clone(),
-        attempt_id: authority.attempt_id.clone(),
-        nonce: authority.nonce.clone(),
-        requested_mode: authority.requested_mode,
-        risk_tier: authority.risk_tier,
-        actual_platform_operation: outcome.actual_platform_operation.to_string(),
-        policy_version: binding.policy_version.clone(),
-        policy_digest: binding.policy_digest.clone(),
+) -> Result<ValidatedOutcome, AuditError> {
+    token.validate_current_process()?;
+    validate_outcome_shape(token.requested_mode, &outcome)?;
+    let started_at_ms = unix_ms_i64(outcome.started_at)?;
+    let finished_at_ms = unix_ms_i64(outcome.finished_at)?;
+    Ok(ValidatedOutcome {
+        actual_platform_operation: outcome.actual_platform_operation,
         adapter_version: outcome.adapter_version,
-        started_at_unix_ms: unix_ms_string(outcome.started_at)?,
-        finished_at_unix_ms: unix_ms_string(outcome.finished_at)?,
-        before_revalidation_digest: authority.before_revalidation_digest.clone(),
-        source_path_hash: authority.source_path_hash.clone(),
-        intent_fence_epoch: authority.fence_epoch,
-        claim_fence_epoch,
+        started_at_ms,
+        finished_at_ms,
         stable_status: outcome.stable_status,
         recovery_state: outcome.recovery_state,
         source_postcheck: outcome.source_postcheck,
@@ -2258,1036 +3318,342 @@ fn make_outcome_event(
         platform_result: outcome.platform_result,
         platform_error_domain: outcome.platform_error_domain,
         platform_error_code: outcome.platform_error_code,
-        notes: bounded_notes(outcome.notes)?,
+        notes: outcome.notes,
     })
 }
 
-fn validate_outcome_values(
+fn validate_outcome_for_mode(
+    requested_mode: RequestedMode,
+    outcome: SimulatedOutcome,
+) -> Result<ValidatedOutcome, AuditError> {
+    validate_outcome_shape(requested_mode, &outcome)?;
+    Ok(ValidatedOutcome {
+        actual_platform_operation: outcome.actual_platform_operation,
+        adapter_version: outcome.adapter_version,
+        started_at_ms: unix_ms_i64(outcome.started_at)?,
+        finished_at_ms: unix_ms_i64(outcome.finished_at)?,
+        stable_status: outcome.stable_status,
+        recovery_state: outcome.recovery_state,
+        source_postcheck: outcome.source_postcheck,
+        destination_postcheck: outcome.destination_postcheck,
+        resulting_trash_locator: outcome.resulting_trash_locator,
+        platform_result: outcome.platform_result,
+        platform_error_domain: outcome.platform_error_domain,
+        platform_error_code: outcome.platform_error_code,
+        notes: outcome.notes,
+    })
+}
+
+fn outcome_event(authority: IntentAuthority, validated: ValidatedOutcome) -> OutcomeEvent {
+    OutcomeEvent {
+        authority,
+        actual_platform_operation: validated.actual_platform_operation,
+        adapter_version: validated.adapter_version,
+        started_at_unix_ms: validated.started_at_ms.to_string(),
+        finished_at_unix_ms: validated.finished_at_ms.to_string(),
+        stable_status: validated.stable_status,
+        recovery_state: validated.recovery_state,
+        source_postcheck: validated.source_postcheck,
+        destination_postcheck: validated.destination_postcheck,
+        resulting_trash_locator: validated.resulting_trash_locator,
+        platform_result: validated.platform_result,
+        platform_error_domain: validated.platform_error_domain,
+        platform_error_code: validated.platform_error_code,
+        notes: validated.notes,
+    }
+}
+
+fn validate_outcome_shape(
     requested_mode: RequestedMode,
     outcome: &SimulatedOutcome,
 ) -> Result<(), AuditError> {
-    let token = DurableIntentToken {
-        attempt_id: AttemptId::new("validation-attempt")?,
-        nonce: NonceId::new("validation-nonce")?,
-        authorization_id: AuthorizationId::new("validation-authorization")?,
-        batch_id: BatchId::new("validation-batch")?,
-        plan_id: PlanId::new("validation-plan")?,
-        plan_digest: DigestString::new("validation-plan-digest")?,
-        item_id: ItemId::new("validation-item")?,
-        action_id: ActionId::new("validation-action")?,
-        requested_mode,
-        risk_tier: RiskTier::R4,
-        source_path_hash: PathHash::new("validation-path")?,
-        before_revalidation_digest: DigestString::new("validation-revalidation")?,
-        fence_epoch: 1,
-        creator_pid: std::process::id(),
-    };
-    validate_outcome(&token, outcome)
-}
-
-fn validate_outcome_event(event: &OutcomeEvent) -> Result<(), AuditError> {
-    let started = parse_decimal_u64(&event.started_at_unix_ms)?;
-    let finished = parse_decimal_u64(&event.finished_at_unix_ms)?;
-    if started > finished
-        || event.actual_platform_operation.is_empty()
-        || event.actual_platform_operation.len() > MAX_TEXT_BYTES
-        || event.actual_platform_operation != operation_for_mode(event.requested_mode)
-        || event.adapter_version.is_empty()
-        || event.adapter_version.len() > MAX_TEXT_BYTES
-        || event.notes.len() > MAX_NOTES
-        || event.notes.iter().any(|note| note.len() > MAX_NOTE_BYTES)
-        || event
-            .source_postcheck
-            .identity
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
-        || event
-            .destination_postcheck
-            .as_ref()
-            .and_then(|observation| observation.identity.as_ref())
-            .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
-        || [
-            event.resulting_trash_locator.as_ref(),
-            event.platform_result.as_ref(),
-            event.platform_error_domain.as_ref(),
-            event.platform_error_code.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value.len() > MAX_TEXT_BYTES)
-        || event.platform_result.as_ref().is_some_and(String::is_empty)
-        || event
-            .platform_error_domain
-            .as_ref()
-            .is_some_and(String::is_empty)
-        || event
-            .platform_error_code
-            .as_ref()
-            .is_some_and(String::is_empty)
-    {
-        return Err(AuditError::InvalidOutcome);
+    validate_nonempty_field(
+        &outcome.actual_platform_operation,
+        "actual_platform_operation",
+        MAX_SHORT_FIELD_BYTES,
+    )?;
+    validate_nonempty_field(
+        &outcome.adapter_version,
+        "adapter_version",
+        MAX_SHORT_FIELD_BYTES,
+    )?;
+    validate_observation(&outcome.source_postcheck)?;
+    if let Some(observation) = &outcome.destination_postcheck {
+        validate_observation(observation)?;
     }
-    validate_outcome_tuple(
-        event.requested_mode,
-        event.stable_status,
-        event.recovery_state,
-        &event.source_postcheck,
-        event.destination_postcheck.as_ref(),
-        event.resulting_trash_locator.as_ref(),
-        event.platform_result.as_ref(),
-        event.platform_error_domain.as_ref(),
-        event.platform_error_code.as_ref(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_outcome_tuple(
-    requested_mode: RequestedMode,
-    stable_status: StableStatus,
-    recovery_state: RecoveryState,
-    source_postcheck: &Observation,
-    destination_postcheck: Option<&Observation>,
-    resulting_trash_locator: Option<&String>,
-    platform_result: Option<&String>,
-    platform_error_domain: Option<&String>,
-    platform_error_code: Option<&String>,
-) -> Result<(), AuditError> {
-    if !observation_is_consistent(source_postcheck)
-        || destination_postcheck.is_some_and(|value| !observation_is_consistent(value))
+    validate_optional_field(&outcome.resulting_trash_locator, MAX_RESULT_FIELD_BYTES)?;
+    validate_optional_field(&outcome.platform_result, MAX_RESULT_FIELD_BYTES)?;
+    validate_optional_field(&outcome.platform_error_domain, MAX_SHORT_FIELD_BYTES)?;
+    validate_optional_field(&outcome.platform_error_code, MAX_SHORT_FIELD_BYTES)?;
+    if outcome.notes.len() > MAX_NOTES
+        || outcome.notes.iter().any(|note| note.len() > MAX_NOTE_BYTES)
     {
-        return Err(AuditError::InvalidOutcome);
+        return Err(AuditError::RecordTooLarge);
     }
-    let destination_exists = destination_postcheck.is_some_and(|value| value.exists);
-    let has_locator = resulting_trash_locator.is_some_and(|value| !value.is_empty());
-    match (stable_status, recovery_state) {
-        (StableStatus::TrashSucceededPlatformReported, RecoveryState::PlatformTrashReported)
-            if requested_mode == RequestedMode::Trash
-                && !source_postcheck.exists
+    let started_at_ms = unix_ms_i64(outcome.started_at)?;
+    let finished_at_ms = unix_ms_i64(outcome.finished_at)?;
+    if finished_at_ms < started_at_ms {
+        return Err(AuditError::InvalidOutcome(
+            "finished_at precedes started_at",
+        ));
+    }
+    let destination_exists = outcome
+        .destination_postcheck
+        .as_ref()
+        .is_some_and(|destination| destination.exists);
+    let has_locator = outcome.resulting_trash_locator.is_some();
+    let has_platform_result = outcome.platform_result.is_some();
+    let has_error =
+        outcome.platform_error_domain.is_some() || outcome.platform_error_code.is_some();
+    let expected_operation = operation_for_mode(requested_mode);
+    if outcome.actual_platform_operation != expected_operation {
+        return Err(AuditError::InvalidOutcome(
+            "operation does not match requested mode",
+        ));
+    }
+    match outcome.stable_status {
+        StableStatus::TrashSucceededPlatformReported => {
+            require_outcome(
+                requested_mode == RequestedMode::Trash
+                    && outcome.recovery_state == RecoveryState::PlatformTrashReported
+                    && !outcome.source_postcheck.exists
+                    && has_platform_result
+                    && !has_error,
+                "contradictory platform-reported Trash success",
+            )?;
+        }
+        StableStatus::TrashSucceededLocationReported => {
+            require_outcome(
+                requested_mode == RequestedMode::Trash
+                    && outcome.recovery_state == RecoveryState::TrashLocationReported
+                    && !outcome.source_postcheck.exists
+                    && (destination_exists || has_locator)
+                    && !has_error,
+                "contradictory location-reported Trash success",
+            )?;
+            if !destination_exists && !has_locator {
+                return Err(AuditError::TrashSuccessRequiresDestinationEvidence);
+            }
+        }
+        StableStatus::PermanentDeleteSucceeded => {
+            if outcome.source_postcheck.exists {
+                return Err(AuditError::SuccessRequiresSourceAbsent);
+            }
+            if outcome.destination_postcheck.is_some() || has_locator {
+                return Err(AuditError::PermanentSuccessMustNotClaimDestination);
+            }
+            require_outcome(
+                requested_mode == RequestedMode::Permanent
+                    && outcome.recovery_state == RecoveryState::InapplicablePermanent
+                    && has_platform_result
+                    && !has_error,
+                "contradictory permanent success",
+            )?;
+        }
+        StableStatus::FailedSourceUnchanged => require_outcome(
+            outcome.recovery_state == RecoveryState::FailedSourceUnchanged
+                && outcome.source_postcheck.exists
+                && !destination_exists
+                && !has_locator,
+            "source-unchanged failure lacks matching observation",
+        )?,
+        StableStatus::CancelledBeforeAction => require_outcome(
+            outcome.recovery_state == RecoveryState::CancelledBeforeAction
+                && outcome.source_postcheck.exists
                 && !destination_exists
                 && !has_locator
-                && platform_result.is_some()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
-        }
-        (StableStatus::TrashSucceededLocationReported, RecoveryState::TrashLocationReported)
-            if requested_mode == RequestedMode::Trash
-                && !source_postcheck.exists
-                && (destination_exists || has_locator)
-                && platform_result.is_some()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
-        }
-        (StableStatus::PermanentDeleteSucceeded, RecoveryState::InapplicablePermanent)
-            if requested_mode == RequestedMode::Permanent
-                && !source_postcheck.exists
-                && destination_postcheck.is_none()
+                && !has_platform_result
+                && !has_error,
+            "cancelled-before-action claims platform evidence",
+        )?,
+        StableStatus::VanishedBeforeAction => require_outcome(
+            outcome.recovery_state == RecoveryState::VanishedBeforeAction
+                && !outcome.source_postcheck.exists
+                && !destination_exists
                 && !has_locator
-                && platform_result.is_some()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
+                && !has_platform_result
+                && !has_error,
+            "vanished-before-action claims platform evidence",
+        )?,
+        StableStatus::FailedPlatformError | StableStatus::FailedCancelledByPlatform => {
+            require_outcome(
+                has_error
+                    && matches!(
+                        outcome.recovery_state,
+                        RecoveryState::FailedSourceUnchanged | RecoveryState::Indeterminate
+                    ),
+                "platform failure lacks native error or recovery state",
+            )?
         }
-        (StableStatus::FailedSourceUnchanged, RecoveryState::FailedSourceUnchanged)
-            if source_postcheck.exists
-                && source_postcheck
-                    .identity
-                    .as_ref()
-                    .is_some_and(|value| !value.is_empty())
-                && destination_postcheck.is_none()
-                && !has_locator
-                && platform_result.is_some()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
+        StableStatus::IndeterminateAfterCrash | StableStatus::IndeterminatePlatformResult => {
+            require_outcome(
+                outcome.recovery_state == RecoveryState::Indeterminate && !has_locator,
+                "indeterminate status carries success semantics",
+            )?
         }
-        (StableStatus::VanishedBeforeAction, RecoveryState::VanishedBeforeAction)
-            if !source_postcheck.exists
-                && source_postcheck.identity.is_none()
-                && destination_postcheck.is_none()
-                && !has_locator
-                && platform_result.is_none()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
-        }
-        (StableStatus::CancelledBeforeAction, RecoveryState::CancelledBeforeAction)
-            if source_postcheck.exists
-                && source_postcheck
-                    .identity
-                    .as_ref()
-                    .is_some_and(|value| !value.is_empty())
-                && destination_postcheck.is_none()
-                && !has_locator
-                && platform_result.is_none()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
-        }
-        (StableStatus::FailedPlatformError, RecoveryState::FailedSourceUnchanged)
-        | (StableStatus::FailedCancelledByPlatform, RecoveryState::FailedSourceUnchanged)
-        | (StableStatus::FailedPlatformError, RecoveryState::Indeterminate)
-        | (StableStatus::FailedCancelledByPlatform, RecoveryState::Indeterminate)
-            if destination_postcheck.is_none()
-                && !has_locator
-                && platform_result.is_some()
-                && platform_error_domain.is_some()
-                && platform_error_code.is_some()
-                && (recovery_state == RecoveryState::Indeterminate
-                    || source_postcheck.exists
-                        && source_postcheck
-                            .identity
-                            .as_ref()
-                            .is_some_and(|value| !value.is_empty())) =>
-        {
-            Ok(())
-        }
-        (StableStatus::IndeterminateAfterCrash, RecoveryState::Indeterminate)
-        | (StableStatus::IndeterminatePlatformResult, RecoveryState::Indeterminate)
-            if destination_postcheck.is_none()
-                && !has_locator
-                && platform_result.is_none()
-                && platform_error_domain.is_none()
-                && platform_error_code.is_none() =>
-        {
-            Ok(())
-        }
-        _ => Err(AuditError::InvalidOutcome),
     }
+    Ok(())
 }
 
-fn observation_is_consistent(observation: &Observation) -> bool {
-    if observation.exists {
-        observation
-            .identity
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
+fn require_outcome(condition: bool, reason: &'static str) -> Result<(), AuditError> {
+    if condition {
+        Ok(())
     } else {
-        observation.identity.is_none()
+        Err(AuditError::InvalidOutcome(reason))
     }
 }
 
-fn outcome_matches_authority(event: &OutcomeEvent, authority: &IntentAuthority) -> bool {
-    event.authorization_id == authority.authorization_id
-        && event.batch_id == authority.batch_id
-        && event.plan_id == authority.plan_id
-        && event.plan_digest == authority.plan_digest
-        && event.item_id == authority.item_id
-        && event.action_id == authority.action_id
-        && event.nonce == authority.nonce
-        && event.requested_mode == authority.requested_mode
-        && event.risk_tier == authority.risk_tier
-        && event.source_path_hash == authority.source_path_hash
-        && event.before_revalidation_digest == authority.before_revalidation_digest
-        && event.intent_fence_epoch == authority.fence_epoch
+fn validate_observation(observation: &Observation) -> Result<(), AuditError> {
+    validate_optional_field(&observation.identity, MAX_RESULT_FIELD_BYTES)?;
+    if !observation.exists && observation.identity.is_some() {
+        return Err(AuditError::InvalidOutcome(
+            "absent observation carries identity",
+        ));
+    }
+    Ok(())
 }
 
 fn classify_observation(
     mode: RequestedMode,
-    observation: RecoveryObservation,
+    observation: &RecoveryObservation,
 ) -> Result<(RecoveryDisposition, String), AuditError> {
     match observation {
-        RecoveryObservation::SourceStillPresent { source }
-            if source.exists
-                && source
-                    .identity
-                    .as_ref()
-                    .is_some_and(|value| !value.is_empty()) =>
-        {
-            Ok((
-                RecoveryDisposition::Reserved,
-                "source still present; reserved intent cannot be replayed".to_string(),
-            ))
-        }
+        RecoveryObservation::SourceStillPresent { source } if source.exists => Ok((
+            RecoveryDisposition::Reserved,
+            "source still present; reserved intent was not replayed".to_string(),
+        )),
         RecoveryObservation::SourceAbsentDestinationConfirmed { destination }
-            if mode == RequestedMode::Trash
-                && destination.exists
-                && destination
-                    .identity
-                    .as_ref()
-                    .is_some_and(|value| !value.is_empty()) =>
+            if mode == RequestedMode::Trash && destination.exists =>
         {
             Ok((
                 RecoveryDisposition::Pending,
-                "source absent and trash destination confirmed".to_string(),
+                "source absent and Trash destination confirmed".to_string(),
             ))
         }
-        RecoveryObservation::SourceStillPresent { .. }
-        | RecoveryObservation::SourceAbsentDestinationConfirmed { .. } => {
-            Err(AuditError::InvalidObservation)
-        }
-        RecoveryObservation::SourceAbsentDestinationUnconfirmed => Ok((
-            RecoveryDisposition::Indeterminate,
-            "source absent and destination unconfirmed".to_string(),
-        )),
-        RecoveryObservation::Unknown => Ok((
-            RecoveryDisposition::Indeterminate,
-            "observer could not confirm a safe recovery classification".to_string(),
-        )),
-    }
-}
-
-fn verify_snapshot(snapshot: &SnapshotFile) -> Result<(), AuditError> {
-    if snapshot.version != SNAPSHOT_VERSION {
-        return Err(AuditError::HeadMismatch);
-    }
-    if snapshot.events.len() > MAX_EVENTS
-        || snapshot.projection.authorizations.len() > MAX_AUTHORIZATIONS
-        || snapshot.projection.intents.len() > MAX_INTENTS
-        || snapshot.projection.outcomes.len() > snapshot.projection.intents.len()
-        || snapshot.projection.recoveries.len() > snapshot.projection.intents.len()
-    {
-        return Err(AuditError::StateTooLarge);
-    }
-    let mut projection = Projection::default();
-    let mut previous_digest: Option<String> = None;
-    let mut action_sequence = 0_u64;
-    for (index, record) in snapshot.events.iter().enumerate() {
-        let expected_sequence = u64::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or(AuditError::HeadMismatch)?;
-        if record.sequence != expected_sequence {
-            return Err(AuditError::JournalTampered {
-                sequence: record.sequence,
-                reason: "non-monotonic sequence".to_string(),
-            });
-        }
-        if record.previous_digest != previous_digest {
-            return Err(AuditError::JournalTampered {
-                sequence: record.sequence,
-                reason: "previous digest mismatch".to_string(),
-            });
-        }
-        let payload_json = canonical_json(&record.payload)?;
-        if canonical_json(record)?.len() > MAX_EVENT_BYTES {
-            return Err(AuditError::RecordTooLarge);
-        }
-        let expected_digest = digest_record(
-            record.sequence,
-            &record.recorded_at_unix_ms,
-            &record.monotonic_elapsed_ms,
-            record.previous_digest.as_deref(),
-            &payload_json,
-        );
-        if record.digest != expected_digest {
-            return Err(AuditError::JournalTampered {
-                sequence: record.sequence,
-                reason: "record digest mismatch".to_string(),
-            });
-        }
-        apply_payload(&mut projection, &record.payload)?;
-        if matches!(
-            record.payload,
-            EventPayload::ActionIntent(_)
-                | EventPayload::ActionOutcome(_)
-                | EventPayload::RecoveryOutcome(_)
-        ) {
-            action_sequence = action_sequence
-                .checked_add(1)
-                .ok_or(AuditError::HeadMismatch)?;
-        }
-        previous_digest = Some(record.digest.clone());
-    }
-    let expected_latest =
-        u64::try_from(snapshot.events.len()).map_err(|_| AuditError::HeadMismatch)?;
-    if snapshot.head.latest_sequence != expected_latest
-        || snapshot.head.latest_digest != previous_digest
-        || snapshot.head.action_sequence != action_sequence
-        || snapshot.projection != projection
-    {
-        return Err(AuditError::HeadMismatch);
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnchorComparison {
-    Current,
-    SnapshotOneAhead,
-}
-
-fn verify_anchor(anchor: &DurableAnchor) -> Result<(), AuditError> {
-    if anchor.version != ANCHOR_VERSION
-        || anchor.action_sequence > anchor.latest_sequence
-        || (anchor.latest_sequence == 0) != anchor.latest_digest.is_none()
-    {
-        return Err(AuditError::RollbackDetected);
-    }
-    Ok(())
-}
-
-fn compare_anchor(
-    snapshot: &SnapshotFile,
-    anchor: &DurableAnchor,
-) -> Result<AnchorComparison, AuditError> {
-    if snapshot.head.latest_sequence == anchor.latest_sequence
-        && snapshot.head.latest_digest == anchor.latest_digest
-        && snapshot.head.action_sequence == anchor.action_sequence
-    {
-        return Ok(AnchorComparison::Current);
-    }
-    if snapshot.head.latest_sequence != anchor.latest_sequence.saturating_add(1) {
-        return Err(AuditError::RollbackDetected);
-    }
-    let extension = snapshot.events.last().ok_or(AuditError::RollbackDetected)?;
-    let action_increment = u64::from(matches!(
-        extension.payload,
-        EventPayload::ActionIntent(_)
-            | EventPayload::ActionOutcome(_)
-            | EventPayload::RecoveryOutcome(_)
-    ));
-    if extension.sequence != snapshot.head.latest_sequence
-        || extension.previous_digest != anchor.latest_digest
-        || snapshot.head.action_sequence != anchor.action_sequence + action_increment
-    {
-        return Err(AuditError::RollbackDetected);
-    }
-    Ok(AnchorComparison::SnapshotOneAhead)
-}
-
-fn apply_payload(projection: &mut Projection, payload: &EventPayload) -> Result<(), AuditError> {
-    match payload {
-        EventPayload::AuthorizationRegistered { binding } => {
-            validate_binding(binding)?;
-            if projection.authorizations.len() >= MAX_AUTHORIZATIONS {
-                return Err(AuditError::StateTooLarge);
-            }
-            if projection
-                .authorizations
-                .contains_key(&binding.authorization_id)
-            {
-                return Err(AuditError::JournalTampered {
-                    sequence: 0,
-                    reason: "duplicate authorization registration".to_string(),
-                });
-            }
-            projection.authorizations.insert(
-                binding.authorization_id.clone(),
-                AuthorizationRecord {
-                    binding: binding.clone(),
-                    state: AuthorizationState::Unused,
-                },
-            );
-        }
-        EventPayload::ExecutionClaimed {
-            authorization_id,
-            expected_plan_digest,
-            fence_epoch,
-        } => {
-            let expected_epoch = projection
-                .latest_fence_epoch
-                .checked_add(1)
-                .ok_or(AuditError::FenceEpochOverflow)?;
-            if *fence_epoch != expected_epoch {
-                return Err(AuditError::FenceEpochMismatch);
-            }
-            let record = projection
-                .authorizations
-                .get_mut(authorization_id)
-                .ok_or_else(|| {
-                    AuditError::AuthorizationUnknown(authorization_id.as_str().to_string())
-                })?;
-            if &record.binding.plan_digest != expected_plan_digest {
-                return Err(AuditError::PlanDigestMismatch);
-            }
-            if record.state != AuthorizationState::Unused {
-                return Err(AuditError::AuthorizationAlreadyClaimed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            record.state = AuthorizationState::Claimed {
-                fence_epoch: *fence_epoch,
-            };
-            projection.latest_fence_epoch = *fence_epoch;
-        }
-        EventPayload::RecoveryClaimed {
-            authorization_id,
-            expected_plan_digest,
-            previous_fence_epoch,
-            fence_epoch,
-        } => {
-            let expected_epoch = projection
-                .latest_fence_epoch
-                .checked_add(1)
-                .ok_or(AuditError::FenceEpochOverflow)?;
-            if *fence_epoch != expected_epoch {
-                return Err(AuditError::FenceEpochMismatch);
-            }
-            let record = projection
-                .authorizations
-                .get_mut(authorization_id)
-                .ok_or_else(|| {
-                    AuditError::AuthorizationUnknown(authorization_id.as_str().to_string())
-                })?;
-            if &record.binding.plan_digest != expected_plan_digest {
-                return Err(AuditError::PlanDigestMismatch);
-            }
-            if record.state
-                != (AuthorizationState::Claimed {
-                    fence_epoch: *previous_fence_epoch,
-                })
-            {
-                return Err(AuditError::FenceEpochMismatch);
-            }
-            record.state = AuthorizationState::Claimed {
-                fence_epoch: *fence_epoch,
-            };
-            projection.latest_fence_epoch = *fence_epoch;
-        }
-        EventPayload::ActionIntent(event) => apply_intent(projection, event)?,
-        EventPayload::ActionOutcome(event) => apply_outcome(projection, event, false)?,
-        EventPayload::RecoveryOutcome(event) => apply_outcome(projection, event, true)?,
-        EventPayload::RecoveryClassification {
-            record,
-            claim_fence_epoch,
-        } => {
-            validate_current_claim(projection, &record.authorization_id, *claim_fence_epoch)?;
-            let authority = projection.intents.get(&record.attempt_id).ok_or_else(|| {
-                AuditError::IntentNotFound(record.attempt_id.as_str().to_string())
-            })?;
-            if authority.authorization_id != record.authorization_id
-                || authority.batch_id != record.batch_id
-                || authority.action_id != record.action_id
-                || authority.terminal_state == IntentTerminalState::OutcomeRecorded
-                || record.reason.len() > MAX_TEXT_BYTES
-            {
-                return Err(AuditError::AuthorizationBindingMismatch);
-            }
-            projection
-                .recoveries
-                .insert(record.attempt_id.clone(), record.clone());
-        }
-        EventPayload::ExecutionConsumed {
-            authorization_id,
-            fence_epoch,
-        } => {
-            validate_current_claim(projection, authorization_id, *fence_epoch)?;
-            if projection.intents.values().any(|intent| {
-                intent.authorization_id == *authorization_id
-                    && intent.terminal_state != IntentTerminalState::OutcomeRecorded
-            }) {
-                return Err(AuditError::UnresolvedIntentsRemain);
-            }
-            projection
-                .authorizations
-                .get_mut(authorization_id)
-                .expect("validated above")
-                .state = AuthorizationState::Consumed {
-                fence_epoch: *fence_epoch,
-            };
-        }
-    }
-    Ok(())
-}
-
-fn apply_intent(projection: &mut Projection, event: &IntentEvent) -> Result<(), AuditError> {
-    if projection.intents.len() >= MAX_INTENTS {
-        return Err(AuditError::StateTooLarge);
-    }
-    validate_current_claim(projection, &event.authorization_id, event.fence_epoch)?;
-    let authorization = projection
-        .authorizations
-        .get(&event.authorization_id)
-        .expect("validated above");
-    validate_intent_event(&authorization.binding, event)?;
-    let expected_ordinal = projection
-        .next_attempt_ordinal
-        .checked_add(1)
-        .ok_or(AuditError::FenceEpochOverflow)?;
-    if event.attempt_ordinal != expected_ordinal
-        || event.attempt_id.as_str()
-            != derive_digest_id(
-                "attempt",
-                &event.authorization_id,
-                event.fence_epoch,
-                event.attempt_ordinal,
-            )
-        || event.nonce.as_str()
-            != derive_digest_id(
-                "nonce",
-                &event.authorization_id,
-                event.fence_epoch,
-                event.attempt_ordinal,
-            )
-        || projection.intents.contains_key(&event.attempt_id)
-        || projection.intents.values().any(|intent| {
-            intent.authorization_id == event.authorization_id && intent.action_id == event.action_id
-        })
-    {
-        return Err(AuditError::AuthorizationBindingMismatch);
-    }
-    projection.next_attempt_ordinal = event.attempt_ordinal;
-    projection.intents.insert(
-        event.attempt_id.clone(),
-        IntentAuthority {
-            attempt_id: event.attempt_id.clone(),
-            nonce: event.nonce.clone(),
-            authorization_id: event.authorization_id.clone(),
-            batch_id: event.batch_id.clone(),
-            plan_id: event.plan_id.clone(),
-            plan_digest: event.plan_digest.clone(),
-            item_id: event.item_id.clone(),
-            action_id: event.action_id.clone(),
-            requested_mode: event.requested_mode,
-            risk_tier: event.risk_tier,
-            source_path_hash: event.source_path_hash.clone(),
-            before_revalidation_digest: event.before_revalidation_digest.clone(),
-            fence_epoch: event.fence_epoch,
-            attempt_ordinal: event.attempt_ordinal,
-            terminal_state: IntentTerminalState::Reserved,
-        },
-    );
-    Ok(())
-}
-
-fn apply_outcome(
-    projection: &mut Projection,
-    event: &OutcomeEvent,
-    recovery_resolution: bool,
-) -> Result<(), AuditError> {
-    validate_current_claim(projection, &event.authorization_id, event.claim_fence_epoch)?;
-    let binding = &projection
-        .authorizations
-        .get(&event.authorization_id)
-        .expect("validated above")
-        .binding;
-    if event.authorization_source != binding.authorization_source
-        || event.policy_version != binding.policy_version
-        || event.policy_digest != binding.policy_digest
-    {
-        return Err(AuditError::AuthorizationBindingMismatch);
-    }
-    let authority = projection
-        .intents
-        .get_mut(&event.attempt_id)
-        .ok_or_else(|| AuditError::IntentNotFound(event.attempt_id.as_str().to_string()))?;
-    let existing_outcome = projection.outcomes.get(&event.attempt_id);
-    let can_replace_indeterminate = recovery_resolution
-        && authority.terminal_state == IntentTerminalState::IndeterminateRecorded
-        && existing_outcome.is_some_and(outcome_is_indeterminate);
-    if !matches!(
-        authority.terminal_state,
-        IntentTerminalState::Reserved | IntentTerminalState::IndeterminateRecorded
-    ) || existing_outcome.is_some() && !can_replace_indeterminate
-        || !outcome_matches_authority(event, authority)
-        || recovery_resolution && event.claim_fence_epoch <= authority.fence_epoch
-        || !recovery_resolution && event.claim_fence_epoch != authority.fence_epoch
-    {
-        return Err(AuditError::OutcomeAlreadyExists(
-            event.attempt_id.as_str().to_string(),
-        ));
-    }
-    validate_outcome_event(event)?;
-    authority.terminal_state = if event.recovery_state == RecoveryState::Indeterminate {
-        IntentTerminalState::IndeterminateRecorded
-    } else {
-        IntentTerminalState::OutcomeRecorded
-    };
-    projection
-        .outcomes
-        .insert(event.attempt_id.clone(), event.clone());
-    Ok(())
-}
-
-fn outcome_is_indeterminate(event: &OutcomeEvent) -> bool {
-    event.recovery_state == RecoveryState::Indeterminate
-}
-
-fn validate_current_claim(
-    projection: &Projection,
-    authorization_id: &AuthorizationId,
-    fence_epoch: u64,
-) -> Result<(), AuditError> {
-    let record = projection
-        .authorizations
-        .get(authorization_id)
-        .ok_or_else(|| AuditError::AuthorizationUnknown(authorization_id.as_str().to_string()))?;
-    if record.state != (AuthorizationState::Claimed { fence_epoch }) {
-        return Err(AuditError::FenceEpochMismatch);
-    }
-    Ok(())
-}
-
-fn ensure_private_state_dir(root: &Path) -> Result<(), AuditError> {
-    if !root.is_absolute() {
-        return Err(AuditError::StateDirNotAbsolute);
-    }
-    for component in root.components() {
-        match component {
-            Component::RootDir | Component::Normal(_) => {}
-            _ => return Err(AuditError::UnsafeStateDir(root.display().to_string())),
-        }
-    }
-    reject_symlink_ancestors(root)?;
-    match fs::symlink_metadata(root) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(AuditError::SymlinkRejected(root.display().to_string()));
-            }
-            if !metadata.is_dir() {
-                return Err(AuditError::UnsafeStateDir(root.display().to_string()));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_private_dir(root)?,
-        Err(error) => return Err(AuditError::Io(error)),
-    }
-    let metadata = fs::symlink_metadata(root)?;
-    if metadata.file_type().is_symlink() {
-        return Err(AuditError::SymlinkRejected(root.display().to_string()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let mode = metadata.mode() & 0o777;
-        let current_uid = unsafe { libc::geteuid() };
-        if mode & 0o077 != 0 || metadata.uid() != current_uid {
-            return Err(AuditError::StateDirNotPrivate(root.display().to_string()));
-        }
-    }
-    Ok(())
-}
-
-fn create_private_dir(path: &Path) -> Result<(), AuditError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder.create(path)?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(AuditError::UnsupportedPlatform)
-    }
-}
-
-fn reject_symlink_ancestors(path: &Path) -> Result<(), AuditError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(AuditError::SymlinkRejected(current.display().to_string()));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(AuditError::Io(error)),
-        }
-    }
-    Ok(())
-}
-
-fn cleanup_stale_snapshot_temps(dir: &File, root: &Path) -> Result<(), AuditError> {
-    validate_directory_descriptor(dir, root)?;
-    for name in directory_entry_names(dir)? {
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let is_snapshot_tmp = name.starts_with(".audit.snapshot.");
-        let is_anchor_tmp = name.starts_with(".audit.anchor.");
-        if (!is_snapshot_tmp && !is_anchor_tmp) || !name.ends_with(".tmp") {
-            continue;
-        }
-        let _file = openat_file(dir, name, false)?;
-        unlinkat_file(dir, name)?;
-    }
-    validate_directory_descriptor(dir, root)?;
-    dir.sync_all()?;
-    Ok(())
-}
-
-fn regular_file_exists_at(dir: &File, name: &str) -> Result<bool, AuditError> {
-    match openat_file(dir, name, false) {
-        Ok(_) => Ok(true),
-        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn ensure_regular_file_at(dir: &File, name: &str, initial: &[u8]) -> Result<(), AuditError> {
-    match openat_file(dir, name, true) {
-        Ok(_) => Ok(()),
-        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut file = createat_file(dir, name)?;
-            file.write_all(initial)?;
-            file.sync_all()?;
-            dir.sync_all()?;
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn validate_lock_descriptor(file: &File, dir: &File) -> Result<(), AuditError> {
-    validate_open_file_descriptor(file)?;
-    let entry = openat_file(dir, LOCK_FILE, true)?;
-    ensure_same_file(file, &entry, LOCK_FILE)
-}
-
-fn read_json_file_at<T: for<'de> Deserialize<'de>>(
-    dir: &File,
-    name: &str,
-    max_bytes: usize,
-) -> Result<T, std::io::Error> {
-    let mut file = openat_file(dir, name, false).map_err(std::io::Error::other)?;
-    let metadata = file.metadata()?;
-    if metadata.len() > max_bytes as u64 {
-        return Err(std::io::Error::other("file too large"));
-    }
-    let mut buf = Vec::with_capacity(metadata.len() as usize + 1);
-    file.read_to_end(&mut buf)?;
-    if buf.len() > max_bytes {
-        return Err(std::io::Error::other("file too large"));
-    }
-    serde_json::from_slice(&buf).map_err(|error| std::io::Error::other(error.to_string()))
-}
-
-fn open_directory_nofollow(path: &Path) -> Result<File, AuditError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(Path::new("/"))?;
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                directory = openat_directory(&directory, name)?;
-            }
-            _ => return Err(AuditError::UnsafeStateDir(path.display().to_string())),
-        }
-    }
-    validate_directory_descriptor(&directory, path)?;
-    Ok(directory)
-}
-
-fn validate_directory_descriptor(file: &File, path: &Path) -> Result<(), AuditError> {
-    let descriptor = file.metadata()?;
-    let entry = fs::symlink_metadata(path)?;
-    if entry.file_type().is_symlink() || !descriptor.is_dir() || !entry.is_dir() {
-        return Err(AuditError::SymlinkRejected(path.display().to_string()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if descriptor.dev() != entry.dev()
-            || descriptor.ino() != entry.ino()
-            || descriptor.uid() != unsafe { libc::geteuid() }
-            || descriptor.mode() & 0o077 != 0
+        RecoveryObservation::SourceAbsentDestinationConfirmed { destination }
+            if destination.exists =>
         {
-            return Err(AuditError::StateDirNotPrivate(path.display().to_string()));
+            Ok((
+                RecoveryDisposition::Indeterminate,
+                "destination evidence cannot establish permanent-operation semantics".to_string(),
+            ))
         }
-    }
-    Ok(())
-}
-
-fn openat_directory(dir: &File, name: &std::ffi::OsStr) -> Result<File, AuditError> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    let name = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| AuditError::UnsafeStateDir(name.to_string_lossy().into_owned()))?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            return Err(AuditError::SymlinkRejected(
-                name.to_string_lossy().into_owned(),
-            ));
+        RecoveryObservation::SourceAbsentDestinationUnconfirmed | RecoveryObservation::Unknown => {
+            Ok((
+                RecoveryDisposition::Indeterminate,
+                "source/destination facts remain indeterminate".to_string(),
+            ))
         }
-        return Err(AuditError::Io(error));
+        _ => Err(AuditError::InvalidRecoveryObservation),
     }
-    let file = unsafe { File::from_raw_fd(fd) };
-    if !file.metadata()?.is_dir() {
-        return Err(AuditError::UnsafeStateDir(
-            name.to_string_lossy().into_owned(),
-        ));
-    }
-    Ok(file)
 }
 
-fn directory_entry_names(dir: &File) -> Result<Vec<std::ffi::OsString>, AuditError> {
-    use std::ffi::CStr;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStringExt;
-
-    let duplicate = unsafe { libc::dup(dir.as_raw_fd()) };
-    if duplicate < 0 {
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
+fn terminal_for_disposition(disposition: RecoveryDisposition) -> &'static str {
+    match disposition {
+        RecoveryDisposition::Pending => "classified_pending",
+        RecoveryDisposition::Reserved => "classified_reserved",
+        RecoveryDisposition::Indeterminate => "classified_indeterminate",
     }
-    let stream = unsafe { libc::fdopendir(duplicate) };
-    if stream.is_null() {
-        unsafe { libc::close(duplicate) };
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
-    }
-    let mut names = Vec::new();
-    loop {
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            break;
-        }
-        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if bytes != b"." && bytes != b".." {
-            names.push(std::ffi::OsString::from_vec(bytes.to_vec()));
-        }
-    }
-    if unsafe { libc::closedir(stream) } != 0 {
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(names)
 }
-
-fn c_name(name: &str) -> Result<std::ffi::CString, AuditError> {
-    std::ffi::CString::new(name).map_err(|_| AuditError::UnsafeStateDir(name.to_string()))
-}
-
-fn openat_file(dir: &File, name: &str, write: bool) -> Result<File, AuditError> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    let name = c_name(name)?;
-    let access = if write { libc::O_RDWR } else { libc::O_RDONLY };
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            access | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            return Err(AuditError::SymlinkRejected(
-                name.to_string_lossy().into_owned(),
-            ));
-        }
-        return Err(AuditError::Io(error));
+fn disposition_db(disposition: RecoveryDisposition) -> &'static str {
+    match disposition {
+        RecoveryDisposition::Pending => "pending",
+        RecoveryDisposition::Reserved => "reserved",
+        RecoveryDisposition::Indeterminate => "indeterminate",
     }
-    let file = unsafe { File::from_raw_fd(fd) };
-    validate_open_file_descriptor(&file)?;
-    Ok(file)
 }
-
-fn createat_file(dir: &File, name: &str) -> Result<File, AuditError> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    let name = c_name(name)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
+fn risk_db(risk: RiskTier) -> &'static str {
+    match risk {
+        RiskTier::R1 => "r1",
+        RiskTier::R2 => "r2",
+        RiskTier::R3 => "r3",
+        RiskTier::R4 => "r4",
     }
-    let file = unsafe { File::from_raw_fd(fd) };
-    validate_open_file_descriptor(&file)?;
-    Ok(file)
-}
-
-fn validate_open_file_descriptor(file: &File) -> Result<(), AuditError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(AuditError::StateDirNotPrivate("audit file".to_string()));
-    }
-    Ok(())
-}
-
-fn ensure_same_file(left: &File, right: &File, name: &str) -> Result<(), AuditError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let left = left.metadata()?;
-    let right = right.metadata()?;
-    if left.dev() != right.dev() || left.ino() != right.ino() {
-        return Err(AuditError::SymlinkRejected(name.to_string()));
-    }
-    Ok(())
-}
-
-fn renameat_file(dir: &File, from: &str, to: &str) -> Result<(), AuditError> {
-    use std::os::fd::AsRawFd;
-
-    let from = c_name(from)?;
-    let to = c_name(to)?;
-    let result =
-        unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) };
-    if result < 0 {
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-fn unlinkat_file(dir: &File, name: &str) -> Result<(), AuditError> {
-    use std::os::fd::AsRawFd;
-
-    let name = c_name(name)?;
-    let result = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
-    if result < 0 {
-        return Err(AuditError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-fn atomic_replace_named_at(dir: &File, target: &str, bytes: &[u8]) -> Result<(), AuditError> {
-    if bytes.len() > MAX_SNAPSHOT_BYTES {
-        return Err(AuditError::StateTooLarge);
-    }
-    let ordinal = TEMP_ORDINAL.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{target}.{}.{}.tmp", std::process::id(), ordinal);
-    let mut file = createat_file(dir, &tmp_name)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    renameat_file(dir, &tmp_name, target)?;
-    dir.sync_all()?;
-    Ok(())
 }
 
 fn canonical_json<T: Serialize>(value: &T) -> Result<String, AuditError> {
     serde_jcs::to_string(value)
         .map_err(|error| AuditError::Io(std::io::Error::other(error.to_string())))
 }
+fn unix_ms_i64(time: SystemTime) -> Result<i64, AuditError> {
+    i64::try_from(
+        time.duration_since(UNIX_EPOCH)
+            .map_err(|_| AuditError::InvalidClock)?
+            .as_millis(),
+    )
+    .map_err(|_| AuditError::InvalidClock)
+}
+fn monotonic_elapsed_ns() -> u128 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos()
+}
 
-fn derive_digest_id(
-    label: &str,
-    authorization_id: &AuthorizationId,
-    fence_epoch: u64,
-    ordinal: u64,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(label.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(authorization_id.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(fence_epoch.to_string().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(ordinal.to_string().as_bytes());
-    format!("sha256:{}", hex_encode(&hasher.finalize()))
+fn random_id(transaction: &Transaction<'_>, label: &str) -> Result<String, AuditError> {
+    let random: Vec<u8> = transaction.query_row("SELECT randomblob(32)", [], |row| row.get(0))?;
+    Ok(format!("{label}:{}", hex_encode(&random)))
+}
+
+fn validate_stable_id(value: &str, field: &'static str) -> Result<(), AuditError> {
+    if (8..=MAX_ID_BYTES).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err(AuditError::InvalidStableId { field })
+    }
+}
+fn validate_bounded_field(
+    value: &str,
+    _field: &'static str,
+    maximum: usize,
+) -> Result<(), AuditError> {
+    if value.len() <= maximum && !value.chars().any(|character| character == char::from(0)) {
+        Ok(())
+    } else {
+        Err(AuditError::RecordTooLarge)
+    }
+}
+fn validate_nonempty_field(
+    value: &str,
+    field: &'static str,
+    maximum: usize,
+) -> Result<(), AuditError> {
+    validate_bounded_field(value, field, maximum)?;
+    if value.trim().is_empty() {
+        Err(AuditError::InvalidOutcome(field))
+    } else {
+        Ok(())
+    }
+}
+fn validate_optional_field(value: &Option<String>, maximum: usize) -> Result<(), AuditError> {
+    if let Some(value) = value {
+        validate_nonempty_field(value, "optional outcome field", maximum)?;
+    }
+    Ok(())
+}
+fn file_len_if_exists(path: &Path) -> Result<u64, AuditError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(AuditError::SymlinkRejected(path.display().to_string()));
+            }
+            Ok(metadata.len())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 pub fn hash_native_path(path: &Path) -> Result<PathHash, AuditError> {
@@ -3295,13 +3661,13 @@ pub fn hash_native_path(path: &Path) -> Result<PathHash, AuditError> {
         return Err(AuditError::UnsafeStateDir(path.display().to_string()));
     }
     let mut hasher = Sha256::new();
-    hasher.update(PATH_HASH_DOMAIN.as_bytes());
+    hasher.update(PATH_HASH_DOMAIN);
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         hasher.update(path.as_os_str().as_bytes());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         for unit in path.as_os_str().encode_wide() {
@@ -3311,749 +3677,273 @@ pub fn hash_native_path(path: &Path) -> Result<PathHash, AuditError> {
     PathHash::new(format!("sha256:{}", hex_encode(&hasher.finalize())))
 }
 
-fn digest_record(
-    sequence: u64,
-    recorded_at_unix_ms: &str,
-    monotonic_elapsed_ms: &str,
-    previous_digest: Option<&str>,
-    payload_json: &str,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(RECORD_DOMAIN.as_bytes());
-    hasher.update(sequence.to_string().as_bytes());
-    hasher.update(b"\n");
-    hasher.update(recorded_at_unix_ms.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(monotonic_elapsed_ms.as_bytes());
-    hasher.update(b"\n");
-    if let Some(previous) = previous_digest {
-        hasher.update(previous.as_bytes());
-    }
-    hasher.update(b"\n");
-    hasher.update(payload_json.as_bytes());
-    format!("sha256:{}", hex_encode(&hasher.finalize()))
-}
-
-fn parse_decimal_u64(value: &str) -> Result<u64, AuditError> {
-    value.parse::<u64>().map_err(|_| AuditError::HeadMismatch)
-}
-
-fn unix_ms_string(time: SystemTime) -> Result<String, AuditError> {
-    Ok(time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AuditError::InvalidClock)?
-        .as_millis()
-        .to_string())
-}
-
-fn monotonic_elapsed_ms_string() -> String {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let start = START.get_or_init(std::time::Instant::now);
-    let elapsed: Duration = start.elapsed();
-    elapsed.as_millis().to_string()
-}
-
-fn bounded_notes(notes: Vec<String>) -> Result<Vec<String>, AuditError> {
-    if notes.len() > MAX_NOTES || notes.iter().any(|note| note.len() > MAX_NOTE_BYTES) {
-        return Err(AuditError::RecordTooLarge);
-    }
-    Ok(notes)
-}
-
-fn validate_stable_id(value: &str, field: &'static str) -> Result<(), AuditError> {
-    let valid_length = (8..=160).contains(&value.len());
-    let valid_chars = value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'));
-    if valid_length && valid_chars {
-        Ok(())
-    } else {
-        Err(AuditError::InvalidStableId { field })
-    }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
     use tempfile::TempDir;
-
-    fn private_dir(path: &Path) {
-        fs::create_dir_all(path).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    }
 
     fn store() -> (TempDir, AuditStore) {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("audit");
-        private_dir(&root);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        }
+        #[cfg(not(unix))]
+        fs::create_dir(&root).unwrap();
         let store = AuditStore::open(&root).unwrap();
         (temp, store)
     }
 
-    fn binding(
-        index: u8,
-        mode: RequestedMode,
-        source: AuthorizationSource,
-        risk: RiskTier,
-    ) -> AuthorizationBinding {
-        let authorization_id = AuthorizationId::new(format!("auth-{index:02}-sha256")).unwrap();
-        let batch_id = BatchId::new(format!("batch-{index:02}-sha256")).unwrap();
-        let plan_id = PlanId::new(format!("plan-{index:02}-sha256")).unwrap();
-        let plan_digest = DigestString::new(format!("plan-digest-{index:02}-sha256")).unwrap();
-        let item_id = ItemId::new(format!("item-{index:02}-sha256")).unwrap();
-        let action_id = ActionId::new(format!("action-{index:02}-sha256")).unwrap();
-        let mut item_ids = BTreeSet::new();
-        item_ids.insert(item_id.clone());
-        let mut action_ids = BTreeSet::new();
-        action_ids.insert(action_id.clone());
-        let mut risk_by_action = BTreeMap::new();
-        risk_by_action.insert(action_id.clone(), risk);
+    fn binding(index: u8, mode: RequestedMode) -> AuthorizationBinding {
+        let item = ItemId::new(format!("item-{index:02}-sqlite")).unwrap();
+        let action = ActionId::new(format!("action-{index:02}-sqlite")).unwrap();
+        let mut items = BTreeSet::new();
+        items.insert(item.clone());
+        let mut actions = BTreeSet::new();
+        actions.insert(action.clone());
         let mut item_by_action = BTreeMap::new();
-        item_by_action.insert(action_id, item_id.clone());
+        item_by_action.insert(action.clone(), item);
+        let mut risk_by_action = BTreeMap::new();
+        risk_by_action.insert(
+            action,
+            if mode == RequestedMode::Permanent {
+                RiskTier::R4
+            } else {
+                RiskTier::R2
+            },
+        );
         AuthorizationBinding {
-            authorization_id,
-            authorization_source: source,
-            batch_id,
-            plan_id,
-            plan_digest,
+            authorization_id: AuthorizationId::new(format!("auth-{index:02}-sqlite")).unwrap(),
+            authorization_source: AuthorizationSource::DeterministicSimulation,
+            batch_id: BatchId::new(format!("batch-{index:02}-sqlite")).unwrap(),
+            plan_id: PlanId::new(format!("plan-{index:02}-sqlite")).unwrap(),
+            plan_digest: DigestString::new(format!("plan-digest-{index:02}")).unwrap(),
             requested_mode: mode,
-            item_ids,
-            action_ids,
-            item_by_action,
+            item_ids: items,
+            action_ids: actions,
             action_count: 1,
+            item_by_action,
             risk_by_action,
             policy_version: "policy-v1".to_string(),
-            policy_digest: DigestString::new(format!("policy-{index:02}-sha256")).unwrap(),
+            policy_digest: DigestString::new(format!("policy-digest-{index:02}")).unwrap(),
             protected_anchor_snapshot_digest: DigestString::new(format!(
-                "anchors-{index:02}-sha256"
+                "anchor-digest-{index:02}"
             ))
             .unwrap(),
-            adapter_capabilities_digest: DigestString::new(format!("adapter-{index:02}-sha256"))
+            adapter_capabilities_digest: DigestString::new(format!("adapter-digest-{index:02}"))
                 .unwrap(),
-            cleaner_set_digest: DigestString::new(format!("cleaner-{index:02}-sha256")).unwrap(),
-            host_instance_id: HostId::new(format!("host-{index:02}-sha256")).unwrap(),
-            user_identity: UserId::new(format!("user-{index:02}-sha256")).unwrap(),
-            workflow_session: SessionId::new(format!("session-{index:02}-sha256")).unwrap(),
+            cleaner_set_digest: DigestString::new(format!("cleaner-digest-{index:02}")).unwrap(),
+            host_instance_id: HostId::new(format!("host-{index:02}-sqlite")).unwrap(),
+            user_identity: UserId::new(format!("user-{index:02}-sqlite")).unwrap(),
+            workflow_session: SessionId::new(format!("session-{index:02}-sqlite")).unwrap(),
         }
     }
 
-    fn register_and_claim(store: &AuditStore, binding: AuthorizationBinding) -> ClaimedExecution {
+    fn register(store: &AuditStore, binding: &AuthorizationBinding) {
         store
             .register_authorization(RegisterAuthorization {
                 binding: binding.clone(),
             })
             .unwrap();
+    }
+
+    fn reserve(
+        store: &AuditStore,
+        claim: &ClaimedExecution,
+        binding: &AuthorizationBinding,
+    ) -> DurableIntentToken {
         store
-            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .reserve_intent(
+                claim,
+                IntentRequest {
+                    item_id: binding.item_ids.iter().next().unwrap().clone(),
+                    action_id: binding.action_ids.iter().next().unwrap().clone(),
+                    source_path_hash: PathHash::new("source-path-sqlite").unwrap(),
+                    before_revalidation_digest: DigestString::new("revalidation-sqlite").unwrap(),
+                },
+            )
             .unwrap()
     }
 
-    fn intent_request(index: u8, binding: &AuthorizationBinding) -> IntentRequest {
-        IntentRequest {
-            item_id: binding.item_ids.iter().next().unwrap().clone(),
-            action_id: binding.action_ids.iter().next().unwrap().clone(),
-            source_path_hash: PathHash::new(format!("path-{index:02}-sha256")).unwrap(),
-            before_revalidation_digest: DigestString::new(format!("reval-{index:02}-sha256"))
-                .unwrap(),
-        }
-    }
-
     fn permanent_success() -> SimulatedOutcome {
-        SimulatedOutcome::permanent_success(
-            "adapter-v1",
-            UNIX_EPOCH + Duration::from_secs(1),
-            UNIX_EPOCH + Duration::from_secs(2),
-            Observation {
+        SimulatedOutcome {
+            actual_platform_operation: "simulated_permanent_delete".to_string(),
+            adapter_version: "adapter-v1".to_string(),
+            started_at: UNIX_EPOCH + Duration::from_secs(1),
+            finished_at: UNIX_EPOCH + Duration::from_secs(2),
+            stable_status: StableStatus::PermanentDeleteSucceeded,
+            recovery_state: RecoveryState::InapplicablePermanent,
+            source_postcheck: Observation {
                 exists: false,
                 identity: None,
             },
-            "ok",
-            Vec::new(),
-        )
-        .unwrap()
-    }
-
-    fn append_test_event(snapshot: &mut SnapshotFile, payload: EventPayload) {
-        let sequence = snapshot.head.latest_sequence + 1;
-        let recorded_at = "1".to_string();
-        let monotonic = "1".to_string();
-        let payload_json = canonical_json(&payload).unwrap();
-        let digest = digest_record(
-            sequence,
-            &recorded_at,
-            &monotonic,
-            snapshot.head.latest_digest.as_deref(),
-            &payload_json,
-        );
-        apply_payload(&mut snapshot.projection, &payload).unwrap();
-        if matches!(
-            payload,
-            EventPayload::ActionIntent(_) | EventPayload::ActionOutcome(_)
-        ) {
-            snapshot.head.action_sequence += 1;
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: Some("ok".to_string()),
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes: vec![],
         }
-        snapshot.events.push(JournalRecord {
-            sequence,
-            recorded_at_unix_ms: recorded_at,
-            monotonic_elapsed_ms: monotonic,
-            previous_digest: snapshot.head.latest_digest.clone(),
-            digest: digest.clone(),
-            payload,
-        });
-        snapshot.head.latest_sequence = sequence;
-        snapshot.head.latest_digest = Some(digest);
-        verify_snapshot(snapshot).unwrap();
     }
 
     struct FixedObserver(RecoveryObservation);
-
     impl RecoveryObserver for FixedObserver {
-        fn observe(&self, _intent: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
+        fn observe(&self, _: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
             Ok(self.0.clone())
         }
     }
 
     #[test]
-    fn symlink_state_dir_rejected() {
-        let temp = TempDir::new().unwrap();
-        let real = temp.path().join("real");
-        private_dir(&real);
-        let link = temp.path().join("link");
-        symlink(&real, &link).unwrap();
-        let error = AuditStore::open(&link).unwrap_err();
-        assert!(matches!(error, AuditError::SymlinkRejected(_)));
-    }
-
-    #[test]
-    fn symlink_snapshot_rejected() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("audit");
-        private_dir(&root);
-        let external = temp.path().join("external");
-        File::create(&external).unwrap();
-        symlink(&external, root.join(SNAPSHOT_FILE)).unwrap();
-        let error = AuditStore::open(&root).unwrap_err();
-        assert!(matches!(error, AuditError::SymlinkRejected(_)));
-    }
-
-    #[test]
-    fn anchor_repairs_only_one_valid_snapshot_event_ahead() {
-        let (temp, store) = store();
-        let mut snapshot = store.read_verified_snapshot().unwrap();
-        let binding = binding(
-            21,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        append_test_event(
-            &mut snapshot,
-            EventPayload::AuthorizationRegistered { binding },
-        );
-        atomic_replace_named_at(
-            &store.state_dir,
-            SNAPSHOT_FILE,
-            canonical_json(&snapshot).unwrap().as_bytes(),
-        )
-        .unwrap();
-        drop(store);
-
-        let reopened = AuditStore::open(temp.path().join("audit")).unwrap();
-        assert_eq!(reopened.verify_integrity().unwrap().latest_sequence, 1);
-        let anchor: DurableAnchor =
-            read_json_file_at(&reopened.state_dir, ANCHOR_FILE, MAX_ANCHOR_BYTES).unwrap();
-        assert_eq!(anchor.latest_sequence, 1);
-        assert_eq!(anchor.latest_digest, snapshot.head.latest_digest);
-    }
-
-    #[test]
-    fn anchor_rejects_snapshot_rollback_and_two_event_gap() {
-        let (temp, first_store) = store();
-        let genesis = fs::read(first_store.root.join(SNAPSHOT_FILE)).unwrap();
-        let first = binding(
-            22,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        first_store
-            .register_authorization(RegisterAuthorization { binding: first })
-            .unwrap();
-        fs::write(first_store.root.join(SNAPSHOT_FILE), &genesis).unwrap();
-        drop(first_store);
-        assert!(matches!(
-            AuditStore::open(temp.path().join("audit")),
-            Err(AuditError::RollbackDetected)
-        ));
-
-        let (temp, store) = store();
-        let mut snapshot = store.read_verified_snapshot().unwrap();
-        for index in [23, 24] {
-            append_test_event(
-                &mut snapshot,
-                EventPayload::AuthorizationRegistered {
-                    binding: binding(
-                        index,
-                        RequestedMode::Permanent,
-                        AuthorizationSource::DeterministicSimulation,
-                        RiskTier::R4,
-                    ),
-                },
-            );
-        }
-        atomic_replace_named_at(
-            &store.state_dir,
-            SNAPSHOT_FILE,
-            canonical_json(&snapshot).unwrap().as_bytes(),
-        )
-        .unwrap();
-        drop(store);
-        assert!(matches!(
-            AuditStore::open(temp.path().join("audit")),
-            Err(AuditError::RollbackDetected)
-        ));
-    }
-
-    #[test]
-    fn interrupted_empty_store_initialization_recovers() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("audit");
-        private_dir(&root);
-        let dir = open_directory_nofollow(&root).unwrap();
-        ensure_regular_file_at(&dir, LOCK_FILE, b"lock\n").unwrap();
-        drop(dir);
-        let store = AuditStore::open(&root).unwrap();
-        assert_eq!(store.verify_integrity().unwrap().latest_sequence, 0);
-    }
-
-    #[test]
-    fn anchor_rejects_ahead_or_divergent_head() {
-        let (temp, store) = store();
-        let mut anchor: DurableAnchor =
-            read_json_file_at(&store.state_dir, ANCHOR_FILE, MAX_ANCHOR_BYTES).unwrap();
-        anchor.latest_sequence = 1;
-        anchor.latest_digest = Some("sha256:anchor-ahead".to_string());
-        atomic_replace_named_at(
-            &store.state_dir,
-            ANCHOR_FILE,
-            canonical_json(&anchor).unwrap().as_bytes(),
-        )
-        .unwrap();
-        drop(store);
-        assert!(matches!(
-            AuditStore::open(temp.path().join("audit")),
-            Err(AuditError::RollbackDetected)
-        ));
-    }
-
-    #[test]
-    fn duplicate_claim_rejected() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            1,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        store
-            .register_authorization(RegisterAuthorization {
-                binding: binding.clone(),
-            })
-            .unwrap();
-        store
+    fn sqlite_configuration_and_every_mutation_is_chained() {
+        let (_temp, store) = store();
+        let binding = binding(1, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
             .claim_execution(&binding.authorization_id, &binding.plan_digest)
             .unwrap();
-        let error = store
+        let token = reserve(&store, &claim, &binding);
+        store
+            .record_outcome(&claim, &token, permanent_success())
+            .unwrap();
+        store.consume_execution(&claim).unwrap();
+        let summary = store.verify_integrity().unwrap();
+        assert_eq!(summary.latest_sequence, 5);
+        let connection = store.connection().unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                .unwrap()
+                .to_ascii_lowercase(),
+            "wal"
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(None, "synchronous", |row| row.get(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(None, "mmap_size", |row| row.get(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(&store.root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("audit"))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn claim_lock_lives_for_the_entire_session_and_recovery_fences_after_drop() {
+        let (_temp, store) = store();
+        let binding = binding(2, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
             .claim_execution(&binding.authorization_id, &binding.plan_digest)
-            .unwrap_err();
-        assert!(matches!(error, AuditError::AuthorizationAlreadyClaimed(_)));
-    }
-
-    #[test]
-    fn exact_binding_required_for_intent() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            2,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        let mut request = intent_request(2, &binding);
-        request.action_id = ActionId::new("other-action-sha256").unwrap();
-        let error = store.reserve_intent(&claimed, request).unwrap_err();
-        assert!(matches!(error, AuditError::AuthorizationBindingMismatch));
-    }
-
-    #[test]
-    fn reservation_reports_created_existing_and_conflicting() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            12,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        let request = intent_request(12, &binding);
-        let created = store
-            .reserve_intent_once(&claimed, request.clone())
             .unwrap();
-        let IntentReservation::Created(token) = created else {
-            panic!("first reservation must create authority");
-        };
-        let expected_attempt_id = token.attempt_id().clone();
-        let existing = store
-            .reserve_intent_once(&claimed, request.clone())
-            .unwrap();
-        let IntentReservation::Existing(existing) = existing else {
-            panic!("exact retry must return diagnostics");
-        };
-        assert_eq!(existing.attempt_id(), &expected_attempt_id);
-        assert_eq!(existing.item_id(), token.item_id());
-        assert_eq!(existing.action_id(), token.action_id());
-        let conflicting = store
-            .reserve_intent_once(
-                &claimed,
-                IntentRequest {
-                    source_path_hash: PathHash::new("changed-path-12-sha256").unwrap(),
-                    ..request.clone()
-                },
-            )
-            .unwrap();
-        let IntentReservation::Conflicting(conflicting) = conflicting else {
-            panic!("changed retry must return diagnostics");
-        };
-        assert_eq!(conflicting.attempt_id(), &expected_attempt_id);
         assert!(matches!(
-            store.reserve_intent(
-                &claimed,
-                IntentRequest {
-                    source_path_hash: PathHash::new("changed-path-12-sha256").unwrap(),
-                    ..request
-                }
-            ),
+            store.claim_recovery(&binding.authorization_id, &binding.plan_digest),
+            Err(AuditError::ConcurrentWriterDenied)
+        ));
+        let fence = claim.fence_epoch();
+        drop(claim);
+        let recovery = store
+            .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        assert!(recovery.fence_epoch() > fence);
+    }
+
+    #[test]
+    fn exact_pairing_and_duplicate_action_are_rejected() {
+        let (_temp, store) = store();
+        let mut invalid_binding = binding(3, RequestedMode::Permanent);
+        let second_item = ItemId::new("item-second-sqlite").unwrap();
+        invalid_binding.item_ids.insert(second_item.clone());
+        assert!(matches!(
+            store.register_authorization(RegisterAuthorization {
+                binding: invalid_binding
+            }),
+            Err(AuditError::AuthorizationBindingMismatch)
+        ));
+
+        let binding = binding(4, RequestedMode::Permanent);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let request = IntentRequest {
+            item_id: binding.item_ids.iter().next().unwrap().clone(),
+            action_id: binding.action_ids.iter().next().unwrap().clone(),
+            source_path_hash: PathHash::new("path-first-sqlite").unwrap(),
+            before_revalidation_digest: DigestString::new("reval-first-sqlite").unwrap(),
+        };
+        store.reserve_intent(&claim, request.clone()).unwrap();
+        assert!(matches!(
+            store.reserve_intent(&claim, request),
             Err(AuditError::ActionAlreadyReserved(_))
         ));
     }
 
     #[test]
-    fn outcome_requires_matching_durable_intent() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            3,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        let fake = DurableIntentToken {
-            attempt_id: AttemptId::new("attempt-fake-sha256").unwrap(),
-            nonce: NonceId::new("nonce-fake-sha256").unwrap(),
-            authorization_id: binding.authorization_id.clone(),
-            batch_id: binding.batch_id.clone(),
-            plan_id: binding.plan_id.clone(),
-            plan_digest: binding.plan_digest.clone(),
-            item_id: binding.item_ids.iter().next().unwrap().clone(),
-            action_id: binding.action_ids.iter().next().unwrap().clone(),
-            requested_mode: binding.requested_mode,
-            risk_tier: RiskTier::R4,
-            source_path_hash: PathHash::new("path-fake-sha256").unwrap(),
-            before_revalidation_digest: DigestString::new("reval-fake-sha256").unwrap(),
-            fence_epoch: claimed.fence_epoch,
-            creator_pid: std::process::id(),
-        };
-        let error = store
-            .record_outcome(&claimed, &fake, permanent_success())
-            .unwrap_err();
-        assert!(matches!(error, AuditError::IntentNotFound(_)));
-    }
-
-    #[test]
-    fn permanent_success_requires_source_absent_and_no_destination() {
-        let error = SimulatedOutcome::permanent_success(
-            "adapter-v1",
-            UNIX_EPOCH + Duration::from_secs(1),
-            UNIX_EPOCH + Duration::from_secs(2),
-            Observation {
-                exists: true,
-                identity: Some("same".to_string()),
-            },
-            "ok",
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            AuditError::SuccessRequiresSourceAbsent | AuditError::InvalidOutcome
-        ));
-    }
-
-    #[test]
-    fn trash_success_requires_platform_result_evidence() {
-        let error = SimulatedOutcome::trash_success(
-            "adapter-v1",
-            UNIX_EPOCH + Duration::from_secs(1),
-            UNIX_EPOCH + Duration::from_secs(2),
-            Observation {
-                exists: false,
-                identity: None,
-            },
-            Observation {
-                exists: false,
-                identity: None,
-            },
-            None,
-            "",
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(matches!(error, AuditError::InvalidOutcome));
-    }
-
-    #[test]
-    fn every_status_requires_exact_recovery_and_evidence_tuple() {
-        let absent = Observation {
-            exists: false,
-            identity: None,
-        };
-        let present = Observation {
-            exists: true,
-            identity: Some("same-object".to_string()),
-        };
-        let empty_identity = Observation {
-            exists: true,
-            identity: Some(String::new()),
-        };
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Trash,
-                StableStatus::TrashSucceededPlatformReported,
-                RecoveryState::PlatformTrashReported,
-                &absent,
-                None,
-                None,
-                Some(&"ok".to_string()),
-                None,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Trash,
-                StableStatus::TrashSucceededPlatformReported,
-                RecoveryState::PlatformTrashReported,
-                &absent,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::FailedSourceUnchanged,
-                RecoveryState::FailedSourceUnchanged,
-                &present,
-                None,
-                None,
-                Some(&"not-submitted".to_string()),
-                None,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::FailedSourceUnchanged,
-                RecoveryState::FailedSourceUnchanged,
-                &empty_identity,
-                None,
-                None,
-                Some(&"not-submitted".to_string()),
-                None,
-                None,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::CancelledBeforeAction,
-                RecoveryState::CancelledBeforeAction,
-                &present,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::VanishedBeforeAction,
-                RecoveryState::VanishedBeforeAction,
-                &absent,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::FailedPlatformError,
-                RecoveryState::Indeterminate,
-                &absent,
-                None,
-                None,
-                Some(&"failed".to_string()),
-                Some(&"platform".to_string()),
-                Some(&"EIO".to_string()),
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::FailedPlatformError,
-                RecoveryState::Indeterminate,
-                &absent,
-                None,
-                None,
-                Some(&"failed".to_string()),
-                None,
-                Some(&"EIO".to_string()),
-            )
-            .is_err()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::IndeterminateAfterCrash,
-                RecoveryState::Indeterminate,
-                &absent,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_outcome_tuple(
-                RequestedMode::Permanent,
-                StableStatus::IndeterminateAfterCrash,
-                RecoveryState::Indeterminate,
-                &absent,
-                Some(&Observation {
-                    exists: true,
-                    identity: Some("success-like".to_string()),
-                }),
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_err()
-        );
-        for status in [
-            StableStatus::TrashSucceededPlatformReported,
-            StableStatus::TrashSucceededLocationReported,
-            StableStatus::PermanentDeleteSucceeded,
-            StableStatus::FailedPlatformError,
-            StableStatus::FailedCancelledByPlatform,
-            StableStatus::FailedSourceUnchanged,
-            StableStatus::VanishedBeforeAction,
-            StableStatus::CancelledBeforeAction,
-            StableStatus::IndeterminateAfterCrash,
-            StableStatus::IndeterminatePlatformResult,
-        ] {
-            assert!(
-                validate_outcome_tuple(
-                    RequestedMode::Permanent,
-                    status,
-                    RecoveryState::PlatformTrashReported,
-                    &present,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn tamper_and_tail_truncation_detected() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            6,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        store
-            .reserve_intent(&claimed, intent_request(6, &binding))
+    fn mismatched_token_and_contradictory_outcome_are_rejected() {
+        let (_temp, store) = store();
+        let first = binding(5, RequestedMode::Permanent);
+        register(&store, &first);
+        let first_claim = store
+            .claim_execution(&first.authorization_id, &first.plan_digest)
             .unwrap();
-        assert!(store.verify_integrity().is_ok());
-
-        let snapshot = store.root.join(SNAPSHOT_FILE);
-        let mut contents = fs::read_to_string(&snapshot).unwrap();
-        contents = contents.replace("permanent", "trash");
-        fs::write(&snapshot, contents).unwrap();
-        let error = store.verify_integrity().unwrap_err();
+        let token = reserve(&store, &first_claim, &first);
+        let mut contradictory = permanent_success();
+        contradictory.finished_at = UNIX_EPOCH;
         assert!(matches!(
-            error,
-            AuditError::JournalTampered { .. } | AuditError::HeadMismatch
+            store.record_outcome(&first_claim, &token, contradictory),
+            Err(AuditError::InvalidClock | AuditError::InvalidOutcome(_))
         ));
+        drop(first_claim);
+
+        let other_temp = TempDir::new().unwrap();
+        let other_store = AuditStore::open(other_temp.path().join("audit")).unwrap();
+        let second = binding(6, RequestedMode::Permanent);
+        register(&other_store, &second);
+        let second_claim = other_store
+            .claim_execution(&second.authorization_id, &second.plan_digest)
+            .unwrap();
+        assert!(matches!(
+            other_store.record_outcome(&second_claim, &token, permanent_success()),
+            Err(AuditError::AuthorizationBindingMismatch)
+        ));
+        drop(second_claim);
     }
 
     #[test]
-    fn recovery_is_idempotent_and_no_marker_inference() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            7,
-            RequestedMode::Trash,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R2,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        store
-            .reserve_intent(&claimed, intent_request(7, &binding))
+    fn recovery_is_idempotent_and_reserved_or_indeterminate_blocks_consume() {
+        let (_temp, store) = store();
+        let binding = binding(7, RequestedMode::Trash);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        reserve(&store, &claim, &binding);
+        drop(claim);
+        let recovery = store
+            .claim_recovery(&binding.authorization_id, &binding.plan_digest)
             .unwrap();
         let first = store
-            .classify_recovery(&claimed, &FixedObserver(RecoveryObservation::Unknown))
+            .classify_recovery(&recovery, &FixedObserver(RecoveryObservation::Unknown))
             .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].disposition, RecoveryDisposition::Indeterminate);
         let second = store
             .classify_recovery(
-                &claimed,
+                &recovery,
                 &FixedObserver(RecoveryObservation::SourceStillPresent {
                     source: Observation {
                         exists: true,
@@ -4062,394 +3952,143 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert_ne!(second, first);
-        assert_eq!(second[0].disposition, RecoveryDisposition::Reserved);
+        assert_eq!(first, second);
+        assert_eq!(first[0].disposition, RecoveryDisposition::Indeterminate);
         assert!(matches!(
-            store.consume_execution(&claimed),
+            store.consume_execution(&recovery),
             Err(AuditError::UnresolvedIntentsRemain)
         ));
     }
 
     #[test]
-    fn contradictory_recovery_observations_are_rejected() {
-        assert!(matches!(
-            classify_observation(
-                RequestedMode::Permanent,
-                RecoveryObservation::SourceStillPresent {
-                    source: Observation {
-                        exists: false,
-                        identity: None,
-                    },
-                },
-            ),
-            Err(AuditError::InvalidObservation)
-        ));
-        assert!(matches!(
-            classify_observation(
-                RequestedMode::Trash,
-                RecoveryObservation::SourceAbsentDestinationConfirmed {
-                    destination: Observation {
-                        exists: false,
-                        identity: None,
-                    },
-                },
-            ),
-            Err(AuditError::InvalidObservation)
-        ));
-    }
-
-    #[test]
-    fn recovery_claim_can_record_original_intent_outcome() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            9,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let original = register_and_claim(&store, binding.clone());
-        let token = store
-            .reserve_intent(&original, intent_request(9, &binding))
+    fn pending_recovery_requires_an_explicit_recovery_outcome_before_consume() {
+        let (_temp, store) = store();
+        let binding = binding(9, RequestedMode::Trash);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
             .unwrap();
-        let original_epoch = original.fence_epoch();
-        drop(original);
-
+        let token = reserve(&store, &claim, &binding);
+        let attempt_id = token.attempt_id().clone();
+        drop(token);
+        drop(claim);
         let recovery = store
             .claim_recovery(&binding.authorization_id, &binding.plan_digest)
             .unwrap();
-        assert!(recovery.fence_epoch() > original_epoch);
-        let attempt_id = token.attempt_id().clone();
-        drop(token);
-        store
-            .record_recovery_outcome(&recovery, &attempt_id, permanent_success())
+        let records = store
+            .classify_recovery(
+                &recovery,
+                &FixedObserver(RecoveryObservation::SourceAbsentDestinationConfirmed {
+                    destination: Observation {
+                        exists: true,
+                        identity: Some("trash-object".to_string()),
+                    },
+                }),
+            )
             .unwrap();
-        store.consume_execution(&recovery).unwrap();
-        assert_eq!(store.verify_integrity().unwrap().latest_sequence, 6);
-    }
-
-    #[test]
-    fn original_claim_cannot_use_tokenless_recovery_outcome() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            13,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        let token = store
-            .reserve_intent(&claimed, intent_request(13, &binding))
-            .unwrap();
+        assert_eq!(records[0].disposition, RecoveryDisposition::Pending);
         assert!(matches!(
-            store.record_recovery_outcome(&claimed, token.attempt_id(), permanent_success()),
-            Err(AuditError::RecoveryClaimRequired)
-        ));
-    }
-
-    #[test]
-    fn unresolved_same_path_across_authorizations_is_conflicting() {
-        let (_tmp, store) = store();
-        let first = binding(
-            14,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let first_claim = register_and_claim(&store, first.clone());
-        let first_token = store
-            .reserve_intent(&first_claim, intent_request(14, &first))
-            .unwrap();
-        drop(first_claim);
-
-        let second = binding(
-            15,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        store
-            .register_authorization(RegisterAuthorization {
-                binding: second.clone(),
-            })
-            .unwrap();
-        let second_claim = store
-            .claim_execution(&second.authorization_id, &second.plan_digest)
-            .unwrap();
-        let mut request = intent_request(15, &second);
-        request.source_path_hash = first_token.source_path_hash().clone();
-        let reservation = store.reserve_intent_once(&second_claim, request).unwrap();
-        let IntentReservation::Conflicting(info) = reservation else {
-            panic!("same unresolved path must conflict across authorization boundaries");
-        };
-        assert_eq!(info.attempt_id(), first_token.attempt_id());
-    }
-
-    #[test]
-    fn indeterminate_outcome_blocks_consume_and_cross_authorization_until_recovered() {
-        let (_tmp, store) = store();
-        let first = binding(
-            16,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let first_claim = register_and_claim(&store, first.clone());
-        let first_request = intent_request(16, &first);
-        let source_path_hash = first_request.source_path_hash.clone();
-        let first_token = store.reserve_intent(&first_claim, first_request).unwrap();
-        let attempt_id = first_token.attempt_id().clone();
-        let indeterminate = SimulatedOutcome::indeterminate_after_crash(
-            RequestedMode::Permanent,
-            "adapter-v1",
-            UNIX_EPOCH + Duration::from_secs(1),
-            UNIX_EPOCH + Duration::from_secs(2),
-            Observation {
-                exists: false,
-                identity: None,
-            },
-            vec!["submission state unknown".to_string()],
-        )
-        .unwrap();
-        store
-            .record_outcome(&first_claim, &first_token, indeterminate)
-            .unwrap();
-        assert!(matches!(
-            store.consume_execution(&first_claim),
+            store.consume_execution(&recovery),
             Err(AuditError::UnresolvedIntentsRemain)
         ));
-        drop(first_token);
-        drop(first_claim);
-
-        let second = binding(
-            17,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
         store
-            .register_authorization(RegisterAuthorization {
-                binding: second.clone(),
-            })
-            .unwrap();
-        let second_claim = store
-            .claim_execution(&second.authorization_id, &second.plan_digest)
-            .unwrap();
-        let mut second_request = intent_request(17, &second);
-        second_request.source_path_hash = source_path_hash.clone();
-        let conflict = store
-            .reserve_intent_once(&second_claim, second_request.clone())
-            .unwrap();
-        let IntentReservation::Conflicting(info) = conflict else {
-            panic!("indeterminate target must remain globally blocked");
-        };
-        assert_eq!(info.attempt_id(), &attempt_id);
-        drop(second_claim);
-
-        let first_recovery = store
-            .claim_recovery(&first.authorization_id, &first.plan_digest)
-            .unwrap();
-        store
-            .record_recovery_outcome(&first_recovery, &attempt_id, permanent_success())
-            .unwrap();
-        store.consume_execution(&first_recovery).unwrap();
-        drop(first_recovery);
-
-        let second_recovery = store
-            .claim_recovery(&second.authorization_id, &second.plan_digest)
-            .unwrap();
-        assert!(matches!(
-            store
-                .reserve_intent_once(&second_recovery, second_request)
+            .record_recovery_outcome(
+                &recovery,
+                &attempt_id,
+                SimulatedOutcome::trash_success(
+                    "adapter-v1",
+                    UNIX_EPOCH + Duration::from_secs(1),
+                    UNIX_EPOCH + Duration::from_secs(2),
+                    Observation {
+                        exists: false,
+                        identity: None,
+                    },
+                    Observation {
+                        exists: true,
+                        identity: Some("trash-object".to_string()),
+                    },
+                    Some("trash:locator".to_string()),
+                    "ok",
+                    vec![],
+                )
                 .unwrap(),
-            IntentReservation::Created(_)
-        ));
+            )
+            .unwrap();
+        store.consume_execution(&recovery).unwrap();
     }
 
     #[test]
-    fn insecure_existing_state_paths_fail_closed() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("audit");
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    fn projection_only_tamper_is_rejected_by_event_replay() {
+        let (_temp, store) = store();
+        let binding = binding(10, RequestedMode::Permanent);
+        register(&store, &binding);
+        {
+            let connection = store.connection().unwrap();
+            connection.execute("UPDATE authorizations SET plan_digest='forged-digest' WHERE authorization_id=?1", [binding.authorization_id.as_str()]).unwrap();
+        }
         assert!(matches!(
-            AuditStore::open(&root),
-            Err(AuditError::StateDirNotPrivate(_))
+            store.verify_integrity(),
+            Err(AuditError::HeadMismatch)
         ));
+    }
 
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let store = AuditStore::open(&root).unwrap();
+    #[cfg(unix)]
+    #[test]
+    fn symlink_sidecar_is_rejected_before_connection_open() {
+        use std::os::unix::fs::symlink;
+        let (temp, store) = store();
         drop(store);
-        fs::set_permissions(root.join(SNAPSHOT_FILE), fs::Permissions::from_mode(0o644)).unwrap();
+        let wal = temp.path().join("external-wal");
+        File::create(&wal).unwrap();
+        symlink(
+            &wal,
+            temp.path()
+                .join("audit")
+                .join(format!("{DATABASE_FILE}-wal")),
+        )
+        .unwrap();
         assert!(matches!(
-            AuditStore::open(&root),
-            Err(AuditError::StateDirNotPrivate(_))
+            AuditStore::open(temp.path().join("audit")),
+            Err(AuditError::SymlinkRejected(_))
         ));
     }
 
     #[test]
-    fn insecure_existing_audit_file_fails_closed() {
+    fn event_tamper_and_sqlite_corruption_are_detected() {
+        let (_temp, store) = store();
+        let binding = binding(8, RequestedMode::Permanent);
+        register(&store, &binding);
+        {
+            let connection = store.connection().unwrap();
+            connection.execute_batch("DROP TRIGGER audit_events_no_update; UPDATE audit_events SET digest='sha256:tampered' WHERE sequence=1;").unwrap();
+        }
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AuditError::JournalTampered { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_database_and_non_private_existing_directory_are_rejected() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("audit");
-        private_dir(&root);
-        let lock_path = root.join(LOCK_FILE);
-        fs::write(&lock_path, b"lock\n").unwrap();
-        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let external = temp.path().join("external");
+        File::create(&external).unwrap();
+        symlink(&external, root.join(DATABASE_FILE)).unwrap();
         assert!(matches!(
             AuditStore::open(&root),
+            Err(AuditError::SymlinkRejected(_))
+        ));
+
+        let broad = temp.path().join("broad");
+        fs::DirBuilder::new().mode(0o755).create(&broad).unwrap();
+        fs::set_permissions(&broad, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            AuditStore::open(&broad),
             Err(AuditError::StateDirNotPrivate(_))
         ));
-    }
-
-    #[test]
-    fn integrity_reports_full_chain_and_action_sequences() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            10,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        let claimed = register_and_claim(&store, binding.clone());
-        let before = store.verify_integrity().unwrap();
-        assert_eq!(before.latest_sequence, 2);
-        assert_eq!(before.action_sequence, 0);
-        store
-            .reserve_intent(&claimed, intent_request(10, &binding))
-            .unwrap();
-        let after = store.verify_integrity().unwrap();
-        assert_eq!(after.latest_sequence, 3);
-        assert_eq!(after.action_sequence, 1);
-    }
-
-    #[test]
-    fn event_slot_reservation_keeps_recovery_outcome_and_consume_reachable() {
-        let claimed_empty = Projection {
-            authorizations: BTreeMap::from([(
-                AuthorizationId::new("auth-capacity-sha256").unwrap(),
-                AuthorizationRecord {
-                    binding: binding(
-                        18,
-                        RequestedMode::Permanent,
-                        AuthorizationSource::DeterministicSimulation,
-                        RiskTier::R4,
-                    ),
-                    state: AuthorizationState::Claimed { fence_epoch: 1 },
-                },
-            )]),
-            latest_fence_epoch: 1,
-            ..Projection::default()
-        };
-        let claim_payload = EventPayload::RecoveryClaimed {
-            authorization_id: AuthorizationId::new("auth-capacity-sha256").unwrap(),
-            expected_plan_digest: DigestString::new("plan-digest-capacity").unwrap(),
-            previous_fence_epoch: 1,
-            fence_epoch: 2,
-        };
-        assert_eq!(
-            required_future_event_slots(&claimed_empty, &claim_payload).unwrap(),
-            1
-        );
-
-        let unresolved_authority = IntentAuthority {
-            attempt_id: AttemptId::new("attempt-capacity-sha256").unwrap(),
-            nonce: NonceId::new("nonce-capacity-sha256").unwrap(),
-            authorization_id: AuthorizationId::new("auth-capacity-sha256").unwrap(),
-            batch_id: BatchId::new("batch-capacity-sha256").unwrap(),
-            plan_id: PlanId::new("plan-capacity-sha256").unwrap(),
-            plan_digest: DigestString::new("plan-digest-capacity").unwrap(),
-            item_id: ItemId::new("item-capacity-sha256").unwrap(),
-            action_id: ActionId::new("action-capacity-sha256").unwrap(),
-            requested_mode: RequestedMode::Permanent,
-            risk_tier: RiskTier::R4,
-            source_path_hash: PathHash::new("path-capacity-sha256").unwrap(),
-            before_revalidation_digest: DigestString::new("reval-capacity-sha256").unwrap(),
-            fence_epoch: 1,
-            attempt_ordinal: 1,
-            terminal_state: IntentTerminalState::Reserved,
-        };
-        let unresolved = Projection {
-            intents: BTreeMap::from([(
-                unresolved_authority.attempt_id.clone(),
-                unresolved_authority,
-            )]),
-            ..claimed_empty
-        };
-        assert_eq!(
-            required_future_event_slots(&unresolved, &claim_payload).unwrap(),
-            3
-        );
-        let consume = EventPayload::ExecutionConsumed {
-            authorization_id: AuthorizationId::new("auth-capacity-sha256").unwrap(),
-            fence_epoch: 2,
-        };
-        assert_eq!(
-            required_future_event_slots(&unresolved, &consume).unwrap(),
-            0
-        );
-
-        let candidate_with_room = MAX_EVENTS - 4;
-        assert_eq!(candidate_with_room + 1 + 3, MAX_EVENTS);
-        assert!(candidate_with_room + 1 + 3 <= MAX_EVENTS);
-        assert!(candidate_with_room + 2 + 3 > MAX_EVENTS);
-    }
-
-    #[test]
-    fn nested_unknown_snapshot_field_is_rejected() {
-        let (_tmp, store) = store();
-        let snapshot_path = store.root.join(SNAPSHOT_FILE);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
-        value["projection"]["unexpected"] = serde_json::Value::Bool(true);
-        fs::write(&snapshot_path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(matches!(
-            store.verify_integrity(),
-            Err(AuditError::StateDecode(_))
-        ));
-    }
-
-    #[test]
-    fn nested_unknown_event_field_is_rejected() {
-        let (_tmp, store) = store();
-        let binding = binding(
-            11,
-            RequestedMode::Permanent,
-            AuthorizationSource::DeterministicSimulation,
-            RiskTier::R4,
-        );
-        store
-            .register_authorization(RegisterAuthorization { binding })
-            .unwrap();
-        let snapshot_path = store.root.join(SNAPSHOT_FILE);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
-        value["events"][0]["payload"]["unexpected"] = serde_json::Value::Bool(true);
-        fs::write(&snapshot_path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(matches!(
-            store.verify_integrity(),
-            Err(AuditError::StateDecode(_))
-        ));
-    }
-
-    #[test]
-    fn concurrent_writer_denied() {
-        let (_tmp, store) = store();
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(store.root.join(LOCK_FILE))
-            .unwrap();
-        lock.try_lock_exclusive().unwrap();
-        let error = store
-            .register_authorization(RegisterAuthorization {
-                binding: binding(
-                    8,
-                    RequestedMode::Permanent,
-                    AuthorizationSource::DeterministicSimulation,
-                    RiskTier::R4,
-                ),
-            })
-            .unwrap_err();
-        assert!(matches!(error, AuditError::ConcurrentWriterDenied));
-        lock.unlock().unwrap();
     }
 }
