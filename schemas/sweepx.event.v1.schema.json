@@ -23,22 +23,50 @@
       "const": "sweepx.event/v1"
     },
     "streamId": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
     },
     "operationId": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/uuidLike"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
     },
     "sequence": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+      "type": "string",
+      "maxLength": 39,
+      "pattern": "^[1-9][0-9]*$"
     },
     "cursor": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "$comment": "The envelope remains compatible with bounded legacy in-memory cursors. Durable stream validation additionally requires an opaque sxcur1 token."
     },
     "emittedAt": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+      "allOf": [
+        {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "Z$"
+        }
+      ]
     },
     "monotonicOffsetNs": {
-      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+      "allOf": [
+        {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        {
+          "maxLength": 39
+        }
+      ]
     },
     "type": {
       "type": "string",
@@ -96,7 +124,8 @@
       "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/eventPhase"
     },
     "payload": {
-      "type": "object"
+      "type": "object",
+      "$comment": "Consumers additionally enforce a 262144-byte limit on compact JSON serialization."
     },
     "terminal": {
       "type": "boolean"
@@ -113,7 +142,126 @@
           "type": "boolean"
         },
         "lastDurableSequence": {
-          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+          "allOf": [
+            {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+            },
+            {
+              "maxLength": 39
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "operation.terminal"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "terminal": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "terminal": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "operation.terminal"
+          },
+          "checkpoint": {
+            "properties": {
+              "durable": {
+                "const": true
+              }
+            },
+            "required": [
+              "durable"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "checkpoint"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/durableTerminalPayload"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "durableTerminalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "exitCode",
+        "kind",
+        "snapshotDigest"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/outputStatus"
+        },
+        "exitCode": {
+          "type": "integer",
+          "enum": [
+            0,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scan.result",
+            "explanation.result",
+            "plan.result",
+            "execution.result",
+            "recovery.result",
+            "cancel.result",
+            "status.result",
+            "capabilities.result",
+            "cleaner.result",
+            "audit.result"
+          ]
+        },
+        "snapshotDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         }
       }
     }

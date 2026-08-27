@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { Buffer } from "node:buffer";
 import path from "node:path";
 import process from "node:process";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -25,6 +26,20 @@ function listJsonFiles(dir) {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
+}
+
+function readNdjson(filePath) {
+  return readFileSync(filePath, "utf8")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        throw new Error(`${path.relative(repoRoot, filePath)}:${index + 1}: ${error.message}`);
+      }
+    });
 }
 
 const ajv = new Ajv2020({
@@ -144,6 +159,404 @@ const validQualifiedCapability = {
 };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const eventValidator = ajv.getSchema(
+  "https://sweepx.dev/schemas/sweepx.event/v1"
+);
+if (!eventValidator) {
+  throw new Error("Missing compiled sweepx.event schema");
+}
+
+const durableEventGolden = readNdjson(
+  path.join(schemaDir, "examples", "sweepx.event.durable-stream.golden.ndjson")
+);
+const eventStartedExample = readJson(
+  path.join(schemaDir, "examples", "sweepx.event.operation.started.example.json")
+);
+
+const eventSchemaCases = [
+  {
+    name: "legacy in-memory operation.started envelope remains valid",
+    source: eventStartedExample,
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "durable operation.terminal golden is structurally valid",
+    source: durableEventGolden[2],
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "non-terminal type cannot set terminal=true",
+    source: durableEventGolden[1],
+    expected: false,
+    mutate(event) {
+      event.terminal = true;
+    }
+  },
+  {
+    name: "operation.terminal must set terminal=true",
+    source: durableEventGolden[2],
+    expected: false,
+    mutate(event) {
+      event.terminal = false;
+    }
+  },
+  {
+    name: "durable operation.terminal requires snapshotDigest",
+    source: durableEventGolden[2],
+    expected: false,
+    mutate(event) {
+      delete event.payload.snapshotDigest;
+    }
+  },
+  {
+    name: "durable operation.terminal rejects unknown payload fields",
+    source: durableEventGolden[2],
+    expected: false,
+    mutate(event) {
+      event.payload.resumable = false;
+    }
+  },
+  {
+    name: "durable operation.terminal requires a lowercase SHA-256 digest",
+    source: durableEventGolden[2],
+    expected: false,
+    mutate(event) {
+      event.payload.snapshotDigest = `sha256:${"A".repeat(64)}`;
+    }
+  },
+  {
+    name: "non-durable legacy terminal payload remains envelope-compatible",
+    source: durableEventGolden[2],
+    expected: true,
+    mutate(event) {
+      event.cursor = "stream-golden-001:3";
+      event.checkpoint = { durable: false, lastDurableSequence: "1" };
+      event.payload = {
+        status: "ok",
+        exitCode: 0,
+        kind: "scan.result",
+        resumable: false
+      };
+    }
+  },
+  {
+    name: "event sequence must be non-zero",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.sequence = "0";
+    }
+  },
+  {
+    name: "event IDs are bounded",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.streamId = "s".repeat(129);
+    }
+  },
+  {
+    name: "event IDs reject whitespace and path syntax",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.operationId = "op invalid/path";
+    }
+  },
+  {
+    name: "event cursor is bounded",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.cursor = "c".repeat(1025);
+    }
+  },
+  {
+    name: "event emittedAt must use UTC",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.emittedAt = "2026-08-28T09:00:00+08:00";
+    }
+  },
+  {
+    name: "event envelope rejects unknown fields",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.unbounded = true;
+    }
+  },
+  {
+    name: "event checkpoint rejects unknown fields",
+    source: durableEventGolden[0],
+    expected: false,
+    mutate(event) {
+      event.checkpoint.digest = "not-part-of-v1";
+    }
+  }
+];
+
+for (const testCase of eventSchemaCases) {
+  const event = clone(testCase.source);
+  testCase.mutate(event);
+  const ok = eventValidator(event);
+  if (ok !== testCase.expected) {
+    failed = true;
+    console.log(`FAIL event schema case: ${testCase.name}`);
+    for (const error of eventValidator.errors ?? []) {
+      console.log(`  ${error.instancePath || "/"} ${error.message}`);
+    }
+  } else {
+    console.log(`PASS event schema case: ${testCase.name}`);
+  }
+}
+
+const U128_MAX = (1n << 128n) - 1n;
+const MAX_EVENT_PAYLOAD_BYTES = 256 * 1024;
+const EXIT_SEVERITY = new Map([
+  [0, 0],
+  [4, 10],
+  [3, 20],
+  [8, 30],
+  [13, 40],
+  [12, 50],
+  [6, 60],
+  [5, 70],
+  [7, 80],
+  [10, 90],
+  [9, 95],
+  [11, 99],
+  [2, 100]
+]);
+const STATUS_EXIT = new Map([
+  ["ok", 0],
+  ["partial", 4],
+  ["blocked", 5],
+  ["authorization_required", 6],
+  ["stale", 7],
+  ["failed", 8],
+  ["needs_reconciliation", 9],
+  ["cancelled", 10],
+  ["unsupported", 3]
+]);
+
+function invariant(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function decimalU128(value, field, allowZero = true) {
+  invariant(typeof value === "string" && /^(0|[1-9][0-9]*)$/u.test(value),
+    `${field} must be a canonical decimal string`);
+  const parsed = BigInt(value);
+  invariant(parsed <= U128_MAX, `${field} exceeds u128`);
+  invariant(allowZero || parsed !== 0n, `${field} must be non-zero`);
+  return parsed;
+}
+
+function utcTimestampNs(value, field) {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/u.exec(value);
+  invariant(match !== null, `${field} must be an RFC 3339 UTC timestamp`);
+  const milliseconds = Date.parse(`${match[1]}Z`);
+  invariant(!Number.isNaN(milliseconds), `${field} must be a valid timestamp`);
+  const fractionalNs = BigInt((match[2] ?? "").padEnd(9, "0") || "0");
+  return BigInt(milliseconds) * 1_000_000n + fractionalNs;
+}
+
+function validateDurableEventStream(events, expectedTerminal) {
+  invariant(Array.isArray(events) && events.length > 0, "durable event stream is empty");
+
+  for (const [index, event] of events.entries()) {
+    invariant(eventValidator(event),
+      `event ${index + 1} fails the event schema: ${ajv.errorsText(eventValidator.errors)}`);
+    invariant(Buffer.byteLength(JSON.stringify(event.payload), "utf8") <= MAX_EVENT_PAYLOAD_BYTES,
+      `event ${index + 1} payload exceeds ${MAX_EVENT_PAYLOAD_BYTES} bytes`);
+    invariant(/^sxcur1\.[A-Za-z0-9_-]{16,1017}$/u.test(event.cursor),
+      `event ${index + 1} cursor is not an opaque sxcur1 cursor`);
+  }
+
+  invariant(events[0].type === "operation.started",
+    "durable event stream must start with operation.started");
+  invariant(events[0].checkpoint.durable === true,
+    "operation.started must be durable");
+  invariant(events.filter((event) => event.type === "operation.started").length === 1,
+    "operation.started must be unique");
+
+  const terminalEvents = events.filter((event) => event.type === "operation.terminal");
+  invariant(terminalEvents.length === 1,
+    "durable event stream must contain exactly one operation.terminal");
+  invariant(events.at(-1).type === "operation.terminal",
+    "operation.terminal must be last");
+  invariant(events.at(-1).checkpoint.durable === true,
+    "operation.terminal must be durable");
+
+  const streamId = events[0].streamId;
+  const operationId = events[0].operationId;
+  const seenCursors = new Set();
+  let lastDurableSequence = 0n;
+  let previousTimestamp = null;
+  let previousMonotonicOffset = null;
+
+  for (const [index, event] of events.entries()) {
+    const sequence = decimalU128(event.sequence, `event ${index + 1} sequence`, false);
+    invariant(sequence === BigInt(index + 1),
+      `event ${index + 1} sequence is not contiguous from one`);
+    invariant(event.streamId === streamId, `event ${index + 1} changes streamId`);
+    invariant(event.operationId === operationId, `event ${index + 1} changes operationId`);
+    invariant(!seenCursors.has(event.cursor), `event ${index + 1} repeats a cursor`);
+    seenCursors.add(event.cursor);
+
+    const timestamp = utcTimestampNs(event.emittedAt, `event ${index + 1} emittedAt`);
+    invariant(previousTimestamp === null || timestamp >= previousTimestamp,
+      `event ${index + 1} emittedAt regresses`);
+    previousTimestamp = timestamp;
+
+    const monotonicOffset = decimalU128(
+      event.monotonicOffsetNs,
+      `event ${index + 1} monotonicOffsetNs`
+    );
+    invariant(previousMonotonicOffset === null || monotonicOffset >= previousMonotonicOffset,
+      `event ${index + 1} monotonicOffsetNs regresses`);
+    previousMonotonicOffset = monotonicOffset;
+
+    const checkpointSequence = decimalU128(
+      event.checkpoint.lastDurableSequence,
+      `event ${index + 1} checkpoint.lastDurableSequence`
+    );
+    const expectedCheckpoint = event.checkpoint.durable ? sequence : lastDurableSequence;
+    invariant(checkpointSequence === expectedCheckpoint,
+      `event ${index + 1} checkpoint history is inconsistent`);
+    if (event.checkpoint.durable) {
+      lastDurableSequence = sequence;
+    }
+  }
+
+  const terminal = events.at(-1).payload;
+  const minimumExit = STATUS_EXIT.get(terminal.status);
+  invariant(EXIT_SEVERITY.get(terminal.exitCode) >= EXIT_SEVERITY.get(minimumExit),
+    "operation.terminal exitCode is weaker than status");
+  for (const field of ["status", "exitCode", "kind", "snapshotDigest"]) {
+    invariant(terminal[field] === expectedTerminal[field],
+      `operation.terminal ${field} does not match the expected snapshot`);
+  }
+}
+
+const expectedTerminal = {
+  status: "ok",
+  exitCode: 0,
+  kind: "scan.result",
+  snapshotDigest: "sha256:89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+};
+const durableStreamCases = [
+  { name: "durable event stream golden", expected: true, mutate() {} },
+  {
+    name: "durable cursor requires the sxcur1 opaque format",
+    expected: false,
+    mutate(events) { events[1].cursor = "stream-golden-001:2"; }
+  },
+  {
+    name: "durable stream rejects sequence gaps",
+    expected: false,
+    mutate(events) { events[1].sequence = "4"; }
+  },
+  {
+    name: "durable stream rejects streamId drift",
+    expected: false,
+    mutate(events) { events[1].streamId = "other-stream"; }
+  },
+  {
+    name: "durable stream rejects operationId drift",
+    expected: false,
+    mutate(events) { events[1].operationId = "other-operation"; }
+  },
+  {
+    name: "durable stream requires operation.started first",
+    expected: false,
+    mutate(events) { events[0].type = "scan.progress"; }
+  },
+  {
+    name: "durable stream rejects a repeated operation.started",
+    expected: false,
+    mutate(events) { events[1].type = "operation.started"; }
+  },
+  {
+    name: "durable stream requires exactly one terminal event",
+    expected: false,
+    mutate(events) { events.pop(); }
+  },
+  {
+    name: "durable stream requires terminal last",
+    expected: false,
+    mutate(events) {
+      const terminal = events.pop();
+      terminal.sequence = "2";
+      terminal.checkpoint.lastDurableSequence = "2";
+      events[1].sequence = "3";
+      events[1].checkpoint.lastDurableSequence = "2";
+      events.splice(1, 0, terminal);
+    }
+  },
+  {
+    name: "durable stream rejects checkpoint history drift",
+    expected: false,
+    mutate(events) { events[1].checkpoint.lastDurableSequence = "0"; }
+  },
+  {
+    name: "durable stream rejects emittedAt regression",
+    expected: false,
+    mutate(events) { events[1].emittedAt = "2026-08-28T00:59:59Z"; }
+  },
+  {
+    name: "durable stream rejects monotonic offset regression",
+    expected: false,
+    mutate(events) { events[2].monotonicOffsetNs = "999"; }
+  },
+  {
+    name: "durable stream rejects duplicate cursors",
+    expected: false,
+    mutate(events) { events[1].cursor = events[0].cursor; }
+  },
+  {
+    name: "durable stream rejects oversized payloads",
+    expected: false,
+    mutate(events) { events[1].payload = { value: "x".repeat(MAX_EVENT_PAYLOAD_BYTES) }; }
+  },
+  {
+    name: "terminal status cannot have a weaker exit code",
+    expected: false,
+    mutate(events) { events[2].payload.status = "failed"; }
+  },
+  {
+    name: "terminal facts must match the expected snapshot",
+    expected: false,
+    mutate(_events, expected) {
+      expected.snapshotDigest = `sha256:${"0".repeat(64)}`;
+    }
+  }
+];
+
+for (const testCase of durableStreamCases) {
+  const events = clone(durableEventGolden);
+  const expected = clone(expectedTerminal);
+  testCase.mutate(events, expected);
+  let ok = true;
+  try {
+    validateDurableEventStream(events, expected);
+  } catch {
+    ok = false;
+  }
+  if (ok !== testCase.expected) {
+    failed = true;
+    console.log(`FAIL durable event stream case: ${testCase.name}`);
+  } else {
+    console.log(`PASS durable event stream case: ${testCase.name}`);
+  }
+}
 
 const scanOutputValidator = ajv.getSchema(
   "https://sweepx.dev/schemas/sweepx.output/v1"

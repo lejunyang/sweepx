@@ -4,7 +4,7 @@ This directory contains the P0 contract baseline for SweepX:
 
 - `sweepx.output/v1`: bounded command result envelope, including the strict output-only
   `plan.result` review projection
-- `sweepx.event/v1`: NDJSON event envelope
+- `sweepx.event/v1`: bounded event envelope plus a separate durable-stream validator
 - `sweepx.capability-record/v1`: capability qualification record
 - `sweepx.fixture-manifest/v1`: deterministic fixture input contract
 - `sweepx.receipt/v1`: deterministic creation and verification receipt
@@ -41,13 +41,35 @@ The validation script checks:
 - live `scan.result` entry identity, native locator lineage, and directory-aggregate identity structure
 - legacy imported scan entries without identity or native locator, which remain readable but untrusted
 - malformed or path-derived values cannot enter trusted `scan-entry:v1` IDs or lossless native-name components
-- example event envelope
+- example event envelope and the durable NDJSON stream golden
+- event conditional negatives (`terminal` iff `operation.terminal`, strict durable terminal payload)
+- non-zero contiguous stream sequence, stable stream/operation identity, started-first and one
+  terminal-last semantics
+- durable checkpoint history, opaque `sxcur1` cursors, monotonic times, bounded IDs/cursors/payloads,
+  and terminal status/exit/kind/snapshot-digest consistency
 - example capability record
 - deterministic minimal fixture manifest
 - deterministic expected receipt
 - executable transition policy
 
 P0 keeps the contracts additive-friendly, but strict enough to reject state, enum, and invariant drift in the core safety model.
+
+The event JSON Schema validates one bounded envelope. It intentionally continues to accept the
+legacy cursor used by the current in-memory scan-event builder; this does not enable the NDJSON
+capability. Before an event can enter or leave a durable replay journal, consumers must also run
+the durable-stream validator. That validator requires an opaque `sxcur1.<token>` cursor, sequence
+starting at one with no gaps, one stream and operation identity, a durable `operation.started`
+first, and exactly one durable `operation.terminal` last. Non-durable events repeat the preceding
+`lastDurableSequence`; durable events checkpoint their own sequence. Wall-clock timestamps are
+RFC 3339 UTC and nondecreasing, while `monotonicOffsetNs` must not regress.
+
+`operation.terminal` has an exact payload of `status`, `exitCode`, `kind`, and the lowercase
+SHA-256 `snapshotDigest`. The Rust and JavaScript stream validators compare those fields with the
+owner-supplied final snapshot facts and reject an exit code weaker than the status. JSON Schema
+cannot compare sequence/checkpoint values, serialized payload byte length, or terminal facts with
+an external snapshot, so those remain mandatory semantic-validator checks. At-least-once transport
+duplicates must be byte/semantic-identical and deduplicated by `(streamId, sequence)` before the
+canonical stream validator runs.
 
 `plan.result.data` uses `schema=sweepx.plan-review/v1` and is a presentation projection only. It
 always says `reviewOnly=true`, `approvalState=not_granted`, and

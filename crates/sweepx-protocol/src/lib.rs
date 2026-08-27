@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 pub use sweepx_model::CapabilityState;
 use sweepx_model::{DecimalU128, OperationId, RequestId};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 pub const OUTPUT_SCHEMA: &str = "sweepx.output/v1";
 pub const EVENT_SCHEMA: &str = "sweepx.event/v1";
@@ -22,6 +22,11 @@ pub const MAX_CAPABILITY_CELL_BYTES: usize = 128;
 pub const MAX_QUALIFICATION_TEXT_BYTES: usize = 512;
 pub const MAX_QUALIFICATION_REASON_BYTES: usize = 4096;
 pub const MAX_EVIDENCE_LIST_ITEMS: usize = 128;
+pub const MAX_EVENT_ID_BYTES: usize = 128;
+pub const MAX_EVENT_CURSOR_BYTES: usize = 1024;
+pub const MAX_EVENT_TIMESTAMP_BYTES: usize = 64;
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+pub const MIN_DURABLE_CURSOR_TOKEN_BYTES: usize = 16;
 pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 7] = [
     CapabilityCell::SCAN_LOCAL_DIRECTORY,
     CapabilityCell::SCAN_NDJSON_STREAM,
@@ -1325,7 +1330,7 @@ pub enum EventType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventEnvelope {
     pub schema: String,
     pub stream_id: String,
@@ -1342,7 +1347,7 @@ pub struct EventEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventCheckpoint {
     pub durable: bool,
     pub last_durable_sequence: DecimalU128,
@@ -1352,6 +1357,577 @@ impl EventEnvelope {
     pub fn is_terminal_type(&self) -> bool {
         matches!(self.r#type, EventType::OperationTerminal)
     }
+
+    /// Validates the bounded, context-free invariants of one event.
+    ///
+    /// This deliberately accepts the legacy in-memory cursor shape still produced by the
+    /// disabled NDJSON path. Use [`Self::validate_for_durable_stream`] before admitting an event
+    /// to a replayable journal or returning it from a durable stream.
+    pub fn validate(&self) -> Result<(), EventValidationError> {
+        if self.schema != EVENT_SCHEMA {
+            return Err(EventValidationError::SchemaMismatch {
+                expected: EVENT_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        validate_event_id(&self.stream_id, "streamId")?;
+        validate_event_id(&self.operation_id, "operationId")?;
+
+        let sequence = u128::from(self.sequence);
+        if sequence == 0 {
+            return Err(EventValidationError::ZeroSequence);
+        }
+        validate_event_cursor(&self.cursor)?;
+        parse_event_timestamp(&self.emitted_at)?;
+
+        if !self.payload.is_object() {
+            return Err(EventValidationError::PayloadNotObject);
+        }
+        let payload_bytes = serde_json::to_vec(&self.payload)
+            .expect("serializing an in-memory JSON value cannot fail")
+            .len();
+        if payload_bytes > MAX_EVENT_PAYLOAD_BYTES {
+            return Err(EventValidationError::PayloadTooLarge {
+                actual_bytes: payload_bytes,
+                max_bytes: MAX_EVENT_PAYLOAD_BYTES,
+            });
+        }
+
+        if self.terminal != self.is_terminal_type() {
+            return Err(EventValidationError::TerminalFlagMismatch);
+        }
+
+        let last_durable_sequence = u128::from(self.checkpoint.last_durable_sequence);
+        if self.checkpoint.durable {
+            if last_durable_sequence != sequence {
+                return Err(EventValidationError::DurableCheckpointMismatch {
+                    sequence: self.sequence,
+                    last_durable_sequence: self.checkpoint.last_durable_sequence,
+                });
+            }
+        } else if last_durable_sequence >= sequence {
+            return Err(EventValidationError::NonDurableCheckpointNotBeforeEvent {
+                sequence: self.sequence,
+                last_durable_sequence: self.checkpoint.last_durable_sequence,
+            });
+        }
+
+        if self.is_terminal_type() && self.checkpoint.durable {
+            self.terminal_payload()?;
+        }
+
+        Ok(())
+    }
+
+    /// Applies the single-event checks plus the opaque cursor format reserved for durable replay.
+    pub fn validate_for_durable_stream(&self) -> Result<(), EventValidationError> {
+        self.validate()?;
+        validate_durable_event_cursor(&self.cursor)?;
+        if self.is_terminal_type() {
+            if !self.checkpoint.durable {
+                return Err(EventValidationError::TerminalNotDurable);
+            }
+            self.terminal_payload()?;
+        }
+        Ok(())
+    }
+
+    /// Returns the typed terminal payload, rejecting missing, unknown, or inconsistent fields.
+    pub fn terminal_payload(&self) -> Result<TerminalEventPayload, EventValidationError> {
+        if !self.is_terminal_type() {
+            return Err(EventValidationError::NotTerminalEvent);
+        }
+        let payload: TerminalEventPayload = serde_json::from_value(self.payload.clone())
+            .map_err(|error| EventValidationError::InvalidTerminalPayload(error.to_string()))?;
+        validate_snapshot_digest(&payload.snapshot_digest)?;
+        let minimum_exit = ExitCode::from(payload.status);
+        if payload.exit_code.more_conservative(minimum_exit) != payload.exit_code {
+            return Err(EventValidationError::TerminalExitTooWeak {
+                status: payload.status,
+                exit_code: payload.exit_code,
+            });
+        }
+        Ok(payload)
+    }
+}
+
+/// The exact payload carried by `operation.terminal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalEventPayload {
+    pub status: OutputStatus,
+    pub exit_code: ExitCode,
+    pub kind: OutputKind,
+    pub snapshot_digest: String,
+}
+
+/// Expected terminal facts supplied by the owner of the final durable snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalEventExpectation {
+    pub status: OutputStatus,
+    pub exit_code: ExitCode,
+    pub kind: OutputKind,
+    pub snapshot_digest: String,
+}
+
+impl TerminalEventExpectation {
+    pub fn new(
+        status: OutputStatus,
+        exit_code: ExitCode,
+        kind: OutputKind,
+        snapshot_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            exit_code,
+            kind,
+            snapshot_digest: snapshot_digest.into(),
+        }
+    }
+}
+
+/// Validates one complete replayable event stream against its durable terminal snapshot.
+///
+/// The stream is canonical rather than an at-least-once transport transcript: duplicate
+/// deliveries must be deduplicated before this function is called.
+pub fn validate_durable_event_stream(
+    events: &[EventEnvelope],
+    expected_terminal: &TerminalEventExpectation,
+) -> Result<(), EventStreamValidationError> {
+    let first = events
+        .first()
+        .ok_or(EventStreamValidationError::EmptyStream)?;
+
+    for (index, event) in events.iter().enumerate() {
+        event
+            .validate_for_durable_stream()
+            .map_err(|source| EventStreamValidationError::InvalidEvent { index, source })?;
+    }
+
+    if first.r#type != EventType::OperationStarted {
+        return Err(EventStreamValidationError::FirstEventNotStarted);
+    }
+    if !first.checkpoint.durable {
+        return Err(EventStreamValidationError::StartedEventNotDurable);
+    }
+
+    let terminal_count = events
+        .iter()
+        .filter(|event| event.is_terminal_type())
+        .count();
+    if terminal_count != 1 {
+        return Err(EventStreamValidationError::TerminalCount {
+            actual: terminal_count,
+        });
+    }
+    if !events.last().is_some_and(EventEnvelope::is_terminal_type) {
+        return Err(EventStreamValidationError::TerminalNotLast);
+    }
+
+    let mut last_durable_sequence = DecimalU128::ZERO;
+    let mut previous_emitted_at = None;
+    let mut previous_monotonic_offset = DecimalU128::ZERO;
+    let mut cursors = BTreeSet::new();
+
+    for (index, event) in events.iter().enumerate() {
+        let expected_sequence = DecimalU128::new(
+            u128::try_from(index)
+                .expect("usize always fits in u128")
+                .checked_add(1)
+                .expect("an in-memory event slice cannot exceed u128::MAX entries"),
+        );
+        if event.sequence != expected_sequence {
+            return Err(EventStreamValidationError::SequenceMismatch {
+                index,
+                expected: expected_sequence,
+                actual: event.sequence,
+            });
+        }
+        if event.stream_id != first.stream_id {
+            return Err(EventStreamValidationError::StreamIdMismatch { index });
+        }
+        if event.operation_id != first.operation_id {
+            return Err(EventStreamValidationError::OperationIdMismatch { index });
+        }
+        if index > 0 && event.r#type == EventType::OperationStarted {
+            return Err(EventStreamValidationError::StartedEventRepeated { index });
+        }
+        if !cursors.insert(event.cursor.as_str()) {
+            return Err(EventStreamValidationError::DuplicateCursor { index });
+        }
+
+        let emitted_at = parse_event_timestamp(&event.emitted_at)
+            .map_err(|source| EventStreamValidationError::InvalidEvent { index, source })?;
+        if previous_emitted_at.is_some_and(|previous| emitted_at < previous) {
+            return Err(EventStreamValidationError::EmittedAtRegression { index });
+        }
+        if index > 0 && event.monotonic_offset_ns < previous_monotonic_offset {
+            return Err(EventStreamValidationError::MonotonicOffsetRegression { index });
+        }
+        previous_emitted_at = Some(emitted_at);
+        previous_monotonic_offset = event.monotonic_offset_ns;
+
+        let expected_last_durable = if event.checkpoint.durable {
+            event.sequence
+        } else {
+            last_durable_sequence
+        };
+        if event.checkpoint.last_durable_sequence != expected_last_durable {
+            return Err(EventStreamValidationError::CheckpointHistoryMismatch {
+                index,
+                expected: expected_last_durable,
+                actual: event.checkpoint.last_durable_sequence,
+            });
+        }
+        if event.checkpoint.durable {
+            last_durable_sequence = event.sequence;
+        }
+    }
+
+    let terminal = events.last().expect("non-empty stream checked above");
+    let actual_terminal =
+        terminal
+            .terminal_payload()
+            .map_err(|source| EventStreamValidationError::InvalidEvent {
+                index: events.len() - 1,
+                source,
+            })?;
+    if actual_terminal.status != expected_terminal.status {
+        return Err(EventStreamValidationError::TerminalExpectationMismatch { field: "status" });
+    }
+    if actual_terminal.exit_code != expected_terminal.exit_code {
+        return Err(EventStreamValidationError::TerminalExpectationMismatch { field: "exitCode" });
+    }
+    if actual_terminal.kind != expected_terminal.kind {
+        return Err(EventStreamValidationError::TerminalExpectationMismatch { field: "kind" });
+    }
+    if actual_terminal.snapshot_digest != expected_terminal.snapshot_digest {
+        return Err(EventStreamValidationError::TerminalExpectationMismatch {
+            field: "snapshotDigest",
+        });
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventValidationError {
+    SchemaMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    EmptyField(&'static str),
+    FieldTooLong {
+        field: &'static str,
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+    InvalidId(&'static str),
+    ZeroSequence,
+    InvalidCursor,
+    InvalidDurableCursor,
+    InvalidTimestamp,
+    TimestampNotUtc,
+    PayloadNotObject,
+    PayloadTooLarge {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+    TerminalFlagMismatch,
+    DurableCheckpointMismatch {
+        sequence: DecimalU128,
+        last_durable_sequence: DecimalU128,
+    },
+    NonDurableCheckpointNotBeforeEvent {
+        sequence: DecimalU128,
+        last_durable_sequence: DecimalU128,
+    },
+    TerminalNotDurable,
+    NotTerminalEvent,
+    InvalidTerminalPayload(String),
+    InvalidSnapshotDigest,
+    TerminalExitTooWeak {
+        status: OutputStatus,
+        exit_code: ExitCode,
+    },
+}
+
+impl fmt::Display for EventValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "event schema mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::EmptyField(field) => write!(formatter, "event field is empty: {field}"),
+            Self::FieldTooLong {
+                field,
+                actual_bytes,
+                max_bytes,
+            } => write!(
+                formatter,
+                "event field {field} is {actual_bytes} bytes; maximum is {max_bytes}"
+            ),
+            Self::InvalidId(field) => write!(formatter, "event field has an invalid ID: {field}"),
+            Self::ZeroSequence => formatter.write_str("event sequence must be non-zero"),
+            Self::InvalidCursor => formatter.write_str("event cursor has an invalid format"),
+            Self::InvalidDurableCursor => {
+                formatter.write_str("durable event cursor must use the opaque sxcur1 format")
+            }
+            Self::InvalidTimestamp => {
+                formatter.write_str("event emittedAt must be a valid RFC 3339 timestamp")
+            }
+            Self::TimestampNotUtc => formatter.write_str("event emittedAt must use UTC (Z)"),
+            Self::PayloadNotObject => formatter.write_str("event payload must be an object"),
+            Self::PayloadTooLarge {
+                actual_bytes,
+                max_bytes,
+            } => write!(
+                formatter,
+                "event payload is {actual_bytes} bytes; maximum is {max_bytes}"
+            ),
+            Self::TerminalFlagMismatch => formatter
+                .write_str("event terminal is true if and only if type is operation.terminal"),
+            Self::DurableCheckpointMismatch {
+                sequence,
+                last_durable_sequence,
+            } => write!(
+                formatter,
+                "durable event sequence {sequence} must checkpoint itself, got {last_durable_sequence}"
+            ),
+            Self::NonDurableCheckpointNotBeforeEvent {
+                sequence,
+                last_durable_sequence,
+            } => write!(
+                formatter,
+                "non-durable event sequence {sequence} must reference an earlier durable sequence, got {last_durable_sequence}"
+            ),
+            Self::TerminalNotDurable => formatter.write_str("operation.terminal must be durable"),
+            Self::NotTerminalEvent => formatter.write_str("event is not operation.terminal"),
+            Self::InvalidTerminalPayload(error) => {
+                write!(formatter, "invalid operation.terminal payload: {error}")
+            }
+            Self::InvalidSnapshotDigest => formatter
+                .write_str("operation.terminal snapshotDigest must be a lowercase sha256 digest"),
+            Self::TerminalExitTooWeak { status, exit_code } => write!(
+                formatter,
+                "operation.terminal exit code {exit_code:?} is weaker than status {status:?}"
+            ),
+        }
+    }
+}
+
+impl Error for EventValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventStreamValidationError {
+    EmptyStream,
+    InvalidEvent {
+        index: usize,
+        source: EventValidationError,
+    },
+    FirstEventNotStarted,
+    StartedEventNotDurable,
+    StartedEventRepeated {
+        index: usize,
+    },
+    TerminalCount {
+        actual: usize,
+    },
+    TerminalNotLast,
+    SequenceMismatch {
+        index: usize,
+        expected: DecimalU128,
+        actual: DecimalU128,
+    },
+    StreamIdMismatch {
+        index: usize,
+    },
+    OperationIdMismatch {
+        index: usize,
+    },
+    DuplicateCursor {
+        index: usize,
+    },
+    EmittedAtRegression {
+        index: usize,
+    },
+    MonotonicOffsetRegression {
+        index: usize,
+    },
+    CheckpointHistoryMismatch {
+        index: usize,
+        expected: DecimalU128,
+        actual: DecimalU128,
+    },
+    TerminalExpectationMismatch {
+        field: &'static str,
+    },
+}
+
+impl fmt::Display for EventStreamValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyStream => formatter.write_str("durable event stream is empty"),
+            Self::InvalidEvent { index, source } => {
+                write!(formatter, "invalid event at index {index}: {source}")
+            }
+            Self::FirstEventNotStarted => {
+                formatter.write_str("durable event stream must start with operation.started")
+            }
+            Self::StartedEventNotDurable => {
+                formatter.write_str("the initial operation.started event must be durable")
+            }
+            Self::StartedEventRepeated { index } => {
+                write!(formatter, "operation.started repeats at index {index}")
+            }
+            Self::TerminalCount { actual } => write!(
+                formatter,
+                "durable event stream must contain exactly one operation.terminal, got {actual}"
+            ),
+            Self::TerminalNotLast => {
+                formatter.write_str("operation.terminal must be the final event")
+            }
+            Self::SequenceMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "event sequence mismatch at index {index}: expected {expected}, got {actual}"
+            ),
+            Self::StreamIdMismatch { index } => {
+                write!(formatter, "streamId changes at index {index}")
+            }
+            Self::OperationIdMismatch { index } => {
+                write!(formatter, "operationId changes at index {index}")
+            }
+            Self::DuplicateCursor { index } => {
+                write!(formatter, "event cursor repeats at index {index}")
+            }
+            Self::EmittedAtRegression { index } => {
+                write!(formatter, "emittedAt regresses at index {index}")
+            }
+            Self::MonotonicOffsetRegression { index } => {
+                write!(formatter, "monotonicOffsetNs regresses at index {index}")
+            }
+            Self::CheckpointHistoryMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "checkpoint history mismatch at index {index}: expected {expected}, got {actual}"
+            ),
+            Self::TerminalExpectationMismatch { field } => {
+                write!(
+                    formatter,
+                    "operation.terminal does not match expected {field}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for EventStreamValidationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidEvent { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+fn validate_event_id(value: &str, field: &'static str) -> Result<(), EventValidationError> {
+    if value.is_empty() {
+        return Err(EventValidationError::EmptyField(field));
+    }
+    if value.len() > MAX_EVENT_ID_BYTES {
+        return Err(EventValidationError::FieldTooLong {
+            field,
+            actual_bytes: value.len(),
+            max_bytes: MAX_EVENT_ID_BYTES,
+        });
+    }
+    let mut bytes = value.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(EventValidationError::InvalidId(field));
+    }
+    Ok(())
+}
+
+fn validate_event_cursor(value: &str) -> Result<(), EventValidationError> {
+    if value.is_empty() {
+        return Err(EventValidationError::EmptyField("cursor"));
+    }
+    if value.len() > MAX_EVENT_CURSOR_BYTES {
+        return Err(EventValidationError::FieldTooLong {
+            field: "cursor",
+            actual_bytes: value.len(),
+            max_bytes: MAX_EVENT_CURSOR_BYTES,
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(EventValidationError::InvalidCursor);
+    }
+    Ok(())
+}
+
+fn validate_durable_event_cursor(value: &str) -> Result<(), EventValidationError> {
+    let Some(token) = value.strip_prefix("sxcur1.") else {
+        return Err(EventValidationError::InvalidDurableCursor);
+    };
+    if token.len() < MIN_DURABLE_CURSOR_TOKEN_BYTES
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(EventValidationError::InvalidDurableCursor);
+    }
+    Ok(())
+}
+
+fn parse_event_timestamp(value: &str) -> Result<OffsetDateTime, EventValidationError> {
+    if value.is_empty() {
+        return Err(EventValidationError::EmptyField("emittedAt"));
+    }
+    if value.len() > MAX_EVENT_TIMESTAMP_BYTES {
+        return Err(EventValidationError::FieldTooLong {
+            field: "emittedAt",
+            actual_bytes: value.len(),
+            max_bytes: MAX_EVENT_TIMESTAMP_BYTES,
+        });
+    }
+    let timestamp = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| EventValidationError::InvalidTimestamp)?;
+    if timestamp.offset() != UtcOffset::UTC || !value.ends_with('Z') {
+        return Err(EventValidationError::TimestampNotUtc);
+    }
+    Ok(timestamp)
+}
+
+fn validate_snapshot_digest(value: &str) -> Result<(), EventValidationError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(EventValidationError::InvalidSnapshotDigest);
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(EventValidationError::InvalidSnapshotDigest);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2506,7 +3082,12 @@ mod tests {
             monotonic_offset_ns: DecimalU128::new(1234),
             r#type: EventType::OperationTerminal,
             phase: EventPhase::Audit,
-            payload: json!({ "status": "ok" }),
+            payload: json!({
+                "status": "ok",
+                "exitCode": 0,
+                "kind": "scan.result",
+                "snapshotDigest": format!("sha256:{}", "a".repeat(64))
+            }),
             terminal: true,
             checkpoint: EventCheckpoint {
                 durable: true,
@@ -2521,6 +3102,192 @@ mod tests {
             ..terminal
         };
         assert!(!non_terminal.is_terminal_type());
+    }
+
+    fn durable_event_stream_example() -> Vec<EventEnvelope> {
+        include_str!("../../../schemas/examples/sweepx.event.durable-stream.golden.ndjson")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("valid event golden line"))
+            .collect()
+    }
+
+    fn terminal_expectation() -> TerminalEventExpectation {
+        TerminalEventExpectation::new(
+            OutputStatus::Ok,
+            ExitCode::Completed,
+            OutputKind::ScanResult,
+            "sha256:89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+        )
+    }
+
+    #[test]
+    fn durable_event_golden_validates_as_single_events_and_stream() {
+        let events = durable_event_stream_example();
+        assert_eq!(events.len(), 3);
+        for event in &events {
+            event.validate().unwrap();
+            event.validate_for_durable_stream().unwrap();
+        }
+        validate_durable_event_stream(&events, &terminal_expectation()).unwrap();
+    }
+
+    #[test]
+    fn single_event_validation_preserves_legacy_in_memory_cursor() {
+        let mut event = durable_event_stream_example().remove(1);
+        event.cursor = "stream-golden-001:2".to_string();
+        event.validate().unwrap();
+        assert!(matches!(
+            event.validate_for_durable_stream(),
+            Err(EventValidationError::InvalidDurableCursor)
+        ));
+    }
+
+    #[test]
+    fn event_validation_enforces_bounds_terminal_equivalence_and_checkpoints() {
+        let events = durable_event_stream_example();
+
+        let mut zero = events[0].clone();
+        zero.sequence = DecimalU128::ZERO;
+        assert!(matches!(
+            zero.validate(),
+            Err(EventValidationError::ZeroSequence)
+        ));
+
+        let mut oversized_id = events[0].clone();
+        oversized_id.stream_id = "x".repeat(MAX_EVENT_ID_BYTES + 1);
+        assert!(matches!(
+            oversized_id.validate(),
+            Err(EventValidationError::FieldTooLong {
+                field: "streamId",
+                ..
+            })
+        ));
+
+        let mut non_utc = events[0].clone();
+        non_utc.emitted_at = "2026-08-28T09:00:00+08:00".to_string();
+        assert!(matches!(
+            non_utc.validate(),
+            Err(EventValidationError::TimestampNotUtc)
+        ));
+
+        let mut oversized_payload = events[1].clone();
+        oversized_payload.payload = json!({ "value": "x".repeat(MAX_EVENT_PAYLOAD_BYTES) });
+        assert!(matches!(
+            oversized_payload.validate(),
+            Err(EventValidationError::PayloadTooLarge { .. })
+        ));
+
+        let mut false_terminal = events[1].clone();
+        false_terminal.terminal = true;
+        assert!(matches!(
+            false_terminal.validate(),
+            Err(EventValidationError::TerminalFlagMismatch)
+        ));
+
+        let mut durable_drift = events[0].clone();
+        durable_drift.checkpoint.last_durable_sequence = DecimalU128::ZERO;
+        assert!(matches!(
+            durable_drift.validate(),
+            Err(EventValidationError::DurableCheckpointMismatch { .. })
+        ));
+
+        let mut non_durable_drift = events[1].clone();
+        non_durable_drift.checkpoint.last_durable_sequence = non_durable_drift.sequence;
+        assert!(matches!(
+            non_durable_drift.validate(),
+            Err(EventValidationError::NonDurableCheckpointNotBeforeEvent { .. })
+        ));
+    }
+
+    #[test]
+    fn durable_stream_validation_rejects_sequence_identity_and_order_drift() {
+        let expectation = terminal_expectation();
+
+        let mut sequence_gap = durable_event_stream_example();
+        sequence_gap[1].sequence = DecimalU128::new(3);
+        sequence_gap[1].checkpoint.last_durable_sequence = DecimalU128::new(1);
+        assert!(matches!(
+            validate_durable_event_stream(&sequence_gap, &expectation),
+            Err(EventStreamValidationError::SequenceMismatch { index: 1, .. })
+        ));
+
+        let mut stream_drift = durable_event_stream_example();
+        stream_drift[1].stream_id = "other-stream".to_string();
+        assert!(matches!(
+            validate_durable_event_stream(&stream_drift, &expectation),
+            Err(EventStreamValidationError::StreamIdMismatch { index: 1 })
+        ));
+
+        let mut operation_drift = durable_event_stream_example();
+        operation_drift[1].operation_id = OperationId::new("other-operation");
+        assert!(matches!(
+            validate_durable_event_stream(&operation_drift, &expectation),
+            Err(EventStreamValidationError::OperationIdMismatch { index: 1 })
+        ));
+
+        let mut not_started = durable_event_stream_example();
+        not_started[0].r#type = EventType::ScanProgress;
+        assert!(matches!(
+            validate_durable_event_stream(&not_started, &expectation),
+            Err(EventStreamValidationError::FirstEventNotStarted)
+        ));
+
+        let mut terminal_not_last = durable_event_stream_example();
+        terminal_not_last.swap(1, 2);
+        terminal_not_last[1].sequence = DecimalU128::new(2);
+        terminal_not_last[1].checkpoint.last_durable_sequence = DecimalU128::new(2);
+        terminal_not_last[2].sequence = DecimalU128::new(3);
+        terminal_not_last[2].checkpoint.last_durable_sequence = DecimalU128::new(2);
+        assert!(matches!(
+            validate_durable_event_stream(&terminal_not_last, &expectation),
+            Err(EventStreamValidationError::TerminalNotLast)
+        ));
+    }
+
+    #[test]
+    fn durable_stream_validation_rejects_checkpoint_time_and_terminal_drift() {
+        let expectation = terminal_expectation();
+
+        let mut checkpoint_drift = durable_event_stream_example();
+        checkpoint_drift[1].checkpoint.last_durable_sequence = DecimalU128::ZERO;
+        assert!(matches!(
+            validate_durable_event_stream(&checkpoint_drift, &expectation),
+            Err(EventStreamValidationError::CheckpointHistoryMismatch { index: 1, .. })
+        ));
+
+        let mut time_regression = durable_event_stream_example();
+        time_regression[1].emitted_at = "2026-08-28T00:59:59Z".to_string();
+        assert!(matches!(
+            validate_durable_event_stream(&time_regression, &expectation),
+            Err(EventStreamValidationError::EmittedAtRegression { index: 1 })
+        ));
+
+        let mut monotonic_regression = durable_event_stream_example();
+        monotonic_regression[2].monotonic_offset_ns = DecimalU128::new(999);
+        assert!(matches!(
+            validate_durable_event_stream(&monotonic_regression, &expectation),
+            Err(EventStreamValidationError::MonotonicOffsetRegression { index: 2 })
+        ));
+
+        let mut payload_drift = durable_event_stream_example();
+        payload_drift[2].payload["snapshotDigest"] = json!(format!("sha256:{}", "0".repeat(64)));
+        assert!(matches!(
+            validate_durable_event_stream(&payload_drift, &expectation),
+            Err(EventStreamValidationError::TerminalExpectationMismatch {
+                field: "snapshotDigest"
+            })
+        ));
+
+        let mut weak_exit = durable_event_stream_example();
+        weak_exit[2].payload["status"] = json!("failed");
+        assert!(matches!(
+            validate_durable_event_stream(&weak_exit, &expectation),
+            Err(EventStreamValidationError::InvalidEvent {
+                index: 2,
+                source: EventValidationError::TerminalExitTooWeak { .. }
+            })
+        ));
     }
 
     #[test]
