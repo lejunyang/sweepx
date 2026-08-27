@@ -158,10 +158,10 @@ pub struct JournalAppendPosition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalSnapshotMetadata {
-    pub snapshot_digest: String,
-    pub canonical_snapshot: Vec<u8>,
-    pub terminal: TerminalEventExpectation,
-    pub operation_id: String,
+    snapshot_digest: String,
+    canonical_snapshot: Vec<u8>,
+    terminal: TerminalEventExpectation,
+    operation_id: String,
 }
 
 impl FinalSnapshotMetadata {
@@ -194,6 +194,18 @@ impl FinalSnapshotMetadata {
             })
         }
     }
+
+    pub fn snapshot_digest(&self) -> &str {
+        &self.snapshot_digest
+    }
+
+    pub fn canonical_snapshot(&self) -> &[u8] {
+        &self.canonical_snapshot
+    }
+
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -216,14 +228,6 @@ fn snapshot_terminal_expectation(
         .get("state")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| JournalError::ProtocolValidation("snapshot state is missing".into()))?;
-    if !matches!(
-        state,
-        "completed" | "partial" | "failed" | "cancelled" | "unsupported"
-    ) {
-        return Err(JournalError::ProtocolValidation(
-            "snapshot is not terminal".into(),
-        ));
-    }
     let status: sweepx_protocol::OutputStatus =
         serde_json::from_value(object.get("status").cloned().ok_or_else(|| {
             JournalError::ProtocolValidation("snapshot status is missing".into())
@@ -239,6 +243,22 @@ fn snapshot_terminal_expectation(
     if exit_code.more_conservative(sweepx_protocol::ExitCode::from(status)) != exit_code {
         return Err(JournalError::ProtocolValidation(
             "snapshot exitCode is weaker than status".into(),
+        ));
+    }
+    let expected_state = match status {
+        sweepx_protocol::OutputStatus::Ok => "completed",
+        sweepx_protocol::OutputStatus::Partial => "partial",
+        sweepx_protocol::OutputStatus::Unsupported => "unsupported",
+        sweepx_protocol::OutputStatus::Blocked
+        | sweepx_protocol::OutputStatus::AuthorizationRequired
+        | sweepx_protocol::OutputStatus::Stale
+        | sweepx_protocol::OutputStatus::Failed
+        | sweepx_protocol::OutputStatus::NeedsReconciliation
+        | sweepx_protocol::OutputStatus::Cancelled => "failed",
+    };
+    if state != expected_state {
+        return Err(JournalError::ProtocolValidation(
+            "snapshot state does not match status".into(),
         ));
     }
     let command = object
@@ -591,18 +611,18 @@ impl EventJournal {
             .terminal_payload()
             .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
         #[cfg(target_os = "linux")]
-        if final_snapshot.canonical_snapshot.len() > MAX_SNAPSHOT_BYTES
-            || sha256_digest(&final_snapshot.canonical_snapshot) != final_snapshot.snapshot_digest
-        {
-            return Err(JournalError::TerminalMetadataMismatch);
-        }
+        let derived_snapshot =
+            serde_json::from_slice::<serde_json::Value>(&final_snapshot.canonical_snapshot)
+                .map_err(|_| JournalError::TerminalMetadataMismatch)
+                .and_then(|value| FinalSnapshotMetadata::from_json(&value))?;
         #[cfg(target_os = "linux")]
-        if terminal.snapshot_digest != final_snapshot.snapshot_digest
-            || terminal.snapshot_digest != final_snapshot.terminal.snapshot_digest
-            || terminal.status != final_snapshot.terminal.status
-            || terminal.exit_code != final_snapshot.terminal.exit_code
-            || terminal.kind != final_snapshot.terminal.kind
-            || event.operation_id.to_string() != final_snapshot.operation_id
+        if derived_snapshot != *final_snapshot
+            || terminal.snapshot_digest != derived_snapshot.snapshot_digest
+            || terminal.snapshot_digest != derived_snapshot.terminal.snapshot_digest
+            || terminal.status != derived_snapshot.terminal.status
+            || terminal.exit_code != derived_snapshot.terminal.exit_code
+            || terminal.kind != derived_snapshot.terminal.kind
+            || event.operation_id.to_string() != derived_snapshot.operation_id
         {
             return Err(JournalError::TerminalMetadataMismatch);
         }
@@ -2010,16 +2030,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn expectation(digest: &str) -> TerminalEventExpectation {
-        TerminalEventExpectation::new(
-            OutputStatus::Ok,
-            ExitCode::Completed,
-            OutputKind::ScanResult,
-            digest,
-        )
-    }
-
-    #[cfg(target_os = "linux")]
     fn snapshot(digest: &str) -> FinalSnapshotMetadata {
         FinalSnapshotMetadata::from_json(&serde_json::json!({
             "schema": "sweepx.operation-snapshot/v1",
@@ -2111,12 +2121,12 @@ mod tests {
         assert_eq!(all.len(), 3);
         let stored_snapshot = journal.read_final_snapshot().unwrap().unwrap();
         assert_eq!(
-            stored_snapshot.snapshot_digest,
+            stored_snapshot.snapshot_digest(),
             terminal.terminal_payload().unwrap().snapshot_digest
         );
         assert_eq!(
-            sha256_digest(&stored_snapshot.canonical_snapshot),
-            stored_snapshot.snapshot_digest
+            sha256_digest(stored_snapshot.canonical_snapshot()),
+            stored_snapshot.snapshot_digest()
         );
     }
 
@@ -2347,7 +2357,7 @@ mod tests {
         }))
         .unwrap();
         let c2 = next_cursor(&journal, Some(&latest_digest(&journal)), 2);
-        let contradictory = terminal(c2, 2, &snapshot.snapshot_digest);
+        let contradictory = terminal(c2, 2, snapshot.snapshot_digest());
         assert!(matches!(
             journal.append_terminal_with_snapshot(&contradictory, &snapshot),
             Err(JournalError::TerminalMetadataMismatch)
@@ -2434,16 +2444,15 @@ mod tests {
         assert!(matches!(
             journal.append_terminal_with_snapshot(
                 &bad_terminal,
-                &FinalSnapshotMetadata {
-                    snapshot_digest:
-                        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                            .to_string(),
-                    canonical_snapshot: b"{}".to_vec(),
-                    terminal: expectation(
-                        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    ),
-                    operation_id: "op-1".to_string(),
-                },
+                &FinalSnapshotMetadata::from_json(&serde_json::json!({
+                    "schema": "sweepx.operation-snapshot/v1",
+                    "operationId": "op-1",
+                    "command": "scan",
+                    "state": "completed",
+                    "status": "ok",
+                    "exitCode": 0
+                }))
+                .unwrap(),
             ),
             Err(JournalError::TerminalMetadataMismatch)
         ));
