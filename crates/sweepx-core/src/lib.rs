@@ -375,8 +375,8 @@ pub struct TuiDetailRescanProvider {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct LiveTuiDetailRescanProvider {
     scanner: DetailRescanner<HostPlatformScanner>,
-    ids: DetailEntryIdAllocator,
-    cancel: CancellationToken,
+    ids: Mutex<DetailEntryIdAllocator>,
+    cancel: Mutex<CancellationToken>,
 }
 
 pub fn tui_detail_rescan_provider(summary: &ScanSummary) -> TuiDetailRescanProvider {
@@ -434,17 +434,31 @@ fn live_tui_detail_rescan_provider(
             HostPlatformScanner::new(),
             sweepx_platform::ScanResourceLimits::default(),
         ),
-        ids,
-        cancel: CancellationToken::new(),
+        ids: Mutex::new(ids),
+        cancel: Mutex::new(CancellationToken::new()),
     })
 }
 
 impl DetailRescanProvider for TuiDetailRescanProvider {
-    fn rescan_detail(&mut self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
+    fn rescan_detail(&self, request: &TuiDetailRescanRequest) -> TuiDetailRescanResult {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        if let Some(live) = &mut self.live {
+        if let Some(live) = &self.live {
             let binding = request.binding.clone();
-            return match live.scanner.rescan(
+            let Ok(cancel_slot) = live.cancel.lock() else {
+                return TuiDetailRescanResult::Failed {
+                    binding: Box::new(binding),
+                    failure: TuiDetailRescanFailure::Unavailable,
+                };
+            };
+            let cancel = cancel_slot.clone();
+            drop(cancel_slot);
+            let Ok(mut ids) = live.ids.lock() else {
+                return TuiDetailRescanResult::Failed {
+                    binding: Box::new(binding),
+                    failure: TuiDetailRescanFailure::Unavailable,
+                };
+            };
+            let result = match live.scanner.rescan(
                 DetailRescanRequest {
                     source_scan_id: &request.binding.source_scan_id,
                     source_root_identity: &request.binding.source_root_identity,
@@ -453,8 +467,8 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                     revision: request.binding.revision,
                     max_rows: request.max_rows,
                 },
-                &mut live.ids,
-                &live.cancel,
+                &mut ids,
+                &cancel,
             ) {
                 Ok(detail) => TuiDetailRescanResult::Refreshed(Box::new(RefreshedDetail {
                     binding,
@@ -468,10 +482,26 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                     failure: map_tui_detail_rescan_error(error),
                 },
             };
+            if cancel.is_cancelled()
+                && let Ok(mut current) = live.cancel.lock()
+                && current.is_cancelled()
+            {
+                *current = CancellationToken::new();
+            }
+            return result;
         }
         TuiDetailRescanResult::Failed {
             binding: Box::new(request.binding.clone()),
             failure: TuiDetailRescanFailure::Unavailable,
+        }
+    }
+
+    fn cancel_detail_rescan(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(cancel) = live.cancel.lock()
+        {
+            cancel.cancel();
         }
     }
 }
@@ -562,7 +592,7 @@ mod tui_detail_rescan_provider_tests {
             parent_reopen_recipe: Vec::new(),
             entry: component,
         };
-        let mut provider = tui_detail_rescan_provider(&ScanSummary {
+        let provider = tui_detail_rescan_provider(&ScanSummary {
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -630,6 +660,94 @@ mod tui_detail_rescan_provider_tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn tui_provider_cancel_hook_notifies_the_active_token() {
+        let provider = tui_detail_rescan_provider(&ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        });
+        assert!(provider.live.is_none());
+        provider.cancel_detail_rescan();
+
+        let scan_id = ScanId::new("cancel-hook");
+        let mut ids = DetailEntryIdAllocator::new(scan_id).unwrap();
+        ids.reserve(&ScanEntryId::for_scan_ordinal(&ScanId::new("cancel-hook"), 1).unwrap())
+            .unwrap();
+        let provider = TuiDetailRescanProvider {
+            live: Some(LiveTuiDetailRescanProvider {
+                scanner: DetailRescanner::new(
+                    HostPlatformScanner::new(),
+                    sweepx_platform::ScanResourceLimits::default(),
+                ),
+                ids: Mutex::new(ids),
+                cancel: Mutex::new(CancellationToken::new()),
+            }),
+        };
+        provider.cancel_detail_rescan();
+        assert!(
+            provider
+                .live
+                .unwrap()
+                .cancel
+                .into_inner()
+                .unwrap()
+                .is_cancelled()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelled_tui_provider_can_start_a_fresh_followup_query() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root_path = temp.path().join("root");
+        std::fs::create_dir(&root_path).unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root_path],
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+        let root = scan.summary.roots[0].clone();
+        let root_identity = root.identity.as_ref().unwrap().clone();
+        let request = TuiDetailRescanRequest {
+            binding: DetailRescanBinding {
+                source_scan_id: root.scan_id.clone(),
+                source_root_identity: root_identity.clone(),
+                source_directory_identity: root_identity,
+                base_revision: DecimalU128::new(1),
+                revision: DecimalU128::new(2),
+            },
+            directory_locator: root.executable_native_locator().unwrap().unwrap().clone(),
+            reason: DetailRescanReason::Evicted,
+            max_rows: 8,
+        };
+        let provider = tui_detail_rescan_provider(&scan.summary);
+
+        provider.cancel_detail_rescan();
+        assert!(matches!(
+            provider.rescan_detail(&request),
+            TuiDetailRescanResult::Failed {
+                failure: TuiDetailRescanFailure::Cancelled,
+                ..
+            }
+        ));
+        assert!(matches!(
+            provider.rescan_detail(&request),
+            TuiDetailRescanResult::Refreshed(_)
+        ));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn live_provider_echoes_binding_and_returns_complete_direct_detail() {
@@ -665,7 +783,7 @@ mod tui_detail_rescan_provider_tests {
             reason: DetailRescanReason::Evicted,
             max_rows: 8,
         };
-        let mut provider = tui_detail_rescan_provider(&scan.summary);
+        let provider = tui_detail_rescan_provider(&scan.summary);
 
         let TuiDetailRescanResult::Refreshed(detail) = provider.rescan_detail(&request) else {
             panic!("live provider unexpectedly failed");

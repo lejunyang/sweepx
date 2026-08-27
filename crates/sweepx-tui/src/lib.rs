@@ -23,9 +23,9 @@ mod live;
 pub use live::{
     BrowserAction, BrowserControl, BrowserError, BrowserEventSource, BrowserExit, BrowserKeyMapper,
     BrowserLoadLimits, BrowserModel, BrowserModelError, BrowserReducer, BrowserResourceLimitKind,
-    BrowserRow, CrosstermEventSource, DefaultBrowserKeyMapper, DetailRescanBinding,
-    DetailRescanBrowserReducer, DetailRescanFailure, DetailRescanProvider, DetailRescanReason,
-    DetailRescanRequest, DetailRescanResult, DetailRescanState, NeverTerminate,
+    BrowserRow, CrosstermEventSource, DETAIL_RESCAN_QUERY_DEADLINE, DefaultBrowserKeyMapper,
+    DetailRescanBinding, DetailRescanBrowserReducer, DetailRescanFailure, DetailRescanProvider,
+    DetailRescanReason, DetailRescanRequest, DetailRescanResult, DetailRescanState, NeverTerminate,
     ReadOnlyBrowserReducer, RefreshedDetail, TerminalGuard, TerminationFlag,
     UnavailableDetailRescanProvider, render_live_browser, run_browser_loop, run_browser_loop_until,
     run_live_browser, run_live_browser_with_detail_rescan,
