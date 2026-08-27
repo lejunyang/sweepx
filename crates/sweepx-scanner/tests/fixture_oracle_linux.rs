@@ -27,12 +27,29 @@ fn deterministic_oracle_matches_linux_host_scanner() {
 
     assert_eq!(generated.receipt, oracle.receipt);
 
-    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
-        .scan(
-            &[ScanRoot::new(generated.fixture_dir.clone()).expect("absolute fixture root")],
-            &CancellationToken::new(),
-        )
-        .expect("scan generated fixture with the Linux host backend");
+    let root = ScanRoot::new(generated.fixture_dir.clone()).expect("absolute fixture root");
+    let summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            max_workers: 1,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(std::slice::from_ref(&root), &CancellationToken::new())
+    .expect("scan generated fixture with one Linux host worker");
+    let parallel_summary = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            max_workers: 4,
+            ..ScannerOptions::default()
+        },
+    )
+    .scan(&[root], &CancellationToken::new())
+    .expect("scan generated fixture with four Linux host workers");
+    assert_eq!(
+        parallel_summary, summary,
+        "worker count must not affect stable scanner output"
+    );
 
     let observed = observed_entries_by_path(&summary);
     assert_eq!(observed.len(), oracle.identities.len());

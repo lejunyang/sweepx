@@ -616,7 +616,9 @@ impl PlatformError {
 /// was inspected. A display path must never be used to regain traversal authority.
 pub trait PlatformScanner: Send + Sync {
     /// An owned, scan-scoped traversal capability. It must not be clonable into broader authority
-    /// or reconstructed from a display path.
+    /// or reconstructed from a display path. A scanner may move different retained handles to
+    /// different workers, but it must give each handle exclusive ownership for the complete
+    /// enumerate-and-inspect unit; backends must not rely on concurrent use of one handle.
     type DirectoryHandle: Send;
 
     fn platform_name(&self) -> &'static str;
@@ -638,7 +640,9 @@ pub trait PlatformScanner: Send + Sync {
     ///
     /// Implementations must independently enforce the [`DirectoryEntryRecord`] invariant and must
     /// ignore `child.path` for resolution. Scanner code should call [`inspect_bound_child`], which
-    /// adds non-overridable contract checks before and after this operation.
+    /// adds non-overridable contract checks before and after this operation. During a bounded
+    /// worker unit, inspection uses the same exclusively owned retained parent handle that produced
+    /// the batch; no pathname reopen or concurrent enumeration of that parent is permitted.
     fn inspect_child(
         &self,
         parent: &Self::DirectoryHandle,
