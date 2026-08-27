@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sweepx_model::{
     ArithmeticState, ByteValue, CandidateId, Coverage, CoverageState, DecimalU128,
     DirectoryAggregate, EvidenceValue, FieldProvenance, NativeName, ObjectType, ReasonCode,
-    RiskTier, ScanId, ScannedEntry,
+    RiskTier, ScanId, ScanObjectIdentity, ScannedEntry,
 };
 
 use crate::digest::{AnalysisDigestError, analysis_digest_hex};
@@ -18,6 +18,7 @@ pub struct PathPresentation {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CandidateLocator {
     pub stable_identity: Option<String>,
+    pub scan_object_identity: Option<ScanObjectIdentity>,
     pub native_basename: NativeName,
     pub metadata_fingerprint: String,
 }
@@ -300,10 +301,10 @@ impl<'a> CandidateBuilder<'a> {
 
     pub fn build(self) -> Result<Candidate, AnalysisDigestError> {
         let source_state = CandidateSourceState::from_provenance(&self.entry.provenance);
-        let stable_identity = self
-            .aggregate_link
+        let scan_object_identity = self.entry.validated_identity().ok().flatten().cloned();
+        let stable_identity = scan_object_identity
             .as_ref()
-            .map(|link| link.directory_identity.clone());
+            .map(|identity| identity.entry_id.to_string());
         let path = PathPresentation {
             display_path: self.entry.display_path.clone(),
             native_basename: self.entry.native_basename.clone(),
@@ -311,15 +312,26 @@ impl<'a> CandidateBuilder<'a> {
         };
         let locator = CandidateLocator {
             stable_identity,
+            scan_object_identity: scan_object_identity.clone(),
             native_basename: self.entry.native_basename.clone(),
             metadata_fingerprint: self.entry.metadata_fingerprint.clone(),
         };
-        let aggregate = self.aggregate_link.as_ref().and_then(|link| link.aggregate);
+        let aggregate_link_requested = self.aggregate_link.is_some();
+        let aggregate = self.aggregate_link.as_ref().and_then(|link| {
+            let aggregate = link.aggregate?;
+            let identity = scan_object_identity.as_ref()?;
+            let aggregate_entry_id = aggregate.scan_entry_id().ok()?;
+            (aggregate.scan_id == self.entry.scan_id
+                && aggregate_entry_id == identity.entry_id
+                && link.directory_identity == aggregate.directory_identity)
+                .then_some(aggregate)
+        });
 
         let risk_signals = collect_risk_signals(
             self.entry,
             aggregate,
-            self.aggregate_link.is_some(),
+            aggregate_link_requested,
+            scan_object_identity.is_some(),
             source_state,
             self.live_source_required,
         );
@@ -328,7 +340,8 @@ impl<'a> CandidateBuilder<'a> {
             self.entry.object_type == ObjectType::Directory,
             &self.entry.coverage,
             aggregate.map(|aggregate| &aggregate.coverage),
-            self.aggregate_link.is_some(),
+            aggregate_link_requested,
+            scan_object_identity.is_some(),
             source_state,
             self.live_source_required,
         );
@@ -344,10 +357,8 @@ impl<'a> CandidateBuilder<'a> {
             allocated_bytes: self.entry.allocated_bytes.clone(),
             reclaimable_estimate: self.entry.reclaimable_estimate.clone(),
             coverage: self.entry.coverage.clone(),
-            aggregate_directory_identity: self
-                .aggregate_link
-                .as_ref()
-                .map(|link| link.directory_identity.clone()),
+            aggregate_directory_identity: aggregate
+                .map(|aggregate| aggregate.directory_identity.clone()),
             aggregate_revision: aggregate.map(|aggregate| aggregate.revision),
             aggregate_coverage: aggregate.map(|aggregate| aggregate.coverage.clone()),
             aggregate_arithmetic_state: aggregate
@@ -488,6 +499,7 @@ fn collect_risk_signals(
     entry: &ScannedEntry,
     aggregate: Option<&DirectoryAggregate>,
     aggregate_linked: bool,
+    identity_valid: bool,
     source_state: CandidateSourceState,
     live_source_required: bool,
 ) -> Vec<RiskSignal> {
@@ -520,6 +532,12 @@ fn collect_risk_signals(
         &entry.reclaimable_estimate,
     );
     push_coverage_signals(&mut signals, &entry.coverage);
+    if !identity_valid {
+        signals.push(RiskSignal::Unknown {
+            code: "scan_object_identity_missing_or_invalid".to_string(),
+            reason: Some(ReasonCode::UnknownIdentity),
+        });
+    }
 
     if let Some(aggregate) = aggregate {
         push_coverage_signals(&mut signals, &aggregate.coverage);
@@ -599,6 +617,7 @@ fn evaluate_eligibility(
     entry_coverage: &Coverage,
     aggregate_coverage: Option<&Coverage>,
     aggregate_linked: bool,
+    identity_valid: bool,
     source_state: CandidateSourceState,
     live_source_required: bool,
 ) -> CandidateEligibility {
@@ -625,6 +644,11 @@ fn evaluate_eligibility(
     }
 
     if (directory_requires_aggregate || aggregate_linked) && aggregate_coverage.is_none() {
+        executable = downgrade(executable, ExecutableEligibility::ReportOnly);
+        reasons.push(ReasonCode::UnknownIdentity);
+    }
+
+    if !identity_valid {
         executable = downgrade(executable, ExecutableEligibility::ReportOnly);
         reasons.push(ReasonCode::UnknownIdentity);
     }
@@ -676,7 +700,10 @@ struct AggregateLink<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sweepx_model::{Coverage, MethodId};
+    use sweepx_model::{
+        Coverage, FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, PlatformFileIdentity,
+        ScanEntryId, ScanObjectIdentity, VolumeOrMountIdentity,
+    };
 
     fn live_provenance() -> FieldProvenance {
         FieldProvenance::LiveObservation {
@@ -716,9 +743,11 @@ mod tests {
         metadata_fingerprint: &str,
         provenance: FieldProvenance,
         object_type: ObjectType,
+        identity: Option<ScanObjectIdentity>,
     ) -> ScannedEntry {
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
+            identity,
             display_path: display_path.to_string(),
             native_basename: NativeName::unix(b"demo".to_vec()),
             object_type,
@@ -734,6 +763,29 @@ mod tests {
             metadata_fingerprint: metadata_fingerprint.to_string(),
             coverage: complete_coverage(),
             provenance,
+        }
+    }
+
+    fn identity(entry_ordinal: u128, root_ordinal: u128) -> ScanObjectIdentity {
+        let scan_id = ScanId::new("scan-1");
+        let entry_id = ScanEntryId::for_scan_ordinal(&scan_id, entry_ordinal).unwrap();
+        let scan_root_id = ScanEntryId::for_scan_ordinal(&scan_id, root_ordinal).unwrap();
+        ScanObjectIdentity {
+            parent_id: (entry_id != scan_root_id).then(|| scan_root_id.clone()),
+            entry_id,
+            scan_root_id,
+            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(1),
+                inode: DecimalU128::new(entry_ordinal),
+            }),
+            filesystem_object_domain_identity: IdentityEvidence::known(
+                FilesystemObjectDomainIdentity {
+                    device: DecimalU128::new(1),
+                },
+            ),
+            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
+                value: DecimalU128::new(1),
+            }),
         }
     }
 
@@ -773,6 +825,7 @@ mod tests {
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(identity(2, 1)),
         ))
         .with_aggregate(&aggregate, "dir-1")
         .build()
@@ -782,6 +835,7 @@ mod tests {
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(identity(2, 1)),
         ))
         .with_aggregate(&aggregate, "dir-1")
         .build()
@@ -812,7 +866,13 @@ mod tests {
 
     #[test]
     fn incomplete_coverage_blocks_executable_eligibility() {
-        let mut scanned = entry("/tmp/a", "fp-1", live_provenance(), ObjectType::File);
+        let mut scanned = entry(
+            "/tmp/a",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(identity(2, 1)),
+        );
         scanned.coverage = incomplete_coverage();
 
         let candidate = CandidateBuilder::new(&scanned).build().unwrap();
@@ -831,21 +891,23 @@ mod tests {
 
     #[test]
     fn path_display_is_not_used_as_identity() {
-        let aggregate = aggregate("stable-identity", complete_coverage(), 1);
+        let entry_identity = identity(2, 1);
+        let aggregate = aggregate(entry_identity.entry_id.as_str(), complete_coverage(), 1);
         let candidate = CandidateBuilder::new(&entry(
             "/tmp/one",
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(entry_identity.clone()),
         ))
-        .with_aggregate(&aggregate, "stable-identity")
+        .with_aggregate(&aggregate, entry_identity.entry_id.as_str())
         .build()
         .unwrap();
 
         assert_eq!(candidate.path.display_path, "/tmp/one");
         assert_eq!(
             candidate.path.stable_identity.as_deref(),
-            Some("stable-identity")
+            Some(entry_identity.entry_id.as_str())
         );
         assert_ne!(
             candidate.path.stable_identity.as_deref(),
@@ -860,6 +922,7 @@ mod tests {
             "fp-1",
             stale_provenance(),
             ObjectType::File,
+            Some(identity(2, 1)),
         ))
         .live_source_required(true)
         .build()
@@ -880,14 +943,16 @@ mod tests {
 
     #[test]
     fn same_identity_different_display_path_keeps_same_digest() {
-        let aggregate = aggregate("dir-identity", complete_coverage(), 3);
+        let entry_identity = identity(2, 1);
+        let aggregate = aggregate(entry_identity.entry_id.as_str(), complete_coverage(), 3);
         let first = CandidateBuilder::new(&entry(
             "/tmp/one",
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(entry_identity.clone()),
         ))
-        .with_aggregate(&aggregate, "dir-identity")
+        .with_aggregate(&aggregate, entry_identity.entry_id.as_str())
         .build()
         .unwrap();
         let second = CandidateBuilder::new(&entry(
@@ -895,8 +960,9 @@ mod tests {
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(entry_identity.clone()),
         ))
-        .with_aggregate(&aggregate, "dir-identity")
+        .with_aggregate(&aggregate, entry_identity.entry_id.as_str())
         .build()
         .unwrap();
 
@@ -907,20 +973,22 @@ mod tests {
 
     #[test]
     fn explicit_aggregate_binding_carries_identity_and_revision() {
-        let aggregate = aggregate("dir-identity", complete_coverage(), 42);
+        let entry_identity = identity(2, 1);
+        let aggregate = aggregate(entry_identity.entry_id.as_str(), complete_coverage(), 42);
         let candidate = CandidateBuilder::new(&entry(
             "/tmp/dir",
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            Some(entry_identity.clone()),
         ))
-        .with_aggregate(&aggregate, "dir-identity")
+        .with_aggregate(&aggregate, entry_identity.entry_id.as_str())
         .build()
         .unwrap();
 
         assert_eq!(
             candidate.aggregate_directory_identity.as_deref(),
-            Some("dir-identity")
+            Some(entry_identity.entry_id.as_str())
         );
         assert_eq!(candidate.aggregate_revision, Some(DecimalU128::new(42)));
         assert_eq!(
@@ -936,6 +1004,7 @@ mod tests {
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            None,
         ))
         .build()
         .unwrap();
@@ -959,11 +1028,40 @@ mod tests {
             "fp-1",
             live_provenance(),
             ObjectType::Directory,
+            None,
         ))
         .with_expected_directory_identity("dir-identity")
         .build()
         .unwrap();
 
+        assert_eq!(
+            candidate.eligibility.executable,
+            ExecutableEligibility::ReportOnly
+        );
+        assert!(
+            candidate
+                .eligibility
+                .reasons
+                .contains(&ReasonCode::UnknownIdentity)
+        );
+    }
+
+    #[test]
+    fn malformed_cross_field_identity_is_not_promoted_into_locator() {
+        let mut invalid = identity(2, 1);
+        invalid.parent_id = None;
+        let candidate = CandidateBuilder::new(&entry(
+            "/tmp/file",
+            "fp-1",
+            live_provenance(),
+            ObjectType::File,
+            Some(invalid),
+        ))
+        .build()
+        .unwrap();
+
+        assert_eq!(candidate.locator.scan_object_identity, None);
+        assert_eq!(candidate.locator.stable_identity, None);
         assert_eq!(
             candidate.eligibility.executable,
             ExecutableEligibility::ReportOnly

@@ -376,6 +376,201 @@ pub type ItemId = Id<ItemIdTag>;
 pub type OperationId = Id<OperationIdTag>;
 pub type RequestId = Id<RequestIdTag>;
 
+/// A scanner-issued identity that is unique within one `scan_id` and never derived from a display
+/// path. The identifier is intentionally scan-scoped: it binds records and aggregates produced by
+/// one traversal, but is not a durable cross-scan filesystem identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScanEntryId(String);
+
+impl ScanEntryId {
+    const PREFIX: &'static str = "scan-entry:v1:";
+
+    pub fn for_scan_ordinal(scan_id: &ScanId, ordinal: u128) -> Result<Self, ScanEntryIdError> {
+        if scan_id.is_empty() {
+            return Err(ScanEntryIdError::EmptyScanId);
+        }
+        if ordinal == 0 {
+            return Err(ScanEntryIdError::ZeroOrdinal);
+        }
+        let encoded_scan_id = URL_SAFE_NO_PAD.encode(scan_id.as_bytes());
+        Ok(Self(format!("{}{encoded_scan_id}:{ordinal}", Self::PREFIX)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn belongs_to(&self, scan_id: &ScanId) -> bool {
+        if scan_id.is_empty() {
+            return false;
+        }
+        let encoded_scan_id = URL_SAFE_NO_PAD.encode(scan_id.as_bytes());
+        self.0
+            .strip_prefix(Self::PREFIX)
+            .and_then(|value| value.split_once(':'))
+            .is_some_and(|(actual, _)| actual == encoded_scan_id)
+    }
+
+    fn validate(value: String) -> Result<Self, ScanEntryIdError> {
+        let payload = value
+            .strip_prefix(Self::PREFIX)
+            .ok_or(ScanEntryIdError::InvalidFormat)?;
+        let (encoded_scan_id, ordinal) = payload
+            .split_once(':')
+            .ok_or(ScanEntryIdError::InvalidFormat)?;
+        if encoded_scan_id.is_empty() || ordinal.contains(':') {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        let scan_id = URL_SAFE_NO_PAD
+            .decode(encoded_scan_id)
+            .map_err(|_| ScanEntryIdError::InvalidScanIdEncoding)?;
+        if scan_id.is_empty()
+            || std::str::from_utf8(&scan_id).is_err()
+            || URL_SAFE_NO_PAD.encode(&scan_id) != encoded_scan_id
+        {
+            return Err(ScanEntryIdError::InvalidScanIdEncoding);
+        }
+        let ordinal = ordinal
+            .parse::<DecimalU128>()
+            .map_err(|_| ScanEntryIdError::InvalidOrdinal)?;
+        if ordinal == DecimalU128::ZERO {
+            return Err(ScanEntryIdError::ZeroOrdinal);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl fmt::Display for ScanEntryId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ScanEntryId {
+    type Err = ScanEntryIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value.to_string())
+    }
+}
+
+impl Serialize for ScanEntryId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScanEntryId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::validate(value).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for ScanEntryId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ScanEntryId".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        json!({
+            "type": "string",
+            "pattern": "^scan-entry:v1:[A-Za-z0-9_-]+:[1-9][0-9]*$",
+            "description": "Validated identity unique within one SweepX scan; never path-derived"
+        })
+        .try_into()
+        .expect("valid scan entry id schema")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ScanEntryIdError {
+    #[error("scan id must not be empty")]
+    EmptyScanId,
+    #[error("scan entry ordinal must be greater than zero")]
+    ZeroOrdinal,
+    #[error("scan entry id has an invalid format")]
+    InvalidFormat,
+    #[error("scan entry id has a non-canonical scan id encoding")]
+    InvalidScanIdEncoding,
+    #[error("scan entry id has an invalid ordinal")]
+    InvalidOrdinal,
+    #[error("scan entry id belongs to a different scan")]
+    ScanMismatch,
+}
+
+/// Identity evidence is never represented by a sentinel value. Missing live platform evidence is
+/// an explicit `Unknown(reason)` and cannot be confused with a known zero-valued native identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IdentityEvidence<T> {
+    Known { value: T },
+    Unknown { reason: ReasonCode },
+}
+
+impl<T> IdentityEvidence<T> {
+    pub fn known(value: T) -> Self {
+        Self::Known { value }
+    }
+
+    pub fn unknown(reason: ReasonCode) -> Self {
+        Self::Unknown { reason }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct PlatformFileIdentity {
+    pub device: DecimalU128,
+    pub inode: DecimalU128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct FilesystemObjectDomainIdentity {
+    pub device: DecimalU128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct VolumeOrMountIdentity {
+    pub value: DecimalU128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct ScanObjectIdentity {
+    pub entry_id: ScanEntryId,
+    pub scan_root_id: ScanEntryId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<ScanEntryId>,
+    pub platform_file_identity: IdentityEvidence<PlatformFileIdentity>,
+    pub filesystem_object_domain_identity: IdentityEvidence<FilesystemObjectDomainIdentity>,
+    pub volume_or_mount_identity: IdentityEvidence<VolumeOrMountIdentity>,
+}
+
+impl ScanObjectIdentity {
+    pub fn validate_for_scan(&self, scan_id: &ScanId) -> Result<(), ScanEntryIdError> {
+        if !self.entry_id.belongs_to(scan_id)
+            || !self.scan_root_id.belongs_to(scan_id)
+            || self
+                .parent_id
+                .as_ref()
+                .is_some_and(|identity| !identity.belongs_to(scan_id))
+        {
+            return Err(ScanEntryIdError::ScanMismatch);
+        }
+        if (self.entry_id == self.scan_root_id) != self.parent_id.is_none()
+            || self.parent_id.as_ref() == Some(&self.entry_id)
+        {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageState {
@@ -406,6 +601,10 @@ pub enum ObjectType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ScannedEntry {
     pub scan_id: ScanId,
+    /// Absent only on legacy/imported records that predate scan identity. New live scanner output
+    /// always supplies this block; consumers must not synthesize one from `display_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ScanObjectIdentity>,
     pub display_path: String,
     pub native_basename: NativeName,
     pub object_type: ObjectType,
@@ -415,6 +614,16 @@ pub struct ScannedEntry {
     pub metadata_fingerprint: String,
     pub coverage: Coverage,
     pub provenance: FieldProvenance,
+}
+
+impl ScannedEntry {
+    /// Returns validated current-format identity, or `Ok(None)` for legacy records.
+    pub fn validated_identity(&self) -> Result<Option<&ScanObjectIdentity>, ScanEntryIdError> {
+        if let Some(identity) = &self.identity {
+            identity.validate_for_scan(&self.scan_id)?;
+        }
+        Ok(self.identity.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -442,6 +651,16 @@ pub struct DirectoryAggregate {
 }
 
 impl DirectoryAggregate {
+    /// Parses the identity emitted by current scanners. Legacy aggregates may still deserialize
+    /// with a path-valued string for wire compatibility, but that value is not a trusted identity.
+    pub fn scan_entry_id(&self) -> Result<ScanEntryId, ScanEntryIdError> {
+        let identity: ScanEntryId = self.directory_identity.parse()?;
+        if !identity.belongs_to(&self.scan_id) {
+            return Err(ScanEntryIdError::ScanMismatch);
+        }
+        Ok(identity)
+    }
+
     pub fn checked_sum_known(values: &[DecimalU128]) -> ByteValue {
         let mut total = DecimalU128::ZERO;
         for value in values {
@@ -711,6 +930,88 @@ mod tests {
         let encoded = serde_json::to_string(&name).unwrap();
         let decoded: NativeName = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, name);
+    }
+
+    #[test]
+    fn scan_entry_id_is_canonical_and_scan_scoped() {
+        let scan = ScanId::new("scan:/not-a-path");
+        let identity = ScanEntryId::for_scan_ordinal(&scan, 42).unwrap();
+
+        assert!(identity.belongs_to(&scan));
+        assert!(!identity.belongs_to(&ScanId::new("other")));
+        assert!(!identity.as_str().contains("/not-a-path"));
+        assert_eq!(identity.as_str().parse::<ScanEntryId>().unwrap(), identity);
+        assert!("/tmp/display-only".parse::<ScanEntryId>().is_err());
+        assert!("scan-entry:v1:c2Nhbg:0".parse::<ScanEntryId>().is_err());
+        assert!("scan-entry:v1:_w:1".parse::<ScanEntryId>().is_err());
+    }
+
+    #[test]
+    fn legacy_scanned_entry_without_identity_remains_readable_but_unknown() {
+        let wire = json!({
+            "scan_id": "legacy-scan",
+            "display_path": "/legacy/path",
+            "native_basename": {"kind": "unix_bytes_base64_url", "value": "cGF0aA"},
+            "object_type": "file",
+            "logical_bytes": {"state": "known", "value": "1"},
+            "allocated_bytes": {"state": "known", "value": "1"},
+            "reclaimable_estimate": {"state": "known", "value": "1"},
+            "metadata_fingerprint": "legacy",
+            "coverage": {
+                "state": "complete",
+                "complete": true,
+                "incomplete_reasons": [],
+                "details_lost": false,
+                "provenance": {
+                    "kind": "unknown",
+                    "reason": "not_revalidated"
+                }
+            },
+            "provenance": {
+                "kind": "unknown",
+                "reason": "not_revalidated"
+            }
+        });
+
+        let entry: ScannedEntry = serde_json::from_value(wire).unwrap();
+        assert_eq!(entry.identity, None);
+        assert_eq!(entry.validated_identity().unwrap(), None);
+    }
+
+    #[test]
+    fn display_path_changes_do_not_change_scan_entry_identity() {
+        let scan_id = ScanId::new("same-scan");
+        let identity = ScanEntryId::for_scan_ordinal(&scan_id, 9).unwrap();
+        let mut first = json!({
+            "scan_id": "same-scan",
+            "identity": {
+                "entry_id": identity,
+                "scan_root_id": ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap(),
+                "platform_file_identity": {"state": "unknown", "reason": "unknown_identity"},
+                "filesystem_object_domain_identity": {"state": "unknown", "reason": "unknown_identity"},
+                "volume_or_mount_identity": {"state": "unknown", "reason": "unknown_identity"}
+            },
+            "display_path": "/first/display",
+            "native_basename": {"kind": "unix_bytes_base64_url", "value": "ZGlzcGxheQ"},
+            "object_type": "file",
+            "logical_bytes": {"state": "known", "value": "1"},
+            "allocated_bytes": {"state": "known", "value": "1"},
+            "reclaimable_estimate": {"state": "known", "value": "1"},
+            "metadata_fingerprint": "first",
+            "coverage": {
+                "state": "complete", "complete": true, "incomplete_reasons": [],
+                "details_lost": false,
+                "provenance": {"kind": "unknown", "reason": "not_revalidated"}
+            },
+            "provenance": {"kind": "unknown", "reason": "not_revalidated"}
+        });
+        let mut second = first.clone();
+        second["display_path"] = json!("/second/display");
+        second["metadata_fingerprint"] = json!("second");
+
+        let first: ScannedEntry = serde_json::from_value(first.take()).unwrap();
+        let second: ScannedEntry = serde_json::from_value(second).unwrap();
+        assert_eq!(first.identity, second.identity);
     }
 
     #[test]

@@ -25,21 +25,175 @@
     "batchState": "DISCOVERED"
   },
   "data": {
+    "scanId": "scan-p0-minimal",
     "roots": [
       {
-        "rootId": "root-001",
+        "scanId": "scan-p0-minimal",
+        "identity": {
+          "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+          "scanRootId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+          "platformFileIdentity": {
+            "state": "known",
+            "value": {
+              "device": "2049",
+              "inode": "1001"
+            }
+          },
+          "filesystemObjectDomainIdentity": {
+            "state": "known",
+            "value": {
+              "device": "2049"
+            }
+          },
+          "volumeOrMountIdentity": {
+            "state": "known",
+            "value": {
+              "value": "77"
+            }
+          }
+        },
         "displayPath": "/fixtures/p0-minimal",
+        "nativeBasename": {
+          "kind": "unix_bytes_base64_url",
+          "value": "cDAtbWluaW1hbA"
+        },
+        "objectType": "directory",
         "logicalBytes": {
           "state": "known",
           "value": "5"
         },
         "allocatedBytes": {
-          "state": "lower_bound",
-          "value": "5",
-          "reason": "filesystem_block_rounding_unknown"
+          "state": "known",
+          "value": "5"
+        },
+        "reclaimableEstimate": {
+          "state": "known",
+          "value": "5"
+        },
+        "metadataFingerprint": "fixture:p0-minimal",
+        "coverage": {
+          "state": "complete",
+          "complete": true,
+          "incompleteReasons": [],
+          "detailsLost": false,
+          "provenance": {
+            "kind": "live_observation",
+            "observedAt": "2026-08-26T06:00:00Z",
+            "method": "metadata_no_follow"
+          }
+        },
+        "provenance": {
+          "kind": "live_observation",
+          "observedAt": "2026-08-26T06:00:00Z",
+          "method": "metadata_no_follow"
         }
       }
-    ]
+    ],
+    "entries": [
+      {
+        "scanId": "scan-p0-minimal",
+        "identity": {
+          "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:2",
+          "scanRootId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+          "parentId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+          "platformFileIdentity": {
+            "state": "unknown",
+            "reason": "unknown_identity"
+          },
+          "filesystemObjectDomainIdentity": {
+            "state": "known",
+            "value": {
+              "device": "2049"
+            }
+          },
+          "volumeOrMountIdentity": {
+            "state": "known",
+            "value": {
+              "value": "77"
+            }
+          }
+        },
+        "displayPath": "/fixtures/p0-minimal/fixture.bin",
+        "nativeBasename": {
+          "kind": "unix_bytes_base64_url",
+          "value": "Zml4dHVyZS5iaW4"
+        },
+        "objectType": "file",
+        "logicalBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "allocatedBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "reclaimableEstimate": {
+          "state": "known",
+          "value": "5"
+        },
+        "metadataFingerprint": "fixture:fixture.bin",
+        "coverage": {
+          "state": "complete",
+          "complete": true,
+          "incompleteReasons": [],
+          "detailsLost": false,
+          "provenance": {
+            "kind": "live_observation",
+            "observedAt": "2026-08-26T06:00:00Z",
+            "method": "metadata_no_follow"
+          }
+        },
+        "provenance": {
+          "kind": "live_observation",
+          "observedAt": "2026-08-26T06:00:00Z",
+          "method": "metadata_no_follow"
+        }
+      }
+    ],
+    "aggregates": [
+      {
+        "scanId": "scan-p0-minimal",
+        "directoryIdentity": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
+        "revision": "1",
+        "apparentLogicalBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "uniqueLogicalBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "filesystemReportedAllocatedBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "potentiallyReclaimableBytes": {
+          "state": "known",
+          "value": "5"
+        },
+        "directChildCount": {
+          "state": "known",
+          "value": "1"
+        },
+        "recursiveEntryCount": {
+          "state": "known",
+          "value": "1"
+        },
+        "coverage": {
+          "state": "complete",
+          "complete": true,
+          "incompleteReasons": [],
+          "detailsLost": false,
+          "provenance": {
+            "kind": "live_observation",
+            "observedAt": "2026-08-26T06:00:00Z",
+            "method": "metadata_no_follow"
+          }
+        },
+        "arithmeticState": "exact"
+      }
+    ],
+    "boundaries": []
   },
   "warnings": [],
   "errors": []

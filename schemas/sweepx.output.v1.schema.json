@@ -88,5 +88,578 @@
         "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/structuredMessage"
       }
     }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "scan.result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/scanResultData"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "overflow",
+        "not_revalidated",
+        "incomplete_stream_coverage",
+        "adapter_capability_absent",
+        "strict_read_only",
+        "identity_unstable",
+        "resource_limit",
+        "unsupported_platform",
+        "unsupported_filesystem",
+        "invalid_input",
+        "unknown_identity",
+        "unknown_layout",
+        "unknown"
+      ]
+    },
+    "nativeName": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "unix_bytes_base64_url",
+            "windows_utf16_le_base64_url"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]*$"
+        }
+      }
+    },
+    "fieldProvenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "observedAt",
+            "method"
+          ],
+          "properties": {
+            "kind": {
+              "const": "live_observation"
+            },
+            "observedAt": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            },
+            "method": {
+              "$ref": "#/$defs/methodId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "observedAt",
+            "validation",
+            "token"
+          ],
+          "properties": {
+            "kind": {
+              "const": "validated_cache"
+            },
+            "observedAt": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            },
+            "validation": {
+              "$ref": "#/$defs/methodId"
+            },
+            "token": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "inputs",
+            "algorithm"
+          ],
+          "properties": {
+            "kind": {
+              "const": "derived_from_current"
+            },
+            "inputs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "algorithm": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "observedAt"
+          ],
+          "properties": {
+            "kind": {
+              "const": "stale_preview"
+            },
+            "observedAt": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unknown"
+            },
+            "reason": {
+              "$ref": "#/$defs/reasonCode"
+            }
+          }
+        }
+      ]
+    },
+    "methodId": {
+      "type": "string",
+      "enum": [
+        "metadata_no_follow",
+        "native_api",
+        "calculated",
+        "validated_cache_token",
+        "imported_preview"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "complete",
+        "incompleteReasons",
+        "detailsLost",
+        "provenance"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete",
+            "details_lost"
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "incompleteReasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reasonCode"
+          }
+        },
+        "detailsLost": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/fieldProvenance"
+        }
+      }
+    },
+    "scanObjectIdentity": {
+      "$comment": "All IDs must belong to the enclosing ScannedEntry.scanId. The root has entryId == scanRootId and no parentId; a child has entryId != scanRootId, a parentId distinct from entryId, and the same scanRootId as its root. JSON Schema validates each ID shape; consumers must enforce these cross-field invariants.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "scanRootId",
+        "platformFileIdentity",
+        "filesystemObjectDomainIdentity",
+        "volumeOrMountIdentity"
+      ],
+      "properties": {
+        "entryId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        "scanRootId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        "parentId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        "platformFileIdentity": {
+          "$ref": "#/$defs/platformFileIdentityEvidence"
+        },
+        "filesystemObjectDomainIdentity": {
+          "$ref": "#/$defs/filesystemObjectDomainIdentityEvidence"
+        },
+        "volumeOrMountIdentity": {
+          "$ref": "#/$defs/volumeOrMountIdentityEvidence"
+        }
+      }
+    },
+    "platformFileIdentityEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "value"
+          ],
+          "properties": {
+            "state": {
+              "const": "known"
+            },
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "device",
+                "inode"
+              ],
+              "properties": {
+                "device": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+                },
+                "inode": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/unknownIdentityEvidence"
+        }
+      ]
+    },
+    "filesystemObjectDomainIdentityEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "value"
+          ],
+          "properties": {
+            "state": {
+              "const": "known"
+            },
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "device"
+              ],
+              "properties": {
+                "device": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/unknownIdentityEvidence"
+        }
+      ]
+    },
+    "volumeOrMountIdentityEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "value"
+          ],
+          "properties": {
+            "state": {
+              "const": "known"
+            },
+            "value": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/unknownIdentityEvidence"
+        }
+      ]
+    },
+    "unknownIdentityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "const": "unknown"
+        },
+        "reason": {
+          "$ref": "#/$defs/reasonCode"
+        }
+      }
+    },
+    "scannedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "displayPath",
+        "nativeBasename",
+        "objectType",
+        "logicalBytes",
+        "allocatedBytes",
+        "reclaimableEstimate",
+        "metadataFingerprint",
+        "coverage",
+        "provenance"
+      ],
+      "properties": {
+        "scanId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "identity": {
+          "$ref": "#/$defs/scanObjectIdentity",
+          "description": "Required on new live scanner output. It may be absent only on legacy or imported records; absence never permits synthesizing identity from displayPath."
+        },
+        "displayPath": {
+          "type": "string"
+        },
+        "nativeBasename": {
+          "$ref": "#/$defs/nativeName"
+        },
+        "objectType": {
+          "type": "string",
+          "enum": [
+            "file",
+            "directory",
+            "symlink",
+            "reparse_point",
+            "other"
+          ]
+        },
+        "logicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "allocatedBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "reclaimableEstimate": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "metadataFingerprint": {
+          "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "provenance": {
+          "$ref": "#/$defs/fieldProvenance"
+        }
+      }
+    },
+    "directoryIdentity": {
+      "$comment": "Only the scanEntryId branch is trusted identity evidence. Acceptance of the legacy branch is wire compatibility, never authority.",
+      "oneOf": [
+        {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        {
+          "$ref": "#/$defs/legacyDirectoryIdentity"
+        }
+      ]
+    },
+    "legacyDirectoryIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^scan-entry:v1:"
+      },
+      "deprecated": true,
+      "description": "Legacy wire-compatible value. It is untrusted and must never be treated as an object identity or promoted from a display path."
+    },
+    "directoryAggregate": {
+      "$comment": "When directoryIdentity uses scanEntryId, its encoded scan component must match scanId. Consumers must enforce that cross-field invariant before trusting it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "directoryIdentity",
+        "revision",
+        "apparentLogicalBytes",
+        "uniqueLogicalBytes",
+        "filesystemReportedAllocatedBytes",
+        "potentiallyReclaimableBytes",
+        "directChildCount",
+        "recursiveEntryCount",
+        "coverage",
+        "arithmeticState"
+      ],
+      "properties": {
+        "scanId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "directoryIdentity": {
+          "$ref": "#/$defs/directoryIdentity"
+        },
+        "revision": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "apparentLogicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "uniqueLogicalBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "filesystemReportedAllocatedBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "potentiallyReclaimableBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "directChildCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "recursiveEntryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "arithmeticState": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "lower_bound",
+            "overflowed",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "reason",
+        "detail"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "root_symlink",
+            "symlink",
+            "reparse_point",
+            "mount",
+            "resource_limit",
+            "cancelled",
+            "other_filesystem"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/reasonCode"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "scanResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "roots",
+        "entries",
+        "aggregates",
+        "boundaries"
+      ],
+      "properties": {
+        "scanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scannedEntry"
+          }
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scannedEntry"
+          }
+        },
+        "aggregates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/directoryAggregate"
+          }
+        },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/boundary"
+          }
+        }
+      }
+    }
   }
 }

@@ -12,6 +12,11 @@
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)$"
     },
+    "scanEntryId": {
+      "type": "string",
+      "pattern": "^scan-entry:v1:[A-Za-z0-9_-]+:[1-9][0-9]*$",
+      "description": "Scanner-issued identity unique within one scan; it is never derived from a display path."
+    },
     "rfc3339Timestamp": {
       "type": "string",
       "format": "date-time"

@@ -1373,9 +1373,11 @@ fn render_human_scan_output(
         .flatten()
         .filter_map(|aggregate| {
             aggregate
-                .get("directoryIdentity")
+                .get("scanEntryId")
+                .or_else(|| aggregate.get("directoryIdentity"))
                 .and_then(Value::as_str)
-                .map(|identity| (identity, aggregate))
+                .filter(|identity| !identity.contains('/'))
+                .map(|entry_id| (entry_id, aggregate))
         })
         .collect();
     let items = output
@@ -1418,7 +1420,12 @@ fn render_human_scan_output(
             .get("objectType")
             .and_then(Value::as_str)
             .unwrap_or("root");
-        let aggregate = aggregates.get(path).copied();
+        let aggregate = item
+            .get("identity")
+            .and_then(|identity| identity.get("entryId"))
+            .and_then(Value::as_str)
+            .and_then(|entry_id| aggregates.get(entry_id))
+            .copied();
         let reclaimable = aggregate
             .and_then(|value| value.get("potentiallyReclaimableBytes"))
             .or_else(|| item.get("reclaimableEstimate"))
@@ -1648,13 +1655,23 @@ fn directory_links(summary: &ScanSummary) -> Vec<DirectoryAggregateLink<'_>> {
         .iter()
         .filter(|entry| entry.object_type == ObjectType::Directory)
         .filter_map(|entry| {
+            let identity = entry.validated_identity().ok().flatten()?;
             summary
                 .aggregates
                 .iter()
-                .find(|aggregate| aggregate.directory_identity == entry.display_path)
+                .find(|aggregate| {
+                    aggregate.scan_id == entry.scan_id
+                        && aggregate
+                            .scan_entry_id()
+                            .ok()
+                            .is_some_and(|aggregate_entry_id| {
+                                aggregate_entry_id == identity.entry_id
+                            })
+                })
                 .map(|aggregate| DirectoryAggregateLink {
                     entry,
                     directory_identity: aggregate.directory_identity.as_str(),
+                    expected_root_id: Some(identity.scan_root_id.as_str()),
                 })
         })
         .collect()
@@ -3113,6 +3130,10 @@ mod tests {
         );
         let entry = json!({
             "displayPath": "/tmp/root",
+            "identity": {
+                "entryId": "scan-1:e:1",
+                "scanRootId": "scan-1:e:root"
+            },
             "objectType": "directory",
             "reclaimableEstimate": {"state": "known", "value": "0"},
             "coverage": {"state": "incomplete"}
@@ -3121,7 +3142,8 @@ mod tests {
             "roots": [entry.clone()],
             "entries": [entry],
             "aggregates": [{
-                "directoryIdentity": "/tmp/root",
+                "scanEntryId": "scan-1:e:1",
+                "directoryIdentity": "scan-1:e:1",
                 "potentiallyReclaimableBytes": {"state": "known", "value": "4096"},
                 "coverage": {"state": "complete"}
             }]
@@ -3158,6 +3180,44 @@ mod tests {
         ));
         assert!(rendered.contains("Warnings: scan.partial"));
         assert!(rendered.contains("Errors: scan.example_error"));
+    }
+
+    #[test]
+    fn human_scan_output_does_not_associate_legacy_entry_without_identity() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let mut output = OutputEnvelope::new(
+            OutputKind::ScanResult,
+            RequestId::new("req"),
+            OperationId::new("op"),
+            timestamp_now(),
+            OutputStatus::Ok,
+            ExitCode::Completed,
+            compat_snapshot("linux"),
+        );
+        output.data = json!({
+            "roots": [],
+            "entries": [{
+                "displayPath": "/tmp/root",
+                "objectType": "directory",
+                "reclaimableEstimate": {"state": "known", "value": "0"},
+                "coverage": {"state": "incomplete"}
+            }],
+            "aggregates": [{
+                "scanEntryId": "scan-1:e:1",
+                "directoryIdentity": "scan-1:e:1",
+                "potentiallyReclaimableBytes": {"state": "known", "value": "4096"},
+                "coverage": {"state": "complete"}
+            }]
+        });
+
+        let rendered = render_human_output(&context, &output);
+        assert!(rendered.contains("/tmp/root"));
+        assert!(!rendered.contains("4096"));
+        assert!(rendered.contains("0"));
+        assert!(rendered.contains("incomplete"));
     }
 
     #[test]
@@ -3428,7 +3488,38 @@ mod tests {
         let links = directory_links(&summary);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].entry.display_path, "/tmp/demo");
-        assert_eq!(links[0].directory_identity, "/tmp/demo");
+        assert_eq!(links[0].directory_identity, "scan-entry:v1:c2Nhbi0x:1");
+        assert_eq!(links[0].expected_root_id, Some("scan-entry:v1:c2Nhbi0x:2"));
+    }
+
+    #[test]
+    fn directory_links_skip_legacy_entries_without_identity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("scan.json");
+        let mut envelope: Value = serde_json::from_str(&sample_scan_json()).unwrap();
+        envelope["data"]["entries"][0]
+            .as_object_mut()
+            .expect("entry object")
+            .remove("identity");
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        let input = read_scan_input_from_path(&path, DEFAULT_ANALYSIS_INPUT_BYTES).unwrap();
+        let summary = scan_summary_from_input(&input);
+        let links = directory_links(&summary);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn directory_links_reject_cross_field_invalid_identity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("scan.json");
+        let mut envelope: Value = serde_json::from_str(&sample_scan_json()).unwrap();
+        envelope["data"]["entries"][0]["identity"]["parentId"] = Value::Null;
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        let input = read_scan_input_from_path(&path, DEFAULT_ANALYSIS_INPUT_BYTES).unwrap();
+        let summary = scan_summary_from_input(&input);
+        assert!(directory_links(&summary).is_empty());
     }
 
     fn sample_scan_json() -> String {
@@ -3460,6 +3551,30 @@ mod tests {
                 "roots": [],
                 "entries": [{
                     "scanId": "scan-1",
+                    "identity": {
+                        "entryId": "scan-entry:v1:c2Nhbi0x:1",
+                        "scanRootId": "scan-entry:v1:c2Nhbi0x:2",
+                        "parentId": "scan-entry:v1:c2Nhbi0x:2",
+                        "platformFileIdentity": {
+                            "state": "known",
+                            "value": {
+                                "device": "1",
+                                "inode": "1"
+                            }
+                        },
+                        "filesystemObjectDomainIdentity": {
+                            "state": "known",
+                            "value": {
+                                "device": "1"
+                            }
+                        },
+                        "volumeOrMountIdentity": {
+                            "state": "known",
+                            "value": {
+                                "value": "1"
+                            }
+                        }
+                    },
                     "displayPath": "/tmp/demo",
                     "nativeBasename": {
                         "kind": "unix_bytes_base64_url",
@@ -3498,7 +3613,8 @@ mod tests {
                 }],
                 "aggregates": [{
                     "scanId": "scan-1",
-                    "directoryIdentity": "/tmp/demo",
+                    "scanEntryId": "scan-entry:v1:c2Nhbi0x:1",
+                    "directoryIdentity": "scan-entry:v1:c2Nhbi0x:1",
                     "revision": "1",
                     "apparentLogicalBytes": {
                         "state": "known",

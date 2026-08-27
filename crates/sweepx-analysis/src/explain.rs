@@ -129,12 +129,10 @@ pub fn build_candidates_from_summary_with_links(
             let mut builder =
                 CandidateBuilder::new(entry).live_source_required(live_source_required);
             if let Some(link) = links.iter().find(|link| same_entry(entry, link.entry)) {
-                builder = match summary
-                    .aggregates
-                    .iter()
-                    .find(|aggregate| aggregate.directory_identity == link.directory_identity)
-                {
-                    Some(aggregate) => builder.with_aggregate(aggregate, link.directory_identity),
+                builder = match find_linked_aggregate(entry, summary, link) {
+                    Some(aggregate) => {
+                        builder.with_aggregate(aggregate, &aggregate.directory_identity)
+                    }
                     None => builder.with_expected_directory_identity(link.directory_identity),
                 };
             }
@@ -147,6 +145,7 @@ pub fn build_candidates_from_summary_with_links(
 pub struct DirectoryAggregateLink<'a> {
     pub entry: &'a ScannedEntry,
     pub directory_identity: &'a str,
+    pub expected_root_id: Option<&'a str>,
 }
 
 fn value_clause(
@@ -206,11 +205,33 @@ fn same_entry(left: &ScannedEntry, right: &ScannedEntry) -> bool {
     std::ptr::eq(left, right)
 }
 
+fn find_linked_aggregate<'a>(
+    entry: &ScannedEntry,
+    summary: &'a ScanSummary,
+    link: &DirectoryAggregateLink<'_>,
+) -> Option<&'a DirectoryAggregate> {
+    let identity = entry.validated_identity().ok().flatten()?;
+    summary.aggregates.iter().find(|aggregate| {
+        aggregate.scan_id == entry.scan_id
+            && aggregate.scan_id == link.entry.scan_id
+            && aggregate
+                .scan_entry_id()
+                .ok()
+                .is_some_and(|aggregate_entry_id| aggregate_entry_id == identity.entry_id)
+            && link.directory_identity == aggregate.directory_identity
+            && link
+                .expected_root_id
+                .is_none_or(|expected_root_id| expected_root_id == identity.scan_root_id.as_str())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sweepx_model::{
-        Coverage, CoverageState, FieldProvenance, MethodId, NativeName, ObjectType, ScanId,
+        Coverage, CoverageState, FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence,
+        MethodId, NativeName, ObjectType, PlatformFileIdentity, ScanEntryId, ScanId,
+        ScanObjectIdentity, VolumeOrMountIdentity,
     };
     use sweepx_scanner::ScanSummary;
 
@@ -228,6 +249,29 @@ mod tests {
             incomplete_reasons: Vec::new(),
             details_lost: false,
             provenance: live_provenance(),
+        }
+    }
+
+    fn identity(entry_ordinal: u128, root_ordinal: u128) -> ScanObjectIdentity {
+        let scan_id = ScanId::new("scan-1");
+        let entry_id = ScanEntryId::for_scan_ordinal(&scan_id, entry_ordinal).unwrap();
+        let scan_root_id = ScanEntryId::for_scan_ordinal(&scan_id, root_ordinal).unwrap();
+        ScanObjectIdentity {
+            parent_id: (entry_id != scan_root_id).then(|| scan_root_id.clone()),
+            entry_id,
+            scan_root_id,
+            platform_file_identity: IdentityEvidence::known(PlatformFileIdentity {
+                device: sweepx_model::DecimalU128::new(1),
+                inode: sweepx_model::DecimalU128::new(entry_ordinal),
+            }),
+            filesystem_object_domain_identity: IdentityEvidence::known(
+                FilesystemObjectDomainIdentity {
+                    device: sweepx_model::DecimalU128::new(1),
+                },
+            ),
+            volume_or_mount_identity: IdentityEvidence::known(VolumeOrMountIdentity {
+                value: sweepx_model::DecimalU128::new(1),
+            }),
         }
     }
 
@@ -263,6 +307,7 @@ mod tests {
         build_candidate_from_scan(
             &ScannedEntry {
                 scan_id: ScanId::new("scan-1"),
+                identity: None,
                 display_path: "/tmp/item".to_string(),
                 native_basename: NativeName::unix(b"item".to_vec()),
                 object_type: ObjectType::File,
@@ -319,8 +364,10 @@ mod tests {
 
     #[test]
     fn summary_links_bind_directory_aggregate_revision_and_coverage() {
+        let stable_identity = identity(2, 1);
         let entry = ScannedEntry {
             scan_id: ScanId::new("scan-1"),
+            identity: Some(stable_identity.clone()),
             display_path: "/tmp/dir".to_string(),
             native_basename: NativeName::unix(b"dir".to_vec()),
             object_type: ObjectType::Directory,
@@ -337,7 +384,7 @@ mod tests {
             coverage: complete_coverage(),
             provenance: live_provenance(),
         };
-        let aggregate = aggregate("stable-dir-id", 99, complete_coverage());
+        let aggregate = aggregate(stable_identity.entry_id.as_str(), 99, complete_coverage());
         let summary = ScanSummary {
             roots: Vec::new(),
             entries: vec![entry.clone()],
@@ -350,7 +397,8 @@ mod tests {
             &summary,
             &[DirectoryAggregateLink {
                 entry: &summary.entries[0],
-                directory_identity: "stable-dir-id",
+                directory_identity: stable_identity.entry_id.as_str(),
+                expected_root_id: Some(stable_identity.scan_root_id.as_str()),
             }],
             true,
         )
@@ -359,7 +407,7 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidates[0].aggregate_directory_identity.as_deref(),
-            Some("stable-dir-id")
+            Some(stable_identity.entry_id.as_str())
         );
         assert_eq!(
             candidates[0].aggregate_revision,
@@ -372,14 +420,20 @@ mod tests {
         );
         assert_eq!(
             candidates[0].path.stable_identity.as_deref(),
-            Some("stable-dir-id")
+            Some(stable_identity.entry_id.as_str())
+        );
+        assert_eq!(
+            candidates[0].locator.scan_object_identity,
+            Some(stable_identity)
         );
     }
 
     #[test]
     fn summary_links_fail_closed_when_identity_has_no_matching_aggregate() {
+        let stable_identity = identity(2, 1);
         let entry = ScannedEntry {
             scan_id: ScanId::new("scan-1"),
+            identity: Some(stable_identity.clone()),
             display_path: "/tmp/dir".to_string(),
             native_basename: NativeName::unix(b"dir".to_vec()),
             object_type: ObjectType::Directory,
@@ -399,7 +453,13 @@ mod tests {
         let summary = ScanSummary {
             roots: Vec::new(),
             entries: vec![entry],
-            aggregates: vec![aggregate("another-id", 1, complete_coverage())],
+            aggregates: vec![aggregate(
+                ScanEntryId::for_scan_ordinal(&ScanId::new("scan-1"), 99)
+                    .unwrap()
+                    .as_str(),
+                1,
+                complete_coverage(),
+            )],
             boundaries: Vec::new(),
             progress: Vec::new(),
         };
@@ -408,7 +468,8 @@ mod tests {
             &summary,
             &[DirectoryAggregateLink {
                 entry: &summary.entries[0],
-                directory_identity: "stable-dir-id",
+                directory_identity: stable_identity.entry_id.as_str(),
+                expected_root_id: Some(stable_identity.scan_root_id.as_str()),
             }],
             true,
         )
@@ -423,7 +484,7 @@ mod tests {
         );
         assert_eq!(
             candidates[0].path.stable_identity.as_deref(),
-            Some("stable-dir-id")
+            Some(stable_identity.entry_id.as_str())
         );
         assert!(
             candidates[0]

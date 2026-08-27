@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use sweepx_model::{
     ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, EvidenceValue,
-    FieldProvenance, NativeName, ObjectType, ReasonCode, ScanId, ScannedEntry,
+    FieldProvenance, FilesystemObjectDomainIdentity, IdentityEvidence, NativeName, ObjectType,
+    PlatformFileIdentity, ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity, ScannedEntry,
+    VolumeOrMountIdentity,
 };
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, CancellationToken, DirectoryReadLimits, EntryKind, EntryMetadata,
@@ -69,7 +71,11 @@ pub trait ScanSink {
     fn push_entry(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError>;
     fn push_boundary(&mut self, root: &Path, boundary: BoundaryRecord) -> Result<(), ScanError>;
     fn push_progress(&mut self, root: &Path, event: ProgressEvent) -> Result<(), ScanError>;
-    fn push_aggregate(&mut self, aggregate: DirectoryAggregate) -> Result<(), ScanError>;
+    fn push_aggregate(
+        &mut self,
+        root: &Path,
+        aggregate: DirectoryAggregate,
+    ) -> Result<(), ScanError>;
 
     fn overflow_count(&self) -> usize {
         0
@@ -203,12 +209,15 @@ impl ScanSink for CollectingScanSink {
         Ok(())
     }
 
-    fn push_aggregate(&mut self, aggregate: DirectoryAggregate) -> Result<(), ScanError> {
+    fn push_aggregate(
+        &mut self,
+        root: &Path,
+        aggregate: DirectoryAggregate,
+    ) -> Result<(), ScanError> {
         if self.summary.aggregates.len() >= self.limits.max_retained_aggregates {
-            let root = PathBuf::from(&aggregate.directory_identity);
             self.mark_overflow(
-                &root,
-                &root,
+                root,
+                root,
                 "retained aggregate cap exceeded across scan roots",
             );
             return Ok(());
@@ -235,6 +244,7 @@ pub struct Scanner<P> {
 struct FrontierDirectory<D> {
     path: PathBuf,
     handle: D,
+    identity: ScanObjectIdentity,
     started: bool,
     consumed_entries: usize,
     consumed_bytes: usize,
@@ -269,6 +279,7 @@ where
                 "max_workers must be greater than zero".to_string(),
             ));
         }
+        let mut next_entry_ordinal = Some(1u128);
 
         for root in roots {
             if sink.retained_aggregate_count()
@@ -294,16 +305,18 @@ where
             let admission = match self.platform.admit_root(root, cancel) {
                 Ok(admission) => admission,
                 Err(PlatformError::Cancelled) => {
+                    let root_entry_id =
+                        allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
                     sink.push_progress(
                         root.path(),
                         ProgressEvent::Cancelled {
                             path: root.path.clone(),
                         },
                     )?;
-                    sink.push_aggregate(cancelled_root_aggregate(
-                        &self.options.scan_id,
+                    sink.push_aggregate(
                         root.path(),
-                    ))?;
+                        cancelled_root_aggregate(&self.options.scan_id, root_entry_id),
+                    )?;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -314,6 +327,14 @@ where
                     detail: error.to_string(),
                 }
             })?;
+            let root_entry_id =
+                allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
+            let root_identity = scan_object_identity(
+                root_entry_id.clone(),
+                root_entry_id,
+                None,
+                &admission.metadata,
+            );
             let overflow_count_before = sink.overflow_count();
             sink.push_progress(
                 root.path(),
@@ -326,11 +347,19 @@ where
                 scanned_entry_from_metadata(
                     &self.options.scan_id,
                     &admission.metadata,
+                    root_identity.clone(),
                     complete_coverage(),
                 ),
             )?;
 
-            self.scan_root(admission, cancel, overflow_count_before, sink)?;
+            self.scan_root(
+                admission,
+                root_identity,
+                &mut next_entry_ordinal,
+                cancel,
+                overflow_count_before,
+                sink,
+            )?;
         }
 
         sink.push_progress(Path::new("/"), ProgressEvent::Finished)?;
@@ -340,6 +369,8 @@ where
     fn scan_root<S: ScanSink>(
         &self,
         admission: RootAdmission<P::DirectoryHandle>,
+        root_identity: ScanObjectIdentity,
+        next_entry_ordinal: &mut Option<u128>,
         cancel: &CancellationToken,
         overflow_count_before: usize,
         sink: &mut S,
@@ -354,6 +385,7 @@ where
         let mut frontier = VecDeque::from([FrontierDirectory {
             path: root_metadata.path.clone(),
             handle: directory,
+            identity: root_identity.clone(),
             started: false,
             consumed_entries: 0,
             consumed_bytes: 0,
@@ -363,7 +395,7 @@ where
         let mut directory_states = BTreeMap::<PathBuf, DirectoryState>::new();
         directory_states.insert(
             root_metadata.path.clone(),
-            DirectoryState::new(root_metadata.path.clone()),
+            DirectoryState::new(root_identity.entry_id.clone()),
         );
 
         while let Some(mut current) = frontier.pop_front() {
@@ -459,6 +491,7 @@ where
                         &root_path,
                         ScannedEntry {
                             scan_id: self.options.scan_id.clone(),
+                            identity: Some(current.identity.clone()),
                             display_path: path.display().to_string(),
                             native_basename: native_basename_for_path(&path),
                             object_type: ObjectType::Directory,
@@ -592,6 +625,7 @@ where
                     }
                     Err(error) => return Err(error.into()),
                 };
+                let entry_id = allocate_scan_entry_id(&self.options.scan_id, next_entry_ordinal)?;
                 match walk {
                     WalkEntry::Directory(opened) => {
                         let metadata = opened.metadata;
@@ -705,9 +739,16 @@ where
                             continue;
                         }
 
+                        let identity = scan_object_identity(
+                            entry_id.clone(),
+                            root_identity.entry_id.clone(),
+                            Some(current.identity.entry_id.clone()),
+                            &metadata,
+                        );
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
+                            identity.clone(),
                             complete_coverage(),
                         );
                         sink.push_progress(
@@ -720,11 +761,12 @@ where
                         propagate_directory_entry(&mut directory_states, &metadata.path);
                         directory_states
                             .entry(metadata.path.clone())
-                            .or_insert_with(|| DirectoryState::new(metadata.path.clone()));
+                            .or_insert_with(|| DirectoryState::new(entry_id.clone()));
                         sink.push_entry(&root_path, scanned)?;
                         frontier.push_back(FrontierDirectory {
                             path: metadata.path.clone(),
                             handle: opened.handle,
+                            identity,
                             started: false,
                             consumed_entries: 0,
                             consumed_bytes: 0,
@@ -735,6 +777,12 @@ where
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
+                            scan_object_identity(
+                                entry_id,
+                                root_identity.entry_id.clone(),
+                                Some(current.identity.entry_id.clone()),
+                                &metadata,
+                            ),
                             complete_coverage(),
                         );
                         sink.push_progress(
@@ -748,6 +796,12 @@ where
                         sink.push_entry(&root_path, scanned)?;
                     }
                     WalkEntry::Link(metadata) => {
+                        let identity = scan_object_identity(
+                            entry_id,
+                            root_identity.entry_id.clone(),
+                            Some(current.identity.entry_id.clone()),
+                            &metadata,
+                        );
                         let coverage = Coverage {
                             state: CoverageState::Complete,
                             complete: true,
@@ -773,7 +827,12 @@ where
                         )?;
                         sink.push_entry(
                             &root_path,
-                            scanned_entry_from_metadata(&self.options.scan_id, &metadata, coverage),
+                            scanned_entry_from_metadata(
+                                &self.options.scan_id,
+                                &metadata,
+                                identity,
+                                coverage,
+                            ),
                         )?;
                     }
                     WalkEntry::Boundary(boundary) => {
@@ -804,6 +863,20 @@ where
                             &root_path,
                             ScannedEntry {
                                 scan_id: self.options.scan_id.clone(),
+                                identity: Some(ScanObjectIdentity {
+                                    entry_id,
+                                    scan_root_id: root_identity.entry_id.clone(),
+                                    parent_id: Some(current.identity.entry_id.clone()),
+                                    platform_file_identity: IdentityEvidence::unknown(
+                                        ReasonCode::UnknownIdentity,
+                                    ),
+                                    filesystem_object_domain_identity: IdentityEvidence::unknown(
+                                        ReasonCode::UnknownIdentity,
+                                    ),
+                                    volume_or_mount_identity: IdentityEvidence::unknown(
+                                        ReasonCode::UnknownIdentity,
+                                    ),
+                                }),
                                 display_path: error.path.display().to_string(),
                                 native_basename: native_basename_for_path(&error.path),
                                 object_type: ObjectType::Other,
@@ -857,7 +930,7 @@ where
             .collect();
         aggregates.sort_by(|left, right| left.directory_identity.cmp(&right.directory_identity));
         for aggregate in aggregates {
-            sink.push_aggregate(aggregate)?;
+            sink.push_aggregate(&root_path, aggregate)?;
         }
         Ok(())
     }
@@ -865,7 +938,7 @@ where
 
 #[derive(Debug, Clone)]
 struct DirectoryState {
-    path: PathBuf,
+    entry_id: ScanEntryId,
     direct_child_count: u128,
     recursive_entry_count: u128,
     apparent_logical_bytes: u128,
@@ -877,9 +950,9 @@ struct DirectoryState {
 }
 
 impl DirectoryState {
-    fn new(path: PathBuf) -> Self {
+    fn new(entry_id: ScanEntryId) -> Self {
         Self {
-            path,
+            entry_id,
             direct_child_count: 0,
             recursive_entry_count: 0,
             apparent_logical_bytes: 0,
@@ -920,7 +993,7 @@ impl DirectoryState {
 
         DirectoryAggregate {
             scan_id: scan_id.clone(),
-            directory_identity: self.path.display().to_string(),
+            directory_identity: self.entry_id.to_string(),
             revision: DecimalU128::new(1),
             apparent_logical_bytes: apparent,
             unique_logical_bytes: unique,
@@ -946,6 +1019,20 @@ impl DirectoryState {
             },
         }
     }
+}
+
+fn allocate_scan_entry_id(
+    scan_id: &ScanId,
+    next_ordinal: &mut Option<u128>,
+) -> Result<ScanEntryId, ScanError> {
+    let ordinal = next_ordinal.take().ok_or_else(|| {
+        ScanError::Platform(PlatformError::ResourceLimit(
+            "scan entry identity space exhausted".to_string(),
+        ))
+    })?;
+    *next_ordinal = ordinal.checked_add(1);
+    ScanEntryId::for_scan_ordinal(scan_id, ordinal)
+        .map_err(|error| ScanError::RootValidation(error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,10 +1238,12 @@ fn state_and_ancestors(path: &Path) -> Vec<PathBuf> {
 fn scanned_entry_from_metadata(
     scan_id: &ScanId,
     metadata: &EntryMetadata,
+    identity: ScanObjectIdentity,
     coverage: Coverage,
 ) -> ScannedEntry {
     ScannedEntry {
         scan_id: scan_id.clone(),
+        identity: Some(identity),
         display_path: metadata.path.display().to_string(),
         native_basename: metadata.file_name.clone(),
         object_type: match metadata.kind {
@@ -1188,6 +1277,42 @@ fn scanned_entry_from_metadata(
     }
 }
 
+fn scan_object_identity(
+    entry_id: ScanEntryId,
+    scan_root_id: ScanEntryId,
+    parent_id: Option<ScanEntryId>,
+    metadata: &EntryMetadata,
+) -> ScanObjectIdentity {
+    let platform_file_identity = match &metadata.identity {
+        Some(identity) => IdentityEvidence::known(PlatformFileIdentity {
+            device: DecimalU128::new(identity.device.into()),
+            inode: DecimalU128::new(identity.inode.into()),
+        }),
+        None => IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+    };
+    let filesystem_object_domain_identity = match &metadata.filesystem_identity {
+        Some(identity) => IdentityEvidence::known(FilesystemObjectDomainIdentity {
+            device: DecimalU128::new(identity.device.into()),
+        }),
+        None => IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+    };
+    let volume_or_mount_identity = match &metadata.mount_identity {
+        Some(identity) => IdentityEvidence::known(VolumeOrMountIdentity {
+            value: DecimalU128::new(identity.value.into()),
+        }),
+        None => IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
+    };
+
+    ScanObjectIdentity {
+        entry_id,
+        scan_root_id,
+        parent_id,
+        platform_file_identity,
+        filesystem_object_domain_identity,
+        volume_or_mount_identity,
+    }
+}
+
 fn complete_coverage() -> Coverage {
     Coverage {
         state: CoverageState::Complete,
@@ -1198,10 +1323,10 @@ fn complete_coverage() -> Coverage {
     }
 }
 
-fn cancelled_root_aggregate(scan_id: &ScanId, path: &Path) -> DirectoryAggregate {
+fn cancelled_root_aggregate(scan_id: &ScanId, entry_id: ScanEntryId) -> DirectoryAggregate {
     DirectoryAggregate {
         scan_id: scan_id.clone(),
-        directory_identity: path.display().to_string(),
+        directory_identity: entry_id.to_string(),
         revision: DecimalU128::new(1),
         apparent_logical_bytes: lower_bound_u128(0, ReasonCode::IncompleteStreamCoverage),
         unique_logical_bytes: lower_bound_u128(0, ReasonCode::IncompleteStreamCoverage),
@@ -1329,6 +1454,25 @@ mod tests {
         }
     }
 
+    fn aggregate_for_path<'a>(summary: &'a ScanSummary, path: &Path) -> &'a DirectoryAggregate {
+        let entry = summary
+            .roots
+            .iter()
+            .chain(summary.entries.iter())
+            .find(|entry| entry.display_path == path.display().to_string())
+            .expect("scanned entry for aggregate path");
+        let entry_id = &entry
+            .identity
+            .as_ref()
+            .expect("live scanner entry identity")
+            .entry_id;
+        summary
+            .aggregates
+            .iter()
+            .find(|aggregate| aggregate.directory_identity == entry_id.as_str())
+            .expect("aggregate joined by stable scan identity")
+    }
+
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     #[test]
     fn scan_collects_files_symlinks_and_hard_links_deterministically() {
@@ -1352,11 +1496,7 @@ mod tests {
             )
             .unwrap();
 
-        let root_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let root_aggregate = aggregate_for_path(&result, &root);
         assert_eq!(root_aggregate.apparent_logical_bytes, known_u128(14));
         assert_eq!(root_aggregate.unique_logical_bytes, known_u128(10));
         assert_eq!(
@@ -1364,6 +1504,41 @@ mod tests {
             unknown_u128(ReasonCode::UnknownIdentity)
         );
         assert!(root_aggregate.coverage.complete);
+        let root_identity = result.roots[0].identity.as_ref().unwrap();
+        assert_eq!(
+            root_aggregate.directory_identity,
+            root_identity.entry_id.as_str()
+        );
+        assert!(root_identity.entry_id.belongs_to(&result.roots[0].scan_id));
+        assert_eq!(root_identity.entry_id, root_identity.scan_root_id);
+        assert_eq!(root_identity.parent_id, None);
+        assert!(matches!(
+            root_identity.platform_file_identity,
+            IdentityEvidence::Known { .. }
+        ));
+        assert!(matches!(
+            root_identity.filesystem_object_domain_identity,
+            IdentityEvidence::Known { .. }
+        ));
+        assert!(matches!(
+            root_identity.volume_or_mount_identity,
+            IdentityEvidence::Known { .. }
+        ));
+        let sub_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.display_path == sub.display().to_string())
+            .unwrap();
+        let sub_identity = sub_entry.identity.as_ref().unwrap();
+        assert_eq!(sub_identity.scan_root_id, root_identity.entry_id);
+        assert_eq!(
+            sub_identity.parent_id.as_ref(),
+            Some(&root_identity.entry_id)
+        );
+        assert_eq!(
+            aggregate_for_path(&result, &sub).directory_identity,
+            sub_identity.entry_id.as_str()
+        );
         assert!(
             result
                 .boundaries
@@ -1393,11 +1568,13 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProgressEvent::Cancelled { .. }))
         );
-        let root_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let root_aggregate = result.aggregates.first().unwrap();
+        let cancelled_identity = root_aggregate.scan_entry_id().unwrap();
+        assert!(cancelled_identity.belongs_to(&ScannerOptions::default().scan_id));
+        assert_ne!(
+            root_aggregate.directory_identity,
+            root.display().to_string()
+        );
         assert!(!root_aggregate.coverage.complete);
         assert!(result.roots.is_empty());
         assert!(result.entries.is_empty());
@@ -1462,21 +1639,9 @@ mod tests {
             )
             .unwrap();
 
-        let root_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
-        let left_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == left.display().to_string())
-            .unwrap();
-        let right_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == right.display().to_string())
-            .unwrap();
+        let root_aggregate = aggregate_for_path(&result, &root);
+        let left_aggregate = aggregate_for_path(&result, &left);
+        let right_aggregate = aggregate_for_path(&result, &right);
 
         assert_eq!(root_aggregate.apparent_logical_bytes, known_u128(8));
         assert_eq!(root_aggregate.unique_logical_bytes, known_u128(4));
@@ -1564,11 +1729,7 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProgressEvent::ResourceLimit { .. }))
         );
-        let root_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let root_aggregate = aggregate_for_path(&result, &root);
         assert!(!root_aggregate.coverage.complete);
         assert!(
             root_aggregate
@@ -1619,11 +1780,7 @@ mod tests {
             )
             .unwrap();
 
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
         assert_eq!(
             aggregate.filesystem_reported_allocated_bytes,
             lower_bound_u128(11, ReasonCode::UnknownLayout)
@@ -1675,11 +1832,7 @@ mod tests {
             )
             .unwrap();
 
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
         assert_eq!(
             aggregate.filesystem_reported_allocated_bytes,
             unknown_u128(ReasonCode::UnknownLayout)
@@ -1705,6 +1858,177 @@ mod tests {
         };
         lower.add(&known_u128(1));
         assert_eq!(lower.into_value(true), unknown_u128(ReasonCode::Overflow));
+    }
+
+    #[test]
+    fn live_identity_uses_typed_metadata_and_aggregate_joins_directory_entry_id() {
+        let root = PathBuf::from("/root");
+        let child = root.join("child");
+        let scanner = Scanner::new(
+            FakePlatform::tree(
+                root.clone(),
+                BTreeMap::from([
+                    (root.clone(), vec![test_entry(&root, "child")]),
+                    (child.clone(), Vec::new()),
+                ]),
+                BTreeMap::from([(
+                    child.clone(),
+                    WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                        metadata: test_metadata(
+                            child.clone(),
+                            "child",
+                            EntryKind::Directory,
+                            Some(7),
+                        ),
+                        handle: FakeDirectoryHandle {
+                            path: child.clone(),
+                            capability_id: 2,
+                            cursor: 0,
+                        },
+                    }),
+                )]),
+            ),
+            ScannerOptions {
+                scan_id: ScanId::new("identity-test"),
+                ..ScannerOptions::default()
+            },
+        );
+
+        let result = scanner
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let root_entry = result.roots.first().unwrap();
+        let child_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.display_path == child.display().to_string())
+            .unwrap();
+        let root_identity = root_entry.identity.as_ref().unwrap();
+        let child_identity = child_entry.identity.as_ref().unwrap();
+
+        assert_eq!(root_identity.entry_id, root_identity.scan_root_id);
+        assert_eq!(root_identity.parent_id, None);
+        assert_eq!(child_identity.scan_root_id, root_identity.entry_id);
+        assert_eq!(
+            child_identity.parent_id.as_ref(),
+            Some(&root_identity.entry_id)
+        );
+        assert_eq!(
+            child_identity.platform_file_identity,
+            IdentityEvidence::known(PlatformFileIdentity {
+                device: DecimalU128::new(1),
+                inode: DecimalU128::new(2),
+            })
+        );
+        assert_eq!(
+            child_identity.filesystem_object_domain_identity,
+            IdentityEvidence::known(FilesystemObjectDomainIdentity {
+                device: DecimalU128::new(1),
+            })
+        );
+        assert_eq!(
+            child_identity.volume_or_mount_identity,
+            IdentityEvidence::known(VolumeOrMountIdentity {
+                value: DecimalU128::new(7),
+            })
+        );
+        let aggregate = aggregate_for_path(&result, &child);
+        assert_eq!(
+            aggregate.directory_identity,
+            child_identity.entry_id.as_str()
+        );
+        assert_ne!(aggregate.directory_identity, child.display().to_string());
+    }
+
+    #[test]
+    fn unknown_platform_identity_stays_explicitly_unknown() {
+        let root = PathBuf::from("/root");
+        let child = root.join("file");
+        let mut metadata = test_metadata(child.clone(), "file", EntryKind::File, Some(1));
+        metadata.identity = None;
+        metadata.filesystem_identity = None;
+        metadata.mount_identity = None;
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![test_entry(&root, "file")],
+                BTreeMap::from([(child.clone(), WalkEntry::File(metadata))]),
+            ),
+            ScannerOptions::default(),
+        );
+
+        let result = scanner
+            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+            .unwrap();
+        let identity = result.entries[0].identity.as_ref().unwrap();
+
+        assert_eq!(
+            identity.platform_file_identity,
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity)
+        );
+        assert_eq!(
+            identity.filesystem_object_domain_identity,
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity)
+        );
+        assert_eq!(
+            identity.volume_or_mount_identity,
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity)
+        );
+    }
+
+    #[test]
+    fn entry_ids_are_unique_across_multiple_roots_and_cancelled_admission() {
+        let first = PathBuf::from("/first");
+        let cancelled = PathBuf::from("/cancelled");
+        let third = PathBuf::from("/third");
+        let scanner = Scanner::new(
+            MultiRootIdentityPlatform {
+                cancelled_root: cancelled.clone(),
+            },
+            ScannerOptions {
+                scan_id: ScanId::new("multi-root"),
+                ..ScannerOptions::default()
+            },
+        );
+
+        let result = scanner
+            .scan(
+                &[
+                    ScanRoot::new(first.clone()).unwrap(),
+                    ScanRoot::new(cancelled).unwrap(),
+                    ScanRoot::new(third.clone()).unwrap(),
+                ],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let entry_ids: BTreeSet<_> = result
+            .roots
+            .iter()
+            .map(|entry| entry.identity.as_ref().unwrap().entry_id.clone())
+            .collect();
+        let aggregate_ids: BTreeSet<_> = result
+            .aggregates
+            .iter()
+            .map(|aggregate| aggregate.scan_entry_id().unwrap())
+            .collect();
+
+        assert_eq!(result.roots.len(), 2);
+        assert_eq!(entry_ids.len(), 2);
+        assert_eq!(result.aggregates.len(), 3);
+        assert_eq!(aggregate_ids.len(), 3);
+        assert!(entry_ids.is_subset(&aggregate_ids));
+        assert!(
+            aggregate_ids
+                .iter()
+                .all(|identity| identity.belongs_to(&ScanId::new("multi-root")))
+        );
+        assert!(result.roots.iter().all(|entry| {
+            entry.display_path == first.display().to_string()
+                || entry.display_path == third.display().to_string()
+        }));
     }
 
     #[test]
@@ -1929,11 +2253,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.display_path == nested.display().to_string())
         );
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
         assert!(!aggregate.coverage.complete);
         assert!(
             aggregate
@@ -1959,11 +2279,7 @@ mod tests {
                 &CancellationToken::new(),
             )
             .unwrap();
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
 
         assert!(!aggregate.coverage.complete);
         assert!(
@@ -1993,11 +2309,7 @@ mod tests {
                 &CancellationToken::new(),
             )
             .unwrap();
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
 
         assert!(!aggregate.coverage.complete);
         assert!(
@@ -2053,11 +2365,7 @@ mod tests {
                     .any(|entry| entry.display_path == path.display().to_string())
             );
         }
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
         assert_eq!(aggregate.direct_child_count, known_count(3));
         assert!(aggregate.coverage.complete);
     }
@@ -2144,11 +2452,7 @@ mod tests {
                 && boundary.kind == BoundaryKind::ResourceLimit
                 && boundary.detail == "retained aggregate limit exceeded"
         }));
-        let root_aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let root_aggregate = aggregate_for_path(&result, &root);
         assert!(!root_aggregate.coverage.complete);
         assert!(
             root_aggregate
@@ -2200,11 +2504,7 @@ mod tests {
                 && boundary.kind == BoundaryKind::ResourceLimit
                 && boundary.detail == "per-directory cumulative enumeration limit exceeded"
         }));
-        let aggregate = result
-            .aggregates
-            .iter()
-            .find(|entry| entry.directory_identity == root.display().to_string())
-            .unwrap();
+        let aggregate = aggregate_for_path(&result, &root);
         assert!(!aggregate.coverage.complete);
         assert!(
             aggregate
@@ -2221,13 +2521,14 @@ mod tests {
             ..ScanResourceLimits::default()
         };
         let mut sink = CollectingScanSink::new(limits);
-        let first =
-            DirectoryState::new(PathBuf::from("/first")).into_aggregate(&ScanId::new("scan"));
-        let second =
-            DirectoryState::new(PathBuf::from("/second")).into_aggregate(&ScanId::new("scan"));
+        let scan_id = ScanId::new("scan");
+        let first = DirectoryState::new(ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap())
+            .into_aggregate(&scan_id);
+        let second = DirectoryState::new(ScanEntryId::for_scan_ordinal(&scan_id, 2).unwrap())
+            .into_aggregate(&scan_id);
 
-        sink.push_aggregate(first).unwrap();
-        sink.push_aggregate(second).unwrap();
+        sink.push_aggregate(Path::new("/first"), first).unwrap();
+        sink.push_aggregate(Path::new("/second"), second).unwrap();
         let summary = sink.finish();
 
         assert_eq!(summary.aggregates.len(), 1);
@@ -2239,6 +2540,72 @@ mod tests {
         assert!(summary.progress.iter().any(|event| {
             matches!(event, ProgressEvent::ResourceLimit { path } if path == Path::new("/second"))
         }));
+    }
+
+    #[derive(Debug)]
+    struct MultiRootIdentityPlatform {
+        cancelled_root: PathBuf,
+    }
+
+    impl PlatformScanner for MultiRootIdentityPlatform {
+        type DirectoryHandle = FakeDirectoryHandle;
+
+        fn platform_name(&self) -> &'static str {
+            "multi-root-fake"
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            _cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            if root.path == self.cancelled_root {
+                return Err(PlatformError::Cancelled);
+            }
+            Ok(RootAdmission {
+                root: root.clone(),
+                metadata: test_metadata(
+                    root.path.clone(),
+                    root.path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("root"),
+                    EntryKind::Directory,
+                    Some(1),
+                ),
+                directory: FakeDirectoryHandle {
+                    path: root.path.clone(),
+                    capability_id: 1,
+                    cursor: 0,
+                },
+            })
+        }
+
+        fn enumerate_children(
+            &self,
+            _directory: &mut Self::DirectoryHandle,
+            _cancel: &CancellationToken,
+            _limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            Ok(DirectoryEntryBatch::complete(Vec::new()))
+        }
+
+        fn inspect_child(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("empty roots have no children")
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            Ok(true)
+        }
     }
 
     #[derive(Debug)]

@@ -132,6 +132,81 @@ const validQualifiedCapability = {
 };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const scanOutputValidator = ajv.getSchema(
+  "https://sweepx.dev/schemas/sweepx.output/v1"
+);
+if (!scanOutputValidator) {
+  throw new Error("Missing compiled sweepx.output schema");
+}
+
+const liveScanOutput = readJson(
+  path.join(schemaDir, "examples", "sweepx.output.scan.result.example.json")
+);
+const scanSchemaCases = [
+  {
+    name: "live scan identity and aggregate scan entry ID",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "legacy imported entry without identity",
+    expected: true,
+    mutate(output) {
+      delete output.data.roots[0].identity;
+      delete output.data.entries[0].identity;
+      output.data.aggregates[0].directoryIdentity = "/legacy/path";
+    }
+  },
+  {
+    name: "malformed scan entry ID is not accepted as legacy identity",
+    expected: false,
+    mutate(output) {
+      output.data.aggregates[0].directoryIdentity =
+        "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:0";
+    }
+  },
+  {
+    name: "path is rejected inside live identity block",
+    expected: false,
+    mutate(output) {
+      output.data.roots[0].identity.entryId = "/fixtures/p0-minimal";
+    }
+  },
+  {
+    name: "live scan supports explicit unknown identity evidence",
+    expected: true,
+    mutate(output) {
+      output.data.roots[0].identity.platformFileIdentity = {
+        state: "unknown",
+        reason: "unknown_identity"
+      };
+    }
+  },
+  {
+    name: "identity evidence cannot use a scalar sentinel",
+    expected: false,
+    mutate(output) {
+      output.data.roots[0].identity.platformFileIdentity.value = 0;
+    }
+  }
+];
+
+for (const testCase of scanSchemaCases) {
+  const output = clone(liveScanOutput);
+  testCase.mutate(output);
+  const ok = scanOutputValidator(output);
+  if (ok !== testCase.expected) {
+    failed = true;
+    console.log(`FAIL scan schema case: ${testCase.name}`);
+    for (const error of scanOutputValidator.errors ?? []) {
+      console.log(`  ${error.instancePath || "/"} ${error.message}`);
+    }
+  } else {
+    console.log(`PASS scan schema case: ${testCase.name}`);
+  }
+}
+
 const qualifiedSchemaCases = [
   {
     name: "valid exact platform tuple",

@@ -35,6 +35,9 @@ Run validation with:
 The validation script checks:
 
 - example output envelope
+- live `scan.result` entry identity and directory-aggregate identity structure
+- legacy imported scan entries without identity, which remain readable but untrusted
+- malformed or path-derived values cannot enter the trusted `scan-entry:v1` identity branch
 - example event envelope
 - example capability record
 - deterministic minimal fixture manifest
@@ -42,3 +45,10 @@ The validation script checks:
 - executable transition policy
 
 P0 keeps the contracts additive-friendly, but strict enough to reject state, enum, and invariant drift in the core safety model.
+
+`ScannedEntry.identity` is present on new live scanner output and may be absent only for legacy or
+imported records. A `DirectoryAggregate.directoryIdentity` matching `scan-entry:v1` is the current
+trusted shape. Non-prefixed strings are accepted solely for legacy wire compatibility and must not
+be treated as identity or synthesized from `displayPath`. Cross-field scan membership (the encoded
+scan component matching `scanId`) remains a consumer validation requirement because JSON Schema
+cannot decode and compare the base64url component.
