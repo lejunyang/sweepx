@@ -11,7 +11,7 @@ Agent-safe 的含义不是“Agent 可以自动清理”，而是自动化只能
 Agent 可以在用户提供明确范围后：
 
 - 运行 `capabilities` 并报告 degraded/report-only/unsupported/disabled 状态；
-- 在用户选择的绝对根上运行 Linux 只读扫描；
+- 在用户选择的绝对根上运行 Linux、macOS 或 Windows 的 development-grade/degraded 只读扫描；Windows traversal 为 handle-relative；
 - 读取现有 JSON，解释 error、boundary、coverage 和 tagged size；scan NDJSON 当前禁用；
 - 对有界 scan JSON 运行 report-only `explain`；
 - 列出或展示 Cleaner 元数据；

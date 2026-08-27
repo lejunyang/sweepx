@@ -14,7 +14,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | 边界 | 当前行为 |
 |---|---|
 | 用户选择根 | `scan` 只接受显式绝对路径 |
-| 遍历 | Linux scanner 使用 metadata/no-follow 语义并记录边界 |
+| 遍历 | Linux 使用 metadata/no-follow 语义；macOS 使用 handle-bound traversal；Windows 使用 handle-relative traversal；三者都记录边界 |
 | 错误与不完整性 | 权限、挂载、链接和资源限制不会伪装成空或已完成 |
 | 导入输入 | `scan.result` JSON 必须是绝对路径并受 byte/row 上限约束 |
 | 导入可信度 | provenance 降级为 stale preview，coverage 强制 incomplete/not revalidated |
@@ -22,7 +22,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | Cleaner | 只读 metadata，兼容性失败关闭 |
 | 能力表达 | unsupported、degraded、report_only、disabled 分开报告 |
 
-当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标；Unix 上的 `scan` 可以在指定 state directory 写自己的终态 snapshot，P3 audit library 也可以用 Unix bundled SQLite WAL 原子事务与 event replay 写 SweepX 自己的审计状态。Windows durable snapshot state 在私有 DACL 与 reparse-point 检查实现前保持禁用。它们都不修改被扫描的目标。
+当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标。Unix 上的 `scan` 可以在指定 state directory 写自己的终态 snapshot；Windows durable operation state 禁用，默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。独立的 P3 audit library 仍可在 Unix 上通过 bundled SQLite WAL 原子事务与 event replay 持久化 simulation-only 审计状态；这些表面都不修改扫描目标，也不构成真实执行资格。
 
 ## 导入报告为什么只能 report-only
 

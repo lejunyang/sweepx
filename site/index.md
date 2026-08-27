@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: 可运行，但只读
-    details: Linux 与 macOS 现都有 degraded 的开发版只读扫描器，并统一通过 `sweepx scan` / `scan --tui` 接入；Windows 扫描仍 fail-closed 为 unsupported。
+    details: Linux、macOS 与 Windows 均已有 degraded 的开发版只读 scanner，并统一通过 `sweepx scan` / `scan --tui` 接入；macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal。
   - title: 证据不会变成授权
     details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。查看报告或解释候选不会产生删除权限；live TUI 同样只有导航能力。
   - title: 破坏性路径仍封闭
@@ -37,8 +37,8 @@ features:
 |---|---|
 | Linux 目录扫描 | development-grade、read-only、degraded |
 | macOS 目录扫描 | development-grade、read-only、handle-bound degraded |
-| Windows 扫描 | fail-closed unsupported |
-| `status` | Unix 上读取持久化的终态 snapshot；Windows durable state disabled |
+| Windows 目录扫描 | development-grade、read-only、handle-relative degraded |
+| `status` | Unix 上读取持久化终态 snapshot；Windows durable state disabled、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门 |

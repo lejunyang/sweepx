@@ -11,7 +11,7 @@ Agent-safe does not mean “an Agent may clean automatically.” It means automa
 After the user provides an explicit scope, an Agent may:
 
 - run `capabilities` and report degraded/report-only/unsupported/disabled states;
-- run the read-only Linux scanner on user-selected absolute roots;
+- run the development-grade/degraded read-only scanner on user-selected absolute roots on Linux, macOS, or Windows; Windows traversal is handle-relative;
 - read current JSON and explain errors, boundaries, coverage, and tagged sizes; scan NDJSON is currently disabled;
 - run report-only `explain` over bounded scan JSON;
 - list or show Cleaner metadata;

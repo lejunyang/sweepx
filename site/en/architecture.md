@@ -15,28 +15,29 @@ absolute roots
   -> Core output envelope
   -> bounded human table | explicit JSON
   -> optional in-process file-manager TUI
-  -> durable terminal snapshot (optional state directory)
+  -> durable terminal snapshot on Unix (optional state directory)
+  -> no durable terminal snapshot on Windows (state_dir defaults to None)
 
 bounded scan.result JSON
   -> imported provenance downgrade
   -> report-only explanation
 ```
 
-Linux connects a real scanner backend. macOS now exposes a handle-bound degraded scanner through the same `sweepx scan` / `scan --tui` path. Windows remains fail-closed unsupported, so Core returns unsupported scan output there instead of simulating success.
+Linux, macOS, and Windows connect real development-grade/degraded read-only scanner backends. macOS traversal is handle-bound and Windows traversal is handle-relative; all three are exposed through `sweepx scan` / `scan --tui`.
 
 ## Crate responsibilities
 
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
-| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux/macOS read-only traversal, Windows fail-closed unsupported behavior, aggregation and state |
+| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux read-only traversal, macOS handle-bound traversal, Windows handle-relative traversal, aggregation, and Unix-only durable state |
 | Analysis and Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 
 ## State and cancellation
 
-CLI scan currently completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state fails closed because current-user-private DACL enforcement and reparse-point checks are not implemented. `status` is snapshot lookup, not a connection to a background worker. Scan NDJSON also fails closed until durable journaling and replay exist. `cancel` has no live registry to act on and therefore returns an honest disposition; that is why its capability is disabled.
+CLI scan completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `status` is not connected to a background worker; scan NDJSON and live cancellation also remain disabled. `cancel` returns an honest disposition; that is why its capability is disabled.
 
 ## Import is an explicit trust boundary
 

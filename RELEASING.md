@@ -29,9 +29,10 @@ and review upstream release notes before changing them.
    inherit this version. Update every internal dependency requirement to that
    same release version and refresh `Cargo.lock`.
 2. Update the changelog and user-facing release notes. Confirm that capability
-   claims still match the executable. In particular, Linux scanning is
-   development-grade/degraded, while macOS and Windows scanning is currently
-   unsupported. Building a binary on those platforms does not qualify scanning.
+   claims still match the executable. Linux, macOS, and Windows scanning are all
+   development-grade/degraded and read-only. macOS traversal is handle-bound and
+   Windows traversal is handle-relative; building a binary still does not qualify
+   scanning for release.
 3. Run the release-equivalent checks from a clean checkout:
 
    ```sh
@@ -69,9 +70,9 @@ one native `sweepx` executable for each target:
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | `.tar.gz` | degraded, development-grade |
 | `aarch64-unknown-linux-gnu` | `.tar.gz` | degraded, development-grade |
-| `x86_64-apple-darwin` | `.tar.gz` | unsupported stub |
-| `aarch64-apple-darwin` | `.tar.gz` | unsupported stub |
-| `x86_64-pc-windows-msvc` | `.zip` | unsupported stub |
+| `x86_64-apple-darwin` | `.tar.gz` | development-grade/degraded read-only scan |
+| `aarch64-apple-darwin` | `.tar.gz` | development-grade/degraded read-only scan |
+| `x86_64-pc-windows-msvc` | `.zip` | development-grade/degraded handle-relative read-only scan |
 
 Each archive contains exactly one root-level file: `sweepx` on Unix or
 `sweepx.exe` on Windows. Archive names are

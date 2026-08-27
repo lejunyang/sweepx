@@ -14,7 +14,7 @@ SweepX safety currently starts with absent capabilities and explicit type bounda
 | Boundary | Current behavior |
 |---|---|
 | User-selected roots | `scan` accepts explicit absolute paths only |
-| Traversal | The Linux scanner uses metadata/no-follow semantics and records boundaries |
+| Traversal | Linux uses metadata/no-follow semantics, macOS uses handle-bound traversal, and Windows uses handle-relative traversal; all record boundaries |
 | Errors and incompleteness | Permission, mount, link, and resource limits do not masquerade as empty or complete |
 | Imported input | `scan.result` JSON must use an absolute path and stay within byte/row bounds |
 | Imported trust | Provenance becomes stale preview and coverage is forced incomplete/not revalidated |
@@ -22,7 +22,7 @@ SweepX safety currently starts with absent capabilities and explicit type bounda
 | Cleaner | Metadata only, with fail-closed compatibility checks |
 | Capability language | unsupported, degraded, report_only, and disabled remain distinct |
 
-The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. “Read-only” refers to scan targets: on Unix, `scan` may write its own terminal snapshot under the selected state directory, and the P3 audit library may persist SweepX audit state through Unix bundled SQLite WAL atomic transactions plus event replay. Windows durable snapshot state remains disabled until private DACL enforcement and reparse-point checks exist. Neither changes a scanned target.
+The current executable does not request elevation, invoke cleanup managers, or expand scope after a read error. On Unix, `scan` may write its own terminal snapshot under the selected state directory. Windows durable operation state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. Separately, the P3 audit library may persist simulation-only audit state on Unix through bundled SQLite WAL atomic transactions and event replay; none of these surfaces changes a scanned target or qualifies real execution.
 
 ## Why imported reports are report-only
 

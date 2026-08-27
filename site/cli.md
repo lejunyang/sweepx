@@ -24,7 +24,7 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 |---|---|
 | `--format human|json|ndjson` | 选择展示或机器输出；默认 `human`；当前 scan 拒绝 `ndjson` |
 | `--locale zh-CN|en-US` | 覆盖自动检测的语言 |
-| `--state-dir ABSOLUTE_DIR` | Unix 上为 scan/status/cancel 指定 durable snapshot 目录；Windows 当前失败关闭 |
+| `--state-dir ABSOLUTE_DIR` | Unix 上为 scan/status/cancel 指定 durable snapshot 目录；Windows durable state 禁用、默认 `state_dir=None`，且显式指定失败关闭 |
 
 语言解析会依次考虑显式 override、locale 环境与系统 locale，无法识别时回退到 `en-US`。机器字段和值不翻译。
 
@@ -51,12 +51,10 @@ irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
 
 普通 push/PR 会运行 Rust、schema、站点、安装器和 native CLI CI；GitHub Pages 在 `main` 更新时独立部署。只有 HEAD commit message 含字面量 `[publish]` 时，二进制与 crates.io 发布任务才运行。GitHub Release 和 Pages 不需要额外 token；crates.io 需要在受保护的 `crates-io` environment 中配置 `CARGO_REGISTRY_TOKEN`。
 
-## Linux 只读扫描
+## 三平台开发版只读扫描
 
 ```bash
-cargo run -p sweepx-cli -- \
-  --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root
+cargo run -p sweepx-cli -- scan /absolute/path/to/root
 ```
 
 - 可以传入多个根，但每个根都必须是绝对路径。
@@ -64,20 +62,21 @@ cargo run -p sweepx-cli -- \
 - 扫描同步运行，metadata-only、no-follow，并把挂载/链接/资源边界与错误写进结果。
 - 当前 Linux capability 是 `degraded`，不是发布资格。
 - macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
-- Windows backend 仍是 fail-closed unsupported；能编译不等于能扫描。
-- `scan --format ndjson` 当前在扫描和 state 创建前返回 unsupported；只有 durable event journal、replay 和 durable terminal event 完成后才会开放。
+- Windows backend 现提供 handle-relative 的 degraded 只读扫描，并通过 `scan` / `scan --tui` 接入；这不等于发布资格。
+- Windows 扫描不要传 `--state-dir`；Unix 可显式选择 durable snapshot 目录。
+- `scan --format ndjson` 当前在扫描前返回 unsupported；只有 durable event journal、replay 和 durable terminal event 完成后才会开放。
 
 只有脚本和系统集成才需要显式机器输出：
 
 ```bash
 sweepx --format json scan /absolute/path/to/root > scan.json
-# 当前返回 unsupported；不会开始扫描或创建 state
+# 当前返回 unsupported；不会开始扫描
 sweepx --format ndjson scan /absolute/path/to/root
 ```
 
 ## 状态快照与取消
 
-从 scan 输出取得 `operationId` 后：
+Unix 上从 scan 输出取得 `operationId` 后，可以查询对应的 durable snapshot：
 
 ```bash
 cargo run -p sweepx-cli -- \
@@ -91,7 +90,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` 只读取已持久化 snapshot。该 durable store 当前仅在 Unix 开放；Windows 默认不创建 state，显式 `--state-dir` 也会失败，因为 current-user-private DACL 与 reparse-point 检查尚未实现。当前没有 live in-process registry，因此结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+`status` 只读取已持久化 snapshot，该 durable store 当前仅在 Unix 开放。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
 
 ## 从 scan JSON 解释
 
@@ -130,7 +129,7 @@ cargo run -p sweepx-cli -- --locale zh-CN \
 
 TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`q` 或 `Ctrl-C` 退出。symlink 和 reparse point 只显示而不可进入。
 
-`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。
+`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。Windows 不创建默认 state，显式 `--state-dir` 失败关闭。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。
 
 ## 当前不存在的命令
 

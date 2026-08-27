@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -15,18 +17,21 @@ use sweepx_analysis::{
     build_explanation_from_candidate,
 };
 use sweepx_audit::{AuditStore, ProjectionError};
+use sweepx_cache::CompactedPreview;
+#[cfg(unix)]
 use sweepx_cache::{
-    AtomicGenerationStore, BudgetUsage, CacheError, CompactedPreview, LoadResult, PreviewBudgets,
-    PreviewCoverage, PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration,
-    admit_preview,
+    AtomicGenerationStore, BudgetUsage, CacheError, LoadResult, PreviewBudgets, PreviewCoverage,
+    PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration, admit_preview,
 };
 use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
+#[cfg(unix)]
+use sweepx_model::EvidenceValue;
 use sweepx_model::{
-    CapabilityState, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
-    ObjectType, OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
+    CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
+    OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
 use sweepx_protocol::{
@@ -43,11 +48,11 @@ use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_platform::{CancellationToken, ScanRoot};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_scanner::HostPlatformScanner;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_scanner::{Scanner, ScannerOptions};
 
 pub const CORE_VERSION: &str = "0.1.0";
@@ -60,10 +65,14 @@ pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
 pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str =
     "scan --format ndjson is disabled until SweepX has a durable event journal and replay support";
+#[cfg(unix)]
 const PREVIEW_GENERATION_POINTER_DIR: &str = "preview-cache";
 const CACHE_LOAD_MODE_MISS: &str = "miss";
+#[cfg(unix)]
 const CACHE_LOAD_MODE_HIT: &str = "stale_preview";
+#[cfg(unix)]
 const CACHE_LOAD_MODE_QUARANTINED: &str = "quarantined";
+#[cfg(unix)]
 const CACHE_STORE_MODE_WRITTEN: &str = "written";
 const CACHE_STORE_MODE_SKIPPED: &str = "skipped";
 
@@ -573,12 +582,15 @@ pub fn scan_with_store<S: SnapshotStore>(
     request: &ScanRequest,
     store: Option<&S>,
 ) -> Result<ScanSuccess, CoreError> {
+    if request.state_dir.is_some() && !durable_state_supported() {
+        return Err(StateError::DurableStateUnsupportedOnWindows.into());
+    }
     let normalized_roots = normalize_scan_roots(&request.roots)?;
     if normalized_roots.is_empty() {
         return Err(CoreError::MissingRoots);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     let roots: Vec<ScanRoot> = normalized_roots
         .iter()
         .map(|path| {
@@ -590,7 +602,7 @@ pub fn scan_with_store<S: SnapshotStore>(
     let started_at = timestamp_now();
     let monotonic = Instant::now();
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let output = unsupported_scan_output(context, &normalized_roots, &ids, &started_at);
         let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
@@ -621,7 +633,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         })
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let scan_id = ScanId::new(format!(
             "scan-{}-{}",
@@ -629,7 +641,10 @@ pub fn scan_with_store<S: SnapshotStore>(
             &digest_hex(ids.operation_id_str())[..12]
         ));
         let compat = compat_snapshot(host_scan_platform());
+        #[cfg(unix)]
         let loaded_preview = load_stale_preview(request.state_dir.as_deref());
+        #[cfg(windows)]
+        let loaded_preview = empty_cache_preview_load();
         let scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
@@ -639,7 +654,10 @@ pub fn scan_with_store<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         let summary = scanner.scan(&roots, &cancel)?;
+        #[cfg(unix)]
         let stored_preview = store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary);
+        #[cfg(windows)]
+        let stored_preview = empty_cache_preview_store();
         let finished_at = timestamp_now();
         let status = scan_status(&summary);
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
@@ -781,6 +799,12 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED",
         )
     };
+    let scan_reason = match current_os {
+        "linux" => "LINUX_SCANNER_DEVELOPMENT",
+        "macos" => "MACOS_SCANNER_DEVELOPMENT",
+        "windows" => "WINDOWS_SCANNER_DEVELOPMENT",
+        _ => "STUB_COMPILATION_ONLY",
+    };
     let mut output = OutputEnvelope::new(
         OutputKind::CapabilitiesResult,
         ids.request_id,
@@ -791,11 +815,7 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
         compat_snapshot_with_digest(current_os, cleaner_catalog.cleaner_set_digest.clone()),
     );
     let commands = vec![
-        command_record(
-            "scan",
-            CapabilityState::Degraded,
-            "LINUX_SCANNER_DEVELOPMENT",
-        ),
+        command_record("scan", CapabilityState::Degraded, scan_reason),
         command_record(
             "explain",
             CapabilityState::Qualified,
@@ -925,8 +945,8 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             "scan.local.directory",
-            CapabilityState::Unsupported,
-            "STUB_COMPILATION_ONLY",
+            CapabilityState::Degraded,
+            "WINDOWS_SCANNER_DEVELOPMENT",
         ),
         capability_record(
             &recorded_at,
@@ -965,8 +985,8 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             "scan.tui.live",
-            CapabilityState::Unsupported,
-            "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
+            CapabilityState::Degraded,
+            "WINDOWS_LIVE_TUI_DEVELOPMENT",
         ),
         mutation_capability_record(
             &recorded_at,
@@ -1696,6 +1716,27 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     format!("…{}", value.chars().skip(count - keep).collect::<String>())
 }
 
+#[cfg(windows)]
+fn empty_cache_preview_load() -> CachePreviewLoad {
+    CachePreviewLoad {
+        status: CACHE_LOAD_MODE_MISS,
+        generation: None,
+        preview: None,
+        warnings: Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+fn empty_cache_preview_store() -> CachePreviewStoreResult {
+    CachePreviewStoreResult {
+        status: CACHE_STORE_MODE_SKIPPED,
+        generation: None,
+        preview_bytes: 0,
+        resource_limit: false,
+        warnings: Vec::new(),
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
@@ -1848,7 +1889,7 @@ fn store_stale_preview(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn cache_preview_metadata(
     summary: &ScanSummary,
     loaded: &CachePreviewLoad,
@@ -2129,6 +2170,7 @@ fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
     }
 }
 
+#[cfg(unix)]
 fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -2852,7 +2894,7 @@ fn snapshot_state(status: OutputStatus) -> OperationState {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn unsupported_scan_output(
     context: &CoreContext,
     roots: &[PathBuf],
@@ -2890,7 +2932,7 @@ fn unsupported_scan_output(
     output
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn scan_status(summary: &ScanSummary) -> OutputStatus {
     if scan_error_count(summary) > 0 || scan_partial_boundary_count(summary) > 0 {
         OutputStatus::Partial
@@ -2899,7 +2941,7 @@ fn scan_status(summary: &ScanSummary) -> OutputStatus {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn scan_error_count(summary: &ScanSummary) -> u128 {
     summary
         .progress
@@ -2908,7 +2950,7 @@ fn scan_error_count(summary: &ScanSummary) -> u128 {
         .count() as u128
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn scan_partial_boundary_count(summary: &ScanSummary) -> u128 {
     summary
         .boundaries
@@ -3306,6 +3348,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "MACOS_SCANNER_DEVELOPMENT" => {
             "macOS scanning is implemented as a development-grade read-only facade."
         }
+        "WINDOWS_SCANNER_DEVELOPMENT" => {
+            "Windows scanning is implemented as a development-grade handle-relative read-only facade without durable state."
+        }
         "STUB_COMPILATION_ONLY" => {
             "Platform support is currently limited to stub compilation only."
         }
@@ -3346,6 +3391,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "MACOS_LIVE_TUI_DEVELOPMENT" => {
             "The in-process read-only TUI browses the completed live macOS scan snapshot."
+        }
+        "WINDOWS_LIVE_TUI_DEVELOPMENT" => {
+            "The in-process read-only TUI browses the completed live Windows scan held in memory without durable state."
         }
         "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER" => {
             "The live TUI is unavailable because the host scanner is not implemented."
@@ -3494,7 +3542,7 @@ fn current_os_family() -> &'static str {
     std::env::consts::OS
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn host_scan_platform() -> &'static str {
     current_os_family()
 }
@@ -3923,6 +3971,7 @@ mod tests {
         assert!(state_dir_from_explicit_or_default(None).unwrap().is_none());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn scan_roots_are_deduplicated_and_ancestor_order_is_stable() {
         let forward = normalize_scan_roots(&[
@@ -3945,6 +3994,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn scan_root_normalization_removes_dot_but_does_not_collapse_parent() {
         let normalized = normalize_scan_roots(&[
@@ -4408,7 +4458,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_report_macos_scan_and_tui_as_degraded() {
+    fn capabilities_report_macos_and_windows_scan_and_tui_as_degraded() {
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
@@ -4445,7 +4495,31 @@ mod tests {
                     && item["qualificationKey"]["capability"] == "scan.local.directory"
             })
             .expect("windows scan capability");
-        assert_eq!(windows_scan["state"], "unsupported");
+        assert_eq!(windows_scan["state"], "degraded");
+        assert_eq!(windows_scan["reasonCode"], "WINDOWS_SCANNER_DEVELOPMENT");
+
+        let windows_tui = capabilities
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == "windows"
+                    && item["qualificationKey"]["capability"] == "scan.tui.live"
+            })
+            .expect("windows tui capability");
+        assert_eq!(windows_tui["state"], "degraded");
+        assert_eq!(windows_tui["reasonCode"], "WINDOWS_LIVE_TUI_DEVELOPMENT");
+
+        let windows_snapshot = capabilities
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == "windows"
+                    && item["qualificationKey"]["capability"] == "operation.snapshot.durable"
+            })
+            .expect("windows durable snapshot capability");
+        assert_eq!(windows_snapshot["state"], "disabled");
+        assert_eq!(
+            windows_snapshot["reasonCode"],
+            "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED"
+        );
     }
 
     #[test]

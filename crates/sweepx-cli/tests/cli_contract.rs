@@ -12,6 +12,7 @@ use tempfile::TempDir;
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
+#[cfg(unix)]
 #[test]
 fn locale_override_beats_environment_for_human_output() {
     let temp = TempDir::new().unwrap();
@@ -53,6 +54,15 @@ fn capabilities_json_uses_fixed_machine_keys() {
     }));
     let scan = commands.iter().find(|item| item["id"] == "scan").unwrap();
     assert_eq!(scan["state"], "degraded");
+    assert_eq!(
+        scan["reasonCode"],
+        match std::env::consts::OS {
+            "linux" => "LINUX_SCANNER_DEVELOPMENT",
+            "macos" => "MACOS_SCANNER_DEVELOPMENT",
+            "windows" => "WINDOWS_SCANNER_DEVELOPMENT",
+            _ => "STUB_COMPILATION_ONLY",
+        }
+    );
     let cancel = commands.iter().find(|item| item["id"] == "cancel").unwrap();
     assert_eq!(cancel["state"], "disabled");
     let explain = commands
@@ -70,6 +80,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_scan["state"], "degraded");
+    assert_eq!(linux_scan["reasonCode"], "LINUX_SCANNER_DEVELOPMENT");
     let explain_capability = json["data"]["capabilities"]
         .as_array()
         .unwrap()
@@ -112,12 +123,15 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     && item["qualificationKey"]["capability"] == "scan.tui.live"
             })
             .unwrap();
-        let expected_tui_state = if os == "macos" {
-            "degraded"
-        } else {
-            "unsupported"
-        };
-        assert_eq!(tui["state"], expected_tui_state);
+        assert_eq!(tui["state"], "degraded");
+        assert_eq!(
+            tui["reasonCode"],
+            if os == "macos" {
+                "MACOS_LIVE_TUI_DEVELOPMENT"
+            } else {
+                "WINDOWS_LIVE_TUI_DEVELOPMENT"
+            }
+        );
 
         let ndjson = json["data"]["capabilities"]
             .as_array()
@@ -179,6 +193,18 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_snapshot["state"], "qualified");
+
+    let windows_scan = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "windows"
+                && item["qualificationKey"]["capability"] == "scan.local.directory"
+        })
+        .unwrap();
+    assert_eq!(windows_scan["state"], "degraded");
+    assert_eq!(windows_scan["reasonCode"], "WINDOWS_SCANNER_DEVELOPMENT");
 
     let capability_values = json["data"]["capabilities"].as_array().unwrap();
     let records = capability_values
@@ -284,6 +310,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn explain_scan_json_returns_explanation_result() {
     let fixture = TempDir::new().unwrap();
@@ -308,6 +335,7 @@ fn explain_scan_json_returns_explanation_result() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn explain_human_output_respects_selected_locale() {
     let fixture = TempDir::new().unwrap();
@@ -329,6 +357,7 @@ fn explain_human_output_respects_selected_locale() {
     assert!(!text.contains("Generated"));
 }
 
+#[cfg(unix)]
 #[test]
 fn explain_rejects_relative_scan_json_path() {
     let mut cmd = cli_command();
@@ -499,6 +528,67 @@ fn scan_defaults_to_a_human_readable_file_table() {
     assert!(!text.trim_start().starts_with('{'));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_scan_runs_without_creating_durable_state() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let user_profile = fixture.path().join("profile");
+    fs::create_dir(&user_profile).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("USERPROFILE", &user_profile)
+        .env_remove("XDG_STATE_HOME")
+        .arg("--format")
+        .arg("json")
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_ne!(json["status"], "unsupported");
+    assert_eq!(json["summary"]["platform"], "windows");
+    assert_eq!(json["summary"]["cachePreview"]["loadStatus"], "miss");
+    assert_eq!(json["summary"]["cachePreview"]["storeStatus"], "skipped");
+    assert!(
+        json["data"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["displayPath"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("visible.txt"))
+            }))
+    );
+    assert!(!user_profile.join(".local/state/sweepx").exists());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_explicit_state_dir_fails_before_scan_or_state_creation() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().code(3).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(stderr.contains("durable state is disabled on Windows"));
+    assert!(!state_dir.exists());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn default_human_scan_sanitizes_terminal_controls_in_paths() {
@@ -546,6 +636,7 @@ fn default_scan_table_is_bounded() {
     assert!(stdout.lines().count() < 50);
 }
 
+#[cfg(unix)]
 #[test]
 fn explain_does_not_create_default_state_dir() {
     let fixture = TempDir::new().unwrap();
@@ -581,6 +672,7 @@ fn capabilities_does_not_create_explicit_state_dir() {
     assert!(!state_dir.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn scan_ndjson_is_rejected_before_state_creation_or_root_validation() {
     let fixture = TempDir::new().unwrap();

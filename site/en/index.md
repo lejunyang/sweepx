@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: Runnable, but read-only
-    details: Linux and macOS now have degraded development-grade read-only scanners exposed through the same `sweepx scan` / `scan --tui` entry points. Windows scanning remains fail-closed unsupported.
+    details: Linux, macOS, and Windows now have degraded development-grade read-only scanners exposed through the same `sweepx scan` / `scan --tui` entry points. macOS traversal is handle-bound and Windows traversal is handle-relative.
   - title: Evidence never becomes authority
     details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Reports and explanations create no deletion authority; the live TUI likewise exposes navigation only.
   - title: Mutation remains sealed off
@@ -37,8 +37,8 @@ features:
 |---|---|
 | Linux directory scan | development-grade, read-only, degraded |
 | macOS directory scan | development-grade, read-only, handle-bound degraded |
-| Windows scan | fail-closed unsupported |
-| `status` | reads a persisted terminal snapshot on Unix; Windows durable state is disabled |
+| Windows directory scan | development-grade, read-only, handle-relative degraded |
+| `status` | reads a persisted terminal snapshot on Unix; Windows durable state is disabled, `state_dir` defaults to `None`, and explicit `--state-dir` fails closed |
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |
 | Cleaner | read-only metadata list/show with compatibility gates |

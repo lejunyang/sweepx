@@ -14,7 +14,7 @@ title: 路线图
 | 轨道 | 当前证据 | 未完成边界 |
 |---|---|---|
 | P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
-| P1 scanner CLI | Linux read-only scan degraded；macOS handle-bound read-only scan degraded；Unix status snapshot 可用 | Windows scanner/durable state fail-closed unsupported；scan NDJSON 与 live cancel disabled；三平台/资源 gate 未闭合 |
+| P1 scanner CLI | Linux read-only scan degraded；macOS handle-bound scan degraded；Windows handle-relative scan degraded；三者均通过 `scan` / `scan --tui` 暴露；Unix status snapshot 可用 | Windows durable state disabled，默认 `state_dir=None`，显式 `--state-dir` fail-closed；scan NDJSON 与 live cancel disabled；三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Unix audit 现使用 bundled SQLite WAL 原子事务 + event replay | 没有 CLI wiring、可信 HumanApproval broker、native path、真实 revalidation 或 platform adapter；阶段尚未资格化 |
 | P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |

@@ -134,7 +134,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             executable: target/x86_64-pc-windows-msvc/debug/sweepx.exe
             capability_os: windows
-            scan_state: unsupported
+            scan_state: degraded
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -153,6 +153,8 @@ jobs:
           --package sweepx-model
           --package sweepx-platform
           --package sweepx-platform-windows
+          --package sweepx-core
+          --package sweepx-cli
       - name: Lint Windows platform crates natively
         if: matrix.capability_os == 'windows'
         run: >-
@@ -160,14 +162,66 @@ jobs:
           --package sweepx-model
           --package sweepx-platform
           --package sweepx-platform-windows
+          --package sweepx-core
+          --package sweepx-cli
           -- -D warnings
-      - name: Test Windows platform crates natively
+      - name: Test Windows scan stack natively
         if: matrix.capability_os == 'windows'
         run: >-
           cargo test --locked --target ${{ matrix.target }}
+          --package sweepx-platform
           --package sweepx-platform-windows
+          --package sweepx-core
+          --package sweepx-cli
       - name: Build native CLI
         run: cargo build --locked --package sweepx-cli --target ${{ matrix.target }}
+      - name: Smoke-test Windows scan and fail-closed state
+        if: matrix.capability_os == 'windows'
+        shell: pwsh
+        env:
+          BIN: ${{ matrix.executable }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $fixture = Join-Path $env:RUNNER_TEMP ("sweepx-ci-" + [guid]::NewGuid().ToString("N"))
+          $scanRoot = Join-Path $fixture "scan-root"
+          $stateDir = Join-Path $fixture "state"
+          New-Item -ItemType Directory -Path $scanRoot | Out-Null
+          Set-Content -LiteralPath (Join-Path $scanRoot "sample.txt") -Value "sweepx"
+
+          $scanText = & $env:BIN --format json scan $scanRoot | Out-String
+          $scanExit = $LASTEXITCODE
+          if ($scanExit -ne 0) {
+            throw "Windows scan must complete successfully, got exit code $scanExit"
+          }
+          $scan = $scanText | ConvertFrom-Json
+          if ($scan.kind -ne "scan.result") {
+            throw "unexpected scan output kind: $($scan.kind)"
+          }
+          if ($scan.status -ne "ok") {
+            throw "expected Windows scan status ok, got $($scan.status)"
+          }
+          if ($scan.summary.platform -ne "windows") {
+            throw "expected Windows scan platform, got $($scan.summary.platform)"
+          }
+          if ($scan.summary.rootCount -ne "1") {
+            throw "expected one Windows scan root, got $($scan.summary.rootCount)"
+          }
+          if ($scan.data.entries.Count -lt 1) {
+            throw "expected Windows scan to report the fixture entry"
+          }
+
+          $stateError = & $env:BIN --format json --state-dir $stateDir scan $scanRoot 2>&1 | Out-String
+          $stateExit = $LASTEXITCODE
+          if ($stateExit -ne 3) {
+            throw "explicit Windows state directory must fail closed with exit code 3, got $stateExit"
+          }
+          if ($stateError -notmatch "durable state is disabled on Windows") {
+            throw "explicit Windows state directory did not report the fail-closed reason"
+          }
+          if (Test-Path -LiteralPath $stateDir) {
+            throw "failed Windows state admission must not create the state directory"
+          }
       - name: Smoke-test binary and capability truthfulness
         shell: bash
         env:

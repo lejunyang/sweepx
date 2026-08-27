@@ -24,7 +24,7 @@ Global options:
 |---|---|
 | `--format human|json|ndjson` | Select display or machine output; default is `human`; scan currently rejects `ndjson` |
 | `--locale zh-CN|en-US` | Override the auto-detected display locale |
-| `--state-dir ABSOLUTE_DIR` | Select durable snapshot storage for scan/status/cancel on Unix; Windows currently fails closed |
+| `--state-dir ABSOLUTE_DIR` | Select durable snapshot storage for scan/status/cancel on Unix; Windows durable state is disabled, `state_dir` defaults to `None`, and explicitly setting it fails closed |
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
@@ -51,12 +51,10 @@ Release infrastructure does not mean a stable release already exists. Check GitH
 
 Normal pushes and pull requests run Rust, schema, site, installer, and native-CLI CI. GitHub Pages deploys independently when `main` changes. Binary and crates.io publication run only when the HEAD commit message contains the literal `[publish]` marker. GitHub Release and Pages need no extra token; crates.io requires `CARGO_REGISTRY_TOKEN` in a protected `crates-io` environment.
 
-## Read-only Linux scan
+## Development-grade read-only scans on all three platforms
 
 ```bash
-cargo run -p sweepx-cli -- \
-  --state-dir /absolute/path/to/sweepx-state \
-  scan /absolute/path/to/root
+cargo run -p sweepx-cli -- scan /absolute/path/to/root
 ```
 
 - You may provide multiple roots, but every root must be absolute.
@@ -64,20 +62,21 @@ cargo run -p sweepx-cli -- \
 - The scan runs synchronously, is metadata-only and no-follow, and reports mount/link/resource boundaries and errors.
 - The current Linux capability is `degraded`, not release qualification.
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
-- The Windows backend remains fail-closed unsupported; compilation is not scanning support.
-- `scan --format ndjson` currently returns unsupported before scanning or state creation. It remains disabled until the durable event journal, replay, and durable terminal event exist.
+- The Windows backend now provides a handle-relative degraded read-only scanner through `scan` / `scan --tui`; that is not release qualification.
+- Do not pass `--state-dir` for a Windows scan; Unix may explicitly select durable snapshot storage.
+- `scan --format ndjson` currently returns unsupported before scanning. It remains disabled until the durable event journal, replay, and durable terminal event exist.
 
 Request machine output explicitly for scripts and integrations:
 
 ```bash
 sweepx --format json scan /absolute/path/to/root > scan.json
-# Currently returns unsupported; it does not scan or create state
+# Currently returns unsupported; it does not scan
 sweepx --format ndjson scan /absolute/path/to/root
 ```
 
 ## Status snapshots and cancellation
 
-After reading `operationId` from scan output:
+On Unix, after reading `operationId` from scan output, the corresponding durable snapshot can be queried:
 
 ```bash
 cargo run -p sweepx-cli -- \
@@ -91,7 +90,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` only reads a persisted snapshot. That durable store is currently enabled only on Unix. Windows creates no default state and rejects explicit `--state-dir` because current-user-private DACL enforcement and reparse-point checks are not implemented. There is no live in-process registry, so output reports `canCancel: false` and cancellation capability is `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+`status` only reads a persisted snapshot, and that durable store is currently enabled only on Unix. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
 
 ## Explain from scan JSON
 
@@ -130,7 +129,7 @@ cargo run -p sweepx-cli -- --locale en-US \
 
 The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, and `q` or `Ctrl-C` to quit. Symlinks and reparse points are visible but cannot be entered.
 
-`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences.
+`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Windows creates no default state and rejects explicit `--state-dir`. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences.
 
 ## Commands that do not exist today
 

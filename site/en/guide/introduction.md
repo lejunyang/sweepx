@@ -13,8 +13,8 @@ SweepX is a safety-first Rust disk-analysis project. The current repository has 
 
 - The Linux scanner performs a synchronous, read-only scan under user-selected absolute roots and reports `degraded`.
 - The macOS scanner now exposes a handle-bound synchronous, read-only live scan and still reports only `degraded`, not release qualification.
-- The Windows scanner remains fail-closed `unsupported`.
-- On Unix, `status` reads a persisted terminal snapshot; Windows durable state is currently disabled. `cancel` is `disabled` because there is no live operation registry.
+- The Windows scanner now provides a handle-relative synchronous read-only live scan through `scan` / `scan --tui`. It remains development-grade/degraded, not release-qualified.
+- On Unix, `status` reads a persisted terminal snapshot. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `cancel` remains `disabled` because there is no live operation registry.
 - Scan NDJSON remains disabled until durable journaling and replay exist; current machine scan output uses JSON.
 - `explain` analyzes bounded `scan.result` JSON, but imported data is downgraded to stale/incomplete provenance and candidates remain report-only.
 - Built-in Cleaners support metadata-only list/show and fail closed on Core-version incompatibility.

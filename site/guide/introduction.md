@@ -13,8 +13,8 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有�
 
 - Linux scanner 能在用户明确选择的绝对路径上做同步、只读扫描，能力状态为 `degraded`。
 - macOS scanner 现已接入 handle-bound 的同步、只读 live scan，仍只报告 `degraded`，不是发布资格。
-- Windows scanner 仍 fail-closed 为 `unsupported`。
-- Unix 上 `status` 读取已持久化的终态 snapshot；Windows durable state 暂时禁用。`cancel` 因没有 live operation registry 而标记为 `disabled`。
+- Windows scanner 现提供 handle-relative 的同步只读 live scan，并通过 `scan` / `scan --tui` 暴露；能力仍为 development-grade/degraded，不是发布资格。
+- Unix 上 `status` 读取持久化终态 snapshot。Windows durable state 当前禁用：默认 `state_dir=None`，不持久化终态 snapshot，显式 `--state-dir` 失败关闭。`cancel` 因没有 live operation registry 而保持 `disabled`。
 - scan NDJSON 在 durable journal/replay 实现前保持禁用；当前机器扫描输出使用 JSON。
 - `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
