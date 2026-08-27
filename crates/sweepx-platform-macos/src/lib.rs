@@ -29,7 +29,7 @@ mod backend {
     use sweepx_model::{NativeName, ReasonCode};
     use sweepx_platform::{
         BoundaryKind, BoundaryRecord, EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity,
-        HardLinkKey, fingerprint_for, known_count, known_u128, unknown_u128,
+        HardLinkKey, MountIdentity, fingerprint_for, known_count, known_u128, unknown_u128,
     };
 
     use super::*;
@@ -61,6 +61,7 @@ mod backend {
         stream: *mut libc::DIR,
         path: PathBuf,
         identity: ObjectIdentity,
+        mount_identity: MountIdentity,
         pending: Option<DirectoryEntryRecord>,
     }
 
@@ -158,6 +159,33 @@ mod backend {
             })
         }
 
+        fn fstatfs_raw(fd: libc::c_int) -> Result<MountIdentity, io::Error> {
+            let mut statfs = MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: `statfs` points to writable storage and fd is live for the call.
+            if unsafe { libc::fstatfs(fd, statfs.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful `fstatfs` initialized the structure.
+            let statfs = unsafe { statfs.assume_init() };
+            let size = std::mem::size_of::<libc::fsid_t>();
+            if size < std::mem::size_of::<u64>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "macOS fsid_t is smaller than u64",
+                ));
+            }
+            let mut bytes = [0u8; 8];
+            let source = &statfs.f_fsid as *const libc::fsid_t as *const u8;
+            // SAFETY: `source` points to initialized fsid bytes and we copy exactly 8 bytes
+            // into a non-overlapping local array after verifying the source size is sufficient.
+            unsafe {
+                std::ptr::copy_nonoverlapping(source, bytes.as_mut_ptr(), bytes.len());
+            }
+            Ok(MountIdentity {
+                value: u64::from_ne_bytes(bytes),
+            })
+        }
+
         fn dirfd(directory: &OpenDirectory) -> Result<libc::c_int, io::Error> {
             // SAFETY: `directory.stream` is a valid owned DIR* for the lifetime of `directory`.
             let fd = unsafe { libc::dirfd(directory.stream) };
@@ -170,6 +198,7 @@ mod backend {
         fn open_directory_from_fd(fd: OwnedFd, path: PathBuf) -> Result<OpenDirectory, io::Error> {
             let observed = Self::fstat(&fd)?;
             let identity = observed.identity();
+            let mount_identity = Self::fstatfs_raw(fd.as_raw_fd())?;
             if identity.kind != EntryKind::Directory {
                 return Err(io::Error::new(
                     io::ErrorKind::NotADirectory,
@@ -189,6 +218,7 @@ mod backend {
                 stream,
                 path,
                 identity,
+                mount_identity,
                 pending: None,
             })
         }
@@ -256,6 +286,7 @@ mod backend {
             path: &Path,
             file_name: NativeName,
             observed: &ObservedMetadata,
+            mount_identity: Option<MountIdentity>,
         ) -> EntryMetadata {
             let kind = kind_from_mode(observed.stat.st_mode);
 
@@ -274,7 +305,6 @@ mod backend {
             let inode = observed.stat.st_ino;
             let identity = Some(EntryIdentity { device, inode });
             let filesystem_identity = Some(FilesystemIdentity { device });
-            let mount_identity = None;
             let hard_link_key = (kind == EntryKind::File).then_some(HardLinkKey { device, inode });
             let hard_link_count = known_count(observed.stat.st_nlink as u128);
             let fingerprint = fingerprint_for(identity.as_ref(), &kind, &logical_bytes);
@@ -307,6 +337,17 @@ mod backend {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         "directory identity changed after admission",
+                    ),
+                ));
+            }
+            let mount_identity = Self::fstatfs_raw(fd)
+                .map_err(|error| PlatformError::io(directory.path.clone(), error))?;
+            if mount_identity != directory.mount_identity {
+                return Err(PlatformError::io(
+                    directory.path.clone(),
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory mount identity changed after admission",
                     ),
                 ));
             }
@@ -390,6 +431,7 @@ mod backend {
                         unsafe { stat.assume_init() }
                     },
                 },
+                Some(directory.mount_identity.clone()),
             );
 
             Ok(RootAdmission {
@@ -514,14 +556,29 @@ mod backend {
                 }
             };
 
-            let metadata = Self::metadata_to_entry(&child.path, child.file_name.clone(), &observed);
-            match metadata.kind {
+            match kind_from_mode(observed.stat.st_mode) {
                 EntryKind::Directory => {
                     let handle = Self::open_child_directory(parent, child, &observed)?;
+                    let metadata = Self::metadata_to_entry(
+                        &child.path,
+                        child.file_name.clone(),
+                        &observed,
+                        Some(handle.mount_identity.clone()),
+                    );
                     Ok(WalkEntry::Directory(OpenedDirectory { metadata, handle }))
                 }
-                EntryKind::File => Ok(WalkEntry::File(metadata)),
-                EntryKind::Symlink => Ok(WalkEntry::Link(metadata)),
+                EntryKind::File => Ok(WalkEntry::File(Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &observed,
+                    None,
+                ))),
+                EntryKind::Symlink => Ok(WalkEntry::Link(Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &observed,
+                    None,
+                ))),
                 EntryKind::ReparsePoint => Ok(WalkEntry::Boundary(BoundaryRecord {
                     path: child.path.clone(),
                     kind: BoundaryKind::ReparsePoint,
@@ -651,14 +708,11 @@ mod tests {
     }
 
     fn child_record(parent: &Path, bytes: &[u8]) -> DirectoryEntryRecord {
-        DirectoryEntryRecord {
-            path: parent.join(OsStr::from_bytes(bytes)),
-            file_name: name(bytes),
-        }
+        DirectoryEntryRecord::from_parent_and_name(parent, name(bytes)).unwrap()
     }
 
     #[test]
-    fn admits_real_directory_without_claiming_mount_identity() {
+    fn admits_real_directory_with_mount_identity() {
         let temp = TempDir::new("admit");
         let scanner = MacosPlatformScanner::new();
         let admission = scanner
@@ -674,11 +728,12 @@ mod tests {
         ));
         assert!(admission.metadata.identity.is_some());
         assert!(admission.metadata.filesystem_identity.is_some());
-        assert!(admission.metadata.mount_identity.is_none());
-        assert!(matches!(
-            scanner.is_same_mount(&admission.metadata, &admission.metadata),
-            Err(PlatformError::Unsupported(_))
-        ));
+        assert!(admission.metadata.mount_identity.is_some());
+        assert!(
+            scanner
+                .is_same_mount(&admission.metadata, &admission.metadata)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -866,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_child_reports_directory_and_special_entry_types() {
+    fn inspect_child_reports_directory_mount_and_special_entry_types() {
         let temp = TempDir::new("entry-types");
         let directory = temp.path().join("directory");
         fs::create_dir(&directory).unwrap();
@@ -880,16 +935,25 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            scanner
-                .inspect_child(
-                    &admission.directory,
-                    &child_record(temp.path(), b"directory"),
-                    &CancellationToken::new()
-                )
-                .unwrap(),
-            WalkEntry::Directory(_)
-        ));
+        let directory_entry = scanner
+            .inspect_child(
+                &admission.directory,
+                &child_record(temp.path(), b"directory"),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        match directory_entry {
+            WalkEntry::Directory(OpenedDirectory { metadata, .. }) => {
+                assert!(metadata.mount_identity.is_some());
+                assert_eq!(metadata.mount_identity, admission.metadata.mount_identity);
+                assert!(
+                    scanner
+                        .is_same_mount(&admission.metadata, &metadata)
+                        .unwrap()
+                );
+            }
+            _ => panic!("expected directory entry"),
+        }
         assert!(matches!(
             scanner
                 .inspect_child(

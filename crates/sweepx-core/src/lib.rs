@@ -36,11 +36,11 @@ use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sweepx_platform::{CancellationToken, ScanRoot};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sweepx_scanner::HostPlatformScanner;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sweepx_scanner::{Scanner, ScannerOptions};
 
 pub const CORE_VERSION: &str = "0.1.0";
@@ -499,7 +499,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         return Err(CoreError::MissingRoots);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let roots: Vec<ScanRoot> = normalized_roots
         .iter()
         .map(|path| {
@@ -511,7 +511,7 @@ pub fn scan_with_store<S: SnapshotStore>(
     let started_at = timestamp_now();
     let monotonic = Instant::now();
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let output = unsupported_scan_output(context, &normalized_roots, &ids, &started_at);
         let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
@@ -542,14 +542,14 @@ pub fn scan_with_store<S: SnapshotStore>(
         });
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let scan_id = ScanId::new(format!(
             "scan-{}-{}",
             unix_timestamp_nanos(),
             &digest_hex(ids.operation_id_str())[..12]
         ));
-        let compat = compat_snapshot("linux");
+        let compat = compat_snapshot(host_scan_platform());
         let scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
@@ -578,7 +578,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             "aggregateCount": DecimalU128::new(summary.aggregates.len() as u128),
             "boundaryCount": DecimalU128::new(summary.boundaries.len() as u128),
             "errorCount": DecimalU128::new(scan_error_count(&summary)),
-            "platform": "linux",
+            "platform": host_scan_platform(),
             "mode": "read_only"
         });
         output.data = camelize_json_keys(json!({
@@ -756,8 +756,8 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             &qualification_expires_at,
             OsFamily::Macos,
             "scan.local.directory",
-            CapabilityState::Unsupported,
-            "STUB_COMPILATION_ONLY",
+            CapabilityState::Degraded,
+            "MACOS_SCANNER_DEVELOPMENT",
         ),
         capability_record(
             &recorded_at,
@@ -780,8 +780,8 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
             &qualification_expires_at,
             OsFamily::Macos,
             "scan.tui.live",
-            CapabilityState::Unsupported,
-            "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER",
+            CapabilityState::Degraded,
+            "MACOS_LIVE_TUI_DEVELOPMENT",
         ),
         capability_record(
             &recorded_at,
@@ -2213,7 +2213,7 @@ fn snapshot_state(status: OutputStatus) -> OperationState {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn unsupported_scan_output(
     context: &CoreContext,
     roots: &[PathBuf],
@@ -2251,7 +2251,7 @@ fn unsupported_scan_output(
     output
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn scan_status(summary: &ScanSummary) -> OutputStatus {
     if scan_error_count(summary) > 0 || scan_partial_boundary_count(summary) > 0 {
         OutputStatus::Partial
@@ -2260,7 +2260,7 @@ fn scan_status(summary: &ScanSummary) -> OutputStatus {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn scan_error_count(summary: &ScanSummary) -> u128 {
     summary
         .progress
@@ -2269,7 +2269,7 @@ fn scan_error_count(summary: &ScanSummary) -> u128 {
         .count() as u128
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn scan_partial_boundary_count(summary: &ScanSummary) -> u128 {
     summary
         .boundaries
@@ -2526,6 +2526,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "LINUX_SCANNER_DEVELOPMENT" => {
             "Linux scanning is implemented as a development-grade read-only facade."
         }
+        "MACOS_SCANNER_DEVELOPMENT" => {
+            "macOS scanning is implemented as a development-grade read-only facade."
+        }
         "STUB_COMPILATION_ONLY" => {
             "Platform support is currently limited to stub compilation only."
         }
@@ -2557,6 +2560,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "LINUX_LIVE_TUI_DEVELOPMENT" => {
             "The in-process read-only TUI browses the completed live Linux scan snapshot."
+        }
+        "MACOS_LIVE_TUI_DEVELOPMENT" => {
+            "The in-process read-only TUI browses the completed live macOS scan snapshot."
         }
         "LIVE_TUI_REQUIRES_SUPPORTED_SCANNER" => {
             "The live TUI is unavailable because the host scanner is not implemented."
@@ -2700,6 +2706,11 @@ fn command_name(kind: &OutputKind) -> &'static str {
 
 fn current_os_family() -> &'static str {
     std::env::consts::OS
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn host_scan_platform() -> &'static str {
+    current_os_family()
 }
 
 #[derive(Debug, Clone)]
@@ -3269,6 +3280,47 @@ mod tests {
             first.operation_id.to_string(),
             second.operation_id.to_string()
         );
+    }
+
+    #[test]
+    fn capabilities_report_macos_scan_and_tui_as_degraded() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let output = capabilities(&context).output;
+        let capabilities = output.data["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+
+        let macos_scan = capabilities
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == "macos"
+                    && item["qualificationKey"]["capability"] == "scan.local.directory"
+            })
+            .expect("macos scan capability");
+        assert_eq!(macos_scan["state"], "degraded");
+        assert_eq!(macos_scan["reasonCode"], "MACOS_SCANNER_DEVELOPMENT");
+
+        let macos_tui = capabilities
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == "macos"
+                    && item["qualificationKey"]["capability"] == "scan.tui.live"
+            })
+            .expect("macos tui capability");
+        assert_eq!(macos_tui["state"], "degraded");
+        assert_eq!(macos_tui["reasonCode"], "MACOS_LIVE_TUI_DEVELOPMENT");
+
+        let windows_scan = capabilities
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == "windows"
+                    && item["qualificationKey"]["capability"] == "scan.local.directory"
+            })
+            .expect("windows scan capability");
+        assert_eq!(windows_scan["state"], "unsupported");
     }
 
     #[test]
