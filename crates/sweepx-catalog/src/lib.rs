@@ -1,12 +1,16 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
+use semver::{Version, VersionReq};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Deserializer;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use sweepx_cleaner_schema::{
-    CLEANER_MANIFEST_SCHEMA, CleanerManifest, CleanerRule, CleanerSignatureEnvelope,
-    PackageDigestEntry, ValidationError, canonical_signature_payload, compute_package_digest,
+    CLEANER_MANIFEST_SCHEMA, CleanerManifest, CleanerRevocationTarget, CleanerRule,
+    CleanerSignatureEnvelope, CleanerTrustSnapshot, PackageDigestEntry, TrustKeyUsage,
+    TrustedPublisherKey, ValidationError, canonical_signature_payload,
+    canonical_trust_snapshot_payload, compute_package_digest,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -16,14 +20,13 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_BUILTIN_PACKAGE_FILES: usize = 4_096;
 const MAX_BUILTIN_SINGLE_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUILTIN_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
+const TRUST_SNAPSHOT_MAX_AGE: time::Duration = time::Duration::days(7);
+const TRUST_SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"SweepX cleaner trust snapshot digest v1\0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BuiltInCleaner {
-    pub package_dir: &'static str,
-    pub manifest_bytes: &'static [u8],
-    pub signature_bytes: &'static [u8],
-    pub rule_files: &'static [(&'static str, &'static [u8])],
-    pub evidence_files: &'static [(&'static str, &'static [u8])],
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustRootAnchor {
+    pub key_id: String,
+    pub public_key_b64u: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +47,15 @@ const BUILTIN_TRUST_STORE: &[TrustedKey] = &[TrustedKey {
     valid_until: "2027-08-27T00:00:00Z",
     revoked: false,
 }];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltInCleaner {
+    pub package_dir: &'static str,
+    pub manifest_bytes: &'static [u8],
+    pub signature_bytes: &'static [u8],
+    pub rule_files: &'static [(&'static str, &'static [u8])],
+    pub evidence_files: &'static [(&'static str, &'static [u8])],
+}
 
 pub const CARGO_TARGET: BuiltInCleaner = BuiltInCleaner {
     package_dir: "org.sweepx.cargo-target",
@@ -88,6 +100,380 @@ pub struct LoadedCleanerPackage {
     pub manifest: CleanerManifest,
     pub signature: CleanerSignatureEnvelope,
     pub rules: Vec<(String, CleanerRule)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustFreshness {
+    Current,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageTrustDisposition {
+    Trusted,
+    ReportOnly,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTrustDecision {
+    pub epoch: u64,
+    pub snapshot_digest: String,
+    pub freshness: TrustFreshness,
+    pub disposition: PackageTrustDisposition,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedTrustSnapshot {
+    snapshot: CleanerTrustSnapshot,
+    digest: String,
+    freshness: TrustFreshness,
+}
+
+impl VerifiedTrustSnapshot {
+    pub fn epoch(&self) -> u64 {
+        self.snapshot.epoch
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn freshness(&self) -> TrustFreshness {
+        self.freshness
+    }
+
+    fn publisher_key(&self, key_id: &str) -> Option<&TrustedPublisherKey> {
+        self.snapshot.keys.iter().find(|key| key.key_id == key_id)
+    }
+}
+
+pub fn verify_trust_snapshot(
+    snapshot_bytes: &[u8],
+    root_keys: &[TrustRootAnchor],
+    now: OffsetDateTime,
+    history: &mut TrustHistory,
+) -> Result<VerifiedTrustSnapshot, CatalogError> {
+    reject_duplicate_keys_and_trailing_bytes(snapshot_bytes)?;
+    let snapshot: CleanerTrustSnapshot =
+        deserialize_rejecting_unknown_fields(snapshot_bytes, "trust-snapshot.json")?;
+    snapshot
+        .validate()
+        .map_err(CatalogError::InvalidTrustSnapshot)?;
+
+    let generated_at = parse_trust_time(&snapshot.generated_at)?;
+    let expires_at = parse_trust_time(&snapshot.expires_at)?;
+    if generated_at > now {
+        return Err(CatalogError::TrustSnapshotFromFuture);
+    }
+    if generated_at >= expires_at {
+        return Err(CatalogError::InvalidTrustSnapshotTimeOrder);
+    }
+    if now >= expires_at {
+        return Err(CatalogError::TrustSnapshotExpired);
+    }
+    for key in &snapshot.keys {
+        let valid_from = parse_trust_time(&key.valid_from)?;
+        let valid_until = parse_trust_time(&key.valid_until)?;
+        if valid_from >= valid_until {
+            return Err(CatalogError::InvalidTrustedKeyWindow {
+                key_id: key.key_id.clone(),
+            });
+        }
+    }
+    for revocation in &snapshot.revocations {
+        if parse_trust_time(&revocation.revoked_at)? > generated_at {
+            return Err(CatalogError::RevocationFromFuture);
+        }
+    }
+
+    let root = root_keys
+        .iter()
+        .find(|root| root.key_id == snapshot.root_key_id)
+        .ok_or_else(|| CatalogError::UnknownTrustRoot(snapshot.root_key_id.clone()))?;
+    verify_ed25519(
+        &root.public_key_b64u,
+        &canonical_trust_snapshot_payload(&snapshot).map_err(CatalogError::InvalidTrustSnapshot)?,
+        &snapshot.signature,
+    )
+    .map_err(|_| CatalogError::TrustSnapshotSignatureVerificationFailed)?;
+
+    let payload =
+        canonical_trust_snapshot_payload(&snapshot).map_err(CatalogError::InvalidTrustSnapshot)?;
+    let mut hasher = Sha256::new();
+    hasher.update(TRUST_SNAPSHOT_DIGEST_DOMAIN);
+    hasher.update(payload);
+    let freshness = if now - generated_at <= TRUST_SNAPSHOT_MAX_AGE {
+        TrustFreshness::Current
+    } else {
+        TrustFreshness::Stale
+    };
+    let verified = VerifiedTrustSnapshot {
+        snapshot,
+        digest: format!("sha256:{:x}", hasher.finalize()),
+        freshness,
+    };
+    history.check_snapshot(&verified)?;
+    history.record_snapshot(&verified);
+    Ok(verified)
+}
+
+pub fn evaluate_package_trust(
+    manifest: &CleanerManifest,
+    signature: &CleanerSignatureEnvelope,
+    file_table: &[PackageDigestEntry],
+    trust: &VerifiedTrustSnapshot,
+    now: OffsetDateTime,
+    history: &mut TrustHistory,
+) -> Result<PackageTrustDecision, CatalogError> {
+    history.check_snapshot(trust)?;
+    history.check_package(manifest)?;
+    let trusted =
+        trust
+            .publisher_key(&signature.key_id)
+            .ok_or_else(|| CatalogError::UnknownKey {
+                key_id: signature.key_id.clone(),
+            })?;
+    verify_package_signature(manifest, signature, file_table, trusted, now)?;
+    enforce_revocations(manifest, trusted, trust)?;
+
+    let disposition = package_disposition(manifest, trusted, trust.freshness)?;
+
+    history.record_snapshot(trust);
+    history.record_package(manifest)?;
+    Ok(PackageTrustDecision {
+        epoch: trust.epoch(),
+        snapshot_digest: trust.digest().to_owned(),
+        freshness: trust.freshness(),
+        disposition,
+    })
+}
+
+fn package_disposition(
+    manifest: &CleanerManifest,
+    trusted: &TrustedPublisherKey,
+    freshness: TrustFreshness,
+) -> Result<PackageTrustDisposition, CatalogError> {
+    let has_native_probe = !manifest.probes.is_empty();
+    let has_official_command = !manifest.official_commands.is_empty();
+    if !trusted.usages.contains(&TrustKeyUsage::DeclarativePackage) {
+        return Err(CatalogError::KeyUsageDenied("declarative_package"));
+    }
+    if has_native_probe && !trusted.usages.contains(&TrustKeyUsage::NativeProbe) {
+        return Err(CatalogError::KeyUsageDenied("native_probe"));
+    }
+    if has_official_command && !trusted.usages.contains(&TrustKeyUsage::OfficialCommand) {
+        return Err(CatalogError::KeyUsageDenied("official_command"));
+    }
+    let disposition = if freshness == TrustFreshness::Current {
+        PackageTrustDisposition::Trusted
+    } else if has_native_probe || has_official_command {
+        PackageTrustDisposition::Disabled
+    } else {
+        PackageTrustDisposition::ReportOnly
+    };
+
+    Ok(disposition)
+}
+
+fn enforce_revocations(
+    manifest: &CleanerManifest,
+    key: &TrustedPublisherKey,
+    trust: &VerifiedTrustSnapshot,
+) -> Result<(), CatalogError> {
+    let version = Version::parse(&manifest.version)
+        .map_err(|_| CatalogError::InvalidPackageVersion(manifest.version.clone()))?;
+    let probe_digests = manifest
+        .probes
+        .iter()
+        .flat_map(|probe| probe.artifacts.iter())
+        .map(|artifact| format!("sha256:{}", artifact.sha256))
+        .collect::<BTreeSet<_>>();
+    for revocation in &trust.snapshot.revocations {
+        let matches = match &revocation.target {
+            CleanerRevocationTarget::PublisherKey {
+                publisher_id,
+                key_id,
+            } => publisher_id == &key.publisher_id && key_id == &key.key_id,
+            CleanerRevocationTarget::PackageDigest { package_digest } => {
+                package_digest == &manifest.package_digest
+            }
+            CleanerRevocationTarget::PackageVersion {
+                publisher_id,
+                package_id,
+                version_req,
+            } => {
+                publisher_id == &manifest.publisher.id
+                    && package_id == &manifest.id
+                    && VersionReq::parse(version_req)
+                        .map_err(|_| {
+                            CatalogError::InvalidRevocationVersionReq(version_req.clone())
+                        })?
+                        .matches(&version)
+            }
+            CleanerRevocationTarget::ProbeDigest { probe_digest } => {
+                probe_digests.contains(probe_digest)
+            }
+        };
+        if matches {
+            return Err(CatalogError::RevokedPackage {
+                reason: revocation.reason.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustHistory {
+    highest_epoch: Option<u64>,
+    snapshot_digest: Option<String>,
+    package_digests: BTreeMap<(String, semver::Version), String>,
+    highest_versions: BTreeMap<String, semver::Version>,
+    package_publishers: BTreeMap<String, String>,
+}
+
+impl TrustHistory {
+    pub fn highest_epoch(&self) -> Option<u64> {
+        self.highest_epoch
+    }
+
+    /// Applies the monotonic package identity rules to a previously authenticated package.
+    /// The caller must invoke this only after package digest and signature verification.
+    pub fn observe_package_identity(
+        &mut self,
+        publisher_id: &str,
+        package_id: &str,
+        package_version: &str,
+        package_digest: &str,
+    ) -> Result<(), CatalogError> {
+        let manifest = PackageHistoryIdentity {
+            publisher_id,
+            package_id,
+            package_version,
+            package_digest,
+        };
+        self.check_package_identity(&manifest)?;
+        self.record_package_identity(&manifest)
+    }
+
+    fn check_snapshot(&self, snapshot: &VerifiedTrustSnapshot) -> Result<(), CatalogError> {
+        if let Some(highest_epoch) = self.highest_epoch {
+            if snapshot.epoch() < highest_epoch {
+                return Err(CatalogError::TrustSnapshotRollback {
+                    highest_epoch,
+                    candidate_epoch: snapshot.epoch(),
+                });
+            }
+            if snapshot.epoch() == highest_epoch
+                && self.snapshot_digest.as_deref() != Some(snapshot.digest())
+            {
+                return Err(CatalogError::TrustSnapshotEpochCollision {
+                    epoch: snapshot.epoch(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn record_snapshot(&mut self, snapshot: &VerifiedTrustSnapshot) {
+        if self
+            .highest_epoch
+            .is_none_or(|epoch| snapshot.epoch() >= epoch)
+        {
+            self.highest_epoch = Some(snapshot.epoch());
+            self.snapshot_digest = Some(snapshot.digest().to_owned());
+        }
+    }
+
+    fn check_package(&self, manifest: &CleanerManifest) -> Result<(), CatalogError> {
+        self.check_package_identity(&PackageHistoryIdentity {
+            publisher_id: &manifest.publisher.id,
+            package_id: &manifest.id,
+            package_version: &manifest.version,
+            package_digest: &manifest.package_digest,
+        })
+    }
+
+    fn check_package_identity(
+        &self,
+        identity: &PackageHistoryIdentity<'_>,
+    ) -> Result<(), CatalogError> {
+        if let Some(known_publisher) = self.package_publishers.get(identity.package_id)
+            && known_publisher != identity.publisher_id
+        {
+            return Err(CatalogError::PackagePublisherSubstitution {
+                package_id: identity.package_id.into(),
+                known_publisher: known_publisher.clone(),
+                candidate_publisher: identity.publisher_id.into(),
+            });
+        }
+        let version = Version::parse(identity.package_version)
+            .map_err(|_| CatalogError::InvalidPackageVersion(identity.package_version.into()))?;
+        if let Some(highest) = self.highest_versions.get(identity.package_id)
+            && &version < highest
+        {
+            return Err(CatalogError::PackageVersionRollback {
+                publisher_id: identity.publisher_id.into(),
+                package_id: identity.package_id.into(),
+                highest_version: highest.to_string(),
+                candidate_version: version.to_string(),
+            });
+        }
+        let version_key = (identity.package_id.into(), version);
+        if let Some(known_digest) = self.package_digests.get(&version_key)
+            && known_digest != identity.package_digest
+        {
+            return Err(CatalogError::SameVersionDigestCollision {
+                publisher_id: identity.publisher_id.into(),
+                package_id: identity.package_id.into(),
+                version: identity.package_version.into(),
+                known_digest: known_digest.clone(),
+                candidate_digest: identity.package_digest.into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn record_package(&mut self, manifest: &CleanerManifest) -> Result<(), CatalogError> {
+        self.record_package_identity(&PackageHistoryIdentity {
+            publisher_id: &manifest.publisher.id,
+            package_id: &manifest.id,
+            package_version: &manifest.version,
+            package_digest: &manifest.package_digest,
+        })
+    }
+
+    fn record_package_identity(
+        &mut self,
+        identity: &PackageHistoryIdentity<'_>,
+    ) -> Result<(), CatalogError> {
+        let version = Version::parse(identity.package_version)
+            .map_err(|_| CatalogError::InvalidPackageVersion(identity.package_version.into()))?;
+        self.highest_versions
+            .entry(identity.package_id.into())
+            .and_modify(|highest| {
+                if version > *highest {
+                    *highest = version.clone();
+                }
+            })
+            .or_insert_with(|| version.clone());
+        self.package_publishers
+            .entry(identity.package_id.into())
+            .or_insert_with(|| identity.publisher_id.into());
+        self.package_digests.insert(
+            (identity.package_id.into(), version),
+            identity.package_digest.into(),
+        );
+        Ok(())
+    }
+}
+
+struct PackageHistoryIdentity<'a> {
+    publisher_id: &'a str,
+    package_id: &'a str,
+    package_version: &'a str,
+    package_digest: &'a str,
 }
 
 impl BuiltInCleaner {
@@ -320,6 +706,147 @@ fn verify_signature_with_store(
     public_key
         .verify_strict(&payload, &ed25519_signature)
         .map_err(|_| CatalogError::SignatureVerificationFailed)
+}
+
+fn verify_package_signature(
+    manifest: &CleanerManifest,
+    signature: &CleanerSignatureEnvelope,
+    file_table: &[PackageDigestEntry],
+    trusted: &TrustedPublisherKey,
+    now: OffsetDateTime,
+) -> Result<(), CatalogError> {
+    if trusted.publisher_id != signature.publisher_id {
+        return Err(CatalogError::KeyPublisherMismatch {
+            key_id: trusted.key_id.clone(),
+        });
+    }
+    verify_signature_bindings_and_times(
+        manifest,
+        signature,
+        file_table,
+        &trusted.key_id,
+        &trusted.publisher_id,
+        &trusted.public_key_b64u,
+        &trusted.valid_from,
+        &trusted.valid_until,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_signature_bindings_and_times(
+    manifest: &CleanerManifest,
+    signature: &CleanerSignatureEnvelope,
+    file_table: &[PackageDigestEntry],
+    key_id: &str,
+    publisher_id: &str,
+    public_key_b64u: &str,
+    valid_from: &str,
+    valid_until: &str,
+    now: OffsetDateTime,
+) -> Result<(), CatalogError> {
+    if publisher_id != signature.publisher_id {
+        return Err(CatalogError::KeyPublisherMismatch {
+            key_id: key_id.to_owned(),
+        });
+    }
+    if signature.publisher_id != manifest.publisher.id
+        || signature.key_id != manifest.publisher.key_id
+        || signature.package_id != manifest.id
+        || signature.package_version != manifest.version
+        || signature.manifest_schema != CLEANER_MANIFEST_SCHEMA
+    {
+        return Err(CatalogError::SignatureBindingMismatch(
+            "signature does not bind the exact manifest tuple".into(),
+        ));
+    }
+    let actual_package_digest =
+        compute_package_digest(file_table).map_err(CatalogError::InvalidSignatureStatement)?;
+    if signature.package_digest != actual_package_digest
+        || manifest.package_digest != actual_package_digest
+    {
+        return Err(CatalogError::PackageDigestMismatch {
+            expected: manifest.package_digest.clone(),
+            actual: actual_package_digest,
+        });
+    }
+    let signed_at = parse_signature_time(&signature.signed_at)?;
+    let manifest_expires_at = parse_signature_time(&manifest.expires_at)?;
+    if signed_at > now {
+        return Err(CatalogError::SignatureFromFuture {
+            signed_at: signature.signed_at.clone(),
+        });
+    }
+    if manifest_expires_at <= now {
+        return Err(CatalogError::ManifestExpired {
+            expires_at: manifest.expires_at.clone(),
+        });
+    }
+    if signed_at >= manifest_expires_at {
+        return Err(CatalogError::InvalidSignatureTimeOrder);
+    }
+    let key_valid_from = parse_signature_time(valid_from)?;
+    let key_valid_until = parse_signature_time(valid_until)?;
+    if signed_at < key_valid_from || signed_at >= key_valid_until {
+        return Err(CatalogError::SignatureOutsideKeyValidity {
+            key_id: key_id.to_owned(),
+        });
+    }
+    if let Some(expires_at_value) = &signature.expires_at {
+        let expires_at = parse_signature_time(expires_at_value)?;
+        if signed_at >= expires_at {
+            return Err(CatalogError::InvalidSignatureTimeOrder);
+        }
+        if expires_at <= now {
+            return Err(CatalogError::SignatureExpired {
+                expires_at: expires_at_value.clone(),
+            });
+        }
+    }
+    let payload =
+        canonical_signature_payload(signature).map_err(CatalogError::InvalidSignatureStatement)?;
+    verify_ed25519(public_key_b64u, &payload, &signature.signature)
+}
+
+fn verify_ed25519(
+    public_key_b64u: &str,
+    payload: &[u8],
+    signature: &str,
+) -> Result<(), CatalogError> {
+    let public_key_bytes = URL_SAFE_NO_PAD
+        .decode(public_key_b64u)
+        .map_err(|_| CatalogError::InvalidSignatureBytes)?;
+    let public_key = VerifyingKey::from_bytes(
+        public_key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CatalogError::InvalidSignatureBytes)?,
+    )
+    .map_err(|_| CatalogError::InvalidSignatureBytes)?;
+    if public_key.is_weak() {
+        return Err(CatalogError::InvalidSignatureBytes);
+    }
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| CatalogError::InvalidSignatureBytes)?;
+    let signature =
+        Signature::from_slice(&signature_bytes).map_err(|_| CatalogError::InvalidSignatureBytes)?;
+    public_key
+        .verify_strict(payload, &signature)
+        .map_err(|_| CatalogError::SignatureVerificationFailed)
+}
+
+fn parse_signature_time(value: &str) -> Result<OffsetDateTime, CatalogError> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
+        CatalogError::InvalidSignatureStatement(ValidationError::UnsupportedFeature(
+            "invalid RFC 3339 timestamp".into(),
+        ))
+    })
+}
+
+fn parse_trust_time(value: &str) -> Result<OffsetDateTime, CatalogError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| CatalogError::InvalidTrustSnapshotTime(value.to_owned()))
 }
 
 fn build_file_table(
@@ -728,6 +1255,66 @@ pub enum CatalogError {
     SignatureBindingMismatch(String),
     #[error("signature verification failed")]
     SignatureVerificationFailed,
+    #[error("trust snapshot validation failed: {0}")]
+    InvalidTrustSnapshot(ValidationError),
+    #[error("invalid trust snapshot timestamp: {0}")]
+    InvalidTrustSnapshotTime(String),
+    #[error("unknown trust root: {0}")]
+    UnknownTrustRoot(String),
+    #[error("trust snapshot signature verification failed")]
+    TrustSnapshotSignatureVerificationFailed,
+    #[error("trust snapshot was generated in the future")]
+    TrustSnapshotFromFuture,
+    #[error("trust snapshot generatedAt must be earlier than expiresAt")]
+    InvalidTrustSnapshotTimeOrder,
+    #[error("trust snapshot is expired")]
+    TrustSnapshotExpired,
+    #[error("invalid trust window for publisher key {key_id}")]
+    InvalidTrustedKeyWindow { key_id: String },
+    #[error("revocation timestamp is later than trust snapshot generation")]
+    RevocationFromFuture,
+    #[error("trust snapshot epoch rollback: highest {highest_epoch}, candidate {candidate_epoch}")]
+    TrustSnapshotRollback {
+        highest_epoch: u64,
+        candidate_epoch: u64,
+    },
+    #[error("trust snapshot epoch {epoch} was reused with different content")]
+    TrustSnapshotEpochCollision { epoch: u64 },
+    #[error("invalid Cleaner package version: {0}")]
+    InvalidPackageVersion(String),
+    #[error("invalid revoked package version requirement: {0}")]
+    InvalidRevocationVersionReq(String),
+    #[error("Cleaner package is revoked: {reason}")]
+    RevokedPackage { reason: String },
+    #[error("publisher key does not allow {0}")]
+    KeyUsageDenied(&'static str),
+    #[error(
+        "package version rollback for {publisher_id}/{package_id}: highest {highest_version}, candidate {candidate_version}"
+    )]
+    PackageVersionRollback {
+        publisher_id: String,
+        package_id: String,
+        highest_version: String,
+        candidate_version: String,
+    },
+    #[error(
+        "same package ID/version has a different digest: {publisher_id}/{package_id}@{version}"
+    )]
+    SameVersionDigestCollision {
+        publisher_id: String,
+        package_id: String,
+        version: String,
+        known_digest: String,
+        candidate_digest: String,
+    },
+    #[error(
+        "package publisher substitution for {package_id}: expected {known_publisher}, got {candidate_publisher}"
+    )]
+    PackagePublisherSubstitution {
+        package_id: String,
+        known_publisher: String,
+        candidate_publisher: String,
+    },
 }
 
 fn verify_signature(
@@ -746,9 +1333,371 @@ fn verify_signature(
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use ed25519_dalek::{Signer, SigningKey};
     use serde_json::{Value, from_slice, to_vec};
 
     use super::*;
+    use sweepx_cleaner_schema::CleanerRevocation;
+
+    const TEST_ROOT_SEED: [u8; 32] = [7; 32];
+
+    fn trust_time(value: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(value, &Rfc3339).unwrap()
+    }
+
+    fn signed_trust_snapshot(
+        epoch: u64,
+        generated_at: &str,
+        expires_at: &str,
+        revocations: Vec<CleanerRevocation>,
+    ) -> (Vec<u8>, TrustRootAnchor) {
+        let root = SigningKey::from_bytes(&TEST_ROOT_SEED);
+        let package_key = BUILTIN_TRUST_STORE[0];
+        let mut snapshot = CleanerTrustSnapshot {
+            schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
+            epoch,
+            generated_at: generated_at.into(),
+            expires_at: expires_at.into(),
+            root_key_id: "test-root".into(),
+            algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
+            keys: vec![TrustedPublisherKey {
+                key_id: package_key.key_id.into(),
+                publisher_id: package_key.publisher_id.into(),
+                public_key_b64u: package_key.public_key_b64u.into(),
+                usages: vec![TrustKeyUsage::DeclarativePackage],
+                valid_from: package_key.valid_from.into(),
+                valid_until: package_key.valid_until.into(),
+            }],
+            revocations,
+            signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
+        };
+        let payload = canonical_trust_snapshot_payload(&snapshot).unwrap();
+        snapshot.signature = URL_SAFE_NO_PAD.encode(root.sign(&payload).to_bytes());
+        let anchor = TrustRootAnchor {
+            key_id: "test-root".into(),
+            public_key_b64u: URL_SAFE_NO_PAD.encode(root.verifying_key().as_bytes()),
+        };
+        (serde_json::to_vec(&snapshot).unwrap(), anchor)
+    }
+
+    #[test]
+    fn trust_snapshot_signature_and_freshness_are_verified() {
+        let (bytes, root) =
+            signed_trust_snapshot(1, "2026-08-20T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
+        let mut history = TrustHistory::default();
+        let current = verify_trust_snapshot(
+            &bytes,
+            std::slice::from_ref(&root),
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(current.freshness(), TrustFreshness::Current);
+        assert_eq!(history.highest_epoch(), Some(1));
+
+        let (stale_bytes, _) =
+            signed_trust_snapshot(2, "2026-08-19T23:59:59Z", "2026-09-20T00:00:00Z", vec![]);
+        let stale = verify_trust_snapshot(
+            &stale_bytes,
+            &[root],
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(stale.freshness(), TrustFreshness::Stale);
+    }
+
+    #[test]
+    fn verified_snapshot_drives_package_signature_and_stale_declarative_policy() {
+        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
+        let signature: CleanerSignatureEnvelope = from_slice(CARGO_TARGET.signature_bytes).unwrap();
+        let (bytes, root) =
+            signed_trust_snapshot(1, "2026-08-20T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
+        let mut history = TrustHistory::default();
+        let trust = verify_trust_snapshot(
+            &bytes,
+            &[root],
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        let decision = evaluate_package_trust(
+            &manifest,
+            &signature,
+            &file_table,
+            &trust,
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(decision.disposition, PackageTrustDisposition::Trusted);
+
+        let (stale_bytes, stale_root) =
+            signed_trust_snapshot(2, "2026-08-19T23:59:59Z", "2026-09-20T00:00:00Z", vec![]);
+        let stale = verify_trust_snapshot(
+            &stale_bytes,
+            &[stale_root],
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        let decision = evaluate_package_trust(
+            &manifest,
+            &signature,
+            &file_table,
+            &stale,
+            trust_time("2026-08-27T00:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+        assert_eq!(decision.disposition, PackageTrustDisposition::ReportOnly);
+    }
+
+    #[test]
+    fn every_revocation_target_matches_its_exact_subject() {
+        let (manifest, _) = built_in_manifest_and_table(&CARGO_TARGET);
+        let key = TrustedPublisherKey {
+            key_id: manifest.publisher.key_id.clone(),
+            publisher_id: manifest.publisher.id.clone(),
+            public_key_b64u: BUILTIN_TRUST_STORE[0].public_key_b64u.into(),
+            usages: vec![TrustKeyUsage::DeclarativePackage],
+            valid_from: BUILTIN_TRUST_STORE[0].valid_from.into(),
+            valid_until: BUILTIN_TRUST_STORE[0].valid_until.into(),
+        };
+        let targets = [
+            CleanerRevocationTarget::PublisherKey {
+                publisher_id: manifest.publisher.id.clone(),
+                key_id: manifest.publisher.key_id.clone(),
+            },
+            CleanerRevocationTarget::PackageDigest {
+                package_digest: manifest.package_digest.clone(),
+            },
+            CleanerRevocationTarget::PackageVersion {
+                publisher_id: manifest.publisher.id.clone(),
+                package_id: manifest.id.clone(),
+                version_req: format!("={}", manifest.version),
+            },
+        ];
+        for target in targets {
+            let snapshot = VerifiedTrustSnapshot {
+                snapshot: CleanerTrustSnapshot {
+                    schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
+                    epoch: 1,
+                    generated_at: "2026-08-27T00:00:00Z".into(),
+                    expires_at: "2026-09-27T00:00:00Z".into(),
+                    root_key_id: "root".into(),
+                    algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
+                    keys: vec![key.clone()],
+                    revocations: vec![CleanerRevocation {
+                        revoked_at: "2026-08-27T00:00:00Z".into(),
+                        reason: "test revocation".into(),
+                        target,
+                    }],
+                    signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
+                },
+                digest: "sha256:test".into(),
+                freshness: TrustFreshness::Current,
+            };
+            assert!(matches!(
+                enforce_revocations(&manifest, &key, &snapshot),
+                Err(CatalogError::RevokedPackage { .. })
+            ));
+        }
+
+        let mut probe_manifest = manifest.clone();
+        probe_manifest
+            .probes
+            .push(sweepx_cleaner_schema::NativeProbeDescriptor {
+                schema: "sweepx.native-probe/v1".into(),
+                id: "probe".into(),
+                abi_version: 1,
+                artifacts: vec![sweepx_cleaner_schema::ProbeArtifact {
+                    os: sweepx_cleaner_schema::Os::Linux,
+                    arch: sweepx_cleaner_schema::Arch::X86_64,
+                    min_os: None,
+                    max_tested_os: None,
+                    package_relative_path: "probes/helper".into(),
+                    sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .into(),
+                }],
+                input_schema: "in/v1".into(),
+                output_schema: "out/v1".into(),
+                capabilities: vec![],
+                sandbox_profile: "strict".into(),
+                network: sweepx_cleaner_schema::DenyPolicy::Deny,
+                filesystem_read_scopes: vec![],
+                cpu_millis: 1,
+                rss_bytes: 1,
+                handle_count: 1,
+                timeout_millis: 1,
+                stdout_bytes: 1,
+                stderr_bytes: 1,
+            });
+        let snapshot = VerifiedTrustSnapshot {
+            snapshot: CleanerTrustSnapshot {
+                schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
+                epoch: 1,
+                generated_at: "2026-08-27T00:00:00Z".into(),
+                expires_at: "2026-09-27T00:00:00Z".into(),
+                root_key_id: "root".into(),
+                algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
+                keys: vec![key.clone()],
+                revocations: vec![CleanerRevocation {
+                    revoked_at: "2026-08-27T00:00:00Z".into(),
+                    reason: "probe revoked".into(),
+                    target: CleanerRevocationTarget::ProbeDigest {
+                        probe_digest:
+                            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                                .into(),
+                    },
+                }],
+                signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
+            },
+            digest: "sha256:test".into(),
+            freshness: TrustFreshness::Current,
+        };
+        assert!(matches!(
+            enforce_revocations(&probe_manifest, &key, &snapshot),
+            Err(CatalogError::RevokedPackage { .. })
+        ));
+    }
+
+    #[test]
+    fn trust_snapshot_tamper_epoch_rollback_and_epoch_reuse_fail_closed() {
+        let (bytes, root) =
+            signed_trust_snapshot(5, "2026-08-27T00:00:00Z", "2026-09-27T00:00:00Z", vec![]);
+        let mut history = TrustHistory::default();
+        verify_trust_snapshot(
+            &bytes,
+            std::slice::from_ref(&root),
+            trust_time("2026-08-27T12:00:00Z"),
+            &mut history,
+        )
+        .unwrap();
+
+        let (rollback, _) =
+            signed_trust_snapshot(4, "2026-08-27T00:00:00Z", "2026-09-27T00:00:00Z", vec![]);
+        assert!(matches!(
+            verify_trust_snapshot(
+                &rollback,
+                std::slice::from_ref(&root),
+                trust_time("2026-08-27T12:00:00Z"),
+                &mut history
+            ),
+            Err(CatalogError::TrustSnapshotRollback { .. })
+        ));
+
+        let revocation = CleanerRevocation {
+            revoked_at: "2026-08-27T00:00:00Z".into(),
+            reason: "test".into(),
+            target: CleanerRevocationTarget::PackageDigest {
+                package_digest:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            },
+        };
+        let (reused, _) = signed_trust_snapshot(
+            5,
+            "2026-08-27T00:00:00Z",
+            "2026-09-27T00:00:00Z",
+            vec![revocation],
+        );
+        assert!(matches!(
+            verify_trust_snapshot(
+                &reused,
+                &[root],
+                trust_time("2026-08-27T12:00:00Z"),
+                &mut history
+            ),
+            Err(CatalogError::TrustSnapshotEpochCollision { epoch: 5 })
+        ));
+
+        let mut tampered: Value = from_slice(&bytes).unwrap();
+        tampered["generatedAt"] = Value::String("2026-08-26T00:00:00Z".into());
+        let mut fresh_history = TrustHistory::default();
+        assert!(matches!(
+            verify_trust_snapshot(
+                &to_vec(&tampered).unwrap(),
+                &[TrustRootAnchor {
+                    key_id: "test-root".into(),
+                    public_key_b64u: URL_SAFE_NO_PAD.encode(
+                        SigningKey::from_bytes(&TEST_ROOT_SEED)
+                            .verifying_key()
+                            .as_bytes()
+                    ),
+                }],
+                trust_time("2026-08-27T12:00:00Z"),
+                &mut fresh_history
+            ),
+            Err(CatalogError::TrustSnapshotSignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn package_history_rejects_same_version_substitution_and_rollback() {
+        let mut history = TrustHistory::default();
+        let first = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let other = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        history
+            .observe_package_identity("org.sweepx", "org.sweepx.test", "2.0.0", first)
+            .unwrap();
+        assert!(matches!(
+            history.observe_package_identity("org.sweepx", "org.sweepx.test", "2.0.0", other),
+            Err(CatalogError::SameVersionDigestCollision { .. })
+        ));
+        assert!(matches!(
+            history.observe_package_identity("org.sweepx", "org.sweepx.test", "1.9.9", first),
+            Err(CatalogError::PackageVersionRollback { .. })
+        ));
+        assert!(matches!(
+            history.observe_package_identity("other.publisher", "org.sweepx.test", "3.0.0", first),
+            Err(CatalogError::PackagePublisherSubstitution { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_policy_is_report_only_for_declarative_and_disabled_for_executable_payloads() {
+        let mut manifest = built_in_manifest_and_table(&CARGO_TARGET).0;
+        let key = TrustedPublisherKey {
+            key_id: "key".into(),
+            publisher_id: "org.sweepx".into(),
+            public_key_b64u: URL_SAFE_NO_PAD.encode([9_u8; 32]),
+            usages: vec![
+                TrustKeyUsage::DeclarativePackage,
+                TrustKeyUsage::NativeProbe,
+            ],
+            valid_from: "2026-01-01T00:00:00Z".into(),
+            valid_until: "2027-01-01T00:00:00Z".into(),
+        };
+        assert_eq!(
+            package_disposition(&manifest, &key, TrustFreshness::Stale).unwrap(),
+            PackageTrustDisposition::ReportOnly
+        );
+        manifest
+            .probes
+            .push(sweepx_cleaner_schema::NativeProbeDescriptor {
+                schema: "sweepx.native-probe/v1".into(),
+                id: "probe".into(),
+                abi_version: 1,
+                artifacts: vec![],
+                input_schema: "in/v1".into(),
+                output_schema: "out/v1".into(),
+                capabilities: vec![],
+                sandbox_profile: "strict".into(),
+                network: sweepx_cleaner_schema::DenyPolicy::Deny,
+                filesystem_read_scopes: vec![],
+                cpu_millis: 1,
+                rss_bytes: 1,
+                handle_count: 1,
+                timeout_millis: 1,
+                stdout_bytes: 1,
+                stderr_bytes: 1,
+            });
+        assert_eq!(
+            package_disposition(&manifest, &key, TrustFreshness::Stale).unwrap(),
+            PackageTrustDisposition::Disabled
+        );
+    }
 
     #[test]
     fn built_ins_load_and_validate() {

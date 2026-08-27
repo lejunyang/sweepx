@@ -1297,6 +1297,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "semver",
  "serde",
  "serde_ignored",
  "serde_json",
@@ -1470,8 +1471,10 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sweepx-analysis",
  "sweepx-audit",
  "sweepx-canonical",
+ "sweepx-model",
  "tempfile",
  "thiserror",
 ]

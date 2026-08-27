@@ -13,10 +13,12 @@ pub const CLEANER_MANIFEST_SCHEMA: &str = "sweepx.cleaner-manifest/v1";
 pub const CLEANER_RULE_SCHEMA: &str = "sweepx.cleaner-rule/v1";
 pub const CLEANER_EVIDENCE_SCHEMA: &str = "sweepx.cleaner-evidence/v1";
 pub const CLEANER_SIGNATURE_SCHEMA: &str = "sweepx.cleaner-signature/v1";
+pub const CLEANER_TRUST_SNAPSHOT_SCHEMA: &str = "sweepx.cleaner-trust-snapshot/v1";
 pub const MAX_AST_DEPTH: usize = 32;
 pub const MAX_AST_NODES: usize = 1024;
 pub const PACKAGE_DIGEST_DOMAIN: &[u8] = b"SweepX cleaner package v1\0";
 pub const PACKAGE_SIGNATURE_DOMAIN: &[u8] = b"SweepX cleaner signature v1\0";
+pub const TRUST_SNAPSHOT_SIGNATURE_DOMAIN: &[u8] = b"SweepX cleaner trust snapshot v1\0";
 const PLACEHOLDER_DIGESTS: [&str; 16] = [
     "0000000000000000000000000000000000000000000000000000000000000000",
     "1111111111111111111111111111111111111111111111111111111111111111",
@@ -91,6 +93,79 @@ pub struct CleanerSignatureEnvelope {
 #[serde(rename_all = "snake_case")]
 pub enum SignatureAlgorithm {
     Ed25519,
+}
+
+/// A root-signed, versioned view of Cleaner publisher trust and revocations.
+///
+/// The root public key is deliberately not carried in this object. Consumers must select it from
+/// an independently shipped trust anchor using `rootKeyId`, then verify `signature` over the
+/// domain-separated canonical payload returned by [`canonical_trust_snapshot_payload`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanerTrustSnapshot {
+    pub schema: String,
+    pub epoch: u64,
+    pub generated_at: String,
+    pub expires_at: String,
+    pub root_key_id: String,
+    pub algorithm: SignatureAlgorithm,
+    pub keys: Vec<TrustedPublisherKey>,
+    pub revocations: Vec<CleanerRevocation>,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrustedPublisherKey {
+    pub key_id: String,
+    pub publisher_id: String,
+    pub public_key_b64u: String,
+    pub usages: Vec<TrustKeyUsage>,
+    pub valid_from: String,
+    pub valid_until: String,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustKeyUsage {
+    DeclarativePackage,
+    NativeProbe,
+    OfficialCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanerRevocation {
+    pub revoked_at: String,
+    pub reason: String,
+    pub target: CleanerRevocationTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum CleanerRevocationTarget {
+    PublisherKey {
+        publisher_id: String,
+        key_id: String,
+    },
+    PackageDigest {
+        package_digest: String,
+    },
+    PackageVersion {
+        publisher_id: String,
+        package_id: String,
+        version_req: String,
+    },
+    ProbeDigest {
+        probe_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -689,6 +764,109 @@ impl CleanerSignatureEnvelope {
     }
 }
 
+impl CleanerTrustSnapshot {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.schema != CLEANER_TRUST_SNAPSHOT_SCHEMA {
+            return Err(ValidationError::SchemaMismatch {
+                expected: CLEANER_TRUST_SNAPSHOT_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        if self.epoch == 0 {
+            return Err(ValidationError::InvalidNumber("trustSnapshot.epoch"));
+        }
+        validate_identifier(&self.root_key_id, "trustSnapshot.rootKeyId")?;
+        if self.generated_at.is_empty() || self.expires_at.is_empty() {
+            return Err(ValidationError::EmptyField(
+                "trustSnapshot.generatedAt/expiresAt",
+            ));
+        }
+        if self.keys.is_empty() {
+            return Err(ValidationError::EmptyField("trustSnapshot.keys"));
+        }
+        let mut key_ids = BTreeSet::new();
+        for key in &self.keys {
+            validate_identifier(&key.key_id, "trustSnapshot.keys[].keyId")?;
+            validate_identifier(&key.publisher_id, "trustSnapshot.keys[].publisherId")?;
+            validate_base64url_nopad_exact_len(
+                &key.public_key_b64u,
+                "trustSnapshot.keys[].publicKeyB64u",
+                32,
+            )?;
+            validate_non_empty_unique(&key.usages, "trustSnapshot.keys[].usages")?;
+            if key.valid_from.is_empty() || key.valid_until.is_empty() {
+                return Err(ValidationError::EmptyField(
+                    "trustSnapshot.keys[].validFrom/validUntil",
+                ));
+            }
+            if !key_ids.insert(key.key_id.as_str()) {
+                return Err(ValidationError::DuplicateEntry(
+                    "trustSnapshot.keys[].keyId".into(),
+                ));
+            }
+        }
+        for revocation in &self.revocations {
+            if revocation.revoked_at.is_empty() || revocation.reason.trim().is_empty() {
+                return Err(ValidationError::EmptyField(
+                    "trustSnapshot.revocations[].revokedAt/reason",
+                ));
+            }
+            match &revocation.target {
+                CleanerRevocationTarget::PublisherKey {
+                    publisher_id,
+                    key_id,
+                } => {
+                    validate_identifier(publisher_id, "revocation.publisherId")?;
+                    validate_identifier(key_id, "revocation.keyId")?;
+                }
+                CleanerRevocationTarget::PackageDigest { package_digest } => {
+                    validate_sha256_prefixed(package_digest, "revocation.packageDigest")?;
+                    validate_non_placeholder_sha256_prefixed(
+                        package_digest,
+                        "revocation.packageDigest",
+                    )?;
+                }
+                CleanerRevocationTarget::PackageVersion {
+                    publisher_id,
+                    package_id,
+                    version_req,
+                } => {
+                    validate_identifier(publisher_id, "revocation.publisherId")?;
+                    validate_identifier(package_id, "revocation.packageId")?;
+                    validate_version_req(version_req, "revocation.versionReq")?;
+                }
+                CleanerRevocationTarget::ProbeDigest { probe_digest } => {
+                    validate_sha256_prefixed(probe_digest, "revocation.probeDigest")?;
+                    validate_non_placeholder_sha256_prefixed(
+                        probe_digest,
+                        "revocation.probeDigest",
+                    )?;
+                }
+            }
+        }
+        validate_base64url_nopad_exact_len(&self.signature, "trustSnapshot.signature", 64)
+    }
+}
+
+pub fn canonical_trust_snapshot_payload(
+    snapshot: &CleanerTrustSnapshot,
+) -> Result<Vec<u8>, ValidationError> {
+    let mut payload = serde_json::to_value(snapshot).map_err(|_| {
+        ValidationError::UnsupportedFeature("cannot serialize trust snapshot".into())
+    })?;
+    if let Value::Object(object) = &mut payload {
+        object.remove("signature");
+    }
+    let payload_bytes = canonicalize_value(&payload).map_err(|_| {
+        ValidationError::UnsupportedFeature("cannot encode trust snapshot payload".into())
+    })?;
+    let mut framed =
+        Vec::with_capacity(TRUST_SNAPSHOT_SIGNATURE_DOMAIN.len() + payload_bytes.len());
+    framed.extend_from_slice(TRUST_SNAPSHOT_SIGNATURE_DOMAIN);
+    framed.extend_from_slice(&payload_bytes);
+    Ok(framed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct PackageDigestEntry {
     pub path: String,
@@ -1204,6 +1382,63 @@ pub enum ValidationError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn trust_snapshot() -> CleanerTrustSnapshot {
+        CleanerTrustSnapshot {
+            schema: CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
+            epoch: 1,
+            generated_at: "2026-08-27T00:00:00Z".into(),
+            expires_at: "2026-09-27T00:00:00Z".into(),
+            root_key_id: "root-1".into(),
+            algorithm: SignatureAlgorithm::Ed25519,
+            keys: vec![TrustedPublisherKey {
+                key_id: "publisher-key-1".into(),
+                publisher_id: "org.sweepx".into(),
+                public_key_b64u: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+                usages: vec![TrustKeyUsage::DeclarativePackage],
+                valid_from: "2026-01-01T00:00:00Z".into(),
+                valid_until: "2027-01-01T00:00:00Z".into(),
+            }],
+            revocations: vec![CleanerRevocation {
+                revoked_at: "2026-08-26T00:00:00Z".into(),
+                reason: "compromised artifact".into(),
+                target: CleanerRevocationTarget::PackageDigest {
+                    package_digest:
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .into(),
+                },
+            }],
+            signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        }
+    }
+
+    #[test]
+    fn trust_snapshot_schema_and_signature_payload_are_stable() {
+        let snapshot = trust_snapshot();
+        snapshot.validate().unwrap();
+        let payload = canonical_trust_snapshot_payload(&snapshot).unwrap();
+        assert!(payload.starts_with(TRUST_SNAPSHOT_SIGNATURE_DOMAIN));
+        assert!(!String::from_utf8_lossy(&payload).contains("\"signature\""));
+    }
+
+    #[test]
+    fn trust_snapshot_rejects_duplicate_keys_and_placeholder_revocation_digest() {
+        let mut duplicate = trust_snapshot();
+        duplicate.keys.push(duplicate.keys[0].clone());
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ValidationError::DuplicateEntry(_))
+        ));
+
+        let mut placeholder = trust_snapshot();
+        placeholder.revocations[0].target = CleanerRevocationTarget::PackageDigest {
+            package_digest: format!("sha256:{}", "0".repeat(64)),
+        };
+        assert!(matches!(
+            placeholder.validate(),
+            Err(ValidationError::PlaceholderDigest(_))
+        ));
+    }
 
     fn cargo_rule_json() -> Value {
         json!({
