@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::mem::size_of;
@@ -20,7 +21,8 @@ use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table}
 use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
 use sweepx_model::{
-    DirectoryAggregate, FieldProvenance, NativeName, ObjectType, ScanEntryId, ScanEntryIdError,
+    Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance,
+    NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId, ScanEntryIdError, ScanId,
     ScanObjectIdentity, ScannedEntry,
 };
 use sweepx_protocol::OutputStatus;
@@ -34,6 +36,145 @@ pub const BROWSER_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const DEFAULT_MAX_BROWSER_ENTRIES: usize = 16_384;
 pub const DEFAULT_MAX_BROWSER_INDEX_BYTES: usize = 48 * 1024 * 1024;
 
+/// Why an entered directory needs a bounded, prioritized detail rescan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailRescanReason {
+    Incomplete,
+    Evicted,
+}
+
+/// Correlation data which a detail result must echo exactly.
+///
+/// Every issued `revision` is strictly greater than `base_revision`, including
+/// after a failed attempt. Scan entry ids remain scoped to `source_scan_id`;
+/// they are not treated as cross-scan identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailRescanBinding {
+    pub source_scan_id: ScanId,
+    pub source_root_identity: ScanObjectIdentity,
+    pub source_directory_identity: ScanObjectIdentity,
+    pub base_revision: DecimalU128,
+    pub revision: DecimalU128,
+}
+
+/// A bounded request for a scanner-owned detail enumeration.
+///
+/// The TUI never opens or traverses `directory_locator`. A caller-provided
+/// scanner adapter must reopen it without following links, revalidate every
+/// identity component, and honor `max_rows`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailRescanRequest {
+    pub binding: DetailRescanBinding,
+    pub directory_locator: NativeLocatorEvidence,
+    pub reason: DetailRescanReason,
+    pub max_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailRescanFailure {
+    IdentityUnavailable,
+    IdentityMismatch,
+    MountChanged,
+    SymlinkOrReparse,
+    Cancelled,
+    ResourceLimit,
+    InvalidResult,
+    RevisionExhausted,
+    Unavailable,
+}
+
+impl DetailRescanFailure {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::IdentityUnavailable => "identity_unavailable",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::MountChanged => "mount_changed",
+            Self::SymlinkOrReparse => "symlink_or_reparse",
+            Self::Cancelled => "cancelled",
+            Self::ResourceLimit => "resource_limit",
+            Self::InvalidResult => "invalid_result",
+            Self::RevisionExhausted => "revision_exhausted",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Scanner-owned output for one detail request.
+///
+/// Refreshed rows must be the complete retained direct-child set for this
+/// bounded result. The browser rejects, rather than truncates, an oversized or
+/// internally inconsistent result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshedDetail {
+    pub binding: DetailRescanBinding,
+    pub observed_root: ScannedEntry,
+    pub observed_directory: ScannedEntry,
+    pub rows: Vec<ScannedEntry>,
+    pub aggregate: DirectoryAggregate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailRescanResult {
+    Refreshed(Box<RefreshedDetail>),
+    Failed {
+        binding: Box<DetailRescanBinding>,
+        failure: DetailRescanFailure,
+    },
+}
+
+pub trait DetailRescanProvider {
+    fn rescan_detail(&mut self, request: &DetailRescanRequest) -> DetailRescanResult;
+}
+
+impl<F> DetailRescanProvider for F
+where
+    F: FnMut(&DetailRescanRequest) -> DetailRescanResult,
+{
+    fn rescan_detail(&mut self, request: &DetailRescanRequest) -> DetailRescanResult {
+        self(request)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnavailableDetailRescanProvider;
+
+impl DetailRescanProvider for UnavailableDetailRescanProvider {
+    fn rescan_detail(&mut self, request: &DetailRescanRequest) -> DetailRescanResult {
+        DetailRescanResult::Failed {
+            binding: Box::new(request.binding.clone()),
+            failure: DetailRescanFailure::Unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailRescanState {
+    Snapshot {
+        revision: DecimalU128,
+    },
+    Refreshed {
+        revision: DecimalU128,
+    },
+    Stale {
+        revision: DecimalU128,
+        failure: DetailRescanFailure,
+    },
+}
+
+impl DetailRescanState {
+    pub const fn revision(&self) -> DecimalU128 {
+        match self {
+            Self::Snapshot { revision }
+            | Self::Refreshed { revision }
+            | Self::Stale { revision, .. } => *revision,
+        }
+    }
+
+    pub const fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale { .. })
+    }
+}
+
 /// One row in the in-memory scan snapshot browser.
 ///
 /// Aggregate evidence is attached to its matching directory row. Aggregates are
@@ -42,12 +183,18 @@ pub const DEFAULT_MAX_BROWSER_INDEX_BYTES: usize = 48 * 1024 * 1024;
 pub struct BrowserRow {
     entry: ScannedEntry,
     aggregate: Option<DirectoryAggregate>,
+    detail_rescan_state: DetailRescanState,
     root: bool,
     label: String,
 }
 
 impl BrowserRow {
-    fn from_owned(entry: ScannedEntry, aggregate: Option<DirectoryAggregate>, root: bool) -> Self {
+    fn from_owned(
+        entry: ScannedEntry,
+        aggregate: Option<DirectoryAggregate>,
+        detail_rescan_state: DetailRescanState,
+        root: bool,
+    ) -> Self {
         let label = if root {
             sanitize_terminal_text(&entry.display_path)
         } else {
@@ -56,6 +203,7 @@ impl BrowserRow {
         Self {
             entry,
             aggregate,
+            detail_rescan_state,
             root,
             label,
         }
@@ -67,6 +215,10 @@ impl BrowserRow {
 
     pub fn aggregate(&self) -> Option<&DirectoryAggregate> {
         self.aggregate.as_ref()
+    }
+
+    pub const fn detail_rescan_state(&self) -> &DetailRescanState {
+        &self.detail_rescan_state
     }
 
     pub fn display_path(&self) -> &str {
@@ -89,6 +241,17 @@ impl BrowserRow {
     /// reparse points remain leaf rows even if malformed input lists descendants.
     pub fn can_enter(&self) -> bool {
         matches!(self.entry.object_type, ObjectType::Directory)
+    }
+
+    fn effective_coverage(&self) -> &Coverage {
+        self.aggregate
+            .as_ref()
+            .map(|aggregate| &aggregate.coverage)
+            .unwrap_or(&self.entry.coverage)
+    }
+
+    fn detail_rescan_reason(&self) -> Option<DetailRescanReason> {
+        detail_rescan_reason(self.can_enter(), self.effective_coverage())
     }
 }
 
@@ -194,12 +357,18 @@ pub enum BrowserModelError {
 struct BrowserNode {
     entry: ScannedEntry,
     aggregate: Option<DirectoryAggregate>,
+    detail_rescan_state: DetailRescanState,
     root: bool,
 }
 
 impl BrowserNode {
     fn to_row(&self) -> BrowserRow {
-        BrowserRow::from_owned(self.entry.clone(), self.aggregate.clone(), self.root)
+        BrowserRow::from_owned(
+            self.entry.clone(),
+            self.aggregate.clone(),
+            self.detail_rescan_state.clone(),
+            self.root,
+        )
     }
 }
 
@@ -476,10 +645,17 @@ impl BrowserModel {
         let nodes = pending_nodes
             .into_iter()
             .zip(aggregate_by_index)
-            .map(|(pending, aggregate)| BrowserNode {
-                entry: pending.entry,
-                aggregate,
-                root: pending.root,
+            .map(|(pending, aggregate)| {
+                let revision = aggregate
+                    .as_ref()
+                    .map(|aggregate| aggregate.revision)
+                    .unwrap_or(DecimalU128::ZERO);
+                BrowserNode {
+                    entry: pending.entry,
+                    aggregate,
+                    detail_rescan_state: DetailRescanState::Snapshot { revision },
+                    root: pending.root,
+                }
             })
             .collect();
 
@@ -558,6 +734,281 @@ impl BrowserModel {
 
     pub const fn max_level_rows(&self) -> usize {
         self.limits.max_level_rows
+    }
+
+    pub fn current_detail_rescan_state(&self) -> Option<&DetailRescanState> {
+        self.levels
+            .last()
+            .map(|level| &self.nodes[level.directory_index].detail_rescan_state)
+    }
+
+    fn rescan_selected_if_needed<P: DetailRescanProvider>(&mut self, provider: &mut P) {
+        let Some(node_index) = self.selected_node_index() else {
+            return;
+        };
+        let Some(reason) = self.nodes[node_index].to_row().detail_rescan_reason() else {
+            return;
+        };
+
+        let base_revision = self.nodes[node_index].detail_rescan_state.revision();
+        let Some(revision) = base_revision.checked_add(DecimalU128::new(1)) else {
+            self.mark_detail_stale(
+                node_index,
+                base_revision,
+                DetailRescanFailure::RevisionExhausted,
+            );
+            return;
+        };
+        let Some(request) = self.detail_rescan_request(node_index, reason, base_revision, revision)
+        else {
+            self.mark_detail_stale(
+                node_index,
+                revision,
+                DetailRescanFailure::IdentityUnavailable,
+            );
+            return;
+        };
+
+        let result = provider.rescan_detail(&request);
+        if let Err(failure) = self.apply_detail_rescan_result(node_index, &request, result) {
+            self.mark_detail_stale(node_index, revision, failure);
+        }
+    }
+
+    fn detail_rescan_request(
+        &self,
+        node_index: usize,
+        reason: DetailRescanReason,
+        base_revision: DecimalU128,
+        revision: DecimalU128,
+    ) -> Option<DetailRescanRequest> {
+        let directory = &self.nodes[node_index].entry;
+        if directory.object_type != ObjectType::Directory {
+            return None;
+        }
+        let directory_identity = directory.validated_identity().ok()??;
+        if !identity_is_known(directory_identity) {
+            return None;
+        }
+        let locator = directory.executable_native_locator().ok()??.clone();
+        let root =
+            self.nodes.iter().find(|node| {
+                node.root
+                    && node.entry.identity.as_ref().is_some_and(|identity| {
+                        identity.entry_id == directory_identity.scan_root_id
+                    })
+            })?;
+        let root_identity = root.entry.validated_identity().ok()??;
+        if !identity_is_known(root_identity) {
+            return None;
+        }
+
+        Some(DetailRescanRequest {
+            binding: DetailRescanBinding {
+                source_scan_id: directory.scan_id.clone(),
+                source_root_identity: root_identity.clone(),
+                source_directory_identity: directory_identity.clone(),
+                base_revision,
+                revision,
+            },
+            directory_locator: locator,
+            reason,
+            max_rows: self.limits.max_level_rows,
+        })
+    }
+
+    fn apply_detail_rescan_result(
+        &mut self,
+        node_index: usize,
+        request: &DetailRescanRequest,
+        result: DetailRescanResult,
+    ) -> Result<(), DetailRescanFailure> {
+        let (binding, observed_root, observed_directory, mut rows, aggregate) = match result {
+            DetailRescanResult::Failed { binding, failure } => {
+                return if *binding == request.binding {
+                    Err(failure)
+                } else {
+                    Err(DetailRescanFailure::InvalidResult)
+                };
+            }
+            DetailRescanResult::Refreshed(refreshed) => {
+                let RefreshedDetail {
+                    binding,
+                    observed_root,
+                    observed_directory,
+                    rows,
+                    aggregate,
+                } = *refreshed;
+                (binding, observed_root, observed_directory, rows, aggregate)
+            }
+        };
+        if binding != request.binding {
+            return Err(DetailRescanFailure::InvalidResult);
+        }
+        validate_refreshed_target(request, &observed_root, &observed_directory)?;
+        validate_detail_rows(request, &observed_directory, &rows, &aggregate)?;
+
+        // A targeted detail result contains only this directory's direct rows.
+        // Conservatively mark any returned subdirectory's own detail as evicted;
+        // it can be refreshed only when the user actually enters that row.
+        for row in &mut rows {
+            if row.object_type == ObjectType::Directory {
+                mark_coverage_details_lost(&mut row.coverage);
+            }
+        }
+
+        let mut replacement = self.rebuilt_with_detail_rows(
+            node_index,
+            observed_directory,
+            rows,
+            aggregate,
+            binding.revision,
+        )?;
+        std::mem::swap(self, &mut replacement);
+        Ok(())
+    }
+
+    fn rebuilt_with_detail_rows(
+        &self,
+        node_index: usize,
+        observed_directory: ScannedEntry,
+        rows: Vec<ScannedEntry>,
+        aggregate: DirectoryAggregate,
+        revision: DecimalU128,
+    ) -> Result<Self, DetailRescanFailure> {
+        let mut removed = vec![false; self.nodes.len()];
+        let mut frontier = self.children_by_index[node_index].clone();
+        while let Some(index) = frontier.pop() {
+            if removed[index] {
+                continue;
+            }
+            removed[index] = true;
+            frontier.extend(self.children_by_index[index].iter().copied());
+        }
+
+        let retained_states =
+            self.nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !removed[*index])
+                .filter_map(|(_, node)| {
+                    node.entry.identity.as_ref().map(|identity| {
+                        (identity.entry_id.clone(), node.detail_rescan_state.clone())
+                    })
+                })
+                .collect::<HashMap<_, _>>();
+        let level_ids = self
+            .levels
+            .iter()
+            .map(|level| {
+                (
+                    self.nodes[level.directory_index]
+                        .entry
+                        .identity
+                        .as_ref()
+                        .expect("browser nodes have validated identities")
+                        .entry_id
+                        .clone(),
+                    level.parent_selection,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut roots = Vec::new();
+        let mut entries = Vec::new();
+        let mut aggregates = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            if removed[index] {
+                continue;
+            }
+            let entry = if index == node_index {
+                observed_directory.clone()
+            } else {
+                node.entry.clone()
+            };
+            if node.root {
+                roots.push(entry);
+            } else {
+                entries.push(entry);
+            }
+            if index == node_index {
+                aggregates.push(aggregate.clone());
+            } else if let Some(aggregate) = &node.aggregate {
+                aggregates.push(aggregate.clone());
+            }
+        }
+        entries.extend(rows);
+
+        let mut rebuilt = Self::from_owned_scan_parts_with_limits(
+            self.locale,
+            self.status,
+            self.scan_id.clone(),
+            roots,
+            entries,
+            aggregates,
+            self.limits,
+        )
+        .map_err(|error| match error {
+            BrowserModelError::ResourceLimit { .. } => DetailRescanFailure::ResourceLimit,
+            _ => DetailRescanFailure::InvalidResult,
+        })?;
+
+        for node in &mut rebuilt.nodes {
+            let identity = node
+                .entry
+                .identity
+                .as_ref()
+                .expect("rebuilt browser nodes have validated identities");
+            if identity.entry_id == request_entry_id(&observed_directory) {
+                node.detail_rescan_state = DetailRescanState::Refreshed { revision };
+            } else if let Some(state) = retained_states.get(&identity.entry_id) {
+                node.detail_rescan_state = state.clone();
+            }
+        }
+
+        rebuilt.levels.clear();
+        for (entry_id, parent_selection) in level_ids {
+            let directory_index = rebuilt
+                .nodes
+                .iter()
+                .position(|node| {
+                    node.entry
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.entry_id == entry_id)
+                })
+                .ok_or(DetailRescanFailure::InvalidResult)?;
+            rebuilt.levels.push(BrowserLevel {
+                directory_index,
+                directory: rebuilt.nodes[directory_index].entry.display_path.clone(),
+                parent_selection,
+            });
+        }
+        let target_id = request_entry_id(&observed_directory);
+        rebuilt.selected = rebuilt
+            .current_level_rows()
+            .iter()
+            .position(|index| {
+                rebuilt.nodes[*index]
+                    .entry
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.entry_id == target_id)
+            })
+            .ok_or(DetailRescanFailure::InvalidResult)?;
+        rebuilt.reload_loaded_level();
+        rebuilt.clamp_selection();
+        Ok(rebuilt)
+    }
+
+    fn mark_detail_stale(
+        &mut self,
+        node_index: usize,
+        revision: DecimalU128,
+        failure: DetailRescanFailure,
+    ) {
+        self.nodes[node_index].detail_rescan_state = DetailRescanState::Stale { revision, failure };
+        self.reload_loaded_level();
     }
 
     fn move_up(&mut self) {
@@ -787,6 +1238,198 @@ fn required_identity(entry: &ScannedEntry) -> Result<&ScanObjectIdentity, Browse
         })
 }
 
+fn detail_rescan_reason(can_enter: bool, coverage: &Coverage) -> Option<DetailRescanReason> {
+    if !can_enter {
+        return None;
+    }
+    match coverage.state {
+        CoverageState::DetailsLost if coverage.details_lost && !coverage.complete => {
+            Some(DetailRescanReason::Evicted)
+        }
+        CoverageState::Incomplete if !coverage.complete && !coverage.details_lost => {
+            Some(DetailRescanReason::Incomplete)
+        }
+        CoverageState::Complete | CoverageState::Incomplete | CoverageState::DetailsLost => None,
+    }
+}
+
+fn identity_is_known(identity: &ScanObjectIdentity) -> bool {
+    use sweepx_model::IdentityEvidence::Known;
+
+    matches!(identity.platform_file_identity, Known { .. })
+        && matches!(identity.filesystem_object_domain_identity, Known { .. })
+        && matches!(identity.volume_or_mount_identity, Known { .. })
+}
+
+fn request_entry_id(entry: &ScannedEntry) -> ScanEntryId {
+    entry
+        .identity
+        .as_ref()
+        .expect("validated detail entry has identity")
+        .entry_id
+        .clone()
+}
+
+fn mark_coverage_details_lost(coverage: &mut Coverage) {
+    coverage.state = CoverageState::DetailsLost;
+    coverage.complete = false;
+    coverage.details_lost = true;
+}
+
+fn validate_refreshed_target(
+    request: &DetailRescanRequest,
+    observed_root: &ScannedEntry,
+    observed_directory: &ScannedEntry,
+) -> Result<(), DetailRescanFailure> {
+    if observed_root.scan_id != request.binding.source_scan_id
+        || observed_directory.scan_id != request.binding.source_scan_id
+    {
+        return Err(DetailRescanFailure::InvalidResult);
+    }
+    let root_identity = observed_root
+        .validated_identity()
+        .map_err(|_| DetailRescanFailure::InvalidResult)?
+        .ok_or(DetailRescanFailure::IdentityUnavailable)?;
+    let directory_identity = observed_directory
+        .validated_identity()
+        .map_err(|_| DetailRescanFailure::InvalidResult)?
+        .ok_or(DetailRescanFailure::IdentityUnavailable)?;
+    if observed_root.object_type != ObjectType::Directory
+        || observed_directory.object_type != ObjectType::Directory
+    {
+        return Err(DetailRescanFailure::SymlinkOrReparse);
+    }
+    if !identity_is_known(root_identity) || !identity_is_known(directory_identity) {
+        return Err(DetailRescanFailure::IdentityUnavailable);
+    }
+    if root_identity.volume_or_mount_identity
+        != request
+            .binding
+            .source_root_identity
+            .volume_or_mount_identity
+        || directory_identity.volume_or_mount_identity
+            != request
+                .binding
+                .source_directory_identity
+                .volume_or_mount_identity
+    {
+        return Err(DetailRescanFailure::MountChanged);
+    }
+    let observed_locator = observed_directory
+        .executable_native_locator()
+        .map_err(|_| DetailRescanFailure::InvalidResult)?
+        .ok_or(DetailRescanFailure::IdentityUnavailable)?;
+    if root_identity != &request.binding.source_root_identity
+        || directory_identity != &request.binding.source_directory_identity
+        || !locator_identity_matches(&request.directory_locator, observed_locator)
+    {
+        return Err(DetailRescanFailure::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn locator_identity_matches(
+    expected: &NativeLocatorEvidence,
+    observed: &NativeLocatorEvidence,
+) -> bool {
+    expected.scan_root_absolute_path == observed.scan_root_absolute_path
+        && native_component_identity_matches(&expected.scan_root, &observed.scan_root)
+        && native_component_identity_matches(&expected.entry, &observed.entry)
+        && expected.parent_reopen_recipe.len() == observed.parent_reopen_recipe.len()
+        && expected
+            .parent_reopen_recipe
+            .iter()
+            .zip(&observed.parent_reopen_recipe)
+            .all(|(expected, observed)| native_component_identity_matches(expected, observed))
+}
+
+fn native_component_identity_matches(
+    expected: &sweepx_model::NativePathComponent,
+    observed: &sweepx_model::NativePathComponent,
+) -> bool {
+    expected.entry_id == observed.entry_id
+        && expected.parent_id == observed.parent_id
+        && expected.native_basename == observed.native_basename
+        && expected.object_type == observed.object_type
+        && expected.platform_file_identity == observed.platform_file_identity
+        && expected.filesystem_object_domain_identity == observed.filesystem_object_domain_identity
+        && expected.volume_or_mount_identity == observed.volume_or_mount_identity
+}
+
+fn validate_detail_rows(
+    request: &DetailRescanRequest,
+    directory: &ScannedEntry,
+    rows: &[ScannedEntry],
+    aggregate: &DirectoryAggregate,
+) -> Result<(), DetailRescanFailure> {
+    if rows.len() > request.max_rows {
+        return Err(DetailRescanFailure::ResourceLimit);
+    }
+    let directory_identity = directory
+        .validated_identity()
+        .map_err(|_| DetailRescanFailure::InvalidResult)?
+        .ok_or(DetailRescanFailure::IdentityUnavailable)?;
+    if aggregate.scan_id != request.binding.source_scan_id
+        || aggregate.revision != request.binding.revision
+        || aggregate
+            .scan_entry_id()
+            .map_err(|_| DetailRescanFailure::InvalidResult)?
+            != directory_identity.entry_id
+    {
+        return Err(DetailRescanFailure::InvalidResult);
+    }
+    let complete_result = aggregate.coverage.state == CoverageState::Complete
+        && aggregate.coverage.complete
+        && !aggregate.coverage.details_lost
+        && aggregate.coverage.incomplete_reasons.is_empty();
+    if !complete_result
+        || aggregate.direct_child_count
+            != (sweepx_model::EvidenceValue::Known {
+                value: DecimalU128::new(rows.len() as u128),
+            })
+    {
+        return Err(DetailRescanFailure::InvalidResult);
+    }
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    for row in rows {
+        if row.scan_id != request.binding.source_scan_id {
+            return Err(DetailRescanFailure::InvalidResult);
+        }
+        let identity = row
+            .validated_identity()
+            .map_err(|_| DetailRescanFailure::InvalidResult)?
+            .ok_or(DetailRescanFailure::IdentityUnavailable)?;
+        if !identity_is_known(identity)
+            || identity.parent_id.as_ref() != Some(&directory_identity.entry_id)
+            || identity.scan_root_id != directory_identity.scan_root_id
+            || !seen.insert(identity.entry_id.clone())
+        {
+            return Err(if identity_is_known(identity) {
+                DetailRescanFailure::InvalidResult
+            } else {
+                DetailRescanFailure::IdentityUnavailable
+            });
+        }
+        if row.object_type == ObjectType::Directory
+            && row
+                .executable_native_locator()
+                .map_err(|_| DetailRescanFailure::InvalidResult)?
+                .is_none()
+        {
+            return Err(DetailRescanFailure::IdentityUnavailable);
+        }
+        if matches!(
+            row.object_type,
+            ObjectType::Symlink | ObjectType::ReparsePoint
+        ) {
+            // Links are valid result rows but remain leaves; they are never
+            // interpreted as directories by the browser.
+            continue;
+        }
+    }
+    Ok(())
+}
+
 fn insert_pending_node(
     pending_nodes: &mut Vec<PendingNode>,
     id_to_index: &mut HashMap<ScanEntryId, usize>,
@@ -916,6 +1559,37 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
             BrowserAction::Quit => return BrowserControl::Quit,
         }
         BrowserControl::Continue
+    }
+}
+
+/// Navigation reducer which delegates bounded detail enumeration to a caller.
+/// The provider owns all filesystem access; this reducer only validates and
+/// applies its result before entering the selected directory.
+pub struct DetailRescanBrowserReducer<P> {
+    provider: RefCell<P>,
+}
+
+impl<P> DetailRescanBrowserReducer<P> {
+    pub const fn new(provider: P) -> Self {
+        Self {
+            provider: RefCell::new(provider),
+        }
+    }
+
+    pub fn into_inner(self) -> P {
+        self.provider.into_inner()
+    }
+}
+
+impl<P> BrowserReducer for DetailRescanBrowserReducer<P>
+where
+    P: DetailRescanProvider,
+{
+    fn reduce(&self, model: &mut BrowserModel, action: BrowserAction) -> BrowserControl {
+        if action == BrowserAction::EnterDirectory {
+            model.rescan_selected_if_needed(&mut *self.provider.borrow_mut());
+        }
+        ReadOnlyBrowserReducer.reduce(model, action)
     }
 }
 
@@ -1089,7 +1763,17 @@ fn restore_terminal_best_effort() {
     let _ = stdout.flush();
 }
 
-pub fn run_live_browser(mut model: BrowserModel) -> Result<BrowserExit, BrowserError> {
+pub fn run_live_browser(model: BrowserModel) -> Result<BrowserExit, BrowserError> {
+    run_live_browser_with_detail_rescan(model, UnavailableDetailRescanProvider)
+}
+
+pub fn run_live_browser_with_detail_rescan<P>(
+    mut model: BrowserModel,
+    provider: P,
+) -> Result<BrowserExit, BrowserError>
+where
+    P: DetailRescanProvider,
+{
     #[cfg(unix)]
     let termination = UnixTerminationFlag::install()?;
     #[cfg(not(unix))]
@@ -1101,7 +1785,7 @@ pub fn run_live_browser(mut model: BrowserModel) -> Result<BrowserExit, BrowserE
 
     let mut events = CrosstermEventSource;
     let mapper = DefaultBrowserKeyMapper;
-    let reducer = ReadOnlyBrowserReducer;
+    let reducer = DetailRescanBrowserReducer::new(provider);
     let result = run_browser_loop_until(
         &mut terminal,
         &mut model,
@@ -1231,7 +1915,7 @@ pub fn render_live_browser(frame: &mut Frame<'_>, area: Rect, model: &BrowserMod
     render_browser_rows(frame, sections[2], model);
 
     frame.render_widget(
-        Paragraph::new(help_text(model.locale())).block(
+        Paragraph::new(browser_footer_text(model)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(read_only_label(model.locale())),
@@ -1270,9 +1954,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
         let children = aggregate
             .map(|value| count_value_label(&value.direct_child_count))
             .unwrap_or_else(|| "-".to_string());
-        let coverage = aggregate
-            .map(|value| &value.coverage.state)
-            .unwrap_or(&row.entry().coverage.state);
+        let coverage = browser_row_coverage_label(row);
         let style = if index == model.selected_index() {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -1285,7 +1967,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
             TableCell::from(logical),
             TableCell::from(reclaimable),
             TableCell::from(children),
-            TableCell::from(coverage_label(coverage)),
+            TableCell::from(coverage),
         ])
         .style(style)
     });
@@ -1308,7 +1990,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
             Constraint::Length(13),
             Constraint::Length(13),
             Constraint::Length(10),
-            Constraint::Length(14),
+            Constraint::Length(20),
         ],
     )
     .header(header)
@@ -1318,6 +2000,30 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
 
 fn count_value_label(value: &sweepx_model::CountValue) -> String {
     byte_value_label(value)
+}
+
+fn browser_row_coverage_label(row: &BrowserRow) -> String {
+    if row.detail_rescan_state().is_stale() {
+        "incomplete/stale".to_string()
+    } else {
+        coverage_label(&row.effective_coverage().state).to_string()
+    }
+}
+
+fn browser_footer_text(model: &BrowserModel) -> String {
+    let help = help_text(model.locale());
+    match model.current_detail_rescan_state() {
+        Some(DetailRescanState::Stale { revision, failure }) => {
+            format!(
+                "{help} | detail: incomplete/stale ({}, revision {revision})",
+                failure.label()
+            )
+        }
+        Some(DetailRescanState::Refreshed { revision }) => {
+            format!("{help} | detail revision {revision}")
+        }
+        _ => help.to_string(),
+    }
 }
 
 fn separator_for(path: &str) -> Option<char> {
@@ -1480,15 +2186,17 @@ fn contents_title(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell as FlagCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     use crossterm::event::{KeyEventState, KeyModifiers};
     use ratatui::backend::TestBackend;
     use sweepx_model::{
         ArithmeticState, Coverage, CoverageState, DecimalU128, EvidenceValue, FieldProvenance,
-        FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, NativeName,
-        PlatformFileIdentity, ReasonCode, ScanEntryId, ScanId, ScanObjectIdentity,
-        VolumeOrMountIdentity,
+        FilesystemObjectDomainIdentity, IdentityEvidence, MethodId, NativeAbsolutePath,
+        NativeLocatorEvidence, NativeName, NativePathComponent, PlatformFileIdentity, ReasonCode,
+        ScanEntryId, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
     };
 
     use super::*;
@@ -1510,6 +2218,31 @@ mod tests {
             provenance: FieldProvenance::LiveObservation {
                 observed_at: "2026-08-27T00:00:00Z".to_string(),
                 method: MethodId::MetadataNoFollow,
+            },
+        }
+    }
+
+    fn incomplete_coverage() -> Coverage {
+        Coverage {
+            state: CoverageState::Incomplete,
+            complete: false,
+            incomplete_reasons: vec![ReasonCode::IncompleteStreamCoverage],
+            details_lost: false,
+            provenance: FieldProvenance::LiveObservation {
+                observed_at: "2026-08-27T00:00:00Z".to_string(),
+                method: MethodId::MetadataNoFollow,
+            },
+        }
+    }
+
+    fn evicted_coverage() -> Coverage {
+        Coverage {
+            state: CoverageState::DetailsLost,
+            complete: false,
+            incomplete_reasons: vec![ReasonCode::ResourceLimit],
+            details_lost: true,
+            provenance: FieldProvenance::StalePreview {
+                observed_at: "2026-08-27T00:00:00Z".to_string(),
             },
         }
     }
@@ -1579,6 +2312,70 @@ mod tests {
                 method: MethodId::MetadataNoFollow,
             },
         }
+    }
+
+    fn native_component(entry: &ScannedEntry) -> NativePathComponent {
+        let identity = entry.identity.as_ref().unwrap();
+        NativePathComponent {
+            entry_id: identity.entry_id.clone(),
+            parent_id: identity.parent_id.clone(),
+            native_basename: entry.native_basename.clone(),
+            object_type: entry.object_type.clone(),
+            platform_file_identity: identity.platform_file_identity.clone(),
+            filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
+            metadata_fingerprint: entry.metadata_fingerprint.clone(),
+        }
+    }
+
+    fn attach_root_locator(root: &mut ScannedEntry) {
+        let root_component = native_component(root);
+        root.native_locator = Some(NativeLocatorEvidence {
+            scan_root: root_component.clone(),
+            scan_root_absolute_path: Some(NativeAbsolutePath::unix(
+                root.display_path.as_bytes().to_vec(),
+            )),
+            parent_reopen_recipe: Vec::new(),
+            entry: root_component,
+        });
+    }
+
+    fn rescan_model(coverage: Coverage) -> BrowserModel {
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        root.coverage = coverage.clone();
+        attach_root_locator(&mut root);
+        let mut aggregate = aggregate(1);
+        aggregate.coverage = coverage;
+        BrowserModel::from_owned_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Partial,
+            Some("scan-live".to_string()),
+            vec![root],
+            vec![entry("/root/old.txt", ObjectType::File, 2, 1, Some(1))],
+            vec![aggregate],
+        )
+        .unwrap()
+    }
+
+    fn refreshed_result(
+        request: &DetailRescanRequest,
+        rows: Vec<ScannedEntry>,
+    ) -> DetailRescanResult {
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        let mut aggregate = aggregate(1);
+        aggregate.revision = request.binding.revision;
+        aggregate.coverage = coverage();
+        aggregate.direct_child_count = EvidenceValue::Known {
+            value: DecimalU128::new(rows.len() as u128),
+        };
+        DetailRescanResult::Refreshed(Box::new(RefreshedDetail {
+            binding: request.binding.clone(),
+            observed_root: root.clone(),
+            observed_directory: root,
+            rows,
+            aggregate,
+        }))
     }
 
     fn entry(
@@ -1780,6 +2577,406 @@ mod tests {
             BrowserControl::Quit
         );
         assert!(!BrowserAction::EnterDirectory.is_destructive());
+    }
+
+    #[test]
+    fn complete_directory_enters_without_rescan_even_when_scan_is_partial() {
+        let calls = Rc::new(FlagCell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_calls.set(callback_calls.get() + 1);
+            DetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: DetailRescanFailure::Unavailable,
+            }
+        });
+        let mut model = model();
+        model.status = OutputStatus::Partial;
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(model.current_directory(), Some("/root"));
+    }
+
+    #[test]
+    fn incomplete_directory_requests_bound_identity_and_applies_refreshed_rows() {
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let callback_requests = Rc::clone(&requests);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_requests.borrow_mut().push(request.clone());
+            refreshed_result(
+                request,
+                vec![entry("/root/new.txt", ObjectType::File, 3, 1, Some(1))],
+            )
+        });
+        let mut model = rescan_model(incomplete_coverage());
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].reason, DetailRescanReason::Incomplete);
+        assert_eq!(requests[0].max_rows, MAX_PAGE_ROWS);
+        assert_eq!(requests[0].binding.base_revision, DecimalU128::new(1));
+        assert_eq!(requests[0].binding.revision, DecimalU128::new(2));
+        assert_eq!(
+            requests[0].binding.source_directory_identity.entry_id,
+            entry_id(&scan_id(), 1)
+        );
+        assert_eq!(model.current_directory(), Some("/root"));
+        assert_eq!(model.visible_rows().len(), 1);
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/new.txt");
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Refreshed {
+                revision: DecimalU128::new(2)
+            })
+        );
+    }
+
+    #[test]
+    fn evicted_directory_requests_rescan_but_failure_keeps_old_rows_stale() {
+        let reducer = DetailRescanBrowserReducer::new(|request: &DetailRescanRequest| {
+            assert_eq!(request.reason, DetailRescanReason::Evicted);
+            DetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: DetailRescanFailure::Cancelled,
+            }
+        });
+        let mut model = rescan_model(evicted_coverage());
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(model.visible_rows().len(), 1);
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/old.txt");
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Stale {
+                revision: DecimalU128::new(2),
+                failure: DetailRescanFailure::Cancelled,
+            })
+        );
+        assert_eq!(
+            browser_footer_text(&model),
+            "↑/↓ select  Enter/→ open directory  Esc/Backspace/← back  q/Ctrl-C quit | detail: incomplete/stale (cancelled, revision 2)"
+        );
+    }
+
+    #[test]
+    fn mount_change_and_oversized_result_fail_closed_without_replacing_rows() {
+        for failure_mode in [
+            DetailRescanFailure::MountChanged,
+            DetailRescanFailure::ResourceLimit,
+        ] {
+            let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+                match failure_mode {
+                    DetailRescanFailure::MountChanged => {
+                        let mut result = refreshed_result(request, Vec::new());
+                        if let DetailRescanResult::Refreshed(refreshed) = &mut result {
+                            refreshed
+                                .observed_directory
+                                .identity
+                                .as_mut()
+                                .unwrap()
+                                .volume_or_mount_identity =
+                                IdentityEvidence::known(VolumeOrMountIdentity {
+                                    value: DecimalU128::new(99),
+                                });
+                        }
+                        result
+                    }
+                    DetailRescanFailure::ResourceLimit => refreshed_result(
+                        request,
+                        (0..=MAX_PAGE_ROWS)
+                            .map(|index| {
+                                entry(
+                                    &format!("/root/file-{index}"),
+                                    ObjectType::File,
+                                    index as u128 + 3,
+                                    1,
+                                    Some(1),
+                                )
+                            })
+                            .collect(),
+                    ),
+                    _ => unreachable!(),
+                }
+            });
+            let mut model = rescan_model(incomplete_coverage());
+
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+            assert_eq!(model.visible_rows().len(), 1);
+            assert_eq!(model.visible_rows()[0].display_path(), "/root/old.txt");
+            assert_eq!(
+                model.current_detail_rescan_state(),
+                Some(&DetailRescanState::Stale {
+                    revision: DecimalU128::new(2),
+                    failure: failure_mode,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn identity_mismatch_and_reparse_target_fail_closed() {
+        for failure_mode in [
+            DetailRescanFailure::IdentityMismatch,
+            DetailRescanFailure::SymlinkOrReparse,
+        ] {
+            let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+                let mut result = refreshed_result(request, Vec::new());
+                let DetailRescanResult::Refreshed(refreshed) = &mut result else {
+                    unreachable!()
+                };
+                match failure_mode {
+                    DetailRescanFailure::IdentityMismatch => {
+                        let replacement_identity = IdentityEvidence::known(PlatformFileIdentity {
+                            device: DecimalU128::new(1),
+                            inode: DecimalU128::new(99),
+                        });
+                        refreshed
+                            .observed_directory
+                            .identity
+                            .as_mut()
+                            .unwrap()
+                            .platform_file_identity = replacement_identity.clone();
+                        let locator = refreshed
+                            .observed_directory
+                            .native_locator
+                            .as_mut()
+                            .unwrap();
+                        locator.scan_root.platform_file_identity = replacement_identity.clone();
+                        locator.entry.platform_file_identity = replacement_identity;
+                    }
+                    DetailRescanFailure::SymlinkOrReparse => {
+                        refreshed.observed_directory.object_type = ObjectType::ReparsePoint;
+                    }
+                    _ => unreachable!(),
+                }
+                result
+            });
+            let mut model = rescan_model(incomplete_coverage());
+
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+            assert_eq!(model.visible_rows()[0].display_path(), "/root/old.txt");
+            assert_eq!(
+                model.current_detail_rescan_state(),
+                Some(&DetailRescanState::Stale {
+                    revision: DecimalU128::new(2),
+                    failure: failure_mode,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_binding_is_rejected_and_failed_attempts_increment_revision() {
+        let calls = Rc::new(FlagCell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_calls.set(callback_calls.get() + 1);
+            let mut binding = request.binding.clone();
+            binding.base_revision = DecimalU128::ZERO;
+            DetailRescanResult::Failed {
+                binding: Box::new(binding),
+                failure: DetailRescanFailure::Cancelled,
+            }
+        });
+        let mut model = rescan_model(incomplete_coverage());
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        model.return_to_parent();
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Stale {
+                revision: DecimalU128::new(3),
+                failure: DetailRescanFailure::InvalidResult,
+            })
+        );
+    }
+
+    #[test]
+    fn file_and_symlink_rows_never_request_detail_rescan() {
+        for object_type in [
+            ObjectType::File,
+            ObjectType::Symlink,
+            ObjectType::ReparsePoint,
+        ] {
+            let calls = Rc::new(FlagCell::new(0));
+            let callback_calls = Rc::clone(&calls);
+            let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+                callback_calls.set(callback_calls.get() + 1);
+                DetailRescanResult::Failed {
+                    binding: Box::new(request.binding.clone()),
+                    failure: DetailRescanFailure::Unavailable,
+                }
+            });
+            let root = entry("/root", ObjectType::Directory, 1, 1, None);
+            let mut child = entry("/root/item", object_type, 2, 1, Some(1));
+            child.coverage = incomplete_coverage();
+            let mut model = BrowserModel::from_owned_scan_parts(
+                Locale::EnUs,
+                OutputStatus::Partial,
+                None,
+                vec![root],
+                vec![child],
+                Vec::new(),
+            )
+            .unwrap();
+            model.enter_selected();
+
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+            assert_eq!(calls.get(), 0);
+            assert_eq!(model.current_directory(), Some("/root"));
+        }
+    }
+
+    #[test]
+    fn missing_executable_identity_fails_closed_without_calling_provider() {
+        let calls = Rc::new(FlagCell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_calls.set(callback_calls.get() + 1);
+            DetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: DetailRescanFailure::Unavailable,
+            }
+        });
+        let mut model = rescan_model(incomplete_coverage());
+        model.nodes[0].entry.native_locator = None;
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Stale {
+                revision: DecimalU128::new(2),
+                failure: DetailRescanFailure::IdentityUnavailable,
+            })
+        );
+    }
+
+    #[test]
+    fn inconsistent_coverage_does_not_trigger_a_detail_request() {
+        let calls = Rc::new(FlagCell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_calls.set(callback_calls.get() + 1);
+            DetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: DetailRescanFailure::Unavailable,
+            }
+        });
+        let mut malformed = coverage();
+        malformed.complete = false;
+        let mut model = rescan_model(malformed);
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(model.current_directory(), Some("/root"));
+    }
+
+    #[test]
+    fn inconsistent_aggregate_and_unknown_row_identity_are_rejected_atomically() {
+        for failure_mode in [
+            DetailRescanFailure::InvalidResult,
+            DetailRescanFailure::IdentityUnavailable,
+        ] {
+            let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+                let mut row = entry("/root/new.txt", ObjectType::File, 3, 1, Some(1));
+                if failure_mode == DetailRescanFailure::IdentityUnavailable {
+                    row.identity.as_mut().unwrap().volume_or_mount_identity =
+                        IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+                }
+                let mut result = refreshed_result(request, vec![row]);
+                if failure_mode == DetailRescanFailure::InvalidResult {
+                    let DetailRescanResult::Refreshed(refreshed) = &mut result else {
+                        unreachable!()
+                    };
+                    refreshed.aggregate.direct_child_count = EvidenceValue::Known {
+                        value: DecimalU128::new(2),
+                    };
+                }
+                result
+            });
+            let mut model = rescan_model(incomplete_coverage());
+
+            reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+            assert_eq!(model.visible_rows()[0].display_path(), "/root/old.txt");
+            assert_eq!(
+                model.current_detail_rescan_state(),
+                Some(&DetailRescanState::Stale {
+                    revision: DecimalU128::new(2),
+                    failure: failure_mode,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn returned_directory_requires_an_executable_locator() {
+        let reducer = DetailRescanBrowserReducer::new(|request: &DetailRescanRequest| {
+            refreshed_result(
+                request,
+                vec![entry(
+                    "/root/subdirectory",
+                    ObjectType::Directory,
+                    3,
+                    1,
+                    Some(1),
+                )],
+            )
+        });
+        let mut model = rescan_model(incomplete_coverage());
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/old.txt");
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Stale {
+                revision: DecimalU128::new(2),
+                failure: DetailRescanFailure::IdentityUnavailable,
+            })
+        );
+    }
+
+    #[test]
+    fn revision_exhaustion_does_not_issue_an_unbound_request() {
+        let calls = Rc::new(FlagCell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_calls.set(callback_calls.get() + 1);
+            DetailRescanResult::Failed {
+                binding: Box::new(request.binding.clone()),
+                failure: DetailRescanFailure::Unavailable,
+            }
+        });
+        let mut model = rescan_model(incomplete_coverage());
+        model.nodes[0].detail_rescan_state = DetailRescanState::Snapshot {
+            revision: DecimalU128::new(u128::MAX),
+        };
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Stale {
+                revision: DecimalU128::new(u128::MAX),
+                failure: DetailRescanFailure::RevisionExhausted,
+            })
+        );
     }
 
     #[test]
