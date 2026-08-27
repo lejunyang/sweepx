@@ -212,6 +212,52 @@ mod tests {
     use sweepx_model::{
         Coverage, CoverageState, FieldProvenance, MethodId, NativeName, ObjectType, ScanId,
     };
+    use sweepx_scanner::ScanSummary;
+
+    fn live_provenance() -> FieldProvenance {
+        FieldProvenance::LiveObservation {
+            observed_at: "2026-08-26T00:00:00Z".to_string(),
+            method: MethodId::NativeApi,
+        }
+    }
+
+    fn complete_coverage() -> Coverage {
+        Coverage {
+            state: CoverageState::Complete,
+            complete: true,
+            incomplete_reasons: Vec::new(),
+            details_lost: false,
+            provenance: live_provenance(),
+        }
+    }
+
+    fn aggregate(identity: &str, revision: u128, coverage: Coverage) -> DirectoryAggregate {
+        DirectoryAggregate {
+            scan_id: ScanId::new("scan-1"),
+            directory_identity: identity.to_string(),
+            revision: sweepx_model::DecimalU128::new(revision),
+            apparent_logical_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(10),
+            },
+            unique_logical_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(10),
+            },
+            filesystem_reported_allocated_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(12),
+            },
+            potentially_reclaimable_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(4),
+            },
+            direct_child_count: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            recursive_entry_count: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            coverage,
+            arithmetic_state: sweepx_model::ArithmeticState::Exact,
+        }
+    }
 
     fn candidate() -> Candidate {
         build_candidate_from_scan(
@@ -269,5 +315,121 @@ mod tests {
         let right = build_explanation_from_candidate(&candidate).unwrap();
 
         assert_eq!(left.canonical_digest, right.canonical_digest);
+    }
+
+    #[test]
+    fn summary_links_bind_directory_aggregate_revision_and_coverage() {
+        let entry = ScannedEntry {
+            scan_id: ScanId::new("scan-1"),
+            display_path: "/tmp/dir".to_string(),
+            native_basename: NativeName::unix(b"dir".to_vec()),
+            object_type: ObjectType::Directory,
+            logical_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(2),
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            metadata_fingerprint: "fp-dir".to_string(),
+            coverage: complete_coverage(),
+            provenance: live_provenance(),
+        };
+        let aggregate = aggregate("stable-dir-id", 99, complete_coverage());
+        let summary = ScanSummary {
+            roots: Vec::new(),
+            entries: vec![entry.clone()],
+            aggregates: vec![aggregate],
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        };
+
+        let candidates = build_candidates_from_summary_with_links(
+            &summary,
+            &[DirectoryAggregateLink {
+                entry: &summary.entries[0],
+                directory_identity: "stable-dir-id",
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].aggregate_directory_identity.as_deref(),
+            Some("stable-dir-id")
+        );
+        assert_eq!(
+            candidates[0].aggregate_revision,
+            Some(sweepx_model::DecimalU128::new(99))
+        );
+        assert_eq!(candidates[0].aggregate_coverage, Some(complete_coverage()));
+        assert_eq!(
+            candidates[0].eligibility.executable,
+            crate::ExecutableEligibility::Executable
+        );
+        assert_eq!(
+            candidates[0].path.stable_identity.as_deref(),
+            Some("stable-dir-id")
+        );
+    }
+
+    #[test]
+    fn summary_links_fail_closed_when_identity_has_no_matching_aggregate() {
+        let entry = ScannedEntry {
+            scan_id: ScanId::new("scan-1"),
+            display_path: "/tmp/dir".to_string(),
+            native_basename: NativeName::unix(b"dir".to_vec()),
+            object_type: ObjectType::Directory,
+            logical_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(2),
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: sweepx_model::DecimalU128::new(1),
+            },
+            metadata_fingerprint: "fp-dir".to_string(),
+            coverage: complete_coverage(),
+            provenance: live_provenance(),
+        };
+        let summary = ScanSummary {
+            roots: Vec::new(),
+            entries: vec![entry],
+            aggregates: vec![aggregate("another-id", 1, complete_coverage())],
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        };
+
+        let candidates = build_candidates_from_summary_with_links(
+            &summary,
+            &[DirectoryAggregateLink {
+                entry: &summary.entries[0],
+                directory_identity: "stable-dir-id",
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].aggregate_revision, None);
+        assert_eq!(candidates[0].aggregate_coverage, None);
+        assert_eq!(
+            candidates[0].eligibility.executable,
+            crate::ExecutableEligibility::ReportOnly
+        );
+        assert_eq!(
+            candidates[0].path.stable_identity.as_deref(),
+            Some("stable-dir-id")
+        );
+        assert!(
+            candidates[0]
+                .eligibility
+                .reasons
+                .contains(&ReasonCode::UnknownIdentity)
+        );
     }
 }
