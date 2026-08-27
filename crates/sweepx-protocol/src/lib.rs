@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    str::FromStr,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -11,6 +16,8 @@ pub const OUTPUT_SCHEMA: &str = "sweepx.output/v1";
 pub const EVENT_SCHEMA: &str = "sweepx.event/v1";
 pub const AUDIT_PROJECTION_SCHEMA: &str = "sweepx.audit-projection/v1";
 pub const CAPABILITY_RECORD_SCHEMA: &str = "sweepx.capability-record/v1";
+pub const PLAN_REVIEW_SCHEMA: &str = "sweepx.plan-review/v1";
+pub const SOURCE_PLAN_SCHEMA: &str = "sweepx.plan/v1";
 pub const MAX_CAPABILITY_CELL_BYTES: usize = 128;
 pub const MAX_QUALIFICATION_TEXT_BYTES: usize = 512;
 pub const MAX_QUALIFICATION_REASON_BYTES: usize = 4096;
@@ -1473,6 +1480,740 @@ impl From<OutputStatus> for ExitCode {
     }
 }
 
+/// A stable, read-only projection of an immutable Core plan for human review.
+///
+/// This DTO is output-only. Deserializing or editing it never creates a `DeletionPlan`, an
+/// approval, an execution authorization, or a preflight permit. Callers may use `planId` only to
+/// ask Core to load its independently persisted canonical plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanResultSummaryV1 {
+    pub review_only: PlanReviewOnly,
+    pub plan_id: String,
+    pub item_count: DecimalU128,
+    pub action_count: DecimalU128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanResultDataV1 {
+    pub schema: String,
+    pub source_plan_schema: String,
+    pub authority: PlanReviewAuthority,
+    pub plan_id: String,
+    pub canonical_digest: String,
+    pub attention_fingerprint: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub mode: PlanReviewMode,
+    pub item_count: DecimalU128,
+    pub action_count: DecimalU128,
+    pub aggregate_risk: PlanReviewRiskTier,
+    pub potentially_reclaimable_bytes: PlanReviewByteRangeV1,
+    pub evidence_quality: PlanReviewEvidenceQualityV1,
+    pub boundaries: Vec<PlanReviewNoticeV1>,
+    pub blockers: Vec<PlanReviewNoticeV1>,
+    pub recovery_expectation: PlanReviewRecoveryExpectationV1,
+    pub items: Vec<PlanReviewItemV1>,
+}
+
+impl PlanResultDataV1 {
+    /// Performs cross-field checks that JSON Schema cannot express.
+    ///
+    /// Validation establishes only that this is a well-formed review projection. It deliberately
+    /// does not verify or grant approval or execution authority.
+    pub fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        if self.schema != PLAN_REVIEW_SCHEMA {
+            return Err(PlanReviewValidationError::SchemaMismatch {
+                field: "schema",
+                expected: PLAN_REVIEW_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        if self.source_plan_schema != SOURCE_PLAN_SCHEMA {
+            return Err(PlanReviewValidationError::SchemaMismatch {
+                field: "sourcePlanSchema",
+                expected: SOURCE_PLAN_SCHEMA,
+                actual: self.source_plan_schema.clone(),
+            });
+        }
+        validate_plan_review_text(&self.plan_id, "planId")?;
+        validate_plan_digest(&self.canonical_digest)?;
+        validate_attention_fingerprint(&self.attention_fingerprint, &self.canonical_digest)?;
+        let created_at = parse_plan_review_timestamp(&self.created_at, "createdAt")?;
+        let expires_at = parse_plan_review_timestamp(&self.expires_at, "expiresAt")?;
+        if created_at >= expires_at {
+            return Err(PlanReviewValidationError::InvalidExpiry);
+        }
+
+        let item_count: u128 = self.item_count.into();
+        let action_count: u128 = self.action_count.into();
+        if item_count == 0 || action_count == 0 {
+            return Err(PlanReviewValidationError::EmptyPlan);
+        }
+        if item_count != self.items.len() as u128 {
+            return Err(PlanReviewValidationError::CountMismatch {
+                field: "itemCount",
+                expected: item_count,
+                actual: self.items.len() as u128,
+            });
+        }
+
+        self.potentially_reclaimable_bytes.validate()?;
+        self.evidence_quality.validate()?;
+        self.recovery_expectation.validate()?;
+        validate_plan_review_notices(&self.boundaries, "boundaries")?;
+        validate_plan_review_notices(&self.blockers, "blockers")?;
+
+        let mut item_ids = BTreeSet::new();
+        let mut action_ids = BTreeSet::new();
+        let mut counted_actions = 0u128;
+        let mut maximum_risk = PlanReviewRiskTier::R1;
+        for item in &self.items {
+            item.validate()?;
+            if !item_ids.insert(item.item_id.as_str()) {
+                return Err(PlanReviewValidationError::DuplicateIdentifier(
+                    "items[].itemId",
+                ));
+            }
+            maximum_risk = maximum_risk.max(item.risk_tier);
+            for action in &item.actions {
+                counted_actions = counted_actions
+                    .checked_add(1)
+                    .ok_or(PlanReviewValidationError::CountOverflow)?;
+                maximum_risk = maximum_risk.max(action.risk_tier);
+                if !action_ids.insert(action.action_id.as_str()) {
+                    return Err(PlanReviewValidationError::DuplicateIdentifier(
+                        "items[].actions[].actionId",
+                    ));
+                }
+            }
+        }
+        if action_count != counted_actions {
+            return Err(PlanReviewValidationError::CountMismatch {
+                field: "actionCount",
+                expected: action_count,
+                actual: counted_actions,
+            });
+        }
+        if self.aggregate_risk != maximum_risk {
+            return Err(PlanReviewValidationError::AggregateRiskMismatch);
+        }
+        let expected_reclaimable_lower = self.items.iter().try_fold(0u128, |total, item| {
+            total
+                .checked_add(u128::from(item.potentially_reclaimable_bytes.lower_bound))
+                .ok_or(PlanReviewValidationError::CountOverflow)
+        })?;
+        if u128::from(self.potentially_reclaimable_bytes.lower_bound) != expected_reclaimable_lower
+        {
+            return Err(PlanReviewValidationError::ReclaimableAggregateMismatch);
+        }
+        let expected_reclaimable_state = aggregate_reclaimable_state(&self.items);
+        if self.potentially_reclaimable_bytes.state != expected_reclaimable_state {
+            return Err(PlanReviewValidationError::ReclaimableAggregateMismatch);
+        }
+        let expected_reclaimable_upper = aggregate_reclaimable_upper_bound(&self.items)?;
+        if self.potentially_reclaimable_bytes.upper_bound != expected_reclaimable_upper {
+            return Err(PlanReviewValidationError::ReclaimableAggregateMismatch);
+        }
+        if self.mode == PlanReviewMode::Permanent
+            && self
+                .items
+                .iter()
+                .flat_map(|item| &item.actions)
+                .any(|action| {
+                    !matches!(
+                        action.risk_tier,
+                        PlanReviewRiskTier::R4 | PlanReviewRiskTier::Blocked
+                    )
+                })
+        {
+            return Err(PlanReviewValidationError::PermanentRiskBelowR4);
+        }
+        if self.mode == PlanReviewMode::Permanent
+            && self.recovery_expectation.kind != PlanReviewRecoveryKind::NonePermanent
+        {
+            return Err(PlanReviewValidationError::PermanentRecoveryMismatch);
+        }
+        if self.mode == PlanReviewMode::Trash
+            && self.recovery_expectation.kind == PlanReviewRecoveryKind::NonePermanent
+        {
+            return Err(PlanReviewValidationError::TrashRecoveryMismatch);
+        }
+        for item in &self.items {
+            if self.mode == PlanReviewMode::Permanent
+                && item.recovery_expectation.kind != PlanReviewRecoveryKind::NonePermanent
+            {
+                return Err(PlanReviewValidationError::PermanentRecoveryMismatch);
+            }
+            if self.mode == PlanReviewMode::Trash
+                && item.recovery_expectation.kind == PlanReviewRecoveryKind::NonePermanent
+            {
+                return Err(PlanReviewValidationError::TrashRecoveryMismatch);
+            }
+        }
+        let any_blocked_item = self.items.iter().any(|item| {
+            item.risk_tier == PlanReviewRiskTier::Blocked
+                || !item.blockers.is_empty()
+                || item.actions.iter().any(|action| {
+                    action.risk_tier == PlanReviewRiskTier::Blocked || !action.blockers.is_empty()
+                })
+        });
+        let review_is_blocked = self.aggregate_risk == PlanReviewRiskTier::Blocked
+            || !self.blockers.is_empty()
+            || any_blocked_item;
+        if review_is_blocked {
+            if self.aggregate_risk != PlanReviewRiskTier::Blocked {
+                return Err(PlanReviewValidationError::BlockedAggregateRiskMismatch);
+            }
+            if self.blockers.is_empty() {
+                return Err(PlanReviewValidationError::MissingAggregateBlocker);
+            }
+            if self.authority.approval_path != PlanReviewApprovalPath::Unavailable {
+                return Err(PlanReviewValidationError::BlockedApprovalPathAvailable);
+            }
+        } else if self.authority.approval_path != PlanReviewApprovalPath::TrustedHumanRequired {
+            return Err(PlanReviewValidationError::ReviewableApprovalPathUnavailable);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewMode {
+    Trash,
+    Permanent,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub enum PlanReviewRiskTier {
+    R1,
+    R2,
+    R3,
+    R4,
+    #[serde(rename = "BLOCKED")]
+    #[schemars(rename = "BLOCKED")]
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewApprovalPath {
+    TrustedHumanRequired,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewEvidenceState {
+    Known,
+    LowerBound,
+    Unknown,
+    Unsupported,
+    NotChecked,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewRecoveryKind {
+    PlatformTrash,
+    RebuildOrRedownload,
+    NonePermanent,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewObjectType {
+    File,
+    Directory,
+    Symlink,
+    ReparsePoint,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewAuthority {
+    pub review_only: PlanReviewOnly,
+    pub approval_state: PlanReviewApprovalState,
+    pub execution_state: PlanReviewExecutionState,
+    pub approval_path: PlanReviewApprovalPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanReviewOnly;
+
+impl Serialize for PlanReviewOnly {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for PlanReviewOnly {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom("reviewOnly must be true"))
+        }
+    }
+}
+
+impl JsonSchema for PlanReviewOnly {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PlanReviewOnly".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        json!({ "const": true })
+            .try_into()
+            .expect("valid review-only schema")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewApprovalState {
+    NotGranted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewExecutionState {
+    NotAuthorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewByteRangeV1 {
+    pub lower_bound: DecimalU128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_bound: Option<DecimalU128>,
+    pub state: PlanReviewEvidenceState,
+    pub reason_codes: Vec<String>,
+}
+
+impl PlanReviewByteRangeV1 {
+    fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        if let Some(upper_bound) = self.upper_bound
+            && u128::from(upper_bound) < u128::from(self.lower_bound)
+        {
+            return Err(PlanReviewValidationError::InvalidReclaimableRange);
+        }
+        match self.state {
+            PlanReviewEvidenceState::Known => {
+                if self.upper_bound.is_some() || !self.reason_codes.is_empty() {
+                    return Err(PlanReviewValidationError::InvalidReclaimableState);
+                }
+            }
+            PlanReviewEvidenceState::LowerBound => {
+                if self.reason_codes.is_empty() {
+                    return Err(PlanReviewValidationError::InvalidReclaimableState);
+                }
+            }
+            PlanReviewEvidenceState::Unknown
+            | PlanReviewEvidenceState::Unsupported
+            | PlanReviewEvidenceState::NotChecked
+            | PlanReviewEvidenceState::Stale => {
+                if self.upper_bound.is_some() || self.reason_codes.is_empty() {
+                    return Err(PlanReviewValidationError::InvalidReclaimableState);
+                }
+            }
+        }
+        validate_plan_review_codes(
+            &self.reason_codes,
+            "potentiallyReclaimableBytes.reasonCodes",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewEvidenceQualityV1 {
+    pub fact_codes: Vec<String>,
+    pub manager_fact_codes: Vec<String>,
+    pub inference_codes: Vec<String>,
+    pub heuristic_codes: Vec<String>,
+    pub unknown_codes: Vec<String>,
+    pub unsupported_codes: Vec<String>,
+    pub not_checked_codes: Vec<String>,
+    pub stale_codes: Vec<String>,
+    pub incomplete_coverage: bool,
+    pub observed_at: Vec<String>,
+}
+
+impl PlanReviewEvidenceQualityV1 {
+    fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        for (values, field) in [
+            (&self.fact_codes, "evidenceQuality.factCodes"),
+            (&self.manager_fact_codes, "evidenceQuality.managerFactCodes"),
+            (&self.inference_codes, "evidenceQuality.inferenceCodes"),
+            (&self.heuristic_codes, "evidenceQuality.heuristicCodes"),
+            (&self.unknown_codes, "evidenceQuality.unknownCodes"),
+            (&self.unsupported_codes, "evidenceQuality.unsupportedCodes"),
+            (&self.not_checked_codes, "evidenceQuality.notCheckedCodes"),
+            (&self.stale_codes, "evidenceQuality.staleCodes"),
+        ] {
+            validate_plan_review_codes(values, field)?;
+        }
+        if self.observed_at.is_empty() {
+            return Err(PlanReviewValidationError::MissingObservationTime);
+        }
+        let mut previous = None;
+        for observed_at in &self.observed_at {
+            let observed_at =
+                parse_plan_review_timestamp(observed_at, "evidenceQuality.observedAt[]")?;
+            if previous.is_some_and(|value| value >= observed_at) {
+                return Err(PlanReviewValidationError::ObservationTimesNotSorted);
+            }
+            previous = Some(observed_at);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewNoticeV1 {
+    pub code: String,
+    pub message_key: String,
+    pub params: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewRecoveryExpectationV1 {
+    pub kind: PlanReviewRecoveryKind,
+    pub message_key: String,
+    pub location_known: bool,
+    pub capacity_release_guaranteed: bool,
+    pub application_state_loss_possible: bool,
+    pub redownload_or_rebuild_required: bool,
+    pub detail_codes: Vec<String>,
+}
+
+impl PlanReviewRecoveryExpectationV1 {
+    fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        if self.capacity_release_guaranteed {
+            return Err(PlanReviewValidationError::CapacityReleaseClaim);
+        }
+        if self.kind == PlanReviewRecoveryKind::NonePermanent
+            && (self.location_known || self.redownload_or_rebuild_required)
+        {
+            return Err(PlanReviewValidationError::PermanentRecoveryMismatch);
+        }
+        validate_plan_review_code(&self.message_key, "recoveryExpectation.messageKey")?;
+        validate_plan_review_codes(&self.detail_codes, "recoveryExpectation.detailCodes")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewItemV1 {
+    pub item_id: String,
+    pub candidate_id: String,
+    pub display_path: String,
+    pub object_type: PlanReviewObjectType,
+    pub risk_tier: PlanReviewRiskTier,
+    pub risk_factors: Vec<String>,
+    pub potentially_reclaimable_bytes: PlanReviewByteRangeV1,
+    pub evidence_quality: PlanReviewEvidenceQualityV1,
+    pub boundaries: Vec<PlanReviewNoticeV1>,
+    pub blockers: Vec<PlanReviewNoticeV1>,
+    pub recovery_expectation: PlanReviewRecoveryExpectationV1,
+    pub actions: Vec<PlanReviewActionV1>,
+}
+
+impl PlanReviewItemV1 {
+    fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        validate_plan_review_text(&self.item_id, "items[].itemId")?;
+        validate_plan_review_text(&self.candidate_id, "items[].candidateId")?;
+        validate_plan_review_text(&self.display_path, "items[].displayPath")?;
+        validate_plan_review_codes(&self.risk_factors, "items[].riskFactors")?;
+        if self.actions.is_empty() {
+            return Err(PlanReviewValidationError::ItemWithoutActions);
+        }
+        self.potentially_reclaimable_bytes.validate()?;
+        self.evidence_quality.validate()?;
+        self.recovery_expectation.validate()?;
+        validate_plan_review_notices(&self.boundaries, "items[].boundaries")?;
+        validate_plan_review_notices(&self.blockers, "items[].blockers")?;
+        let maximum_risk =
+            self.actions
+                .iter()
+                .try_fold(PlanReviewRiskTier::R1, |maximum, action| {
+                    action.validate()?;
+                    Ok::<_, PlanReviewValidationError>(maximum.max(action.risk_tier))
+                })?;
+        if self.risk_tier < maximum_risk {
+            return Err(PlanReviewValidationError::ItemRiskBelowAction);
+        }
+        if (self.risk_tier == PlanReviewRiskTier::Blocked || !self.blockers.is_empty())
+            && self
+                .actions
+                .iter()
+                .all(|action| action.risk_tier != PlanReviewRiskTier::Blocked)
+        {
+            return Err(PlanReviewValidationError::BlockedItemWithoutBlockedAction);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanReviewActionV1 {
+    pub action_id: String,
+    pub risk_tier: PlanReviewRiskTier,
+    pub risk_factors: Vec<String>,
+    pub blockers: Vec<PlanReviewNoticeV1>,
+}
+
+impl PlanReviewActionV1 {
+    fn validate(&self) -> Result<(), PlanReviewValidationError> {
+        validate_plan_review_text(&self.action_id, "items[].actions[].actionId")?;
+        validate_plan_review_codes(&self.risk_factors, "items[].actions[].riskFactors")?;
+        validate_plan_review_notices(&self.blockers, "items[].actions[].blockers")?;
+        if !self.blockers.is_empty() && self.risk_tier != PlanReviewRiskTier::Blocked {
+            return Err(PlanReviewValidationError::BlockedActionRiskMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanReviewValidationError {
+    SchemaMismatch {
+        field: &'static str,
+        expected: &'static str,
+        actual: String,
+    },
+    EmptyField(&'static str),
+    InvalidCode(&'static str),
+    DuplicateCode(&'static str),
+    InvalidTimestamp(&'static str),
+    InvalidExpiry,
+    InvalidDigest,
+    InvalidAttentionFingerprint,
+    EmptyPlan,
+    CountMismatch {
+        field: &'static str,
+        expected: u128,
+        actual: u128,
+    },
+    CountOverflow,
+    DuplicateIdentifier(&'static str),
+    InvalidReclaimableRange,
+    InvalidReclaimableState,
+    ObservationTimesNotSorted,
+    MissingObservationTime,
+    CapacityReleaseClaim,
+    ItemWithoutActions,
+    ItemRiskBelowAction,
+    AggregateRiskMismatch,
+    ReclaimableAggregateMismatch,
+    PermanentRiskBelowR4,
+    PermanentRecoveryMismatch,
+    TrashRecoveryMismatch,
+    BlockedActionRiskMismatch,
+    BlockedItemWithoutBlockedAction,
+    BlockedAggregateRiskMismatch,
+    MissingAggregateBlocker,
+    BlockedApprovalPathAvailable,
+    ReviewableApprovalPathUnavailable,
+}
+
+impl fmt::Display for PlanReviewValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(formatter, "{field} must be {expected}, got {actual}"),
+            Self::EmptyField(field) => write!(formatter, "field is empty: {field}"),
+            Self::InvalidCode(field) => write!(formatter, "field is not a machine code: {field}"),
+            Self::DuplicateCode(field) => write!(formatter, "field contains duplicate codes: {field}"),
+            Self::InvalidTimestamp(field) => write!(formatter, "invalid RFC 3339 timestamp: {field}"),
+            Self::InvalidExpiry => formatter.write_str("expiresAt must be later than createdAt"),
+            Self::InvalidDigest => formatter.write_str("canonicalDigest must be 64 lowercase hexadecimal characters"),
+            Self::InvalidAttentionFingerprint => formatter.write_str("attentionFingerprint must match the first 12 digest characters and is attention-only"),
+            Self::EmptyPlan => formatter.write_str("plan review counts must be non-zero"),
+            Self::CountMismatch { field, expected, actual } => write!(formatter, "{field} mismatch: declared {expected}, observed {actual}"),
+            Self::CountOverflow => formatter.write_str("plan review action count overflowed"),
+            Self::DuplicateIdentifier(field) => write!(formatter, "duplicate identifier: {field}"),
+            Self::InvalidReclaimableRange => formatter.write_str("reclaimable upper bound is smaller than its lower bound"),
+            Self::InvalidReclaimableState => formatter.write_str("reclaimable range fields do not match its evidence state"),
+            Self::ObservationTimesNotSorted => formatter.write_str("observation timestamps must be sorted and unique"),
+            Self::MissingObservationTime => formatter.write_str("plan review evidence must include an observation time"),
+            Self::CapacityReleaseClaim => formatter.write_str("plan review cannot guarantee capacity release"),
+            Self::ItemWithoutActions => formatter.write_str("review item must contain at least one action"),
+            Self::ItemRiskBelowAction => formatter.write_str("item risk cannot be below an action risk"),
+            Self::AggregateRiskMismatch => formatter.write_str("aggregate risk must equal the maximum item/action risk"),
+            Self::ReclaimableAggregateMismatch => formatter.write_str("aggregate reclaimable range must equal the conservative sum of item ranges"),
+            Self::PermanentRiskBelowR4 => formatter.write_str("permanent actions must be R4 or BLOCKED"),
+            Self::PermanentRecoveryMismatch => formatter.write_str("permanent plans must expose the non-recoverable recovery expectation"),
+            Self::TrashRecoveryMismatch => formatter.write_str("trash plans cannot claim the permanent recovery expectation"),
+            Self::BlockedActionRiskMismatch => formatter.write_str("an action with blockers must have BLOCKED risk"),
+            Self::BlockedItemWithoutBlockedAction => formatter.write_str("a blocked item must contain a blocked action"),
+            Self::BlockedAggregateRiskMismatch => formatter.write_str("a review containing blockers must have BLOCKED aggregate risk"),
+            Self::MissingAggregateBlocker => formatter.write_str("a blocked review must expose at least one aggregate blocker"),
+            Self::BlockedApprovalPathAvailable => formatter.write_str("a blocked review cannot expose an approval path"),
+            Self::ReviewableApprovalPathUnavailable => formatter.write_str("a non-blocked review must require the trusted human approval path"),
+        }
+    }
+}
+
+impl Error for PlanReviewValidationError {}
+
+fn aggregate_reclaimable_state(items: &[PlanReviewItemV1]) -> PlanReviewEvidenceState {
+    if items.iter().any(|item| {
+        matches!(
+            item.potentially_reclaimable_bytes.state,
+            PlanReviewEvidenceState::Unknown
+                | PlanReviewEvidenceState::Unsupported
+                | PlanReviewEvidenceState::NotChecked
+                | PlanReviewEvidenceState::Stale
+        )
+    }) {
+        PlanReviewEvidenceState::Unknown
+    } else if items
+        .iter()
+        .any(|item| item.potentially_reclaimable_bytes.state == PlanReviewEvidenceState::LowerBound)
+    {
+        PlanReviewEvidenceState::LowerBound
+    } else {
+        PlanReviewEvidenceState::Known
+    }
+}
+
+fn aggregate_reclaimable_upper_bound(
+    items: &[PlanReviewItemV1],
+) -> Result<Option<DecimalU128>, PlanReviewValidationError> {
+    if aggregate_reclaimable_state(items) != PlanReviewEvidenceState::LowerBound
+        || items
+            .iter()
+            .any(|item| item.potentially_reclaimable_bytes.upper_bound.is_none())
+    {
+        return Ok(None);
+    }
+
+    items
+        .iter()
+        .try_fold(0u128, |total, item| {
+            total
+                .checked_add(u128::from(
+                    item.potentially_reclaimable_bytes
+                        .upper_bound
+                        .expect("all upper bounds checked"),
+                ))
+                .ok_or(PlanReviewValidationError::CountOverflow)
+        })
+        .map(|value| Some(DecimalU128::new(value)))
+}
+
+fn validate_plan_review_text(
+    value: &str,
+    field: &'static str,
+) -> Result<(), PlanReviewValidationError> {
+    if value.trim().is_empty() {
+        return Err(PlanReviewValidationError::EmptyField(field));
+    }
+    Ok(())
+}
+
+fn validate_plan_review_code(
+    value: &str,
+    field: &'static str,
+) -> Result<(), PlanReviewValidationError> {
+    validate_plan_review_text(value, field)?;
+    if value.len() > 128
+        || !value.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+    {
+        return Err(PlanReviewValidationError::InvalidCode(field));
+    }
+    Ok(())
+}
+
+fn validate_plan_review_codes(
+    values: &[String],
+    field: &'static str,
+) -> Result<(), PlanReviewValidationError> {
+    let mut unique = BTreeSet::new();
+    for value in values {
+        validate_plan_review_code(value, field)?;
+        if !unique.insert(value.as_str()) {
+            return Err(PlanReviewValidationError::DuplicateCode(field));
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_review_notices(
+    notices: &[PlanReviewNoticeV1],
+    field: &'static str,
+) -> Result<(), PlanReviewValidationError> {
+    let mut codes = BTreeSet::new();
+    for notice in notices {
+        validate_plan_review_code(&notice.code, field)?;
+        validate_plan_review_code(&notice.message_key, field)?;
+        for (key, value) in &notice.params {
+            validate_plan_review_code(key, field)?;
+            validate_plan_review_text(value, field)?;
+        }
+        if !codes.insert(notice.code.as_str()) {
+            return Err(PlanReviewValidationError::DuplicateCode(field));
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_digest(value: &str) -> Result<(), PlanReviewValidationError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PlanReviewValidationError::InvalidDigest);
+    }
+    Ok(())
+}
+
+fn validate_attention_fingerprint(
+    fingerprint: &str,
+    canonical_digest: &str,
+) -> Result<(), PlanReviewValidationError> {
+    let expected = format!("SX1-{}", canonical_digest[..12].to_ascii_uppercase());
+    if fingerprint != expected {
+        return Err(PlanReviewValidationError::InvalidAttentionFingerprint);
+    }
+    Ok(())
+}
+
+fn parse_plan_review_timestamp(
+    value: &str,
+    field: &'static str,
+) -> Result<OffsetDateTime, PlanReviewValidationError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| PlanReviewValidationError::InvalidTimestamp(field))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1541,6 +2282,170 @@ mod tests {
             required_features: vec![],
             extensions: vec![],
         }
+    }
+
+    fn plan_review_example() -> PlanResultDataV1 {
+        serde_json::from_str(include_str!(
+            "../../../schemas/examples/sweepx.output.plan.result.example.json"
+        ))
+        .and_then(|envelope: OutputEnvelope| serde_json::from_value(envelope.data))
+        .expect("valid plan review example")
+    }
+
+    fn plan_review_summary_example() -> PlanResultSummaryV1 {
+        serde_json::from_str(include_str!(
+            "../../../schemas/examples/sweepx.output.plan.result.example.json"
+        ))
+        .and_then(|envelope: OutputEnvelope| serde_json::from_value(envelope.summary))
+        .expect("valid plan review summary example")
+    }
+
+    #[test]
+    fn plan_review_example_is_a_valid_read_only_projection() {
+        let review = plan_review_example();
+        review.validate().unwrap();
+        assert_eq!(review.schema, PLAN_REVIEW_SCHEMA);
+        assert_eq!(review.source_plan_schema, SOURCE_PLAN_SCHEMA);
+        assert_eq!(review.authority.review_only, PlanReviewOnly);
+        assert_eq!(
+            review.authority.approval_state,
+            PlanReviewApprovalState::NotGranted
+        );
+        assert_eq!(
+            review.authority.execution_state,
+            PlanReviewExecutionState::NotAuthorized
+        );
+        assert_eq!(review.item_count.to_string(), "1");
+        assert_eq!(review.action_count.to_string(), "2");
+        let summary = plan_review_summary_example();
+        assert_eq!(summary.review_only, PlanReviewOnly);
+        assert_eq!(summary.plan_id, review.plan_id);
+        assert_eq!(summary.item_count, review.item_count);
+        assert_eq!(summary.action_count, review.action_count);
+    }
+
+    #[test]
+    fn plan_review_uses_stable_camel_case_and_decimal_strings() {
+        let encoded = serde_json::to_value(plan_review_example()).unwrap();
+        assert_eq!(encoded["schema"], PLAN_REVIEW_SCHEMA);
+        assert_eq!(encoded["authority"]["reviewOnly"], true);
+        assert_eq!(encoded["authority"]["approvalState"], "not_granted");
+        assert_eq!(encoded["authority"]["executionState"], "not_authorized");
+        assert_eq!(encoded["itemCount"], "1");
+        assert_eq!(encoded["actionCount"], "2");
+        assert_eq!(encoded["potentiallyReclaimableBytes"]["lowerBound"], "4096");
+        assert!(encoded.get("item_count").is_none());
+        assert!(encoded.get("approvalId").is_none());
+        assert!(encoded.get("authorizationId").is_none());
+        assert!(encoded.get("nonce").is_none());
+
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../schemas/examples/sweepx.output.plan.result.example.json"
+        ))
+        .unwrap();
+        assert_eq!(encoded, golden["data"]);
+    }
+
+    #[test]
+    fn plan_review_rejects_unknown_fields() {
+        let mut encoded = serde_json::to_value(plan_review_example()).unwrap();
+        encoded["approvalId"] = json!("forbidden");
+        assert!(serde_json::from_value::<PlanResultDataV1>(encoded).is_err());
+
+        let mut encoded = serde_json::to_value(plan_review_example()).unwrap();
+        encoded["items"][0]["actions"][0]["permit"] = json!("forbidden");
+        assert!(serde_json::from_value::<PlanResultDataV1>(encoded).is_err());
+
+        let mut encoded = serde_json::to_value(plan_review_example()).unwrap();
+        encoded["authority"]["reviewOnly"] = json!(false);
+        assert!(serde_json::from_value::<PlanResultDataV1>(encoded).is_err());
+    }
+
+    #[test]
+    fn plan_review_validation_rejects_authority_and_count_drift() {
+        let mut review = plan_review_example();
+        review.item_count = DecimalU128::new(2);
+        assert!(matches!(
+            review.validate(),
+            Err(PlanReviewValidationError::CountMismatch {
+                field: "itemCount",
+                ..
+            })
+        ));
+
+        let mut review = plan_review_example();
+        review.attention_fingerprint = "SX1-FFFFFFFFFFFF".to_string();
+        assert!(matches!(
+            review.validate(),
+            Err(PlanReviewValidationError::InvalidAttentionFingerprint)
+        ));
+
+        let mut review = plan_review_example();
+        review.recovery_expectation.capacity_release_guaranteed = true;
+        assert!(matches!(
+            review.validate(),
+            Err(PlanReviewValidationError::CapacityReleaseClaim)
+        ));
+
+        let mut review = plan_review_example();
+        review.potentially_reclaimable_bytes.lower_bound = DecimalU128::new(4097);
+        assert!(matches!(
+            review.validate(),
+            Err(PlanReviewValidationError::ReclaimableAggregateMismatch)
+        ));
+    }
+
+    #[test]
+    fn plan_review_validation_enforces_permanent_and_blocked_gates() {
+        let mut permanent = plan_review_example();
+        permanent.mode = PlanReviewMode::Permanent;
+        assert!(matches!(
+            permanent.validate(),
+            Err(PlanReviewValidationError::PermanentRiskBelowR4)
+        ));
+
+        let mut blocked = plan_review_example();
+        blocked.aggregate_risk = PlanReviewRiskTier::Blocked;
+        blocked.items[0].risk_tier = PlanReviewRiskTier::Blocked;
+        blocked.items[0].actions[0].risk_tier = PlanReviewRiskTier::Blocked;
+        blocked.items[0].actions[0]
+            .blockers
+            .push(PlanReviewNoticeV1 {
+                code: "protected_anchor".to_string(),
+                message_key: "plan.review.blocker.protected_anchor".to_string(),
+                params: BTreeMap::new(),
+            });
+        blocked.items[0].blockers = blocked.items[0].actions[0].blockers.clone();
+        blocked.blockers = blocked.items[0].blockers.clone();
+        assert!(matches!(
+            blocked.validate(),
+            Err(PlanReviewValidationError::BlockedApprovalPathAvailable)
+        ));
+        blocked.authority.approval_path = PlanReviewApprovalPath::Unavailable;
+        blocked.validate().unwrap();
+    }
+
+    #[test]
+    fn plan_review_validation_rejects_unstable_enums_and_nested_blocker_drift() {
+        let mut invalid_action = serde_json::to_value(plan_review_example()).unwrap();
+        invalid_action["items"][0]["actions"][0]["actionKind"] = json!("任意动作");
+        assert!(serde_json::from_value::<PlanResultDataV1>(invalid_action).is_err());
+
+        let mut hidden_blocker = plan_review_example();
+        hidden_blocker.items[0].actions[0].risk_tier = PlanReviewRiskTier::Blocked;
+        hidden_blocker.items[0].actions[0]
+            .blockers
+            .push(PlanReviewNoticeV1 {
+                code: "protected_anchor".to_string(),
+                message_key: "plan.review.blocker.protected_anchor".to_string(),
+                params: BTreeMap::new(),
+            });
+        hidden_blocker.items[0].risk_tier = PlanReviewRiskTier::Blocked;
+        hidden_blocker.aggregate_risk = PlanReviewRiskTier::Blocked;
+        assert!(matches!(
+            hidden_blocker.validate(),
+            Err(PlanReviewValidationError::MissingAggregateBlocker)
+        ));
     }
 
     #[test]

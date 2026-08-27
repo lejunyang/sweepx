@@ -113,6 +113,28 @@
       "if": {
         "properties": {
           "kind": {
+            "const": "plan.result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "summary": {
+            "$ref": "#/$defs/planResultSummary"
+          },
+          "data": {
+            "$ref": "#/$defs/planResultData"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
             "const": "status.result"
           }
         },
@@ -910,6 +932,491 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/boundary"
+          }
+        }
+      }
+    },
+    "planReviewCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9_]+(?:\\.[a-z0-9_]+)*$"
+    },
+    "planReviewRiskTier": {
+      "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/riskTier"
+    },
+    "planReviewEvidenceState": {
+      "type": "string",
+      "enum": [
+        "known",
+        "lower_bound",
+        "unknown",
+        "unsupported",
+        "not_checked",
+        "stale"
+      ]
+    },
+    "planReviewNotice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "messageKey",
+        "params"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/planReviewCode"
+        },
+        "messageKey": {
+          "$ref": "#/$defs/planReviewCode"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "planReviewNoticeList": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/planReviewNotice"
+      }
+    },
+    "planReviewCodeList": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/planReviewCode"
+      }
+    },
+    "planReviewByteRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lowerBound",
+        "state",
+        "reasonCodes"
+      ],
+      "properties": {
+        "lowerBound": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "upperBound": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "state": {
+          "$ref": "#/$defs/planReviewEvidenceState"
+        },
+        "reasonCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "known"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "upperBound"
+              ]
+            },
+            "properties": {
+              "reasonCodes": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "lower_bound",
+                  "unknown",
+                  "unsupported",
+                  "not_checked",
+                  "stale"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reasonCodes": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "unknown",
+                  "unsupported",
+                  "not_checked",
+                  "stale"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "upperBound"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "planReviewEvidenceQuality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "factCodes",
+        "managerFactCodes",
+        "inferenceCodes",
+        "heuristicCodes",
+        "unknownCodes",
+        "unsupportedCodes",
+        "notCheckedCodes",
+        "staleCodes",
+        "incompleteCoverage",
+        "observedAt"
+      ],
+      "properties": {
+        "factCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "managerFactCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "inferenceCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "heuristicCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "unknownCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "unsupportedCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "notCheckedCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "staleCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "incompleteCoverage": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+          }
+        }
+      }
+    },
+    "planReviewRecoveryExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "messageKey",
+        "locationKnown",
+        "capacityReleaseGuaranteed",
+        "applicationStateLossPossible",
+        "redownloadOrRebuildRequired",
+        "detailCodes"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "platform_trash",
+            "rebuild_or_redownload",
+            "none_permanent",
+            "unknown"
+          ]
+        },
+        "messageKey": {
+          "$ref": "#/$defs/planReviewCode"
+        },
+        "locationKnown": {
+          "type": "boolean"
+        },
+        "capacityReleaseGuaranteed": {
+          "const": false
+        },
+        "applicationStateLossPossible": {
+          "type": "boolean"
+        },
+        "redownloadOrRebuildRequired": {
+          "type": "boolean"
+        },
+        "detailCodes": {
+          "$ref": "#/$defs/planReviewCodeList"
+        }
+      }
+    },
+    "planReviewAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actionId",
+        "riskTier",
+        "riskFactors",
+        "blockers"
+      ],
+      "properties": {
+        "actionId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "riskTier": {
+          "$ref": "#/$defs/planReviewRiskTier"
+        },
+        "riskFactors": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "blockers": {
+          "$ref": "#/$defs/planReviewNoticeList"
+        }
+      }
+    },
+    "planReviewItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "candidateId",
+        "displayPath",
+        "objectType",
+        "riskTier",
+        "riskFactors",
+        "potentiallyReclaimableBytes",
+        "evidenceQuality",
+        "boundaries",
+        "blockers",
+        "recoveryExpectation",
+        "actions"
+      ],
+      "properties": {
+        "itemId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "candidateId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "displayPath": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "objectType": {
+          "type": "string",
+          "enum": [
+            "file",
+            "directory",
+            "symlink",
+            "reparse_point",
+            "other"
+          ]
+        },
+        "riskTier": {
+          "$ref": "#/$defs/planReviewRiskTier"
+        },
+        "riskFactors": {
+          "$ref": "#/$defs/planReviewCodeList"
+        },
+        "potentiallyReclaimableBytes": {
+          "$ref": "#/$defs/planReviewByteRange"
+        },
+        "evidenceQuality": {
+          "$ref": "#/$defs/planReviewEvidenceQuality"
+        },
+        "boundaries": {
+          "$ref": "#/$defs/planReviewNoticeList"
+        },
+        "blockers": {
+          "$ref": "#/$defs/planReviewNoticeList"
+        },
+        "recoveryExpectation": {
+          "$ref": "#/$defs/planReviewRecoveryExpectation"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/planReviewAction"
+          }
+        }
+      }
+    },
+    "planResultSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewOnly",
+        "planId",
+        "itemCount",
+        "actionCount"
+      ],
+      "properties": {
+        "reviewOnly": {
+          "const": true
+        },
+        "planId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "itemCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "actionCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        }
+      }
+    },
+    "planResultData": {
+      "$comment": "Output-only human-review projection. This JSON is never accepted as a DeletionPlan, ApprovalRecord, ExecutionAuthorization, or PreflightPermit. Cross-field count, digest/fingerprint, aggregate-risk, expiry-order, and permanent-risk invariants are also enforced by the typed protocol validator.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sourcePlanSchema",
+        "authority",
+        "planId",
+        "canonicalDigest",
+        "attentionFingerprint",
+        "createdAt",
+        "expiresAt",
+        "mode",
+        "itemCount",
+        "actionCount",
+        "aggregateRisk",
+        "potentiallyReclaimableBytes",
+        "evidenceQuality",
+        "boundaries",
+        "blockers",
+        "recoveryExpectation",
+        "items"
+      ],
+      "properties": {
+        "schema": {
+          "const": "sweepx.plan-review/v1"
+        },
+        "sourcePlanSchema": {
+          "const": "sweepx.plan/v1"
+        },
+        "authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reviewOnly",
+            "approvalState",
+            "executionState",
+            "approvalPath"
+          ],
+          "properties": {
+            "reviewOnly": {
+              "const": true
+            },
+            "approvalState": {
+              "const": "not_granted"
+            },
+            "executionState": {
+              "const": "not_authorized"
+            },
+            "approvalPath": {
+              "type": "string",
+              "enum": [
+                "trusted_human_required",
+                "unavailable"
+              ]
+            }
+          }
+        },
+        "planId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "canonicalDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "attentionFingerprint": {
+          "type": "string",
+          "pattern": "^SX1-[0-9A-F]{12}$"
+        },
+        "createdAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "expiresAt": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
+        },
+        "itemCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "actionCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "aggregateRisk": {
+          "$ref": "#/$defs/planReviewRiskTier"
+        },
+        "potentiallyReclaimableBytes": {
+          "$ref": "#/$defs/planReviewByteRange"
+        },
+        "evidenceQuality": {
+          "$ref": "#/$defs/planReviewEvidenceQuality"
+        },
+        "boundaries": {
+          "$ref": "#/$defs/planReviewNoticeList"
+        },
+        "blockers": {
+          "$ref": "#/$defs/planReviewNoticeList"
+        },
+        "recoveryExpectation": {
+          "$ref": "#/$defs/planReviewRecoveryExpectation"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/planReviewItem"
           }
         }
       }

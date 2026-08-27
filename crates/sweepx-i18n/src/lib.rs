@@ -270,10 +270,126 @@ impl Catalog {
             Locale::EnUs => render_en_us(key, args),
         }
     }
+
+    pub fn render_plan_review(
+        &self,
+        key: PlanReviewMessageKey,
+        args: &PlanReviewMessageArgs<'_>,
+    ) -> String {
+        render_plan_review(self.locale, key, args)
+    }
 }
 
 pub fn render(locale: Locale, key: MessageKey, args: &MessageArgs<'_>) -> String {
     Catalog::new(locale).render(key, args)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlanReviewMessageKey {
+    Summary,
+    AuthorityNotice,
+    FingerprintNotice,
+    RecoveryNotice,
+}
+
+impl PlanReviewMessageKey {
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Summary,
+            Self::AuthorityNotice,
+            Self::FingerprintNotice,
+            Self::RecoveryNotice,
+        ]
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "plan.review.summary",
+            Self::AuthorityNotice => "plan.review.authority_notice",
+            Self::FingerprintNotice => "plan.review.fingerprint_notice",
+            Self::RecoveryNotice => "plan.review.recovery_notice",
+        }
+    }
+}
+
+impl fmt::Display for PlanReviewMessageKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Display values for the read-only plan review surface.
+///
+/// `mode`, `risk`, and `recovery_kind` are stable protocol enum values and are intentionally
+/// interpolated verbatim instead of translated. Counts stay decimal strings end to end.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanReviewMessageArgs<'a> {
+    pub plan_id: &'a str,
+    pub mode: &'a str,
+    pub item_count: &'a str,
+    pub action_count: &'a str,
+    pub risk: &'a str,
+    pub fingerprint: &'a str,
+    pub recovery_kind: &'a str,
+}
+
+pub fn render_plan_review(
+    locale: Locale,
+    key: PlanReviewMessageKey,
+    args: &PlanReviewMessageArgs<'_>,
+) -> String {
+    match locale {
+        Locale::EnUs => render_plan_review_en_us(key, args),
+        Locale::ZhCn => render_plan_review_zh_cn(key, args),
+    }
+}
+
+fn render_plan_review_en_us(key: PlanReviewMessageKey, args: &PlanReviewMessageArgs<'_>) -> String {
+    match key {
+        PlanReviewMessageKey::Summary => format!(
+            "Plan {plan_id}: mode {mode}, {item_count} items, {action_count} actions, risk {risk}.",
+            plan_id = args.plan_id,
+            mode = args.mode,
+            item_count = args.item_count,
+            action_count = args.action_count,
+            risk = args.risk
+        ),
+        PlanReviewMessageKey::AuthorityNotice => {
+            "Review only: this output grants no approval and authorizes no execution. JSON is not plan authority.".to_string()
+        }
+        PlanReviewMessageKey::FingerprintNotice => format!(
+            "Attention fingerprint {fingerprint} is for comparison only; it is not authorization.",
+            fingerprint = args.fingerprint
+        ),
+        PlanReviewMessageKey::RecoveryNotice => format!(
+            "Recovery expectation: {recovery_kind}. Capacity release is not guaranteed.",
+            recovery_kind = args.recovery_kind
+        ),
+    }
+}
+
+fn render_plan_review_zh_cn(key: PlanReviewMessageKey, args: &PlanReviewMessageArgs<'_>) -> String {
+    match key {
+        PlanReviewMessageKey::Summary => format!(
+            "计划 {plan_id}：模式 {mode}，{item_count} 个条目，{action_count} 个动作，风险 {risk}。",
+            plan_id = args.plan_id,
+            mode = args.mode,
+            item_count = args.item_count,
+            action_count = args.action_count,
+            risk = args.risk
+        ),
+        PlanReviewMessageKey::AuthorityNotice => {
+            "仅供审阅：此输出不授予审批，也不授权执行；JSON 不是计划权威来源。".to_string()
+        }
+        PlanReviewMessageKey::FingerprintNotice => format!(
+            "注意力指纹 {fingerprint} 仅用于对照，不是授权凭据。",
+            fingerprint = args.fingerprint
+        ),
+        PlanReviewMessageKey::RecoveryNotice => format!(
+            "恢复预期：{recovery_kind}；不保证释放容量。",
+            recovery_kind = args.recovery_kind
+        ),
+    }
 }
 
 fn render_en_us(key: MessageKey, args: &MessageArgs<'_>) -> String {
@@ -422,6 +538,18 @@ mod tests {
             status: "partial",
             capabilities: "filesystem.metadata.read.scoped, process.observe",
             detail: "permission denied",
+        }
+    }
+
+    fn sample_plan_review_args<'a>() -> PlanReviewMessageArgs<'a> {
+        PlanReviewMessageArgs {
+            plan_id: "plan-example",
+            mode: "trash",
+            item_count: "2",
+            action_count: "5",
+            risk: "R2",
+            fingerprint: "SX1-0123456789AB",
+            recovery_kind: "platform_trash",
         }
     }
 
@@ -600,6 +728,38 @@ mod tests {
     }
 
     #[test]
+    fn plan_review_messages_keep_machine_enums_and_decimal_strings_untranslated() {
+        let args = sample_plan_review_args();
+
+        for locale in Locale::all() {
+            let summary = render_plan_review(locale, PlanReviewMessageKey::Summary, &args);
+            let fingerprint =
+                render_plan_review(locale, PlanReviewMessageKey::FingerprintNotice, &args);
+            let recovery = render_plan_review(locale, PlanReviewMessageKey::RecoveryNotice, &args);
+
+            for value in ["plan-example", "trash", "2", "5", "R2"] {
+                assert!(summary.contains(value), "{locale:?}: {value}");
+            }
+            assert!(fingerprint.contains("SX1-0123456789AB"));
+            assert!(recovery.contains("platform_trash"));
+        }
+    }
+
+    #[test]
+    fn plan_review_authority_message_is_explicitly_non_authorizing() {
+        let args = sample_plan_review_args();
+        let en = render_plan_review(Locale::EnUs, PlanReviewMessageKey::AuthorityNotice, &args);
+        let zh = render_plan_review(Locale::ZhCn, PlanReviewMessageKey::AuthorityNotice, &args);
+
+        assert!(en.contains("no approval"));
+        assert!(en.contains("no execution"));
+        assert!(en.contains("JSON is not plan authority"));
+        assert!(zh.contains("不授予审批"));
+        assert!(zh.contains("不授权执行"));
+        assert!(zh.contains("JSON 不是计划权威来源"));
+    }
+
+    #[test]
     fn translated_messages_are_distinct_between_locales() {
         let args = sample_args();
 
@@ -618,6 +778,32 @@ mod tests {
             let zh = render(Locale::ZhCn, key, &args);
             assert_ne!(en, zh, "{key:?}");
         }
+    }
+
+    #[test]
+    fn each_plan_review_message_key_renders_for_every_locale() {
+        let args = sample_plan_review_args();
+        for locale in Locale::all() {
+            for key in PlanReviewMessageKey::all() {
+                let rendered = render_plan_review(locale, key, &args);
+                assert!(
+                    !rendered.trim().is_empty(),
+                    "missing plan review rendering for {locale:?} {key:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_review_message_keys_have_stable_machine_names() {
+        assert_eq!(
+            PlanReviewMessageKey::AuthorityNotice.as_str(),
+            "plan.review.authority_notice"
+        );
+        assert_eq!(
+            PlanReviewMessageKey::RecoveryNotice.to_string(),
+            "plan.review.recovery_notice"
+        );
     }
 
     #[test]

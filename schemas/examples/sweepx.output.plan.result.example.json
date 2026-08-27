@@ -1,0 +1,190 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "plan.result",
+  "requestId": "req-plan-review-example",
+  "operationId": "op-plan-review-example",
+  "generatedAt": "2026-08-27T06:01:00Z",
+  "status": "ok",
+  "exitCode": 0,
+  "compat": {
+    "coreVersion": "0.1.0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "simulation-only",
+      "version": "0.1.0"
+    },
+    "cleanerSetDigest": "sha256:example",
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "reviewOnly": true,
+    "planId": "plan-example",
+    "itemCount": "1",
+    "actionCount": "2"
+  },
+  "data": {
+    "schema": "sweepx.plan-review/v1",
+    "sourcePlanSchema": "sweepx.plan/v1",
+    "authority": {
+      "reviewOnly": true,
+      "approvalState": "not_granted",
+      "executionState": "not_authorized",
+      "approvalPath": "trusted_human_required"
+    },
+    "planId": "plan-example",
+    "canonicalDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "attentionFingerprint": "SX1-0123456789AB",
+    "createdAt": "2026-08-27T06:00:00Z",
+    "expiresAt": "2026-08-27T06:10:00Z",
+    "mode": "trash",
+    "itemCount": "1",
+    "actionCount": "2",
+    "aggregateRisk": "R2",
+    "potentiallyReclaimableBytes": {
+      "lowerBound": "4096",
+      "state": "lower_bound",
+      "reasonCodes": [
+        "shared_extents_not_attributable"
+      ]
+    },
+    "evidenceQuality": {
+      "factCodes": [
+        "scan.live_identity",
+        "scan.complete_directory"
+      ],
+      "managerFactCodes": [
+        "cargo.target_directory"
+      ],
+      "inferenceCodes": [
+        "cache.rebuildable"
+      ],
+      "heuristicCodes": [],
+      "unknownCodes": [
+        "shared_extents_not_attributable"
+      ],
+      "unsupportedCodes": [],
+      "notCheckedCodes": [],
+      "staleCodes": [],
+      "incompleteCoverage": false,
+      "observedAt": [
+        "2026-08-27T05:59:58Z",
+        "2026-08-27T05:59:59Z"
+      ]
+    },
+    "boundaries": [
+      {
+        "code": "shared_extent",
+        "messageKey": "plan.review.boundary.shared_extent",
+        "params": {}
+      }
+    ],
+    "blockers": [],
+    "recoveryExpectation": {
+      "kind": "platform_trash",
+      "messageKey": "plan.review.recovery.platform_trash",
+      "locationKnown": false,
+      "capacityReleaseGuaranteed": false,
+      "applicationStateLossPossible": false,
+      "redownloadOrRebuildRequired": true,
+      "detailCodes": [
+        "trash_location_may_be_unknown",
+        "rebuild_required"
+      ]
+    },
+    "items": [
+      {
+        "itemId": "item-cargo-target",
+        "candidateId": "candidate-cargo-target",
+        "displayPath": "/work/example/target",
+        "objectType": "directory",
+        "riskTier": "R2",
+        "riskFactors": [
+          "directory",
+          "shared_extent_uncertain"
+        ],
+        "potentiallyReclaimableBytes": {
+          "lowerBound": "4096",
+          "state": "lower_bound",
+          "reasonCodes": [
+            "shared_extents_not_attributable"
+          ]
+        },
+        "evidenceQuality": {
+          "factCodes": [
+            "scan.live_identity",
+            "scan.complete_directory"
+          ],
+          "managerFactCodes": [
+            "cargo.target_directory"
+          ],
+          "inferenceCodes": [
+            "cache.rebuildable"
+          ],
+          "heuristicCodes": [],
+          "unknownCodes": [
+            "shared_extents_not_attributable"
+          ],
+          "unsupportedCodes": [],
+          "notCheckedCodes": [],
+          "staleCodes": [],
+          "incompleteCoverage": false,
+          "observedAt": [
+            "2026-08-27T05:59:58Z",
+            "2026-08-27T05:59:59Z"
+          ]
+        },
+        "boundaries": [
+          {
+            "code": "shared_extent",
+            "messageKey": "plan.review.boundary.shared_extent",
+            "params": {}
+          }
+        ],
+        "blockers": [],
+        "recoveryExpectation": {
+          "kind": "platform_trash",
+          "messageKey": "plan.review.recovery.platform_trash",
+          "locationKnown": false,
+          "capacityReleaseGuaranteed": false,
+          "applicationStateLossPossible": false,
+          "redownloadOrRebuildRequired": true,
+          "detailCodes": [
+            "trash_location_may_be_unknown",
+            "rebuild_required"
+          ]
+        },
+        "actions": [
+          {
+            "actionId": "action-child-first",
+            "riskTier": "R1",
+            "riskFactors": [],
+            "blockers": []
+          },
+          {
+            "actionId": "action-target-root",
+            "riskTier": "R2",
+            "riskFactors": [
+              "directory"
+            ],
+            "blockers": []
+          }
+        ]
+      }
+    ]
+  },
+  "warnings": [
+    {
+      "code": "plan.review_only",
+      "class": "safety",
+      "messageKey": "plan.review.authority_notice",
+      "retryable": false,
+      "params": {
+        "approvalState": "not_granted",
+        "executionState": "not_authorized"
+      }
+    }
+  ],
+  "errors": []
+}

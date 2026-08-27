@@ -2,7 +2,8 @@
 
 This directory contains the P0 contract baseline for SweepX:
 
-- `sweepx.output/v1`: bounded command result envelope
+- `sweepx.output/v1`: bounded command result envelope, including the strict output-only
+  `plan.result` review projection
 - `sweepx.event/v1`: NDJSON event envelope
 - `sweepx.capability-record/v1`: capability qualification record
 - `sweepx.fixture-manifest/v1`: deterministic fixture input contract
@@ -36,6 +37,7 @@ The validation script checks:
 
 - example output envelope
 - exact `status.result.data` and `cancel.result.data` branches, including positive examples and rejection of unknown or disposition-inconsistent fields
+- exact `plan.result.data` review-only branch, including rejection of unknown fields, authority-shaped fields, translated machine enums, and numeric/leading-zero counts
 - live `scan.result` entry identity, native locator lineage, and directory-aggregate identity structure
 - legacy imported scan entries without identity or native locator, which remain readable but untrusted
 - malformed or path-derived values cannot enter trusted `scan-entry:v1` IDs or lossless native-name components
@@ -46,6 +48,13 @@ The validation script checks:
 - executable transition policy
 
 P0 keeps the contracts additive-friendly, but strict enough to reject state, enum, and invariant drift in the core safety model.
+
+`plan.result.data` uses `schema=sweepx.plan-review/v1` and is a presentation projection only. It
+always says `reviewOnly=true`, `approvalState=not_granted`, and
+`executionState=not_authorized`. It is never accepted as a canonical plan, approval record,
+execution authorization, or permit; `planId` can only be used to ask Core for its separately
+persisted immutable plan. Byte/count fields are decimal strings, protocol enums and reason codes
+are never translated, and all review objects reject unknown fields.
 
 `ScannedEntry.identity` is present on new live scanner output and may be absent only for legacy or
 imported records. A `DirectoryAggregate.directoryIdentity` matching `scan-entry:v1` is the current

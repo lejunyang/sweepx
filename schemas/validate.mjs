@@ -52,6 +52,10 @@ const validations = [
     file: path.join(schemaDir, "examples", "sweepx.output.cancel.result.example.json")
   },
   {
+    schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
+    file: path.join(schemaDir, "examples", "sweepx.output.plan.result.example.json")
+  },
+  {
     schemaId: "https://sweepx.dev/schemas/sweepx.event/v1",
     file: path.join(schemaDir, "examples", "sweepx.event.operation.started.example.json")
   },
@@ -312,6 +316,113 @@ for (const testCase of scanSchemaCases) {
 }
 
 const resultSchemaCases = [
+  {
+    name: "plan result matches its exact review-only data branch",
+    file: "sweepx.output.plan.result.example.json",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "plan result rejects unknown data fields",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.approvalId = "forbidden";
+    }
+  },
+  {
+    name: "plan result rejects unknown summary fields",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.summary.approvalId = "forbidden";
+    }
+  },
+  {
+    name: "plan result summary is always review only",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.summary.reviewOnly = false;
+    }
+  },
+  {
+    name: "plan result is always review only",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.authority.reviewOnly = false;
+    }
+  },
+  {
+    name: "plan result carries no approval",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.authority.approvalState = "approved";
+    }
+  },
+  {
+    name: "plan result carries no execution authorization",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.authority.executionState = "authorized";
+    }
+  },
+  {
+    name: "plan result rejects numeric counts",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.actionCount = 2;
+    }
+  },
+  {
+    name: "plan result rejects leading-zero decimal strings",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.items[0].potentiallyReclaimableBytes.lowerBound = "04096";
+    }
+  },
+  {
+    name: "plan result keeps machine enums stable",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.items[0].riskTier = "中风险";
+    }
+  },
+  {
+    name: "known reclaimable values are point values without a redundant upper bound",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.potentiallyReclaimableBytes = {
+        lowerBound: "4096",
+        upperBound: "4096",
+        state: "known",
+        reasonCodes: []
+      };
+    }
+  },
+  {
+    name: "plan result rejects an authorization-shaped action field",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.items[0].actions[0].permit = "forbidden";
+    }
+  },
+  {
+    name: "plan review never guarantees capacity release",
+    file: "sweepx.output.plan.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.recoveryExpectation.capacityReleaseGuaranteed = true;
+    }
+  },
   {
     name: "status result matches its exact data branch",
     file: "sweepx.output.status.result.example.json",
