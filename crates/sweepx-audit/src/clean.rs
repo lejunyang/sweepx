@@ -386,7 +386,20 @@ struct LiveClaimAuthority {
 #[derive(Debug)]
 struct SessionCoordinator {
     active: AtomicBool,
+    observer_phase: AtomicBool,
     mutation_lock: Mutex<()>,
+}
+
+struct ObserverPhaseGuard<'a> {
+    coordinator: &'a SessionCoordinator,
+}
+
+impl Drop for ObserverPhaseGuard<'_> {
+    fn drop(&mut self) {
+        self.coordinator
+            .observer_phase
+            .store(false, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for LiveClaimAuthority {
@@ -533,6 +546,90 @@ impl DurableIntentToken {
         validate_binding(&binding)?;
         validate_authority_binding(&authority, &binding)?;
         validate_token_authority(self, &authority)
+    }
+}
+
+/// A process-local capability proving that a durable intent was still reserved
+/// under the exact live execution claim when it was armed.
+///
+/// Arming consumes the underlying [`DurableIntentToken`] and exclusively borrows
+/// its [`ClaimedExecution`]. This keeps the claim alive and prevents other safe
+/// claim operations throughout a native adapter's final preflight/submit quiet
+/// zone. The capability is intentionally neither cloneable nor serializable.
+#[must_use = "an armed durable intent must be validated or consumed"]
+pub struct ArmedDurableIntent<'claim> {
+    durable_intent: DurableIntentToken,
+    claim: &'claim mut ClaimedExecution,
+}
+
+impl fmt::Debug for ArmedDurableIntent<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArmedDurableIntent")
+            .field("attempt_id", &self.durable_intent.attempt_id)
+            .field("authorization_id", &self.durable_intent.authorization_id)
+            .field("action_id", &self.durable_intent.action_id)
+            .field("item_id", &self.durable_intent.item_id)
+            .field("requested_mode", &self.durable_intent.requested_mode)
+            .field("risk_tier", &self.durable_intent.risk_tier)
+            .field("fence_epoch", &self.durable_intent.fence_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ArmedDurableIntent<'_> {
+    pub fn attempt_id(&self) -> &AttemptId {
+        &self.durable_intent.attempt_id
+    }
+    pub fn nonce(&self) -> &NonceId {
+        &self.durable_intent.nonce
+    }
+    pub fn authorization_id(&self) -> &AuthorizationId {
+        &self.durable_intent.authorization_id
+    }
+    pub fn batch_id(&self) -> &BatchId {
+        &self.durable_intent.batch_id
+    }
+    pub fn plan_id(&self) -> &PlanId {
+        &self.durable_intent.plan_id
+    }
+    pub fn plan_digest(&self) -> &DigestString {
+        &self.durable_intent.plan_digest
+    }
+    pub fn action_id(&self) -> &ActionId {
+        &self.durable_intent.action_id
+    }
+    pub fn item_id(&self) -> &ItemId {
+        &self.durable_intent.item_id
+    }
+    pub fn requested_mode(&self) -> RequestedMode {
+        self.durable_intent.requested_mode
+    }
+    pub fn risk_tier(&self) -> RiskTier {
+        self.durable_intent.risk_tier
+    }
+    pub fn source_path_hash(&self) -> &PathHash {
+        &self.durable_intent.source_path_hash
+    }
+    pub fn before_revalidation_digest(&self) -> &DigestString {
+        &self.durable_intent.before_revalidation_digest
+    }
+    pub fn fence_epoch(&self) -> u64 {
+        self.durable_intent.fence_epoch
+    }
+
+    /// Rechecks only process-local state. This method performs no filesystem or
+    /// database access and takes no mutex or file lock.
+    pub fn validate_in_memory_current_process(&self) -> Result<(), AuditError> {
+        validate_armed_intent_in_memory(self.claim, &self.durable_intent)
+    }
+
+    /// Disarms the capability and returns its raw durable token.
+    ///
+    /// There is deliberately no borrowed-token accessor: recovering the raw
+    /// token always consumes the armed state and ends its exclusive claim borrow.
+    pub fn into_durable_intent(self) -> DurableIntentToken {
+        self.durable_intent
     }
 }
 
@@ -1239,6 +1336,8 @@ pub enum AuditError {
     ForkedProcess,
     #[error("claimed execution mutation lock is poisoned")]
     SessionLockPoisoned,
+    #[error("same-store audit reentry is forbidden during RecoveryObserver callback")]
+    ObserverReentryDenied,
     #[error("stable identifier field {field} is invalid")]
     InvalidStableId { field: &'static str },
     #[error("authorization {0} already exists")]
@@ -1381,6 +1480,7 @@ impl AuditStore {
                 owner_pid: std::process::id(),
                 coordinator: Arc::new(SessionCoordinator {
                     active: AtomicBool::new(false),
+                    observer_phase: AtomicBool::new(false),
                     mutation_lock: Mutex::new(()),
                 }),
             })
@@ -1389,6 +1489,7 @@ impl AuditStore {
 
     pub fn register_authorization(&self, request: RegisterAuthorization) -> Result<(), AuditError> {
         self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
         validate_binding(&request.binding)?;
         let binding_json = canonical_json(&request.binding)?;
         if binding_json.len() > MAX_BINDING_BYTES {
@@ -1431,6 +1532,7 @@ impl AuditStore {
         expected_plan_digest: &DigestString,
     ) -> Result<ClaimedExecution, AuditError> {
         self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
         let _session_guard = self
             .coordinator
             .mutation_lock
@@ -1449,6 +1551,7 @@ impl AuditStore {
         expected_plan_digest: &DigestString,
     ) -> Result<ClaimedExecution, AuditError> {
         self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
         let _session_guard = self
             .coordinator
             .mutation_lock
@@ -1581,6 +1684,7 @@ impl AuditStore {
         claimed: &ClaimedExecution,
         request: IntentRequest,
     ) -> Result<DurableIntentToken, AuditError> {
+        self.ensure_not_in_observer_phase()?;
         match self.reserve_intent_once(claimed, request)? {
             IntentReservation::Created(token) => Ok(token),
             IntentReservation::Existing(info) | IntentReservation::Conflicting(info) => Err(
@@ -1589,11 +1693,40 @@ impl AuditStore {
         }
     }
 
+    /// Performs the final durable authority check before entering a native
+    /// adapter's preflight/submit quiet zone.
+    ///
+    /// This consumes `token` and exclusively borrows `claimed`. Once this
+    /// method succeeds, [`ArmedDurableIntent::validate_in_memory_current_process`]
+    /// can recheck the same process-local authority without opening the audit
+    /// database, inspecting the filesystem, or taking a lock.
+    pub fn arm_native_intent<'claim>(
+        &self,
+        claimed: &'claim mut ClaimedExecution,
+        token: DurableIntentToken,
+    ) -> Result<ArmedDurableIntent<'claim>, AuditError> {
+        self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
+        ensure_store_matches_claim_in_memory(self, claimed)?;
+        validate_armed_intent_in_memory(claimed, &token)?;
+
+        // This is deliberately the only heavyweight validation performed while
+        // arming. It verifies the held OS lock and database identity/integrity,
+        // then exact-matches the persisted reserved intent, including its nonce.
+        token.validate_current_process()?;
+
+        Ok(ArmedDurableIntent {
+            durable_intent: token,
+            claim: claimed,
+        })
+    }
+
     pub fn reserve_intent_once(
         &self,
         claimed: &ClaimedExecution,
         request: IntentRequest,
     ) -> Result<IntentReservation, AuditError> {
+        self.ensure_not_in_observer_phase()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         validate_intent_binding(&claimed.binding, &request)?;
@@ -1733,6 +1866,7 @@ impl AuditStore {
         token: &DurableIntentToken,
         outcome: SimulatedOutcome,
     ) -> Result<(), AuditError> {
+        self.ensure_not_in_observer_phase()?;
         ensure_claim_matches_token(claimed, token)?;
         token.validate_current_process()?;
         let _mutation_guard = claimed.lock_mutation()?;
@@ -1779,6 +1913,7 @@ impl AuditStore {
         attempt_id: &AttemptId,
         outcome: SimulatedOutcome,
     ) -> Result<(), AuditError> {
+        self.ensure_not_in_observer_phase()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
@@ -1837,6 +1972,7 @@ impl AuditStore {
         &self,
         claimed: &ClaimedExecution,
     ) -> Result<Vec<IntentReservationInfo>, AuditError> {
+        self.ensure_not_in_observer_phase()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         let connection = self.connection()?;
@@ -1872,6 +2008,7 @@ impl AuditStore {
         claimed: &ClaimedExecution,
         observer: &dyn RecoveryObserver,
     ) -> Result<Vec<RecoveryRecord>, AuditError> {
+        self.ensure_not_in_observer_phase()?;
         let (reserved, mut existing) = {
             let _mutation_guard = claimed.lock_mutation()?;
             self.validate_claim_guard(claimed)?;
@@ -1881,21 +2018,24 @@ impl AuditStore {
             load_recovery_candidates(&connection, claimed.authorization_id())?
         };
         let mut pending = Vec::new();
-        for authority in reserved {
-            let view = RecoveryIntentView {
-                info: IntentReservationInfo {
-                    attempt_id: authority.attempt_id.clone(),
-                    item_id: authority.item_id.clone(),
-                    action_id: authority.action_id.clone(),
-                    source_path_hash: authority.source_path_hash.clone(),
-                    before_revalidation_digest: authority.before_revalidation_digest.clone(),
-                },
-                authorization_source: authority.authorization_source,
-            };
-            let observation = observer.observe(&view)?;
-            let (disposition, reason) =
-                classify_observation(authority.requested_mode, &observation)?;
-            pending.push((authority, observation, disposition, reason));
+        {
+            let _observer_phase = self.enter_observer_phase()?;
+            for authority in reserved {
+                let view = RecoveryIntentView {
+                    info: IntentReservationInfo {
+                        attempt_id: authority.attempt_id.clone(),
+                        item_id: authority.item_id.clone(),
+                        action_id: authority.action_id.clone(),
+                        source_path_hash: authority.source_path_hash.clone(),
+                        before_revalidation_digest: authority.before_revalidation_digest.clone(),
+                    },
+                    authorization_source: authority.authorization_source,
+                };
+                let observation = observer.observe(&view)?;
+                let (disposition, reason) =
+                    classify_observation(authority.requested_mode, &observation)?;
+                pending.push((authority, observation, disposition, reason));
+            }
         }
         if pending.is_empty() {
             return Ok(existing);
@@ -1952,6 +2092,7 @@ impl AuditStore {
     }
 
     pub fn consume_execution(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
+        self.ensure_not_in_observer_phase()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
@@ -2010,6 +2151,7 @@ impl AuditStore {
 
     pub fn verify_integrity(&self) -> Result<IntegritySummary, AuditError> {
         self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
         if self.coordinator.active.load(Ordering::Acquire) {
             let _mutation_guard = self
                 .coordinator
@@ -2057,6 +2199,7 @@ impl AuditStore {
 
     fn projection_snapshot_result(&self) -> Result<AuditProjectionSnapshot, AuditError> {
         self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
         if self.coordinator.active.load(Ordering::Acquire) {
             let _mutation_guard = self
                 .coordinator
@@ -2188,6 +2331,24 @@ impl AuditStore {
             return Err(AuditError::LockReplaced);
         }
         Ok(())
+    }
+
+    fn ensure_not_in_observer_phase(&self) -> Result<(), AuditError> {
+        if self.coordinator.observer_phase.load(Ordering::Acquire) {
+            Err(AuditError::ObserverReentryDenied)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn enter_observer_phase(&self) -> Result<ObserverPhaseGuard<'_>, AuditError> {
+        self.coordinator
+            .observer_phase
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| AuditError::ObserverReentryDenied)?;
+        Ok(ObserverPhaseGuard {
+            coordinator: &self.coordinator,
+        })
     }
 
     fn ensure_process(&self) -> Result<(), AuditError> {
@@ -3980,6 +4141,58 @@ fn ensure_claim_matches_token(
     Ok(())
 }
 
+fn ensure_store_matches_claim_in_memory(
+    store: &AuditStore,
+    claimed: &ClaimedExecution,
+) -> Result<(), AuditError> {
+    if store.owner_pid != std::process::id() || claimed.live_claim.owner_pid != std::process::id() {
+        return Err(AuditError::ForkedProcess);
+    }
+    if !Arc::ptr_eq(&store.coordinator, &claimed.live_claim.coordinator)
+        || store.database_id != claimed.database_id
+        || store.database_path != claimed.database_path
+        || store.lock_identity != claimed.lock_identity
+    {
+        return Err(AuditError::StoreMismatch);
+    }
+    Ok(())
+}
+
+fn validate_armed_intent_in_memory(
+    claimed: &ClaimedExecution,
+    token: &DurableIntentToken,
+) -> Result<(), AuditError> {
+    let current_pid = std::process::id();
+    if token.creator_pid != current_pid
+        || claimed.live_claim.owner_pid != current_pid
+        || claimed.live_claim.owner_pid != token.creator_pid
+    {
+        return Err(AuditError::ForkedProcess);
+    }
+    if !claimed.live_claim.active.load(Ordering::Acquire)
+        || !claimed
+            .live_claim
+            .coordinator
+            .active
+            .load(Ordering::Acquire)
+    {
+        return Err(AuditError::ClaimNotActive);
+    }
+    let token_live_claim = token
+        .live_claim
+        .upgrade()
+        .ok_or(AuditError::ClaimNotActive)?;
+    if !Arc::ptr_eq(&token_live_claim, &claimed.live_claim)
+        || claimed.live_claim.database_id != claimed.database_id
+        || claimed.live_claim.execution_id != claimed.execution_id
+        || claimed.live_claim.authorization_id != claimed.binding.authorization_id
+        || claimed.live_claim.fence_epoch != claimed.fence_epoch
+    {
+        return Err(AuditError::StoreMismatch);
+    }
+    ensure_claim_matches_token(claimed, token)
+}
+
 fn validate_token_authority(
     token: &DurableIntentToken,
     authority: &IntentAuthority,
@@ -5082,6 +5295,180 @@ mod tests {
     }
 
     #[test]
+    fn exact_reserved_intent_arms_and_disarms_without_exposing_the_raw_token() {
+        let (_temp, store) = store();
+        let binding = binding(31, RequestedMode::Permanent);
+        register(&store, &binding);
+        let mut claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        let attempt_id = token.attempt_id().clone();
+        let nonce = token.nonce().clone();
+        let fence_epoch = claim.fence_epoch();
+
+        let armed = store.arm_native_intent(&mut claim, token).unwrap();
+        assert_eq!(armed.attempt_id(), &attempt_id);
+        assert_eq!(armed.nonce(), &nonce);
+        assert_eq!(armed.authorization_id(), &binding.authorization_id);
+        assert_eq!(armed.batch_id(), &binding.batch_id);
+        assert_eq!(armed.plan_id(), &binding.plan_id);
+        assert_eq!(armed.plan_digest(), &binding.plan_digest);
+        assert_eq!(armed.action_id(), binding.action_ids.iter().next().unwrap());
+        assert_eq!(armed.item_id(), binding.item_ids.iter().next().unwrap());
+        assert_eq!(armed.requested_mode(), RequestedMode::Permanent);
+        assert_eq!(armed.risk_tier(), RiskTier::R4);
+        assert_eq!(armed.source_path_hash().as_str(), "source-path-sqlite");
+        assert_eq!(
+            armed.before_revalidation_digest().as_str(),
+            "revalidation-sqlite"
+        );
+        assert_eq!(armed.fence_epoch(), fence_epoch);
+        armed.validate_in_memory_current_process().unwrap();
+
+        let token = armed.into_durable_intent();
+        store
+            .record_outcome(&claim, &token, permanent_success())
+            .unwrap();
+    }
+
+    #[test]
+    fn armed_intent_is_neither_cloneable_nor_serializable() {
+        trait AmbiguousIfClone<Marker> {
+            fn marker() {}
+        }
+        trait AmbiguousIfSerialize<Marker> {
+            fn marker() {}
+        }
+        struct Implemented;
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        impl<T: Clone> AmbiguousIfClone<Implemented> for T {}
+        impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+        impl<T: ?Sized + Serialize> AmbiguousIfSerialize<Implemented> for T {}
+
+        let _ = <ArmedDurableIntent<'static> as AmbiguousIfClone<_>>::marker;
+        let _ = <ArmedDurableIntent<'static> as AmbiguousIfSerialize<_>>::marker;
+    }
+
+    #[test]
+    fn arming_rejects_stale_and_mismatched_authority() {
+        let (_temp, store) = store();
+        let stale_binding = binding(32, RequestedMode::Permanent);
+        register(&store, &stale_binding);
+        let stale_claim = store
+            .claim_execution(&stale_binding.authorization_id, &stale_binding.plan_digest)
+            .unwrap();
+        let stale_token = reserve(&store, &stale_claim, &stale_binding);
+        drop(stale_claim);
+
+        let mut recovery = store
+            .claim_recovery(&stale_binding.authorization_id, &stale_binding.plan_digest)
+            .unwrap();
+        assert!(matches!(
+            store.arm_native_intent(&mut recovery, stale_token),
+            Err(AuditError::ClaimNotActive | AuditError::AuthorizationBindingMismatch)
+        ));
+        drop(recovery);
+
+        let first_temp = TempDir::new().unwrap();
+        let first_store = AuditStore::open(first_temp.path().join("audit")).unwrap();
+        let first_binding = binding(33, RequestedMode::Permanent);
+        register(&first_store, &first_binding);
+        let first_claim = first_store
+            .claim_execution(&first_binding.authorization_id, &first_binding.plan_digest)
+            .unwrap();
+        let first_token = reserve(&first_store, &first_claim, &first_binding);
+
+        let second_temp = TempDir::new().unwrap();
+        let second_store = AuditStore::open(second_temp.path().join("audit")).unwrap();
+        let second_binding = binding(34, RequestedMode::Permanent);
+        register(&second_store, &second_binding);
+        let mut second_claim = second_store
+            .claim_execution(
+                &second_binding.authorization_id,
+                &second_binding.plan_digest,
+            )
+            .unwrap();
+        assert!(matches!(
+            second_store.arm_native_intent(&mut second_claim, first_token),
+            Err(AuditError::StoreMismatch | AuditError::AuthorizationBindingMismatch)
+        ));
+    }
+
+    #[test]
+    fn spent_intent_cannot_be_armed() {
+        let (_temp, store) = store();
+        let binding = binding(35, RequestedMode::Permanent);
+        register(&store, &binding);
+        let mut claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        store
+            .record_outcome(&claim, &token, permanent_success())
+            .unwrap();
+        assert!(matches!(
+            store.arm_native_intent(&mut claim, token),
+            Err(AuditError::FenceEpochMismatch)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn armed_validation_is_in_memory_only_after_database_is_moved() {
+        let (_temp, store) = store();
+        let binding = binding(36, RequestedMode::Permanent);
+        register(&store, &binding);
+        let mut claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        let database_path = store.database_path.clone();
+        let moved_database_path = store.root.join("audit.db.moved");
+        let armed = store.arm_native_intent(&mut claim, token).unwrap();
+
+        fs::rename(&database_path, &moved_database_path).unwrap();
+        assert!(armed.validate_in_memory_current_process().is_ok());
+        assert!(armed.validate_in_memory_current_process().is_ok());
+        fs::rename(&moved_database_path, &database_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn armed_intent_rejects_a_fork_without_touching_external_state() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (_temp, store) = store();
+        let binding = binding(37, RequestedMode::Permanent);
+        register(&store, &binding);
+        let mut claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let token = reserve(&store, &claim, &binding);
+        let armed = store.arm_native_intent(&mut claim, token).unwrap();
+
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            let rejected = matches!(
+                armed.validate_in_memory_current_process(),
+                Err(AuditError::ForkedProcess)
+            );
+            unsafe { libc::_exit(if rejected { 0 } else { 1 }) };
+        }
+
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(waited, child);
+        assert!(std::process::ExitStatus::from_raw(status).success());
+        armed.validate_in_memory_current_process().unwrap();
+    }
+
+    #[test]
     fn cloned_store_cannot_claim_while_same_process_session_is_active() {
         let (_temp, store) = store();
         let cloned = store.clone();
@@ -5103,20 +5490,51 @@ mod tests {
     }
 
     #[test]
-    fn recovery_observer_runs_outside_the_claim_mutation_mutex() {
+    fn recovery_observer_allows_normal_lock_free_observation() {
+        struct PassiveObserver;
+        impl RecoveryObserver for PassiveObserver {
+            fn observe(
+                &self,
+                view: &RecoveryIntentView,
+            ) -> Result<RecoveryObservation, AuditError> {
+                assert!(view.info.action_id.as_str().starts_with("action-14"));
+                Ok(RecoveryObservation::Unknown)
+            }
+        }
+        let (_temp, store) = store();
+        let binding = binding(14, RequestedMode::Trash);
+        register(&store, &binding);
+        let claim = store
+            .claim_execution(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        reserve(&store, &claim, &binding);
+        drop(claim);
+        let recovery = store
+            .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        let records = store
+            .classify_recovery(&recovery, &PassiveObserver)
+            .unwrap();
+        assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
+    }
+
+    #[test]
+    fn recovery_observer_denies_same_store_reentry_without_deadlock() {
         struct ReentrantObserver<'a> {
             store: &'a AuditStore,
             claim: &'a ClaimedExecution,
         }
         impl RecoveryObserver for ReentrantObserver<'_> {
             fn observe(&self, _: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
-                let unresolved = self.store.unresolved_recovery_intents(self.claim)?;
-                assert_eq!(unresolved.len(), 1);
+                assert!(matches!(
+                    self.store.unresolved_recovery_intents(self.claim),
+                    Err(AuditError::ObserverReentryDenied)
+                ));
                 Ok(RecoveryObservation::Unknown)
             }
         }
         let (_temp, store) = store();
-        let binding = binding(14, RequestedMode::Trash);
+        let binding = binding(15, RequestedMode::Trash);
         register(&store, &binding);
         let claim = store
             .claim_execution(&binding.authorization_id, &binding.plan_digest)
@@ -5138,11 +5556,72 @@ mod tests {
         assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
     }
 
+    #[test]
+    fn recovery_observer_cannot_arm_a_native_intent() {
+        struct ReentrantObserver<'a> {
+            store: &'a AuditStore,
+            claim: &'a std::cell::RefCell<ClaimedExecution>,
+            token: &'a std::cell::RefCell<Option<DurableIntentToken>>,
+        }
+        impl RecoveryObserver for ReentrantObserver<'_> {
+            fn observe(&self, _: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
+                let token = self.token.borrow_mut().take().unwrap();
+                assert!(matches!(
+                    self.store
+                        .arm_native_intent(&mut self.claim.borrow_mut(), token),
+                    Err(AuditError::ObserverReentryDenied)
+                ));
+                Ok(RecoveryObservation::Unknown)
+            }
+        }
+
+        let (_temp, store) = store();
+        let recovery_binding = binding(38, RequestedMode::Trash);
+        register(&store, &recovery_binding);
+        let claim = store
+            .claim_execution(
+                &recovery_binding.authorization_id,
+                &recovery_binding.plan_digest,
+            )
+            .unwrap();
+        reserve(&store, &claim, &recovery_binding);
+        drop(claim);
+        let recovery = store
+            .claim_recovery(
+                &recovery_binding.authorization_id,
+                &recovery_binding.plan_digest,
+            )
+            .unwrap();
+
+        let other_temp = TempDir::new().unwrap();
+        let other_store = AuditStore::open(other_temp.path().join("audit")).unwrap();
+        let other_binding = binding(39, RequestedMode::Permanent);
+        register(&other_store, &other_binding);
+        let other_claim = other_store
+            .claim_execution(&other_binding.authorization_id, &other_binding.plan_digest)
+            .unwrap();
+        let other_token = reserve(&other_store, &other_claim, &other_binding);
+        let other_claim = std::cell::RefCell::new(other_claim);
+        let other_token = std::cell::RefCell::new(Some(other_token));
+
+        let records = store
+            .classify_recovery(
+                &recovery,
+                &ReentrantObserver {
+                    store: &store,
+                    claim: &other_claim,
+                    token: &other_token,
+                },
+            )
+            .unwrap();
+        assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
+    }
+
     #[cfg(unix)]
     #[test]
     fn manually_unlocked_claim_cannot_validate_token() {
         let (_temp, store) = store();
-        let binding = binding(15, RequestedMode::Permanent);
+        let binding = binding(16, RequestedMode::Permanent);
         register(&store, &binding);
         let claim = store
             .claim_execution(&binding.authorization_id, &binding.plan_digest)
