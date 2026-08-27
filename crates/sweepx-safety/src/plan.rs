@@ -330,7 +330,12 @@ impl DeletionPlan {
             .into_iter()
             .map(PlanItem::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        validate_plan_semantics(input.mode, &items)?;
+        validate_plan_semantics(
+            input.mode,
+            &items,
+            &input.scan_id,
+            &input.scan_root_identity,
+        )?;
 
         let aggregate_risk = aggregate_risk_for_items(&items);
 
@@ -521,7 +526,12 @@ impl DeletionPlan {
             return Err(CanonicalPlanError::EmptyPlan);
         }
         validate_plan_ttl(plan.created_at_unix_ms, plan.expires_at_unix_ms)?;
-        validate_plan_semantics(plan.mode, &plan.items)?;
+        validate_plan_semantics(
+            plan.mode,
+            &plan.items,
+            &plan.scan_id,
+            &plan.scan_root_identity,
+        )?;
         if plan.aggregate_risk != aggregate_risk_for_items(&plan.items) {
             return Err(CanonicalPlanError::AggregateRiskMismatch);
         }
@@ -569,7 +579,12 @@ impl DeletionPlan {
     /// identity or revalidation digests.
     pub fn ordered_simulated_actions(&self) -> Result<Vec<SimulatedAction>, CanonicalPlanError> {
         self.verify_canonical_digest()?;
-        validate_plan_semantics(self.mode, &self.items)?;
+        validate_plan_semantics(
+            self.mode,
+            &self.items,
+            &self.scan_id,
+            &self.scan_root_identity,
+        )?;
 
         self.items
             .iter()
@@ -1240,6 +1255,7 @@ fn validate_native_path_component_wire_shape(value: &Value) -> Result<(), Canoni
         "native_target.native_locator.component",
         &[
             "entry_id",
+            "parent_id",
             "native_basename",
             "object_type",
             "platform_file_identity",
@@ -1248,6 +1264,14 @@ fn validate_native_path_component_wire_shape(value: &Value) -> Result<(), Canoni
             "metadata_fingerprint",
         ],
     )?;
+    if let Some(parent_id) = value.get("parent_id")
+        && !parent_id.is_string()
+    {
+        return Err(CanonicalPlanError::InvalidField {
+            field: "native_target.native_locator.component.parent_id",
+            reason: "expected string".to_string(),
+        });
+    }
     validate_native_name_wire_shape(required_nested_object(
         value,
         "native_basename",
@@ -1352,6 +1376,9 @@ pub fn plan_item_from_live_candidate(
             plan_scan_id: scan_id.to_string(),
         });
     }
+    if !candidate.has_valid_executable_native_locator() {
+        return Err(CanonicalPlanError::CandidateMissingNativeLocator { candidate_id });
+    }
 
     let stable_identity = candidate.locator.stable_identity.clone().ok_or_else(|| {
         CanonicalPlanError::CandidateMissingIdentity {
@@ -1377,6 +1404,17 @@ pub fn plan_item_from_live_candidate(
             candidate_id: candidate.candidate_id.to_string(),
         }
     })?;
+    if native_locator
+        .validate_for_execution(&scan_object_identity, &candidate.scan_id)
+        .is_err()
+        || native_locator.entry.native_basename != candidate.locator.native_basename
+        || native_locator.entry.object_type != candidate.object_type
+        || native_locator.entry.metadata_fingerprint != candidate.metadata_fingerprint
+    {
+        return Err(CanonicalPlanError::CandidateMissingNativeLocator {
+            candidate_id: candidate.candidate_id.to_string(),
+        });
+    }
 
     Ok(PlanItemInput {
         item_id: format!("item-{}", candidate.candidate_id),
@@ -1451,6 +1489,8 @@ fn aggregate_risk_for_items(items: &[PlanItem]) -> AggregateRisk {
 fn validate_plan_semantics(
     mode: DeletionMode,
     items: &[PlanItem],
+    scan_id: &str,
+    scan_root_identity: &str,
 ) -> Result<(), CanonicalPlanError> {
     let mut item_ids = BTreeSet::new();
     let mut action_ids = BTreeSet::new();
@@ -1502,6 +1542,18 @@ fn validate_plan_semantics(
             });
         }
         if let Some(native_target) = &item.native_target {
+            if native_target.scan_id != scan_id {
+                return Err(invalid_native_target(
+                    &item.item_id,
+                    "scan_id does not match plan scan_id",
+                ));
+            }
+            if native_target.scan_root_identity != scan_root_identity {
+                return Err(invalid_native_target(
+                    &item.item_id,
+                    "scan_root_identity does not match plan scan_root_identity",
+                ));
+            }
             validate_native_target(&item.item_id, native_target)?;
         }
         if mode == DeletionMode::Permanent
@@ -1600,7 +1652,7 @@ fn validate_native_target(
     }
     if native_target
         .native_locator
-        .validate_for_identity(
+        .validate_for_execution(
             &native_target.scan_object_identity,
             &sweepx_model::ScanId::new(native_target.scan_id.clone()),
         )
@@ -1611,21 +1663,23 @@ fn validate_native_target(
             "native_locator does not match scan_object_identity",
         ));
     }
-    if native_target
-        .native_locator
-        .scan_root_absolute_path
-        .as_ref()
-        .is_none_or(|path| path.validate_for_current_platform().is_err())
-    {
-        return Err(invalid_native_target(
-            item_id,
-            "native_locator has no valid current-platform scan root absolute path",
-        ));
-    }
     if native_target.native_locator.entry.native_basename != native_target.native_basename {
         return Err(invalid_native_target(
             item_id,
             "native basename does not match locator entry",
+        ));
+    }
+    if native_target.native_locator.entry.object_type != native_target.object_type {
+        return Err(invalid_native_target(
+            item_id,
+            "object type does not match locator entry",
+        ));
+    }
+    if native_target.native_locator.entry.metadata_fingerprint != native_target.metadata_fingerprint
+    {
+        return Err(invalid_native_target(
+            item_id,
+            "metadata fingerprint does not match locator entry",
         ));
     }
     Ok(())
@@ -1736,6 +1790,21 @@ mod tests {
         }
     }
 
+    fn native_name(name: &str) -> NativeName {
+        #[cfg(unix)]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeName::windows_utf16(name.encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+    }
+
     fn live_candidate() -> AnalysisCandidate {
         let scan_id = ScanId::new("scan-1");
         let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
@@ -1769,7 +1838,7 @@ mod tests {
             metadata_fingerprint: "fp-live".to_string(),
             path: PathPresentation {
                 display_path: "/tmp/live".to_string(),
-                native_basename: NativeName::unix(b"live".to_vec()),
+                native_basename: native_name("live"),
                 stable_identity: Some(entry_id.to_string()),
             },
             locator: CandidateLocator {
@@ -1778,7 +1847,8 @@ mod tests {
                 native_locator: Some(NativeLocatorEvidence {
                     scan_root: NativePathComponent {
                         entry_id: root_id.clone(),
-                        native_basename: NativeName::unix(b"root".to_vec()),
+                        parent_id: None,
+                        native_basename: native_name("root"),
                         object_type: ObjectType::Directory,
                         platform_file_identity: scan_object_identity.platform_file_identity.clone(),
                         filesystem_object_domain_identity: scan_object_identity
@@ -1792,7 +1862,8 @@ mod tests {
                     scan_root_absolute_path: Some(native_absolute_root()),
                     parent_reopen_recipe: vec![NativePathComponent {
                         entry_id: root_id.clone(),
-                        native_basename: NativeName::unix(b"root".to_vec()),
+                        parent_id: None,
+                        native_basename: native_name("root"),
                         object_type: ObjectType::Directory,
                         platform_file_identity: scan_object_identity.platform_file_identity.clone(),
                         filesystem_object_domain_identity: scan_object_identity
@@ -1805,7 +1876,8 @@ mod tests {
                     }],
                     entry: NativePathComponent {
                         entry_id: entry_id.clone(),
-                        native_basename: NativeName::unix(b"live".to_vec()),
+                        parent_id: Some(root_id.clone()),
+                        native_basename: native_name("live"),
                         object_type: ObjectType::File,
                         platform_file_identity: scan_object_identity.platform_file_identity.clone(),
                         filesystem_object_domain_identity: scan_object_identity
@@ -1817,7 +1889,7 @@ mod tests {
                         metadata_fingerprint: "fp-live".to_string(),
                     },
                 }),
-                native_basename: NativeName::unix(b"live".to_vec()),
+                native_basename: native_name("live"),
                 metadata_fingerprint: "fp-live".to_string(),
             },
             provenance: FieldProvenance::LiveObservation {
@@ -2164,6 +2236,77 @@ mod tests {
     }
 
     #[test]
+    fn native_target_rejects_forged_entry_facts() {
+        let candidate = live_candidate();
+        let mut item = plan_item_from_live_candidate(
+            "scan-1",
+            candidate
+                .locator
+                .scan_object_identity
+                .as_ref()
+                .unwrap()
+                .scan_root_id
+                .as_str(),
+            &candidate,
+            ExplanationDigest::new("explain-1"),
+            "action-top-1",
+            TargetIdentity::new("target-1"),
+            vec![PlanAction::new("action-top-1", RiskTier::R2)],
+            None,
+        )
+        .unwrap();
+        let native_target = item.native_target.as_mut().unwrap();
+
+        native_target.object_type = ObjectType::Directory;
+        assert!(matches!(
+            validate_native_target("item-1", native_target),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
+
+        native_target.object_type = ObjectType::File;
+        native_target.metadata_fingerprint = "forged-fingerprint".to_string();
+        assert!(matches!(
+            validate_native_target("item-1", native_target),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn live_candidate_builder_rejects_candidate_mutated_after_digest() {
+        let mut candidate = live_candidate();
+        candidate
+            .locator
+            .native_locator
+            .as_mut()
+            .unwrap()
+            .entry
+            .metadata_fingerprint = "forged-fingerprint".to_string();
+
+        let error = plan_item_from_live_candidate(
+            "scan-1",
+            candidate
+                .locator
+                .scan_object_identity
+                .as_ref()
+                .unwrap()
+                .scan_root_id
+                .as_str(),
+            &candidate,
+            ExplanationDigest::new("explain-1"),
+            "action-top-1",
+            TargetIdentity::new("target-1"),
+            vec![PlanAction::new("action-top-1", RiskTier::R2)],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CanonicalPlanError::CandidateMissingNativeLocator { .. }
+        ));
+    }
+
+    #[test]
     fn plan_item_digest_changes_when_native_target_changes() {
         let first = PlanItem::try_from(
             plan_item_from_live_candidate(
@@ -2192,7 +2335,9 @@ mod tests {
             .as_mut()
             .unwrap()
             .entry
-            .native_basename = NativeName::unix(b"changed".to_vec());
+            .native_basename = native_name("changed");
+        changed_candidate.locator.native_basename = native_name("changed");
+        changed_candidate.path.native_basename = native_name("changed");
         let second = PlanItem::try_from(
             plan_item_from_live_candidate(
                 "scan-1",
@@ -2396,6 +2541,60 @@ mod tests {
             json!(true);
 
         assert_unknown_field_rejected(value, "native_target.native_name");
+    }
+
+    #[test]
+    fn validated_loader_rejects_incomplete_native_target_parent_link() {
+        let mut value = native_plan_value();
+        value["items"][0]["native_target"]["native_locator"]["entry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_id");
+
+        assert!(matches!(
+            DeletionPlan::from_validated_value(value),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_native_target_with_skipped_ancestor() {
+        let mut value = native_plan_value();
+        let skipped_parent = "scan-entry:v1:c2Nhbi0x:3";
+        value["items"][0]["native_target"]["scan_object_identity"]["parent_id"] =
+            json!(skipped_parent);
+        value["items"][0]["native_target"]["native_locator"]["entry"]["parent_id"] =
+            json!(skipped_parent);
+
+        assert!(matches!(
+            DeletionPlan::from_validated_value(value),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_native_target_with_unknown_mount_identity() {
+        let mut value = native_plan_value();
+        value["items"][0]["native_target"]["scan_object_identity"]["volume_or_mount_identity"] =
+            json!({"state": "unknown", "reason": "unknown_identity"});
+        value["items"][0]["native_target"]["native_locator"]["entry"]["volume_or_mount_identity"] =
+            json!({"state": "unknown", "reason": "unknown_identity"});
+
+        assert!(matches!(
+            DeletionPlan::from_validated_value(value),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn validated_loader_rejects_native_target_from_another_plan_scan() {
+        let mut value = native_plan_value();
+        value["items"][0]["native_target"]["scan_id"] = json!("scan-other");
+
+        assert!(matches!(
+            DeletionPlan::from_validated_value(value),
+            Err(CanonicalPlanError::InvalidNativeTarget { .. })
+        ));
     }
 
     #[test]

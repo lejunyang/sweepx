@@ -356,6 +356,7 @@
       }
     },
     "nativePathComponent": {
+      "$comment": "parentId is absent only for the scan root and is required for every non-root ancestor and target entry by the enclosing nativeLocator/scannedEntry constraints.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -369,6 +370,9 @@
       ],
       "properties": {
         "entryId": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+        },
+        "parentId": {
           "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
         },
         "nativeBasename": {
@@ -400,7 +404,7 @@
       }
     },
     "nativeLocatorEvidence": {
-      "$comment": "All component IDs must belong to the enclosing ScannedEntry.scanId. scanRoot and entry must match identity.scanRootId and identity.entryId. New live output includes scanRootAbsolutePath; legacy/imported v1 records may omit it and are non-executable. A root has an empty parentReopenRecipe. Every child recipe begins with scanRoot and continues in ancestor order through the immediate parent, whose ID must match identity.parentId. The entry nativeBasename must match ScannedEntry.nativeBasename. JSON Schema validates structure and lossless encodings; consumers enforce ID equality, ordering, absolute-path grammar, and current-platform matching.",
+      "$comment": "All component IDs must belong to the enclosing ScannedEntry.scanId. scanRoot and entry must match identity.scanRootId and identity.entryId. New live output includes scanRootAbsolutePath; legacy/imported v1 records may omit it and are non-executable. A root has no parentId and an empty parentReopenRecipe. Every child recipe begins with scanRoot and continues in ancestor order through the immediate parent; every non-root component carries its direct parentId and the target parent must match identity.parentId. The entry nativeBasename, objectType, identity evidence, and metadataFingerprint must match ScannedEntry. JSON Schema validates structure and lossless encodings; consumers enforce ID equality, parent-link continuity, native basename grammar, absolute-path grammar, and current-platform matching.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -410,16 +414,60 @@
       ],
       "properties": {
         "scanRoot": {
-          "$ref": "#/$defs/nativePathComponent"
+          "allOf": [
+            {
+              "$ref": "#/$defs/nativePathComponent"
+            },
+            {
+              "not": {
+                "required": [
+                  "parentId"
+                ]
+              }
+            }
+          ]
         },
         "scanRootAbsolutePath": {
           "$ref": "#/$defs/nativeAbsolutePath"
         },
         "parentReopenRecipe": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/nativePathComponent"
-          }
+          "oneOf": [
+            {
+              "maxItems": 0
+            },
+            {
+              "minItems": 1,
+              "prefixItems": [
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/nativePathComponent"
+                    },
+                    {
+                      "not": {
+                        "required": [
+                          "parentId"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ],
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/nativePathComponent"
+                  },
+                  {
+                    "required": [
+                      "parentId"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
         },
         "entry": {
           "$ref": "#/$defs/nativePathComponent"
@@ -623,6 +671,11 @@
             "properties": {
               "nativeLocator": {
                 "properties": {
+                  "entry": {
+                    "required": [
+                      "parentId"
+                    ]
+                  },
                   "parentReopenRecipe": {
                     "minItems": 1
                   }
@@ -651,6 +704,13 @@
             "properties": {
               "nativeLocator": {
                 "properties": {
+                  "entry": {
+                    "not": {
+                      "required": [
+                        "parentId"
+                      ]
+                    }
+                  },
                   "parentReopenRecipe": {
                     "maxItems": 0
                   }

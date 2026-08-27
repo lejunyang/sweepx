@@ -360,9 +360,9 @@ where
                     root_identity.clone(),
                     native_locator_evidence(
                         &admission.root_locator,
-                        &native_path_component(&root_identity.entry_id, &admission.metadata),
+                        &native_path_component(&root_identity, &admission.metadata),
                         &[],
-                        &native_path_component(&root_identity.entry_id, &admission.metadata),
+                        &native_path_component(&root_identity, &admission.metadata),
                     ),
                     complete_coverage(),
                 ),
@@ -403,7 +403,7 @@ where
             path: root_metadata.path.clone(),
             handle: directory,
             identity: root_identity.clone(),
-            native_component: native_path_component(&root_identity.entry_id, &root_metadata),
+            native_component: native_path_component(&root_identity, &root_metadata),
             parent_reopen_recipe: Vec::new(),
             started: false,
             consumed_entries: 0,
@@ -733,14 +733,14 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component = native_path_component(&identity.entry_id, &metadata);
+                        let native_component = native_path_component(&identity, &metadata);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
                                 &root_locator,
-                                &native_path_component(&root_identity.entry_id, &root_metadata),
+                                &native_path_component(&root_identity, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
@@ -777,14 +777,14 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component = native_path_component(&identity.entry_id, &metadata);
+                        let native_component = native_path_component(&identity, &metadata);
                         let scanned = scanned_entry_from_metadata(
                             &self.options.scan_id,
                             &metadata,
                             identity.clone(),
                             native_locator_evidence(
                                 &root_locator,
-                                &native_path_component(&root_identity.entry_id, &root_metadata),
+                                &native_path_component(&root_identity, &root_metadata),
                                 &current.parent_recipe_with_self(),
                                 &native_component,
                             ),
@@ -807,7 +807,7 @@ where
                             Some(current.identity.entry_id.clone()),
                             &metadata,
                         );
-                        let native_component = native_path_component(&identity.entry_id, &metadata);
+                        let native_component = native_path_component(&identity, &metadata);
                         let coverage = Coverage {
                             state: CoverageState::Complete,
                             complete: true,
@@ -839,7 +839,7 @@ where
                                 identity.clone(),
                                 native_locator_evidence(
                                     &root_locator,
-                                    &native_path_component(&root_identity.entry_id, &root_metadata),
+                                    &native_path_component(&root_identity, &root_metadata),
                                     &current.parent_recipe_with_self(),
                                     &native_component,
                                 ),
@@ -1292,10 +1292,13 @@ fn scanned_entry_from_metadata(
     }
 }
 
-fn native_path_component(entry_id: &ScanEntryId, metadata: &EntryMetadata) -> NativePathComponent {
-    let identity = scan_object_identity(entry_id.clone(), entry_id.clone(), None, metadata);
+fn native_path_component(
+    identity: &ScanObjectIdentity,
+    metadata: &EntryMetadata,
+) -> NativePathComponent {
     NativePathComponent {
-        entry_id: entry_id.clone(),
+        entry_id: identity.entry_id.clone(),
+        parent_id: identity.parent_id.clone(),
         native_basename: metadata.file_name.clone(),
         object_type: match metadata.kind {
             EntryKind::File => ObjectType::File,
@@ -1304,9 +1307,9 @@ fn native_path_component(entry_id: &ScanEntryId, metadata: &EntryMetadata) -> Na
             EntryKind::ReparsePoint => ObjectType::ReparsePoint,
             EntryKind::Other => ObjectType::Other,
         },
-        platform_file_identity: identity.platform_file_identity,
-        filesystem_object_domain_identity: identity.filesystem_object_domain_identity,
-        volume_or_mount_identity: identity.volume_or_mount_identity,
+        platform_file_identity: identity.platform_file_identity.clone(),
+        filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
+        volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
         metadata_fingerprint: metadata.fingerprint.clone(),
     }
 }
@@ -1610,6 +1613,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [&root_identity.entry_id]
         );
+        assert_eq!(sub_locator.scan_root.parent_id, None);
+        assert_eq!(sub_locator.parent_reopen_recipe[0].parent_id, None);
+        assert_eq!(
+            sub_locator.entry.parent_id.as_ref(),
+            Some(&root_identity.entry_id)
+        );
         assert_eq!(
             sub_locator
                 .parent_reopen_recipe
@@ -1640,6 +1649,15 @@ mod tests {
                 .map(|component| &component.entry_id)
                 .collect::<Vec<_>>(),
             [&root_identity.entry_id, &sub_identity.entry_id]
+        );
+        assert_eq!(beta_locator.parent_reopen_recipe[0].parent_id, None);
+        assert_eq!(
+            beta_locator.parent_reopen_recipe[1].parent_id.as_ref(),
+            Some(&root_identity.entry_id)
+        );
+        assert_eq!(
+            beta_locator.entry.parent_id.as_ref(),
+            Some(&sub_identity.entry_id)
         );
         assert_eq!(
             beta_locator

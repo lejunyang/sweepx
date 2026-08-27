@@ -344,7 +344,7 @@ core executor 和 DeletionAdapter 的公共接口不接受 force bit。hard prot
 
 ### 8.1 权威定位
 
-持久计划中的定位是 parent_reopen_recipe + exact native basename + expected parent/object/domain/type/mount identities。recipe 是从 scan root 到 parent 的原生相对组件链，不是打开的 handle，也不因序列化而成为可信路径；preflight 从 live no-follow root handle 逐层重开并核对后，才得到短期 held_parent_handle。Unix 保存原始 basename bytes；Windows 保存 UTF-16。不得通过 lossy UTF-8、Unicode normalization、大小写折叠或 shell 字符串重建。
+持久计划中的定位是 parent_reopen_recipe + exact native basename + expected parent/object/domain/type/mount identities。每个非 root 组件还携带它的直接 parent identity，以及该层 no-follow 观察到的 object/domain/mount identity、type 和 metadata fingerprint；验证必须证明 recipe 从 root 到 immediate parent 连续且无跳层。recipe 不是打开的 handle，也不因序列化而成为可信路径；preflight 从 live no-follow root handle 逐层重开并核对后，才得到短期 held_parent_handle。scan root 由 absolute native path 与 root identity 定位，本身不要求满足相对 basename 语法。Unix 保存原始 basename bytes；Windows 保存 UTF-16。不得通过 lossy UTF-8、Unicode normalization、大小写折叠或 shell 字符串重建。
 
 DeletionExecutor 默认串行、同时最多一个 active permit，因此最多保留一组 preflight parent/object handles；单项终态或 permit 过期立即关闭。计划和 Candidate 不持有 native handle，也不受 scanner 的 open-enumerator 配额混淆。未来提高并发必须给 handle 数独立硬上限并重新做 TOCTOU/平台 adapter 测试。
 

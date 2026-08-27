@@ -160,8 +160,11 @@
           "scanRootId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
           "parentId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
           "platformFileIdentity": {
-            "state": "unknown",
-            "reason": "unknown_identity"
+            "state": "known",
+            "value": {
+              "device": "2049",
+              "inode": "1002"
+            }
           },
           "filesystemObjectDomainIdentity": {
             "state": "known",
@@ -241,14 +244,18 @@
           ],
           "entry": {
             "entryId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:2",
+            "parentId": "scan-entry:v1:c2Nhbi1wMC1taW5pbWFs:1",
             "nativeBasename": {
               "kind": "unix_bytes_base64_url",
               "value": "Zml4dHVyZS5iaW4"
             },
             "objectType": "file",
             "platformFileIdentity": {
-              "state": "unknown",
-              "reason": "unknown_identity"
+              "state": "known",
+              "value": {
+                "device": "2049",
+                "inode": "1002"
+              }
             },
             "filesystemObjectDomainIdentity": {
               "state": "known",

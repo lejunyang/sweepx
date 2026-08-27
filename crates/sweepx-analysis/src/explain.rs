@@ -268,6 +268,21 @@ mod tests {
         }
     }
 
+    fn native_name(name: &str) -> NativeName {
+        #[cfg(unix)]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeName::windows_utf16(name.encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+    }
+
     fn identity(entry_ordinal: u128, root_ordinal: u128) -> ScanObjectIdentity {
         let scan_id = ScanId::new("scan-1");
         let entry_id = ScanEntryId::for_scan_ordinal(&scan_id, entry_ordinal).unwrap();
@@ -295,7 +310,8 @@ mod tests {
         NativeLocatorEvidence {
             scan_root: NativePathComponent {
                 entry_id: identity.scan_root_id.clone(),
-                native_basename: NativeName::unix(b"root".to_vec()),
+                parent_id: None,
+                native_basename: native_name("root"),
                 object_type: ObjectType::Directory,
                 platform_file_identity: identity.platform_file_identity.clone(),
                 filesystem_object_domain_identity: identity
@@ -310,7 +326,8 @@ mod tests {
                 .as_ref()
                 .map(|parent_id| NativePathComponent {
                     entry_id: parent_id.clone(),
-                    native_basename: NativeName::unix(b"root".to_vec()),
+                    parent_id: None,
+                    native_basename: native_name("root"),
                     object_type: ObjectType::Directory,
                     platform_file_identity: identity.platform_file_identity.clone(),
                     filesystem_object_domain_identity: identity
@@ -323,14 +340,15 @@ mod tests {
                 .collect(),
             entry: NativePathComponent {
                 entry_id: identity.entry_id.clone(),
-                native_basename: NativeName::unix(basename.as_bytes().to_vec()),
+                parent_id: identity.parent_id.clone(),
+                native_basename: native_name(basename),
                 object_type: ObjectType::Directory,
                 platform_file_identity: identity.platform_file_identity.clone(),
                 filesystem_object_domain_identity: identity
                     .filesystem_object_domain_identity
                     .clone(),
                 volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-                metadata_fingerprint: "fp-1".to_string(),
+                metadata_fingerprint: "fp-dir".to_string(),
             },
         }
     }
@@ -370,7 +388,7 @@ mod tests {
                 identity: None,
                 native_locator: None,
                 display_path: "/tmp/item".to_string(),
-                native_basename: NativeName::unix(b"item".to_vec()),
+                native_basename: native_name("item"),
                 object_type: ObjectType::File,
                 logical_bytes: EvidenceValue::Known {
                     value: sweepx_model::DecimalU128::new(1),
@@ -431,7 +449,7 @@ mod tests {
             identity: Some(stable_identity.clone()),
             native_locator: Some(native_locator(&stable_identity, "dir")),
             display_path: "/tmp/dir".to_string(),
-            native_basename: NativeName::unix(b"dir".to_vec()),
+            native_basename: native_name("dir"),
             object_type: ObjectType::Directory,
             logical_bytes: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(1),
@@ -498,7 +516,7 @@ mod tests {
             identity: Some(stable_identity.clone()),
             native_locator: None,
             display_path: "/tmp/dir".to_string(),
-            native_basename: NativeName::unix(b"dir".to_vec()),
+            native_basename: native_name("dir"),
             object_type: ObjectType::Directory,
             logical_bytes: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(1),

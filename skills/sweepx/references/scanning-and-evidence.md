@@ -161,6 +161,12 @@ subtree completeness, coverage, rules, evidence, boundaries, errors, uncertainti
 supported actions and recovery conditions
 ```
 
+Every non-root locator component records its direct parent identity. Before executable eligibility,
+verify that the recipe is a contiguous root-to-immediate-parent chain and that every component has
+known no-follow object, filesystem-domain, and mount/volume identity plus type and metadata
+fingerprint evidence. Validate relative native-basename grammar for every non-root component; the
+scan root is instead anchored by its lossless absolute native path and root identity.
+
 Require the explanation to bind the candidate digest and distinguish current observed facts, manager/browser/native facts, rule-derived inferences, heuristics, and unknown/unsupported/not-checked/stale/incomplete/skipped evidence. Explain why the rule matched, why action is unavailable when applicable, sharing/references/activity/official state, size semantics, risk changes, cold-start/download effects, recovery needs, and human actions. It must not alter identity, scope, mode, or risk floor.
 
 Treat timestamps as weak signals unless the owning manager defines their semantics. Treat a negative holder/process observation only as “not observed at that time,” never as authorization. Require owner, canonical object identity and granularity, references, activity/activation, official state, recovery requirements, sharing/concurrency, and blockers. Missing evidence may only preserve/raise risk or force report/skip. No query proves absence of references across every user, project, container, VM, CI worker, remote host, or offline medium.

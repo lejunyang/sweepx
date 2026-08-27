@@ -255,6 +255,32 @@ impl Candidate {
             aggregate_arithmetic_state: self.aggregate_arithmetic_state.clone(),
         }
     }
+
+    /// Returns true only when all native locator fields required for local execution remain
+    /// mutually consistent.
+    pub fn has_valid_executable_native_locator(&self) -> bool {
+        if self.path.native_basename != self.locator.native_basename
+            || self.path.stable_identity != self.locator.stable_identity
+            || self.metadata_fingerprint != self.locator.metadata_fingerprint
+        {
+            return false;
+        }
+
+        let (Some(stable_identity), Some(identity), Some(locator)) = (
+            self.locator.stable_identity.as_deref(),
+            self.locator.scan_object_identity.as_ref(),
+            self.locator.native_locator.as_ref(),
+        ) else {
+            return false;
+        };
+        stable_identity == identity.entry_id.as_str()
+            && locator
+                .validate_for_execution(identity, &self.scan_id)
+                .is_ok()
+            && locator.entry.native_basename == self.locator.native_basename
+            && locator.entry.object_type == self.object_type
+            && locator.entry.metadata_fingerprint == self.metadata_fingerprint
+    }
 }
 
 pub struct CandidateBuilder<'a> {
@@ -780,6 +806,21 @@ mod tests {
         }
     }
 
+    fn native_name(name: &str) -> NativeName {
+        #[cfg(unix)]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeName::windows_utf16(name.encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+    }
+
     fn entry(
         display_path: &str,
         metadata_fingerprint: &str,
@@ -787,10 +828,15 @@ mod tests {
         object_type: ObjectType,
         identity: Option<ScanObjectIdentity>,
     ) -> ScannedEntry {
-        let native_basename = NativeName::unix(b"demo".to_vec());
-        let native_locator = identity
-            .as_ref()
-            .map(|identity| native_locator(identity, native_basename.clone()));
+        let native_basename = native_name("demo");
+        let native_locator = identity.as_ref().map(|identity| {
+            native_locator(
+                identity,
+                native_basename.clone(),
+                object_type.clone(),
+                metadata_fingerprint,
+            )
+        });
         ScannedEntry {
             scan_id: ScanId::new("scan-1"),
             identity,
@@ -858,10 +904,13 @@ mod tests {
     fn native_locator(
         identity: &ScanObjectIdentity,
         entry_native_basename: NativeName,
+        entry_object_type: ObjectType,
+        entry_metadata_fingerprint: &str,
     ) -> NativeLocatorEvidence {
         let root_component = NativePathComponent {
             entry_id: identity.scan_root_id.clone(),
-            native_basename: NativeName::unix(b"root".to_vec()),
+            parent_id: None,
+            native_basename: native_name("root"),
             object_type: ObjectType::Directory,
             platform_file_identity: identity.platform_file_identity.clone(),
             filesystem_object_domain_identity: identity.filesystem_object_domain_identity.clone(),
@@ -879,14 +928,15 @@ mod tests {
                 .collect(),
             entry: NativePathComponent {
                 entry_id: identity.entry_id.clone(),
+                parent_id: identity.parent_id.clone(),
                 native_basename: entry_native_basename,
-                object_type: ObjectType::File,
+                object_type: entry_object_type,
                 platform_file_identity: identity.platform_file_identity.clone(),
                 filesystem_object_domain_identity: identity
                     .filesystem_object_domain_identity
                     .clone(),
                 volume_or_mount_identity: identity.volume_or_mount_identity.clone(),
-                metadata_fingerprint: "fp-1".to_string(),
+                metadata_fingerprint: entry_metadata_fingerprint.to_string(),
             },
         }
     }
@@ -1109,7 +1159,9 @@ mod tests {
             Some(entry_identity.clone()),
             Some(native_locator(
                 &entry_identity,
-                NativeName::unix(b"demo".to_vec()),
+                native_name("demo"),
+                ObjectType::File,
+                "fp-1",
             )),
         ))
         .build()
@@ -1122,7 +1174,9 @@ mod tests {
             Some(entry_identity.clone()),
             Some(native_locator(
                 &entry_identity,
-                NativeName::unix(b"different".to_vec()),
+                native_name("different"),
+                ObjectType::File,
+                "fp-1",
             )),
         ))
         .build()
@@ -1135,7 +1189,12 @@ mod tests {
     #[test]
     fn absolute_scan_root_locator_changes_candidate_digest() {
         let entry_identity = identity(2, 1);
-        let first_locator = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        let first_locator = native_locator(
+            &entry_identity,
+            native_name("demo"),
+            ObjectType::File,
+            "fp-1",
+        );
         let mut second_locator = first_locator.clone();
         #[cfg(unix)]
         {
@@ -1176,7 +1235,12 @@ mod tests {
     #[test]
     fn missing_or_foreign_absolute_root_locator_is_report_only() {
         let entry_identity = identity(2, 1);
-        let mut missing = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        let mut missing = native_locator(
+            &entry_identity,
+            native_name("demo"),
+            ObjectType::File,
+            "fp-1",
+        );
         missing.scan_root_absolute_path = None;
         let missing_candidate = CandidateBuilder::new(&entry_with_native_locator(
             "/tmp/file",
@@ -1201,7 +1265,12 @@ mod tests {
         let foreign = NativeAbsolutePath::unix(b"/root".to_vec());
         #[cfg(any(unix, windows))]
         {
-            let mut locator = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+            let mut locator = native_locator(
+                &entry_identity,
+                native_name("demo"),
+                ObjectType::File,
+                "fp-1",
+            );
             locator.scan_root_absolute_path = Some(foreign);
             let foreign_candidate = CandidateBuilder::new(&entry_with_native_locator(
                 "/tmp/file",
@@ -1328,7 +1397,12 @@ mod tests {
     #[test]
     fn malformed_native_locator_is_not_promoted_into_locator() {
         let entry_identity = identity(2, 1);
-        let mut malformed = native_locator(&entry_identity, NativeName::unix(b"demo".to_vec()));
+        let mut malformed = native_locator(
+            &entry_identity,
+            native_name("demo"),
+            ObjectType::File,
+            "fp-1",
+        );
         malformed.entry.entry_id = malformed.scan_root.entry_id.clone();
         let candidate = CandidateBuilder::new(&entry_with_native_locator(
             "/tmp/file",

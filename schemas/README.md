@@ -35,6 +35,7 @@ Run validation with:
 The validation script checks:
 
 - example output envelope
+- exact `status.result.data` and `cancel.result.data` branches, including positive examples and rejection of unknown or disposition-inconsistent fields
 - live `scan.result` entry identity, native locator lineage, and directory-aggregate identity structure
 - legacy imported scan entries without identity or native locator, which remain readable but untrusted
 - malformed or path-derived values cannot enter trusted `scan-entry:v1` IDs or lossless native-name components
@@ -57,10 +58,13 @@ New live entries also include `ScannedEntry.nativeLocator`. It binds lossless na
 for the scan root and entry to a complete `parentReopenRecipe` chain, and carries the exact admitted
 root in `scanRootAbsolutePath` as tagged Unix bytes or Windows UTF-16LE. The decoded absolute root is
 bounded to 64 KiB, rejects NUL and Windows namespace forms, and must match the executing platform.
-The root itself has an empty recipe; every child recipe starts with the scan-root component and
-proceeds in ancestor order through the immediate parent. Legacy or imported v1 records may omit the
+The root itself has no `parentId` and an empty recipe; every non-root component carries its direct
+`parentId`, and every child recipe starts with the scan-root component and proceeds through a
+contiguous ancestor chain to the immediate parent. Legacy or imported v1 records may omit the
 whole block or only `scanRootAbsolutePath`; both remain viewable, but missing or foreign-platform
 absolute-root evidence is never execution-eligible and must never be reconstructed from
 `displayPath`. JSON Schema validates component shapes and wire encoding. Consumers must additionally
-verify canonical decoding, absolute-path grammar, component order, locator IDs, native basenames,
-the final parent, and current-platform compatibility before execution.
+verify canonical decoding, absolute-path grammar, component order and parent links, locator IDs,
+native basenames, the final parent, and current-platform compatibility before execution. Every
+root, ancestor, parent, and target component must have known object, filesystem-domain, and
+mount/volume identity evidence plus a non-empty metadata fingerprint before it is executable.

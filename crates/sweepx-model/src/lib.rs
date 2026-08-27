@@ -242,6 +242,140 @@ impl NativeName {
             }
         }
     }
+
+    /// Validates that this lossless native name is exactly one relative path component.
+    ///
+    /// `NativeName` is also used by non-executable presentation records, so this invariant is
+    /// enforced by locator consumers rather than by the constructors.
+    pub fn validate_basename(&self) -> Result<(), NativeNameError> {
+        match self {
+            Self::UnixBytes(bytes) => {
+                if bytes.is_empty() {
+                    return Err(NativeNameError::Empty);
+                }
+                if bytes.contains(&0) {
+                    return Err(NativeNameError::ContainsNul);
+                }
+                if bytes.contains(&b'/') {
+                    return Err(NativeNameError::ContainsSeparator);
+                }
+                if bytes.as_slice() == b"." || bytes.as_slice() == b".." {
+                    return Err(NativeNameError::DotComponent);
+                }
+            }
+            Self::WindowsUtf16(units) => {
+                if units.is_empty() {
+                    return Err(NativeNameError::Empty);
+                }
+                if units.contains(&0) {
+                    return Err(NativeNameError::ContainsNul);
+                }
+                if units.iter().any(|unit| {
+                    matches!(
+                        *unit,
+                        0..=31
+                            | 0x0022
+                            | 0x002a
+                            | 0x002f
+                            | 0x003a
+                            | 0x003c
+                            | 0x003e
+                            | 0x003f
+                            | 0x005c
+                            | 0x007c
+                    )
+                }) {
+                    return Err(NativeNameError::ContainsSeparator);
+                }
+                if units.as_slice() == [b'.' as u16]
+                    || units.as_slice() == [b'.' as u16, b'.' as u16]
+                {
+                    return Err(NativeNameError::DotComponent);
+                }
+                if units
+                    .last()
+                    .is_some_and(|unit| matches!(*unit, 0x002e | 0x0020))
+                    || windows_utf16_is_reserved_device_name(units)
+                {
+                    return Err(NativeNameError::AmbiguousWindowsName);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates a basename for use by the process's current platform.
+    pub fn validate_basename_for_current_platform(&self) -> Result<(), NativeNameError> {
+        self.validate_basename()?;
+        #[cfg(unix)]
+        if !matches!(self, Self::UnixBytes(_)) {
+            return Err(NativeNameError::ForeignPlatform);
+        }
+        #[cfg(windows)]
+        if !matches!(self, Self::WindowsUtf16(_)) {
+            return Err(NativeNameError::ForeignPlatform);
+        }
+        #[cfg(not(any(unix, windows)))]
+        return Err(NativeNameError::UnsupportedCurrentPlatform);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NativeNameError {
+    #[error("native basename is empty")]
+    Empty,
+    #[error("native basename contains a NUL code unit")]
+    ContainsNul,
+    #[error("native basename contains a path separator or Windows stream separator")]
+    ContainsSeparator,
+    #[error("native basename is a dot path component")]
+    DotComponent,
+    #[error("native basename is ambiguous under Windows path semantics")]
+    AmbiguousWindowsName,
+    #[error("native basename is for a different platform")]
+    ForeignPlatform,
+    #[error("the current platform has no supported native basename representation")]
+    UnsupportedCurrentPlatform,
+}
+
+fn windows_utf16_is_reserved_device_name(component: &[u16]) -> bool {
+    let stem_end = component
+        .iter()
+        .position(|unit| *unit == b'.' as u16)
+        .unwrap_or(component.len());
+    let stem = &component[..stem_end];
+    let stem = &stem[..stem
+        .iter()
+        .rposition(|unit| *unit != b' ' as u16)
+        .map_or(0, |index| index + 1)];
+
+    fn ascii_eq_ignore_case(actual: &[u16], expected: &[u8]) -> bool {
+        actual.len() == expected.len()
+            && actual.iter().zip(expected).all(|(actual, expected)| {
+                u8::try_from(*actual).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+            })
+    }
+
+    [
+        b"CON".as_slice(),
+        b"PRN",
+        b"AUX",
+        b"NUL",
+        b"CLOCK$",
+        b"CONIN$",
+        b"CONOUT$",
+    ]
+    .iter()
+    .any(|reserved| ascii_eq_ignore_case(stem, reserved))
+        || (stem.len() == 4
+            && (ascii_eq_ignore_case(&stem[..3], b"COM")
+                || ascii_eq_ignore_case(&stem[..3], b"LPT"))
+            && matches!(
+                stem[3],
+                value if (value >= b'1' as u16 && value <= b'9' as u16)
+                    || matches!(value, 0x00b9 | 0x00b2 | 0x00b3)
+            ))
 }
 
 impl Serialize for NativeName {
@@ -270,6 +404,7 @@ impl<'de> Deserialize<'de> for NativeName {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             kind: NativeNameKind,
             value: String,
@@ -279,6 +414,11 @@ impl<'de> Deserialize<'de> for NativeName {
         let bytes = URL_SAFE_NO_PAD
             .decode(&wire.value)
             .map_err(D::Error::custom)?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != wire.value {
+            return Err(D::Error::custom(
+                "native name payload is not canonical unpadded base64url",
+            ));
+        }
 
         match wire.kind {
             NativeNameKind::UnixBytesBase64Url => Ok(Self::UnixBytes(bytes)),
@@ -905,6 +1045,11 @@ impl ScanObjectIdentity {
 #[serde(deny_unknown_fields)]
 pub struct NativePathComponent {
     pub entry_id: ScanEntryId,
+    /// The scan-scoped identity of the component's direct parent. It is absent only for the scan
+    /// root. Legacy components that omit this field remain deserializable, but cannot satisfy a
+    /// non-root executable locator chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<ScanEntryId>,
     pub native_basename: NativeName,
     pub object_type: ObjectType,
     pub platform_file_identity: IdentityEvidence<PlatformFileIdentity>,
@@ -935,27 +1080,32 @@ impl NativeLocatorEvidence {
                 .validate()
                 .map_err(|_| ScanEntryIdError::InvalidFormat)?;
         }
-        if !self.scan_root.entry_id.belongs_to(scan_id) || !self.entry.entry_id.belongs_to(scan_id)
-        {
-            return Err(ScanEntryIdError::ScanMismatch);
-        }
+        Self::validate_component(&self.scan_root, scan_id, true, false)?;
+        Self::validate_component(
+            &self.entry,
+            scan_id,
+            false,
+            self.entry.entry_id != self.scan_root.entry_id,
+        )?;
         if self.scan_root.entry_id != identity.scan_root_id
             || self.entry.entry_id != identity.entry_id
             || self.scan_root.object_type != ObjectType::Directory
-            || self.scan_root.metadata_fingerprint.is_empty()
-            || self.entry.metadata_fingerprint.is_empty()
+            || self.scan_root.parent_id.is_some()
+            || self.entry.parent_id != identity.parent_id
+            || self.entry.platform_file_identity != identity.platform_file_identity
+            || self.entry.filesystem_object_domain_identity
+                != identity.filesystem_object_domain_identity
+            || self.entry.volume_or_mount_identity != identity.volume_or_mount_identity
         {
             return Err(ScanEntryIdError::InvalidFormat);
         }
         for component in &self.parent_reopen_recipe {
-            if !component.entry_id.belongs_to(scan_id) {
-                return Err(ScanEntryIdError::ScanMismatch);
-            }
-            if component.object_type != ObjectType::Directory
-                || component.metadata_fingerprint.is_empty()
-            {
-                return Err(ScanEntryIdError::InvalidFormat);
-            }
+            Self::validate_component(
+                component,
+                scan_id,
+                true,
+                component.entry_id != self.scan_root.entry_id,
+            )?;
         }
         if self
             .parent_reopen_recipe
@@ -965,18 +1115,101 @@ impl NativeLocatorEvidence {
             return Err(ScanEntryIdError::InvalidFormat);
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut expected_parent = None;
         for component in &self.parent_reopen_recipe {
-            if !seen.insert(component.entry_id.clone()) || component.entry_id == self.entry.entry_id
+            if component.parent_id.as_ref() != expected_parent
+                || !seen.insert(component.entry_id.clone())
+                || component.entry_id == self.entry.entry_id
             {
                 return Err(ScanEntryIdError::InvalidFormat);
             }
+            expected_parent = Some(&component.entry_id);
         }
         match &identity.parent_id {
             Some(expected_parent)
                 if self.parent_reopen_recipe.last().map(|part| &part.entry_id)
-                    == Some(expected_parent) => {}
+                    == Some(expected_parent)
+                    && self.entry.parent_id.as_ref() == Some(expected_parent) => {}
             None if self.parent_reopen_recipe.is_empty() && self.entry == self.scan_root => {}
             _ => return Err(ScanEntryIdError::InvalidFormat),
+        }
+        Ok(())
+    }
+
+    /// Validates locator evidence strongly enough to become local execution input.
+    pub fn validate_for_execution(
+        &self,
+        identity: &ScanObjectIdentity,
+        scan_id: &ScanId,
+    ) -> Result<(), ScanEntryIdError> {
+        self.validate_for_identity(identity, scan_id)?;
+        if !matches!(
+            identity.platform_file_identity,
+            IdentityEvidence::Known { .. }
+        ) || !matches!(
+            identity.filesystem_object_domain_identity,
+            IdentityEvidence::Known { .. }
+        ) || !matches!(
+            identity.volume_or_mount_identity,
+            IdentityEvidence::Known { .. }
+        ) {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        self.scan_root_absolute_path
+            .as_ref()
+            .ok_or(ScanEntryIdError::InvalidFormat)?
+            .validate_for_current_platform()
+            .map_err(|_| ScanEntryIdError::InvalidFormat)?;
+
+        for component in std::iter::once(&self.scan_root)
+            .chain(self.parent_reopen_recipe.iter())
+            .chain(std::iter::once(&self.entry))
+        {
+            if component.entry_id != self.scan_root.entry_id {
+                component
+                    .native_basename
+                    .validate_basename_for_current_platform()
+                    .map_err(|_| ScanEntryIdError::InvalidFormat)?;
+            }
+            if !matches!(
+                component.platform_file_identity,
+                IdentityEvidence::Known { .. }
+            ) || !matches!(
+                component.filesystem_object_domain_identity,
+                IdentityEvidence::Known { .. }
+            ) || !matches!(
+                component.volume_or_mount_identity,
+                IdentityEvidence::Known { .. }
+            ) {
+                return Err(ScanEntryIdError::InvalidFormat);
+            }
+        }
+        if self.entry.object_type == ObjectType::Other {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        Ok(())
+    }
+
+    fn validate_component(
+        component: &NativePathComponent,
+        scan_id: &ScanId,
+        require_directory: bool,
+        require_native_basename: bool,
+    ) -> Result<(), ScanEntryIdError> {
+        if !component.entry_id.belongs_to(scan_id)
+            || component
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent_id| !parent_id.belongs_to(scan_id))
+        {
+            return Err(ScanEntryIdError::ScanMismatch);
+        }
+        if component.parent_id.as_ref() == Some(&component.entry_id)
+            || (require_directory && component.object_type != ObjectType::Directory)
+            || component.metadata_fingerprint.is_empty()
+            || (require_native_basename && component.native_basename.validate_basename().is_err())
+        {
+            return Err(ScanEntryIdError::InvalidFormat);
         }
         Ok(())
     }
@@ -1053,7 +1286,10 @@ impl ScannedEntry {
             return Ok(None);
         };
         locator.validate_for_identity(identity, &self.scan_id)?;
-        if locator.entry.native_basename != self.native_basename {
+        if locator.entry.native_basename != self.native_basename
+            || locator.entry.object_type != self.object_type
+            || locator.entry.metadata_fingerprint != self.metadata_fingerprint
+        {
             return Err(ScanEntryIdError::InvalidFormat);
         }
         Ok(Some(locator))
@@ -1068,12 +1304,11 @@ impl ScannedEntry {
         let Some(locator) = self.validated_native_locator()? else {
             return Ok(None);
         };
-        locator
-            .scan_root_absolute_path
+        let identity = self
+            .identity
             .as_ref()
-            .ok_or(ScanEntryIdError::InvalidFormat)?
-            .validate_for_current_platform()
-            .map_err(|_| ScanEntryIdError::InvalidFormat)?;
+            .ok_or(ScanEntryIdError::InvalidFormat)?;
+        locator.validate_for_execution(identity, &self.scan_id)?;
         Ok(Some(locator))
     }
 }
@@ -1333,6 +1568,98 @@ impl ItemState {
 mod tests {
     use super::*;
 
+    fn known_platform_identity(inode: u128) -> IdentityEvidence<PlatformFileIdentity> {
+        IdentityEvidence::known(PlatformFileIdentity {
+            device: DecimalU128::new(1),
+            inode: DecimalU128::new(inode),
+        })
+    }
+
+    fn known_domain_identity() -> IdentityEvidence<FilesystemObjectDomainIdentity> {
+        IdentityEvidence::known(FilesystemObjectDomainIdentity {
+            device: DecimalU128::new(1),
+        })
+    }
+
+    fn known_mount_identity() -> IdentityEvidence<VolumeOrMountIdentity> {
+        IdentityEvidence::known(VolumeOrMountIdentity {
+            value: DecimalU128::new(1),
+        })
+    }
+
+    fn host_native_name(name: &str) -> NativeName {
+        #[cfg(unix)]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeName::windows_utf16(name.encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeName::unix(name.as_bytes().to_vec())
+        }
+    }
+
+    fn host_native_absolute_root() -> NativeAbsolutePath {
+        #[cfg(unix)]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            NativeAbsolutePath::windows_utf16(r"C:\root".encode_utf16().collect::<Vec<_>>())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            NativeAbsolutePath::unix(b"/root".to_vec())
+        }
+    }
+
+    fn locator_component(
+        scan_id: &ScanId,
+        ordinal: u128,
+        parent_ordinal: Option<u128>,
+        basename: &str,
+        object_type: ObjectType,
+    ) -> NativePathComponent {
+        NativePathComponent {
+            entry_id: ScanEntryId::for_scan_ordinal(scan_id, ordinal).unwrap(),
+            parent_id: parent_ordinal
+                .map(|parent| ScanEntryId::for_scan_ordinal(scan_id, parent).unwrap()),
+            native_basename: host_native_name(basename),
+            object_type,
+            platform_file_identity: known_platform_identity(ordinal),
+            filesystem_object_domain_identity: known_domain_identity(),
+            volume_or_mount_identity: known_mount_identity(),
+            metadata_fingerprint: format!("fp-{ordinal}"),
+        }
+    }
+
+    fn child_locator_fixture() -> (ScanId, ScanObjectIdentity, NativeLocatorEvidence) {
+        let scan_id = ScanId::new("locator-chain");
+        let root = locator_component(&scan_id, 1, None, "root", ObjectType::Directory);
+        let ancestor = locator_component(&scan_id, 2, Some(1), "ancestor", ObjectType::Directory);
+        let parent = locator_component(&scan_id, 3, Some(2), "parent", ObjectType::Directory);
+        let entry = locator_component(&scan_id, 4, Some(3), "item", ObjectType::File);
+        let identity = ScanObjectIdentity {
+            entry_id: entry.entry_id.clone(),
+            scan_root_id: root.entry_id.clone(),
+            parent_id: entry.parent_id.clone(),
+            platform_file_identity: entry.platform_file_identity.clone(),
+            filesystem_object_domain_identity: entry.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: entry.volume_or_mount_identity.clone(),
+        };
+        let locator = NativeLocatorEvidence {
+            scan_root: root.clone(),
+            scan_root_absolute_path: Some(host_native_absolute_root()),
+            parent_reopen_recipe: vec![root, ancestor, parent],
+            entry,
+        };
+        (scan_id, identity, locator)
+    }
+
     #[test]
     fn decimal_u128_round_trips_as_string() {
         let value = DecimalU128::new(u128::MAX);
@@ -1382,6 +1709,186 @@ mod tests {
         let encoded = serde_json::to_string(&name).unwrap();
         let decoded: NativeName = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, name);
+    }
+
+    #[test]
+    fn native_basename_rejects_path_and_dot_components() {
+        for invalid in [b"".as_slice(), b".", b"..", b"a/b", b"a\0b"] {
+            assert!(
+                NativeName::unix(invalid.to_vec())
+                    .validate_basename()
+                    .is_err()
+            );
+        }
+        for invalid in [
+            r".",
+            r"..",
+            r"a\b",
+            r"a/b",
+            r"a:b",
+            r"NUL.txt",
+            r"CLOCK$",
+            r"clock$.log",
+            r"COM¹",
+            r"com².data",
+            r"LPT³",
+        ] {
+            assert!(
+                NativeName::windows_utf16(invalid.encode_utf16().collect::<Vec<_>>())
+                    .validate_basename()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_locator_accepts_filesystem_root_name_with_absolute_root_authority() {
+        let scan_id = ScanId::new("filesystem-root");
+        #[allow(unused_mut)]
+        let mut root = locator_component(&scan_id, 1, None, "/", ObjectType::Directory);
+        let identity = ScanObjectIdentity {
+            entry_id: root.entry_id.clone(),
+            scan_root_id: root.entry_id.clone(),
+            parent_id: None,
+            platform_file_identity: root.platform_file_identity.clone(),
+            filesystem_object_domain_identity: root.filesystem_object_domain_identity.clone(),
+            volume_or_mount_identity: root.volume_or_mount_identity.clone(),
+        };
+        #[cfg(windows)]
+        {
+            root.native_basename =
+                NativeName::windows_utf16(r"C:\".encode_utf16().collect::<Vec<_>>());
+        }
+        let absolute_root = {
+            #[cfg(unix)]
+            {
+                NativeAbsolutePath::unix(b"/".to_vec())
+            }
+            #[cfg(windows)]
+            {
+                NativeAbsolutePath::windows_utf16(r"C:\".encode_utf16().collect::<Vec<_>>())
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                NativeAbsolutePath::unix(b"/".to_vec())
+            }
+        };
+        let locator = NativeLocatorEvidence {
+            scan_root: root.clone(),
+            scan_root_absolute_path: Some(absolute_root),
+            parent_reopen_recipe: vec![],
+            entry: root,
+        };
+
+        assert!(locator.validate_for_execution(&identity, &scan_id).is_ok());
+    }
+
+    #[test]
+    fn native_locator_requires_a_contiguous_root_to_parent_chain() {
+        let (scan_id, identity, locator) = child_locator_fixture();
+        assert!(locator.validate_for_identity(&identity, &scan_id).is_ok());
+
+        let mut skipped = locator.clone();
+        skipped.parent_reopen_recipe.remove(1);
+        assert_eq!(
+            skipped.validate_for_identity(&identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+
+        let mut forged_parent = locator.clone();
+        forged_parent.parent_reopen_recipe[2].parent_id =
+            Some(ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap());
+        assert_eq!(
+            forged_parent.validate_for_identity(&identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+
+        let mut missing_link = locator;
+        missing_link.parent_reopen_recipe[1].parent_id = None;
+        assert_eq!(
+            missing_link.validate_for_identity(&identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+    }
+
+    #[test]
+    fn native_locator_execution_requires_known_identity_and_mount_evidence() {
+        let (scan_id, identity, locator) = child_locator_fixture();
+        assert!(locator.validate_for_execution(&identity, &scan_id).is_ok());
+
+        let mut unknown_ancestor = locator.clone();
+        unknown_ancestor.parent_reopen_recipe[1].platform_file_identity =
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        assert_eq!(
+            unknown_ancestor.validate_for_execution(&identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+
+        let mut unknown_mount = locator.clone();
+        unknown_mount.entry.volume_or_mount_identity =
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        let mut matching_identity = identity.clone();
+        matching_identity.volume_or_mount_identity =
+            IdentityEvidence::unknown(ReasonCode::UnknownIdentity);
+        assert_eq!(
+            unknown_mount.validate_for_execution(&matching_identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+
+        let mut unknown_type = locator;
+        unknown_type.entry.object_type = ObjectType::Other;
+        assert_eq!(
+            unknown_type.validate_for_execution(&identity, &scan_id),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+    }
+
+    #[test]
+    fn scanned_entry_rejects_locator_type_and_fingerprint_mismatch() {
+        let (scan_id, identity, locator) = child_locator_fixture();
+        let mut entry = ScannedEntry {
+            scan_id,
+            identity: Some(identity),
+            native_locator: Some(locator),
+            display_path: "/root/ancestor/parent/item".to_string(),
+            native_basename: host_native_name("item"),
+            object_type: ObjectType::File,
+            logical_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            metadata_fingerprint: "fp-4".to_string(),
+            coverage: Coverage {
+                state: CoverageState::Complete,
+                complete: true,
+                incomplete_reasons: vec![],
+                details_lost: false,
+                provenance: FieldProvenance::Unknown {
+                    reason: ReasonCode::NotRevalidated,
+                },
+            },
+            provenance: FieldProvenance::Unknown {
+                reason: ReasonCode::NotRevalidated,
+            },
+        };
+        assert!(entry.validated_native_locator().is_ok());
+
+        entry.object_type = ObjectType::Directory;
+        assert_eq!(
+            entry.validated_native_locator(),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
+        entry.object_type = ObjectType::File;
+        entry.metadata_fingerprint = "forged".to_string();
+        assert_eq!(
+            entry.validated_native_locator(),
+            Err(ScanEntryIdError::InvalidFormat)
+        );
     }
 
     #[test]
@@ -1481,6 +1988,7 @@ mod tests {
         let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
         let component = NativePathComponent {
             entry_id: root_id.clone(),
+            parent_id: None,
             native_basename: NativeName::unix(b"root".to_vec()),
             object_type: ObjectType::Directory,
             platform_file_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
@@ -1546,6 +2054,7 @@ mod tests {
         let root_id = ScanEntryId::for_scan_ordinal(&scan_id, 1).unwrap();
         let component = NativePathComponent {
             entry_id: root_id,
+            parent_id: None,
             native_basename: NativeName::unix(b"root".to_vec()),
             object_type: ObjectType::Directory,
             platform_file_identity: IdentityEvidence::unknown(ReasonCode::UnknownIdentity),
