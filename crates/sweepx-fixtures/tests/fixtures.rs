@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use sha2::Digest;
 use sweepx_fixtures::{
     ContentPattern, FixtureEntry, FixtureEntryKind, FixtureError, LINUX_P4_TRASH_TARGET_ENTRY_ID,
-    Receipt, TaggedValue, contract_manifest_path, contract_receipt_path, default_p0_p1_manifest,
+    P4BarrierName, P4EvidenceBundle, Receipt, TaggedValue, contract_manifest_path,
+    contract_p4_evidence_bundle_path, contract_receipt_path, default_p0_p1_manifest,
     generate_from_contract_files, generate_from_manifest, linux_p4_trash_manifest,
     load_receipt_contract, oracle_from_contract_files, oracle_from_manifest,
 };
@@ -688,6 +689,60 @@ fn linux_p4_post_action_recheck_allows_only_target_removal() {
     ));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_p4_named_evidence_trace_and_bundle_are_deterministic() {
+    let root = tempdir().expect("evidence tempdir");
+    let generated = generate_from_manifest(root.path(), &linux_p4_trash_manifest("ext4"))
+        .expect("generate evidence fixture");
+    let selected = generated
+        .select_linux_trash_target(LINUX_P4_TRASH_TARGET_ENTRY_ID)
+        .expect("select target");
+
+    let barriers = [
+        P4BarrierName::BeforeIntent,
+        P4BarrierName::AfterIntentSync,
+        P4BarrierName::AfterSubmit,
+        P4BarrierName::BeforeOutcomeSync,
+        P4BarrierName::DuringReconcile,
+    ];
+    for barrier in barriers {
+        let trace = selected
+            .evidence_trace(barrier, "linux-trash-backend", "native_ok")
+            .expect("trace");
+        assert_eq!(trace.schema, "sweepx.p4_evidence_trace/v1");
+        assert_eq!(trace.barrier, barrier);
+        assert_eq!(trace.seed, "44".parse().expect("seed"));
+        assert_eq!(trace.fixture_manifest_id, "fixture-linux-p4-trash");
+        assert_eq!(trace.os_family, "linux");
+        assert_eq!(trace.filesystem, "ext4");
+        assert_eq!(trace.backend, "linux-trash-backend");
+        assert_eq!(trace.native_result, "native_ok");
+        assert_eq!(trace.expires_at, "2026-08-28T06:00:00Z");
+        assert!(!trace.limitations.is_empty());
+    }
+
+    let bundle = selected
+        .evidence_bundle(
+            P4BarrierName::AfterSubmit,
+            "linux-trash-backend",
+            "native_ok",
+        )
+        .expect("bundle");
+    let expected = load_p4_evidence_bundle(contract_p4_evidence_bundle_path(
+        "linux-p4-trash-after-submit",
+    ))
+    .expect("golden bundle");
+    assert_eq!(
+        normalized_p4_bundle(bundle.clone()),
+        normalized_p4_bundle(expected)
+    );
+    assert_eq!(
+        bundle.trace.oracle_receipt_digest,
+        selected.oracle_receipt_digest()
+    );
+}
+
 fn normalized_receipt(mut receipt: Receipt) -> Receipt {
     receipt.root_path = normalize_root_path(&receipt.root_path);
     receipt.receipt_id = normalize_receipt_id(&receipt.receipt_id, &receipt.manifest_id);
@@ -741,6 +796,18 @@ fn normalize_receipt_id(receipt_id: &str, manifest_id: &str) -> String {
     } else {
         format!("receipt-{manifest_id}")
     }
+}
+
+fn load_p4_evidence_bundle(path: impl AsRef<Path>) -> Result<P4EvidenceBundle, serde_json::Error> {
+    let bytes = std::fs::read(path).expect("read p4 evidence bundle contract");
+    serde_json::from_slice(&bytes)
+}
+
+fn normalized_p4_bundle(mut bundle: P4EvidenceBundle) -> P4EvidenceBundle {
+    bundle.oracle_receipt = normalized_receipt(bundle.oracle_receipt);
+    bundle.trace.fixture_manifest_digest = "sha256:NORMALIZED_MANIFEST".into();
+    bundle.trace.oracle_receipt_digest = "sha256:NORMALIZED_RECEIPT".into();
+    bundle
 }
 
 fn normalize_file_allocated(value: TaggedValue) -> TaggedValue {

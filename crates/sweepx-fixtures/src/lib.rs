@@ -206,6 +206,8 @@ pub struct LinuxTrashTargetQualification {
     entry_id: String,
     manifest_digest: String,
     expected_filesystem: String,
+    fixture_manifest: FixtureManifest,
+    oracle_receipt: Receipt,
     top_dir: PathBuf,
     target_path: PathBuf,
     #[cfg(target_os = "linux")]
@@ -282,6 +284,49 @@ pub struct EntryIdentity {
     pub hardlink_group: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum P4BarrierName {
+    BeforeIntent,
+    AfterIntentSync,
+    AfterSubmit,
+    BeforeOutcomeSync,
+    DuringReconcile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P4Limitation {
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P4EvidenceTrace {
+    pub schema: String,
+    pub barrier: P4BarrierName,
+    pub seed: DecimalU128,
+    pub fixture_manifest_id: String,
+    pub fixture_manifest_digest: String,
+    pub oracle_receipt_digest: String,
+    pub os_family: String,
+    pub filesystem: String,
+    pub backend: String,
+    pub native_result: String,
+    pub limitations: Vec<P4Limitation>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P4EvidenceBundle {
+    pub schema: String,
+    pub trace: P4EvidenceTrace,
+    pub fixture_manifest: FixtureManifest,
+    pub oracle_receipt: Receipt,
+}
+
 #[derive(Debug, Error)]
 pub enum FixtureError {
     #[error("failed to parse contract JSON {path}: {source}")]
@@ -349,6 +394,8 @@ pub enum FixtureError {
     LinuxTrashUnexpectedEntry,
     #[error("Linux Trash fixture target still exists after the Trash action: {entry_id}")]
     LinuxTrashTargetStillExists { entry_id: String },
+    #[error("Linux Trash fixture evidence barrier requires nativeMutationPhase=P4-trash-only")]
+    LinuxTrashBarrierUnsupported,
     #[error("Linux Trash fixture qualification is supported only on Linux")]
     LinuxTrashUnsupportedHost,
     #[error("oracle found entry outside fixture root: {path}")]
@@ -488,6 +535,8 @@ impl GeneratedFixture {
                 entry_id: entry_id.to_string(),
                 manifest_digest: format!("sha256:{:x}", Sha256::digest(manifest_bytes)),
                 expected_filesystem: profile.filesystem.clone(),
+                fixture_manifest: source.manifest.clone(),
+                oracle_receipt: oracle_receipt_for_top_dir(&source.top_dir, &source.manifest)?,
                 top_dir: source.top_dir.clone(),
                 target_path,
                 target_relative,
@@ -536,6 +585,63 @@ impl LinuxTrashTargetQualification {
         self.verify_unchanged()
     }
 
+    pub fn evidence_trace(
+        &self,
+        barrier: P4BarrierName,
+        backend: impl Into<String>,
+        native_result: impl Into<String>,
+    ) -> Result<P4EvidenceTrace, FixtureError> {
+        let backend = backend.into();
+        let native_result = native_result.into();
+        let limitations = vec![
+            P4Limitation {
+                code: "temporary_fixture_root_only".to_string(),
+                detail: "destructive fixtures are valid only under a caller-created temporary generated root".to_string(),
+            },
+            P4Limitation {
+                code: "harness_expires_after_generation".to_string(),
+                detail: "barrier evidence is valid only while the generated fixture tree remains unchanged".to_string(),
+            },
+        ];
+        Ok(P4EvidenceTrace {
+            schema: "sweepx.p4_evidence_trace/v1".to_string(),
+            barrier,
+            seed: self.fixture_manifest().seed,
+            fixture_manifest_id: self.fixture_manifest().manifest_id.clone(),
+            fixture_manifest_digest: self.manifest_digest.clone(),
+            oracle_receipt_digest: self.oracle_receipt_digest(),
+            os_family: self.fixture_manifest().platform_profile.os_family.clone(),
+            filesystem: self.expected_filesystem.clone(),
+            backend,
+            native_result,
+            limitations,
+            expires_at: deterministic_evidence_expiry(&self.fixture_manifest().created_at)?,
+        })
+    }
+
+    pub fn evidence_bundle(
+        &self,
+        barrier: P4BarrierName,
+        backend: impl Into<String>,
+        native_result: impl Into<String>,
+    ) -> Result<P4EvidenceBundle, FixtureError> {
+        if self
+            .fixture_manifest()
+            .platform_profile
+            .native_mutation_phase
+            != "P4-trash-only"
+        {
+            return Err(FixtureError::LinuxTrashBarrierUnsupported);
+        }
+        let trace = self.evidence_trace(barrier, backend, native_result)?;
+        Ok(P4EvidenceBundle {
+            schema: "sweepx.p4_evidence_bundle/v1".to_string(),
+            trace,
+            fixture_manifest: self.fixture_manifest().clone(),
+            oracle_receipt: self.oracle_receipt().clone(),
+        })
+    }
+
     pub fn verify_unchanged(&self) -> Result<(), FixtureError> {
         #[cfg(not(target_os = "linux"))]
         {
@@ -548,6 +654,18 @@ impl LinuxTrashTargetQualification {
             compare_linux_fixture_trees(&self.tree_baseline, &current, LinuxTreeComparison::Exact)?;
             self.verify_named_baselines(&current)
         }
+    }
+
+    pub fn fixture_manifest(&self) -> &FixtureManifest {
+        &self.fixture_manifest
+    }
+
+    pub fn oracle_receipt(&self) -> &Receipt {
+        &self.oracle_receipt
+    }
+
+    pub fn oracle_receipt_digest(&self) -> String {
+        canonical_json_sha256(self.oracle_receipt()).expect("receipt digest must serialize")
     }
 
     /// Verifies that only the selected directory entry disappeared.
@@ -626,6 +744,18 @@ impl LinuxTrashTargetQualification {
         }
         Ok(())
     }
+}
+
+fn oracle_receipt_for_top_dir(
+    top_dir: &Path,
+    manifest: &FixtureManifest,
+) -> Result<Receipt, FixtureError> {
+    let fixture_root = top_dir
+        .parent()
+        .ok_or_else(|| FixtureError::TargetEscapesFixtureRoot {
+            path: top_dir.to_path_buf(),
+        })?;
+    Ok(oracle_from_manifest(fixture_root, manifest)?.receipt)
 }
 
 pub fn load_manifest_contract(path: impl AsRef<Path>) -> Result<FixtureManifest, FixtureError> {
@@ -1050,6 +1180,13 @@ pub fn linux_p4_trash_manifest(filesystem: impl Into<String>) -> FixtureManifest
             expected_boundaries: vec!["kind:linux-p4-trash/trash-target.txt:file".to_string()],
         },
     }
+}
+
+pub fn contract_p4_evidence_bundle_path(name: &str) -> PathBuf {
+    normalize_lexical(workspace_root())
+        .join("fixtures")
+        .join("contracts")
+        .join(format!("{name}.p4-evidence-bundle.json"))
 }
 
 pub fn is_within_fixture_root(root: &Path, candidate: &Path) -> bool {
@@ -1769,6 +1906,11 @@ fn hash_file(path: &Path) -> Result<String, FixtureError> {
     Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
 }
 
+fn canonical_json_sha256<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(value)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
+}
+
 fn deterministic_receipt_timestamp(created_at: &str) -> Result<String, FixtureError> {
     let parsed = OffsetDateTime::parse(created_at, &Rfc3339).map_err(|source| {
         FixtureError::TimestampParse {
@@ -1778,6 +1920,18 @@ fn deterministic_receipt_timestamp(created_at: &str) -> Result<String, FixtureEr
     })?;
     Ok(parsed
         .saturating_add(time::Duration::seconds(RECEIPT_TIME_OFFSET_SECS))
+        .format(&Rfc3339)?)
+}
+
+fn deterministic_evidence_expiry(created_at: &str) -> Result<String, FixtureError> {
+    let parsed = OffsetDateTime::parse(created_at, &Rfc3339).map_err(|source| {
+        FixtureError::TimestampParse {
+            value: created_at.to_string(),
+            source,
+        }
+    })?;
+    Ok(parsed
+        .saturating_add(time::Duration::hours(24))
         .format(&Rfc3339)?)
 }
 

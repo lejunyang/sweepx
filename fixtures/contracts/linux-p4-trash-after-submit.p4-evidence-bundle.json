@@ -1,0 +1,151 @@
+{
+  "schema": "sweepx.p4_evidence_bundle/v1",
+  "trace": {
+    "schema": "sweepx.p4_evidence_trace/v1",
+    "barrier": "after_submit",
+    "seed": "44",
+    "fixtureManifestId": "fixture-linux-p4-trash",
+    "fixtureManifestDigest": "sha256:NORMALIZED_MANIFEST",
+    "oracleReceiptDigest": "sha256:NORMALIZED_RECEIPT",
+    "osFamily": "linux",
+    "filesystem": "ext4",
+    "backend": "linux-trash-backend",
+    "nativeResult": "native_ok",
+    "limitations": [
+      {
+        "code": "temporary_fixture_root_only",
+        "detail": "destructive fixtures are valid only under a caller-created temporary generated root"
+      },
+      {
+        "code": "harness_expires_after_generation",
+        "detail": "barrier evidence is valid only while the generated fixture tree remains unchanged"
+      }
+    ],
+    "expiresAt": "2026-08-28T06:00:00Z"
+  },
+  "fixtureManifest": {
+    "schema": "sweepx.fixture-manifest/v1",
+    "manifestId": "fixture-linux-p4-trash",
+    "seed": "44",
+    "createdAt": "2026-08-27T06:00:00Z",
+    "generatorVersion": "0.1.0",
+    "platformProfile": {
+      "osFamily": "linux",
+      "filesystem": "ext4",
+      "caseSensitivity": "case-sensitive",
+      "nativeMutationPhase": "P4-trash-only"
+    },
+    "entries": [
+      {
+        "entryId": "linux-trash-root",
+        "path": [
+          "linux-p4-trash"
+        ],
+        "kind": "directory",
+        "notes": [
+          "disposable Linux P4 Trash fixture root"
+        ]
+      },
+      {
+        "entryId": "trash-target-file",
+        "path": [
+          "linux-p4-trash",
+          "trash-target.txt"
+        ],
+        "kind": "file",
+        "bytes": "23",
+        "mode": "0644",
+        "contentPattern": "ascii-seed",
+        "notes": [
+          "sole Linux P4 Trash target"
+        ]
+      }
+    ],
+    "expectations": {
+      "entryCount": "2",
+      "logicalBytes": {
+        "state": "known",
+        "value": "23"
+      },
+      "allocatedBytes": {
+        "state": "lower_bound",
+        "value": "23",
+        "reason": "cross_platform_block_size_unknown"
+      },
+      "requiresLiveScan": true,
+      "expectedBoundaries": [
+        "kind:linux-p4-trash/trash-target.txt:file"
+      ]
+    }
+  },
+  "oracleReceipt": {
+    "schema": "sweepx.receipt/v1",
+    "receiptId": "receipt-fixture-linux-p4-trash",
+    "manifestId": "fixture-linux-p4-trash",
+    "generatedAt": "2026-08-27T06:00:01Z",
+    "generatorVersion": "0.1.0",
+    "seed": "44",
+    "status": "verified",
+    "rootPath": "/NORMALIZED/linux-p4-trash",
+    "entries": [
+      {
+        "entryId": "linux-trash-root",
+        "kind": "directory",
+        "path": [
+          "linux-p4-trash"
+        ],
+        "exists": true,
+        "logicalBytes": {
+          "state": "known",
+          "value": "0"
+        },
+        "allocatedBytes": {
+          "state": "unknown",
+          "reason": "directory_allocation_platform_specific"
+        },
+        "notes": []
+      },
+      {
+        "entryId": "trash-target-file",
+        "kind": "file",
+        "path": [
+          "linux-p4-trash",
+          "trash-target.txt"
+        ],
+        "exists": true,
+        "logicalBytes": {
+          "state": "known",
+          "value": "23"
+        },
+        "allocatedBytes": {
+          "state": "lower_bound",
+          "value": "5",
+          "reason": "cross_platform_block_size_unknown"
+        },
+        "digest": "sha256:20247e3ca9371d7fe4d56951fa7227c753a0f54e84dddb0d87ce9fe1edeb409f",
+        "notes": []
+      }
+    ],
+    "totals": {
+      "entryCount": "2",
+      "logicalBytes": {
+        "state": "known",
+        "value": "23"
+      },
+      "apparentLogicalBytes": {
+        "state": "known",
+        "value": "23"
+      },
+      "uniqueLogicalBytes": {
+        "state": "known",
+        "value": "23"
+      },
+      "allocatedBytes": {
+        "state": "lower_bound",
+        "value": "5",
+        "reason": "cross_platform_block_size_unknown"
+      }
+    },
+    "errors": []
+  }
+}
