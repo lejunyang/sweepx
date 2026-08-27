@@ -10,6 +10,7 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sweepx_canonical::canonicalize_value;
 use sweepx_analysis::{
     DirectoryAggregateLink, build_candidates_from_summary_with_links,
     build_explanation_from_candidate,
@@ -341,6 +342,8 @@ pub enum CoreError {
     CleanerVm(#[from] sweepx_cleaner_vm::VmError),
     #[error("cleaner reference is invalid: {0}")]
     InvalidCleanerRef(String),
+    #[error("cleaner catalog trust is invalid: {0}")]
+    CleanerCatalogTrust(String),
     #[error(
         "cleaner is incompatible with this core: {cleaner_ref} requires {required_core}, current={current_core}"
     )]
@@ -649,28 +652,37 @@ pub fn cancel_with_store<S: SnapshotStore>(
     Ok(SnapshotSuccess { output, snapshot })
 }
 
-pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
+pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreError> {
     let ids = fresh_operation_ids("capabilities", &[]);
     let recorded_at = timestamp_now();
     let qualification_expires_at = timestamp_after(&recorded_at, time::Duration::hours(24));
     let current_os = current_os_family();
-    let cleaner_catalog = load_builtin_cleaners();
-    let cleaner_digest = cleaner_set_digest();
-    let cleaner_state = match (&cleaner_catalog, &cleaner_digest) {
-        (_, Err(_)) => CapabilityState::Degraded,
-        (Ok(cleaners), Ok(_)) if cleaners.iter().any(|cleaner| !cleaner.compatible) => {
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let cleaner_state = match cleaner_catalog.trust.disposition {
+        CleanerCatalogTrustDisposition::Disabled => CapabilityState::Disabled,
+        CleanerCatalogTrustDisposition::ReportOnly => CapabilityState::ReportOnly,
+        CleanerCatalogTrustDisposition::Trusted
+            if cleaner_catalog
+                .cleaners
+                .iter()
+                .any(|cleaner| !cleaner.compatible) =>
+        {
             CapabilityState::ReportOnly
         }
-        (Ok(_), Ok(_)) => CapabilityState::Qualified,
-        (Err(_), _) => CapabilityState::Degraded,
+        CleanerCatalogTrustDisposition::Trusted => CapabilityState::Qualified,
     };
-    let cleaner_reason = match (&cleaner_catalog, &cleaner_digest) {
-        (_, Err(_)) => "BUILTIN_CLEANER_REPORTING_DEGRADED",
-        (Ok(cleaners), Ok(_)) if cleaners.iter().any(|cleaner| !cleaner.compatible) => {
+    let cleaner_reason = match cleaner_catalog.trust.disposition {
+        CleanerCatalogTrustDisposition::Disabled => "BUILTIN_CLEANER_TRUST_DISABLED",
+        CleanerCatalogTrustDisposition::ReportOnly => "BUILTIN_CLEANER_TRUST_REPORT_ONLY",
+        CleanerCatalogTrustDisposition::Trusted
+            if cleaner_catalog
+                .cleaners
+                .iter()
+                .any(|cleaner| !cleaner.compatible) =>
+        {
             "BUILTIN_CLEANER_COMPAT_PARTIAL"
         }
-        (Ok(_), Ok(_)) => "BUILTIN_CLEANER_REPORTING_SUPPORTED",
-        (Err(_), _) => "BUILTIN_CLEANER_REPORTING_DEGRADED",
+        CleanerCatalogTrustDisposition::Trusted => "BUILTIN_CLEANER_REPORTING_SUPPORTED",
     };
     let mut output = OutputEnvelope::new(
         OutputKind::CapabilitiesResult,
@@ -679,7 +691,7 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         recorded_at.clone(),
         OutputStatus::Partial,
         ExitCode::Partial,
-        compat_snapshot(current_os),
+        compat_snapshot_with_digest(current_os, cleaner_catalog.cleaner_set_digest.clone()),
     );
     let commands = vec![
         command_record(
@@ -951,7 +963,7 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         "commandCount": DecimalU128::new(commands.len() as u128),
         "capabilityCount": DecimalU128::new(capabilities.len() as u128),
         "currentPlatform": current_os,
-        "cleanerSetDigest": cleaner_digest.unwrap_or_else(|_| "sha256:unavailable".to_string()),
+        "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
     });
     output.data = json!({
         "commands": commands,
@@ -964,7 +976,7 @@ pub fn capabilities(_context: &CoreContext) -> CapabilitiesSuccess {
         false,
         [("platform", current_os.to_string())],
     ));
-    CapabilitiesSuccess { output }
+    Ok(CapabilitiesSuccess { output })
 }
 
 pub fn explain_from_scan_json(
@@ -1025,9 +1037,14 @@ pub fn explain_from_scan_json(
 
 pub fn cleaner_list(_context: &CoreContext) -> Result<CleanerSuccess, CoreError> {
     let ids = fresh_operation_ids("cleaner-list", &[]);
-    let cleaners = load_builtin_cleaners()?;
-    let list = cleaners.iter().map(cleaner_list_entry).collect::<Vec<_>>();
-    let incompatible_count = cleaners
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let list = cleaner_catalog
+        .cleaners
+        .iter()
+        .map(|cleaner| cleaner_list_entry(cleaner, &cleaner_catalog.trust))
+        .collect::<Vec<_>>();
+    let incompatible_count = cleaner_catalog
+        .cleaners
         .iter()
         .filter(|cleaner| !cleaner.compatible)
         .count();
@@ -1043,12 +1060,16 @@ pub fn cleaner_list(_context: &CoreContext) -> Result<CleanerSuccess, CoreError>
         timestamp_now(),
         status,
         ExitCode::Completed,
-        compat_snapshot(current_os_family()),
+        compat_snapshot_with_digest(
+            current_os_family(),
+            cleaner_catalog.cleaner_set_digest.clone(),
+        ),
     );
     output.summary = json!({
         "command": "cleaner.list",
         "cleanerCount": DecimalU128::new(list.len() as u128),
         "incompatibleCleanerCount": DecimalU128::new(incompatible_count as u128),
+        "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
     });
     output.data = json!({
         "command": "cleaner.list",
@@ -1071,8 +1092,9 @@ pub fn cleaner_show(
     request: &CleanerShowRequest,
 ) -> Result<CleanerSuccess, CoreError> {
     let (id, version) = parse_cleaner_ref(&request.cleaner_ref)?;
-    let cleaners = load_builtin_cleaners()?;
-    let cleaner = cleaners
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    let cleaner = cleaner_catalog
+        .cleaners
         .iter()
         .find(|cleaner| {
             cleaner.package.manifest.id == id
@@ -1089,7 +1111,7 @@ pub fn cleaner_show(
             current_core: CORE_VERSION.to_string(),
         });
     }
-    let entry = cleaner_show_entry(cleaner)?;
+    let entry = cleaner_show_entry(cleaner, &cleaner_catalog.trust)?;
     let ids = fresh_operation_ids("cleaner-show", &[]);
     let mut output = OutputEnvelope::new(
         OutputKind::CleanerResult,
@@ -1098,12 +1120,16 @@ pub fn cleaner_show(
         timestamp_now(),
         OutputStatus::Ok,
         ExitCode::Completed,
-        compat_snapshot(current_os_family()),
+        compat_snapshot_with_digest(
+            current_os_family(),
+            cleaner_catalog.cleaner_set_digest.clone(),
+        ),
     );
     output.summary = json!({
         "command": "cleaner.show",
         "cleanerId": entry["manifest"]["id"].clone(),
         "ruleCount": DecimalU128::new(entry["rules"].as_array().map(|items| items.len()).unwrap_or(0) as u128),
+        "cleanerSetDigest": cleaner_catalog.cleaner_set_digest,
     });
     output.data = json!({
         "command": "cleaner.show",
@@ -1799,7 +1825,10 @@ fn downgrade_imported_coverage(coverage: &mut Coverage) {
     }
 }
 
-fn cleaner_list_entry(cleaner: &LoadedBuiltInCleaner) -> Value {
+fn cleaner_list_entry(
+    cleaner: &LoadedBuiltInCleaner,
+    trust: &CleanerCatalogTrustResolution,
+) -> Value {
     let package = &cleaner.package;
     json!({
         "id": package.manifest.id,
@@ -1812,11 +1841,15 @@ fn cleaner_list_entry(cleaner: &LoadedBuiltInCleaner) -> Value {
         "platforms": package.manifest.platforms,
         "unknownVersionBehavior": package.manifest.target_versions.unknown,
         "ruleCount": DecimalU128::new(package.rules.len() as u128),
+        "catalogTrust": cleaner_catalog_trust_json(trust),
         "compatibility": cleaner_compatibility_json(cleaner),
     })
 }
 
-fn cleaner_show_entry(cleaner: &LoadedBuiltInCleaner) -> Result<Value, CoreError> {
+fn cleaner_show_entry(
+    cleaner: &LoadedBuiltInCleaner,
+    trust: &CleanerCatalogTrustResolution,
+) -> Result<Value, CoreError> {
     let package = &cleaner.package;
     let rules = package
         .rules
@@ -1825,6 +1858,7 @@ fn cleaner_show_entry(cleaner: &LoadedBuiltInCleaner) -> Result<Value, CoreError
         .collect::<Result<Vec<_>, CoreError>>()?;
     Ok(json!({
         "manifest": package.manifest,
+        "catalogTrust": cleaner_catalog_trust_json(trust),
         "compatibility": cleaner_compatibility_json(cleaner),
         "rules": rules,
     }))
@@ -2305,6 +2339,49 @@ struct LoadedBuiltInCleaner {
     compatible: bool,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CleanerCatalogTrustSource {
+    LegacyBuiltin,
+    ProductionSnapshot,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CleanerCatalogTrustFreshness {
+    Current,
+    Stale,
+    LegacyBuiltin,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CleanerCatalogTrustDisposition {
+    Trusted,
+    ReportOnly,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanerCatalogTrustResolution {
+    source: CleanerCatalogTrustSource,
+    snapshot_digest: Option<String>,
+    epoch: Option<u64>,
+    freshness: CleanerCatalogTrustFreshness,
+    disposition: CleanerCatalogTrustDisposition,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedCleanerCatalog {
+    cleaners: Vec<LoadedBuiltInCleaner>,
+    trust: CleanerCatalogTrustResolution,
+    cleaner_set_digest: String,
+}
+
 fn load_builtin_cleaners() -> Result<Vec<LoadedBuiltInCleaner>, CoreError> {
     BUILT_INS
         .iter()
@@ -2317,6 +2394,55 @@ fn load_builtin_cleaners() -> Result<Vec<LoadedBuiltInCleaner>, CoreError> {
             })
         })
         .collect()
+}
+
+fn resolve_cleaner_catalog() -> Result<ResolvedCleanerCatalog, CoreError> {
+    let cleaners = load_builtin_cleaners()?;
+    let trust = legacy_builtin_catalog_trust()?;
+    let cleaner_set_digest = cleaner_set_digest_with_trust(&cleaners, &trust)?;
+    Ok(ResolvedCleanerCatalog {
+        cleaners,
+        trust,
+        cleaner_set_digest,
+    })
+}
+
+fn legacy_builtin_catalog_trust() -> Result<CleanerCatalogTrustResolution, CoreError> {
+    let trust = CleanerCatalogTrustResolution {
+        source: CleanerCatalogTrustSource::LegacyBuiltin,
+        snapshot_digest: None,
+        epoch: None,
+        freshness: CleanerCatalogTrustFreshness::LegacyBuiltin,
+        disposition: CleanerCatalogTrustDisposition::Trusted,
+    };
+    validate_catalog_trust(&trust)?;
+    Ok(trust)
+}
+
+fn validate_catalog_trust(trust: &CleanerCatalogTrustResolution) -> Result<(), CoreError> {
+    match trust.source {
+        CleanerCatalogTrustSource::LegacyBuiltin => {
+            if trust.snapshot_digest.is_some() || trust.epoch.is_some() {
+                return Err(CoreError::CleanerCatalogTrust(
+                    "legacy builtin catalog trust cannot carry snapshot digest or epoch"
+                        .to_string(),
+                ));
+            }
+            if trust.freshness != CleanerCatalogTrustFreshness::LegacyBuiltin {
+                return Err(CoreError::CleanerCatalogTrust(
+                    "legacy builtin catalog trust must use legacy_builtin freshness".to_string(),
+                ));
+            }
+        }
+        CleanerCatalogTrustSource::ProductionSnapshot => {
+            if trust.snapshot_digest.is_none() || trust.epoch.is_none() {
+                return Err(CoreError::CleanerCatalogTrust(
+                    "production snapshot trust requires snapshot digest and epoch".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cleaner_is_core_compatible(package: &LoadedCleanerPackage) -> Result<bool, CoreError> {
@@ -2336,13 +2462,23 @@ fn cleaner_is_core_compatible(package: &LoadedCleanerPackage) -> Result<bool, Co
 }
 
 fn cleaner_set_digest() -> Result<String, CoreError> {
-    let mut records = load_builtin_cleaners()?
-        .into_iter()
+    let cleaner_catalog = resolve_cleaner_catalog()?;
+    Ok(cleaner_catalog.cleaner_set_digest)
+}
+
+fn cleaner_set_digest_with_trust(
+    cleaners: &[LoadedBuiltInCleaner],
+    trust: &CleanerCatalogTrustResolution,
+) -> Result<String, CoreError> {
+    validate_catalog_trust(trust)?;
+    let mut records = cleaners
+        .iter()
         .map(|cleaner| {
             json!({
                 "id": cleaner.package.manifest.id,
                 "version": cleaner.package.manifest.version,
                 "packageDigest": cleaner.package.manifest.package_digest,
+                "catalogTrust": cleaner_catalog_trust_json(trust),
             })
         })
         .collect::<Vec<_>>();
@@ -2351,21 +2487,44 @@ fn cleaner_set_digest() -> Result<String, CoreError> {
             left["id"].as_str().unwrap_or_default(),
             left["version"].as_str().unwrap_or_default(),
             left["packageDigest"].as_str().unwrap_or_default(),
+            left["catalogTrust"]["source"].as_str().unwrap_or_default(),
+            left["catalogTrust"]["snapshotDigest"]
+                .as_str()
+                .unwrap_or_default(),
+            left["catalogTrust"]["epoch"].as_u64().unwrap_or_default(),
+            left["catalogTrust"]["freshness"].as_str().unwrap_or_default(),
+            left["catalogTrust"]["disposition"]
+                .as_str()
+                .unwrap_or_default(),
         );
         let right_key = (
             right["id"].as_str().unwrap_or_default(),
             right["version"].as_str().unwrap_or_default(),
             right["packageDigest"].as_str().unwrap_or_default(),
+            right["catalogTrust"]["source"].as_str().unwrap_or_default(),
+            right["catalogTrust"]["snapshotDigest"]
+                .as_str()
+                .unwrap_or_default(),
+            right["catalogTrust"]["epoch"].as_u64().unwrap_or_default(),
+            right["catalogTrust"]["freshness"].as_str().unwrap_or_default(),
+            right["catalogTrust"]["disposition"]
+                .as_str()
+                .unwrap_or_default(),
         );
         left_key.cmp(&right_key)
     });
     let mut hasher = Sha256::new();
     hasher.update(b"sweepx.cleaner-set-digest.v1\0");
-    hasher.update(
-        serde_json::to_vec(&records)
-            .expect("cleaner set digest records should serialize to canonical array"),
-    );
+    hasher.update(canonicalize_value(&Value::Array(records)).map_err(|error| {
+        CoreError::CleanerCatalogTrust(format!(
+            "failed to canonicalize cleaner set digest payload: {error}"
+        ))
+    })?);
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn cleaner_catalog_trust_json(trust: &CleanerCatalogTrustResolution) -> Value {
+    json!(trust)
 }
 
 fn cleaner_compatibility_json(cleaner: &LoadedBuiltInCleaner) -> Value {
@@ -2377,7 +2536,10 @@ fn cleaner_compatibility_json(cleaner: &LoadedBuiltInCleaner) -> Value {
     })
 }
 
-fn compat_snapshot(platform_adapter_id: &str) -> CompatSnapshot {
+fn compat_snapshot_with_digest(
+    platform_adapter_id: &str,
+    cleaner_set_digest: String,
+) -> CompatSnapshot {
     CompatSnapshot {
         core_version: CORE_VERSION.to_string(),
         scanner_semantics_version: SCANNER_SEMANTICS_VERSION,
@@ -2386,11 +2548,17 @@ fn compat_snapshot(platform_adapter_id: &str) -> CompatSnapshot {
             id: platform_adapter_id.to_string(),
             version: CORE_VERSION.to_string(),
         },
-        cleaner_set_digest: cleaner_set_digest()
-            .unwrap_or_else(|_| "sha256:unavailable".to_string()),
+        cleaner_set_digest,
         required_features: Vec::new(),
         extensions: Vec::new(),
     }
+}
+
+fn compat_snapshot(platform_adapter_id: &str) -> CompatSnapshot {
+    compat_snapshot_with_digest(
+        platform_adapter_id,
+        cleaner_set_digest().unwrap_or_else(|_| "sha256:unavailable".to_string()),
+    )
 }
 
 fn command_record(id: &str, state: CapabilityState, reason_code: &str) -> Value {
@@ -2649,7 +2817,9 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         | CoreError::CandidateNotFound(_)
         | CoreError::InvalidCleanerRef(_)
         | CoreError::TuiInput(_) => ExitCode::UsageError,
-        CoreError::CleanerCompat { .. } => ExitCode::CleanerTrustOrCompat,
+        CoreError::CleanerCompat { .. } | CoreError::CleanerCatalogTrust(_) => {
+            ExitCode::CleanerTrustOrCompat
+        }
         CoreError::State(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::Scan(_)
         | CoreError::AnalysisBuild(_)
@@ -3348,7 +3518,7 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let output = capabilities(&context).output;
+        let output = capabilities(&context).unwrap().output;
         let capabilities = output.data["capabilities"]
             .as_array()
             .expect("capabilities array");
@@ -3476,6 +3646,67 @@ mod tests {
         let second = cleaner_set_digest().unwrap();
         assert_eq!(first, second);
         assert!(first.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn cleaner_set_digest_is_order_independent_for_same_catalog_and_trust() {
+        let mut cleaners = load_builtin_cleaners().unwrap();
+        let trust = legacy_builtin_catalog_trust().unwrap();
+        let forward = cleaner_set_digest_with_trust(&cleaners, &trust).unwrap();
+        cleaners.reverse();
+        let reversed = cleaner_set_digest_with_trust(&cleaners, &trust).unwrap();
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn cleaner_set_digest_changes_when_catalog_trust_changes() {
+        let cleaners = load_builtin_cleaners().unwrap();
+        let legacy = legacy_builtin_catalog_trust().unwrap();
+        let production = CleanerCatalogTrustResolution {
+            source: CleanerCatalogTrustSource::ProductionSnapshot,
+            snapshot_digest: Some("sha256:trust-snapshot".to_string()),
+            epoch: Some(7),
+            freshness: CleanerCatalogTrustFreshness::Current,
+            disposition: CleanerCatalogTrustDisposition::Trusted,
+        };
+        let report_only = CleanerCatalogTrustResolution {
+            source: CleanerCatalogTrustSource::ProductionSnapshot,
+            snapshot_digest: Some("sha256:trust-snapshot".to_string()),
+            epoch: Some(7),
+            freshness: CleanerCatalogTrustFreshness::Stale,
+            disposition: CleanerCatalogTrustDisposition::ReportOnly,
+        };
+
+        let legacy_digest = cleaner_set_digest_with_trust(&cleaners, &legacy).unwrap();
+        let production_digest = cleaner_set_digest_with_trust(&cleaners, &production).unwrap();
+        let report_only_digest = cleaner_set_digest_with_trust(&cleaners, &report_only).unwrap();
+
+        assert_ne!(legacy_digest, production_digest);
+        assert_ne!(production_digest, report_only_digest);
+    }
+
+    #[test]
+    fn cleaner_set_digest_accepts_disabled_production_trust_shape() {
+        let cleaners = load_builtin_cleaners().unwrap();
+        let disabled = CleanerCatalogTrustResolution {
+            source: CleanerCatalogTrustSource::ProductionSnapshot,
+            snapshot_digest: Some("sha256:trust-disabled".to_string()),
+            epoch: Some(9),
+            freshness: CleanerCatalogTrustFreshness::Stale,
+            disposition: CleanerCatalogTrustDisposition::Disabled,
+        };
+        let digest = cleaner_set_digest_with_trust(&cleaners, &disabled).unwrap();
+        assert!(digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn cleaner_catalog_trust_error_maps_to_trust_or_compat_exit_code() {
+        assert_eq!(
+            core_error_exit_code(&CoreError::CleanerCatalogTrust(
+                "trust snapshot invalid".to_string()
+            )),
+            ExitCode::CleanerTrustOrCompat
+        );
     }
 
     #[test]

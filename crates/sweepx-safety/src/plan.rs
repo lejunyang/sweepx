@@ -128,6 +128,9 @@ pub struct NativePlanTarget {
     pub(crate) stable_identity: String,
     pub(crate) scan_object_identity: ScanObjectIdentity,
     pub(crate) native_locator: NativeLocatorEvidence,
+    pub(crate) native_basename: sweepx_model::NativeName,
+    pub(crate) object_type: sweepx_model::ObjectType,
+    pub(crate) metadata_fingerprint: String,
     pub(crate) candidate_digest: String,
 }
 
@@ -150,6 +153,18 @@ impl NativePlanTarget {
 
     pub fn native_locator(&self) -> &NativeLocatorEvidence {
         &self.native_locator
+    }
+
+    pub fn native_basename(&self) -> &sweepx_model::NativeName {
+        &self.native_basename
+    }
+
+    pub fn object_type(&self) -> &sweepx_model::ObjectType {
+        &self.object_type
+    }
+
+    pub fn metadata_fingerprint(&self) -> &str {
+        &self.metadata_fingerprint
     }
 
     pub fn candidate_digest(&self) -> &str {
@@ -988,6 +1003,21 @@ fn parse_native_target(value: &Value) -> Result<NativePlanTarget, CanonicalPlanE
             },
         )?)
         .map_err(CanonicalPlanError::Json)?,
+        native_basename: serde_json::from_value(value.get("native_basename").cloned().ok_or_else(
+            || CanonicalPlanError::InvalidField {
+                field: "native_target.native_basename",
+                reason: "expected object".to_string(),
+            },
+        )?)
+        .map_err(CanonicalPlanError::Json)?,
+        object_type: serde_json::from_value(value.get("object_type").cloned().ok_or_else(
+            || CanonicalPlanError::InvalidField {
+                field: "native_target.object_type",
+                reason: "expected object type".to_string(),
+            },
+        )?)
+        .map_err(CanonicalPlanError::Json)?,
+        metadata_fingerprint: required_string(value, "metadata_fingerprint")?,
         candidate_digest: required_string(value, "candidate_digest")?,
     })
 }
@@ -1055,6 +1085,9 @@ pub fn plan_item_from_live_candidate(
             stable_identity,
             scan_object_identity,
             native_locator,
+            native_basename: candidate.locator.native_basename.clone(),
+            object_type: candidate.object_type.clone(),
+            metadata_fingerprint: candidate.metadata_fingerprint.clone(),
             candidate_digest: candidate.canonical_digest.clone(),
         }),
         risk_tier: match candidate.risk.tier {
@@ -1231,6 +1264,12 @@ fn validate_native_target(
     if native_target.candidate_digest.is_empty() {
         return Err(invalid_native_target(item_id, "candidate_digest is empty"));
     }
+    if native_target.metadata_fingerprint.is_empty() {
+        return Err(invalid_native_target(
+            item_id,
+            "metadata_fingerprint is empty",
+        ));
+    }
     if native_target.stable_identity != native_target.scan_object_identity.entry_id.as_str() {
         return Err(invalid_native_target(
             item_id,
@@ -1265,6 +1304,12 @@ fn validate_native_target(
         return Err(invalid_native_target(
             item_id,
             "native_locator does not match scan_object_identity",
+        ));
+    }
+    if native_target.native_locator.entry.native_basename != native_target.native_basename {
+        return Err(invalid_native_target(
+            item_id,
+            "native basename does not match locator entry",
         ));
     }
     Ok(())

@@ -605,6 +605,21 @@ impl NativeLocatorEvidence {
                 return Err(ScanEntryIdError::ScanMismatch);
             }
         }
+        if self
+            .parent_reopen_recipe
+            .first()
+            .is_some_and(|component| component.entry_id != self.scan_root.entry_id)
+        {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for component in &self.parent_reopen_recipe {
+            if !seen.insert(component.entry_id.clone())
+                || component.entry_id == self.entry.entry_id
+            {
+                return Err(ScanEntryIdError::InvalidFormat);
+            }
+        }
         match &identity.parent_id {
             Some(expected_parent)
                 if self.parent_reopen_recipe.last().map(|part| &part.entry_id)
@@ -687,6 +702,9 @@ impl ScannedEntry {
             return Ok(None);
         };
         locator.validate_for_identity(identity, &self.scan_id)?;
+        if locator.entry.native_basename != self.native_basename {
+            return Err(ScanEntryIdError::InvalidFormat);
+        }
         Ok(Some(locator))
     }
 }
