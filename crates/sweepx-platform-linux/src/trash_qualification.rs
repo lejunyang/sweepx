@@ -1108,6 +1108,22 @@ impl<B: BoundTrashBackend> ArmedFixtureTrash<B> {
         F: FnOnce(&DurableIntentToken),
         G: FnOnce(&DurableIntentToken),
     {
+        self.trash_with_terminal_hooks(after_intent, after_submission, || {}, || {})
+    }
+
+    fn trash_with_terminal_hooks<F, G, H, I>(
+        self,
+        after_intent: F,
+        after_submission: G,
+        before_final_sync: H,
+        after_final_sync: I,
+    ) -> Result<TrashOutcome, QualificationError>
+    where
+        F: FnOnce(&DurableIntentToken),
+        G: FnOnce(&DurableIntentToken),
+        H: FnOnce(),
+        I: FnOnce(),
+    {
         if let Err(error) = self
             .scope
             .recheck(QualificationErrorKind::StaleBeforeSubmit)
@@ -1212,7 +1228,13 @@ impl<B: BoundTrashBackend> ArmedFixtureTrash<B> {
                 ),
             },
         };
-        persist_outcome(&self.evidence_root, &intent, outcome)
+        persist_outcome_with_hooks(
+            &self.evidence_root,
+            &intent,
+            outcome,
+            before_final_sync,
+            after_final_sync,
+        )
     }
 }
 
@@ -1221,7 +1243,27 @@ fn persist_outcome(
     intent: &DurableIntentToken,
     outcome: TrashOutcome,
 ) -> Result<TrashOutcome, QualificationError> {
-    write_outcome(evidence_root, intent, &outcome)?;
+    persist_outcome_with_hooks(evidence_root, intent, outcome, || {}, || {})
+}
+
+fn persist_outcome_with_hooks<F, G>(
+    evidence_root: &PrivateDirectory,
+    intent: &DurableIntentToken,
+    outcome: TrashOutcome,
+    before_final_sync: F,
+    after_final_sync: G,
+) -> Result<TrashOutcome, QualificationError>
+where
+    F: FnOnce(),
+    G: FnOnce(),
+{
+    write_outcome_with_hooks(
+        evidence_root,
+        intent,
+        &outcome,
+        before_final_sync,
+        after_final_sync,
+    )?;
     Ok(outcome)
 }
 
@@ -1255,11 +1297,17 @@ fn write_intent<B: BoundTrashBackend>(
     })
 }
 
-fn write_outcome(
+fn write_outcome_with_hooks<F, G>(
     evidence_root: &PrivateDirectory,
     intent: &DurableIntentToken,
     outcome: &TrashOutcome,
-) -> Result<(), QualificationError> {
+    before_final_sync: F,
+    after_final_sync: G,
+) -> Result<(), QualificationError>
+where
+    F: FnOnce(),
+    G: FnOnce(),
+{
     intent.verify()?;
     let content = format!(
         "schema=sweepx.test-linux-trash-outcome/v1\nstatus={:?}\ndetail={}\n",
@@ -1271,16 +1319,60 @@ fn write_outcome(
         content.as_bytes(),
         &[INTENT_FILE],
     )?;
-    intent.verify_record()?;
-    verify_named_record(
+    verify_terminal_records(
         evidence_root,
-        OUTCOME_FILE,
+        intent,
         &outcome_file,
         outcome_identity,
         content.as_bytes(),
     )?;
-    evidence_root.verify(&[INTENT_FILE, OUTCOME_FILE], "evidence root")?;
-    sync_held_directory(evidence_root)
+
+    // The final durability barrier must commit exactly the two records that
+    // were verified above. Recheck immediately before the barrier to close a
+    // replacement window, then recheck again after it so a namespace change
+    // concurrent with fsync cannot be accepted as durable terminal evidence.
+    before_final_sync();
+    verify_terminal_records(
+        evidence_root,
+        intent,
+        &outcome_file,
+        outcome_identity,
+        content.as_bytes(),
+    )?;
+    sync_held_directory(evidence_root)?;
+    after_final_sync();
+    verify_terminal_records(
+        evidence_root,
+        intent,
+        &outcome_file,
+        outcome_identity,
+        content.as_bytes(),
+    )
+}
+
+fn verify_terminal_records(
+    evidence_root: &PrivateDirectory,
+    intent: &DurableIntentToken,
+    outcome_file: &File,
+    outcome_identity: NativeIdentity,
+    outcome_content: &[u8],
+) -> Result<(), QualificationError> {
+    intent.verify_record()?;
+    verify_named_record(
+        evidence_root,
+        OUTCOME_FILE,
+        outcome_file,
+        outcome_identity,
+        outcome_content,
+    )?;
+    evidence_root
+        .verify(&[INTENT_FILE, OUTCOME_FILE], "evidence root")
+        .map_err(|error| {
+            QualificationError::new(
+                QualificationErrorKind::Evidence,
+                format!("terminal evidence root binding failed: {error}"),
+            )
+        })
 }
 
 fn verify_named_record(
@@ -1553,6 +1645,81 @@ mod tests {
             )
             .expect("admit fixture scope")
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TerminalEvidenceTamper {
+        ReplaceIntent,
+        ReplaceOutcome,
+        RebindEvidenceRoot,
+    }
+
+    fn tamper_terminal_evidence(tamper: TerminalEvidenceTamper, evidence_root: &Path) {
+        match tamper {
+            TerminalEvidenceTamper::ReplaceIntent => {
+                let path = evidence_root.join(INTENT_FILE);
+                fs::remove_file(&path).expect("unlink verified intent");
+                fs::write(path, b"replacement intent").expect("recreate intent");
+            }
+            TerminalEvidenceTamper::ReplaceOutcome => {
+                let path = evidence_root.join(OUTCOME_FILE);
+                fs::remove_file(&path).expect("unlink verified outcome");
+                fs::write(path, b"replacement outcome").expect("recreate outcome");
+            }
+            TerminalEvidenceTamper::RebindEvidenceRoot => {
+                let parent = evidence_root.parent().expect("evidence root parent");
+                let replacement = parent.join("evidence-root-replacement");
+                let displaced = parent.join("evidence-root-displaced");
+                fs::create_dir(&replacement).expect("create replacement evidence root");
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700))
+                    .expect("make replacement evidence root private");
+                fs::rename(evidence_root, &displaced).expect("displace admitted evidence root");
+                fs::rename(replacement, evidence_root).expect("rebind evidence root path");
+            }
+        }
+    }
+
+    fn assert_terminal_evidence_tamper_fails(
+        tamper: TerminalEvidenceTamper,
+        after_final_sync: bool,
+    ) {
+        let fixture = HarnessFixture::new();
+        let backend = FakeBackend::new(FakeBehavior::ErrorUnchanged);
+        let submit_calls = Rc::clone(&backend.submit_calls);
+        let armed = fixture
+            .scope(backend, FakeRuntime::ordinary(&fixture.xdg))
+            .probe()
+            .unwrap()
+            .arm(&fixture.evidence)
+            .unwrap();
+
+        let result = if after_final_sync {
+            armed.trash_with_terminal_hooks(
+                |_| {},
+                |_| {},
+                || {},
+                || tamper_terminal_evidence(tamper, &fixture.evidence),
+            )
+        } else {
+            armed.trash_with_terminal_hooks(
+                |_| {},
+                |_| {},
+                || tamper_terminal_evidence(tamper, &fixture.evidence),
+                || {},
+            )
+        };
+
+        let error = result.expect_err("terminal evidence tampering must fail closed");
+        assert_eq!(error.kind, QualificationErrorKind::Evidence);
+        assert_eq!(submit_calls.get(), 1);
+        assert!(
+            fixture
+                .generated
+                .top_dir()
+                .join("trash-target.txt")
+                .is_file(),
+            "evidence fault injection must not mutate the fixture target"
+        );
     }
 
     #[test]
@@ -1847,6 +2014,32 @@ mod tests {
             .expect_err("terminal persistence failure must propagate");
         assert_eq!(error.kind, QualificationErrorKind::Evidence);
         assert_eq!(submit_calls.get(), 1);
+    }
+
+    #[test]
+    fn fixed_terminal_names_are_rechecked_before_final_durability_barrier() {
+        for tamper in [
+            TerminalEvidenceTamper::ReplaceIntent,
+            TerminalEvidenceTamper::ReplaceOutcome,
+        ] {
+            assert_terminal_evidence_tamper_fails(tamper, false);
+        }
+    }
+
+    #[test]
+    fn fixed_terminal_names_are_rechecked_after_final_durability_barrier() {
+        for tamper in [
+            TerminalEvidenceTamper::ReplaceIntent,
+            TerminalEvidenceTamper::ReplaceOutcome,
+        ] {
+            assert_terminal_evidence_tamper_fails(tamper, true);
+        }
+    }
+
+    #[test]
+    fn evidence_root_rebind_around_final_durability_barrier_fails_closed() {
+        assert_terminal_evidence_tamper_fails(TerminalEvidenceTamper::RebindEvidenceRoot, false);
+        assert_terminal_evidence_tamper_fails(TerminalEvidenceTamper::RebindEvidenceRoot, true);
     }
 
     #[test]
