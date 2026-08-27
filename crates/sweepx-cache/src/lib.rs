@@ -287,6 +287,7 @@ impl AtomicGenerationStore {
 
         let checksum = checksum_hex(&envelope.payload)?;
         if checksum != envelope.checksum_sha256
+            || pointer.generation != envelope.generation
             || envelope.generation != envelope.payload.generation
         {
             self.quarantine_generation(&pointer.generation, &bytes)?;
@@ -1039,6 +1040,39 @@ mod tests {
         let loaded = store.load_current().unwrap();
         assert_eq!(loaded, LoadResult::Miss);
         assert!(temp.path().join("quarantine/gen-1.corrupt.json").exists());
+    }
+
+    #[test]
+    fn generation_must_match_current_pointer_and_referenced_path() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        let generation = StoredGeneration {
+            generation: "gen-b".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+        };
+        let envelope = StoredEnvelope {
+            generation: generation.generation.clone(),
+            checksum_sha256: checksum_hex(&generation).unwrap(),
+            payload: generation,
+        };
+        let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+        fs::write(temp.path().join("generations/gen-a.json"), &envelope_bytes).unwrap();
+        fs::write(
+            temp.path().join("current.json"),
+            br#"{"generation":"gen-a"}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load_current().unwrap();
+
+        assert_eq!(loaded, LoadResult::Miss);
+        assert_eq!(
+            fs::read(temp.path().join("quarantine/gen-a.corrupt.json")).unwrap(),
+            envelope_bytes
+        );
     }
 
     #[test]
