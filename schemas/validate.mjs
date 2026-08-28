@@ -64,6 +64,10 @@ const validations = [
   },
   {
     schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
+    file: path.join(schemaDir, "examples", "sweepx.output.cache-status.result.example.json")
+  },
+  {
+    schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
     file: path.join(schemaDir, "examples", "sweepx.output.cancel.result.example.json")
   },
   {
@@ -859,6 +863,98 @@ const resultSchemaCases = [
     }
   },
   {
+    name: "cache status result matches its exact typed data branch",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "cache status result rejects unknown data fields",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.previewRoot = "/private/cache";
+    }
+  },
+  {
+    name: "cache status result rejects numeric counts",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.generationCount = 0;
+    }
+  },
+  {
+    name: "cache status result rejects untyped inspection errors",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.errors = [{ kind: "unknown_cache_error", path: "/private/cache" }];
+    }
+  },
+  {
+    name: "cache status result rejects unsafe generation identifiers",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "degraded";
+      output.status = "partial";
+      output.exitCode = 4;
+      output.data.exists = true;
+      output.data.currentGeneration = "../../secret";
+    }
+  },
+  {
+    name: "cache status available requires an existing healthy cache",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "available";
+    }
+  },
+  {
+    name: "cache status degraded requires partial exit four",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "degraded";
+    }
+  },
+  {
+    name: "cache status absent requires zero complete aggregate state",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.approxBytes = "1";
+      output.data.approxBytesComplete = false;
+    }
+  },
+  {
+    name: "cache status available rejects quarantine presence",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "available";
+      output.data.exists = true;
+      output.data.currentGeneration = "gen-example";
+      output.data.storedSchema = "sweepx.preview.cache/v1";
+      output.data.currentHealth = "available";
+      output.data.schemaHealth = "available";
+      output.data.quarantineCount = "1";
+    }
+  },
+  {
+    name: "cache status unsupported requires the unsupported exit code",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "unsupported";
+      output.status = "unsupported";
+      output.exitCode = 11;
+      output.data.approxBytesComplete = false;
+    }
+  },
+  {
     name: "cancel result matches its exact data branch",
     file: "sweepx.output.cancel.result.example.json",
     expected: true,
@@ -926,6 +1022,22 @@ const qualifiedSchemaCases = [
       record.qualificationKey.scope = "cleaner";
       record.qualificationKey.cleanerId = "org.sweepx.test-cleaner";
       record.qualificationKey.cleanerVersion = "1.2.3";
+    }
+  },
+  {
+    name: "qualified preview cache inspection accepts development evidence",
+    expected: true,
+    mutate(record) {
+      record.qualificationKey.capability = "cache.preview.inspect";
+      record.evidence.evidenceClass = "development_snapshot";
+    }
+  },
+  {
+    name: "qualified completed replay accepts development evidence",
+    expected: true,
+    mutate(record) {
+      record.qualificationKey.capability = "operation.event.completed_replay";
+      record.evidence.evidenceClass = "development_snapshot";
     }
   },
   {

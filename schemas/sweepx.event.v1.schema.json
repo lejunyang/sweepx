@@ -329,7 +329,8 @@
             "status.result",
             "capabilities.result",
             "cleaner.result",
-            "audit.result"
+            "audit.result",
+            "cache.status.result"
           ]
         },
         "snapshotDigest": {

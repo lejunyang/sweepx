@@ -34,7 +34,8 @@
         "status.result",
         "capabilities.result",
         "cleaner.result",
-        "audit.result"
+        "audit.result",
+        "cache.status.result"
       ]
     },
     "requestId": {
@@ -148,6 +149,151 @@
             "$ref": "#/$defs/statusResultData"
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "cache.status.result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/cacheStatusResultData"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "cache.status.result" },
+          "data": {
+            "properties": { "disposition": { "const": "absent" } },
+            "required": ["disposition"]
+          }
+        },
+        "required": ["kind", "data"]
+      },
+      "then": {
+        "properties": {
+          "status": { "const": "ok" },
+          "exitCode": { "const": 0 },
+          "data": {
+            "properties": {
+              "exists": { "const": false },
+              "currentGeneration": { "const": null },
+              "storedSchema": { "const": null },
+              "generationCount": { "const": "0" },
+              "quarantineCount": { "const": "0" },
+              "approxBytes": { "const": "0" },
+              "approxBytesComplete": { "const": true },
+              "currentHealth": { "const": "missing" },
+              "schemaHealth": { "const": "unknown" },
+              "warnings": { "maxItems": 0 },
+              "errors": { "maxItems": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "cache.status.result" },
+          "data": {
+            "properties": { "disposition": { "const": "available" } },
+            "required": ["disposition"]
+          }
+        },
+        "required": ["kind", "data"]
+      },
+      "then": {
+        "properties": {
+          "status": { "const": "ok" },
+          "exitCode": { "const": 0 },
+          "data": {
+            "properties": {
+              "exists": { "const": true },
+              "currentGeneration": { "type": "string", "minLength": 1 },
+              "storedSchema": { "const": "sweepx.preview.cache/v1" },
+              "quarantineCount": { "const": "0" },
+              "approxBytesComplete": { "const": true },
+              "currentHealth": { "const": "available" },
+              "schemaHealth": { "const": "available" },
+              "warnings": { "maxItems": 0 },
+              "errors": { "maxItems": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "cache.status.result" },
+          "data": {
+            "properties": { "disposition": { "const": "degraded" } },
+            "required": ["disposition"]
+          }
+        },
+        "required": ["kind", "data"]
+      },
+      "then": {
+        "properties": {
+          "status": { "const": "partial" },
+          "exitCode": { "const": 4 },
+          "data": { "properties": { "exists": { "const": true } } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "cache.status.result" },
+          "data": {
+            "properties": { "disposition": { "const": "unsupported" } },
+            "required": ["disposition"]
+          }
+        },
+        "required": ["kind", "data"]
+      },
+      "then": {
+        "properties": {
+          "status": { "enum": ["failed", "unsupported"] },
+          "exitCode": { "enum": [2, 3, 11] },
+          "data": {
+            "properties": {
+              "exists": { "const": false },
+              "currentGeneration": { "const": null },
+              "storedSchema": { "const": null },
+              "currentHealth": { "const": "unknown" },
+              "schemaHealth": { "const": "unknown" },
+              "warnings": { "maxItems": 0 },
+              "errors": { "maxItems": 0 }
+            }
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "status": { "const": "unsupported" },
+              "exitCode": { "const": 3 }
+            }
+          },
+          {
+            "properties": {
+              "status": { "const": "failed" },
+              "exitCode": { "enum": [2, 11] }
+            }
+          }
+        ]
       }
     },
     {
@@ -1519,6 +1665,145 @@
     },
     "statusResultData": {
       "$ref": "#/$defs/publicOperationView"
+    },
+    "cacheStatusResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "disposition",
+        "exists",
+        "currentGeneration",
+        "storedSchema",
+        "generationCount",
+        "quarantineCount",
+        "approxBytes",
+        "approxBytesComplete",
+        "currentHealth",
+        "schemaHealth",
+        "warnings",
+        "errors"
+      ],
+      "properties": {
+        "command": {
+          "const": "cache.status"
+        },
+        "disposition": {
+          "enum": ["absent", "available", "degraded", "unsupported"]
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "currentGeneration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "storedSchema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generationCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "quarantineCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "approxBytes": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "approxBytesComplete": {
+          "type": "boolean"
+        },
+        "currentHealth": {
+          "enum": ["available", "missing", "unknown", "error"]
+        },
+        "schemaHealth": {
+          "enum": ["available", "missing", "unknown", "error"]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cacheInspectionWarning"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cacheInspectionError"
+          }
+        }
+      }
+    },
+    "cacheInspectionWarning": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "limit"],
+          "properties": {
+            "kind": {
+              "enum": ["generation_scan_truncated", "quarantine_scan_truncated"]
+            },
+            "limit": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "count"],
+          "properties": {
+            "kind": { "const": "quarantine_present" },
+            "count": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+            }
+          }
+        }
+      ]
+    },
+    "cacheInspectionError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "bytes"],
+          "properties": {
+            "kind": {
+              "enum": ["current_pointer_too_large", "current_generation_too_large"]
+            },
+            "bytes": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "enum": [
+                "malformed_current_pointer",
+                "invalid_current_generation_name",
+                "missing_current_generation_data",
+                "malformed_generation_envelope",
+                "generation_checksum_mismatch",
+                "generation_pointer_mismatch",
+                "invalid_stored_generation_name",
+                "invalid_stored_schema",
+                "invalid_stored_provenance"
+              ]
+            }
+          }
+        }
+      ]
     },
     "cancelResultData": {
       "type": "object",

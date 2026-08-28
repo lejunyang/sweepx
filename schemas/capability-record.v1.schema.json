@@ -108,7 +108,9 @@
                     "analysis.explain.scan_json",
                     "catalog.cleaner.read",
                     "scan.tui.live",
-                    "operation.cancel"
+                    "operation.cancel",
+                    "operation.event.completed_replay",
+                    "cache.preview.inspect"
                   ]
                 }
               }

@@ -1293,6 +1293,7 @@ dependencies = [
 name = "sweepx-cache"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -1361,6 +1362,7 @@ dependencies = [
  "clap",
  "predicates",
  "serde_json",
+ "sweepx-cache",
  "sweepx-core",
  "sweepx-i18n",
  "sweepx-protocol",

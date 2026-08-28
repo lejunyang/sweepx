@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -58,8 +58,8 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["summary"]["commandCount"], "8");
-    assert_eq!(json["summary"]["capabilityCount"], "37");
+    assert_eq!(json["summary"]["commandCount"], "9");
+    assert_eq!(json["summary"]["capabilityCount"], "40");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert!(commands.iter().all(|command| command["mutating"] == false));
     assert!(commands.iter().all(|command| {
@@ -92,6 +92,16 @@ fn capabilities_json_uses_fixed_machine_keys() {
         .find(|item| item["id"] == "explain")
         .unwrap();
     assert_eq!(explain["state"], "qualified");
+    let cache_status = commands
+        .iter()
+        .find(|item| item["id"] == "cache.status")
+        .unwrap();
+    let expected_cache_status_state = if cfg!(target_os = "windows") {
+        "disabled"
+    } else {
+        "degraded"
+    };
+    assert_eq!(cache_status["state"], expected_cache_status_state);
     let linux_scan = json["data"]["capabilities"]
         .as_array()
         .unwrap()
@@ -231,6 +241,20 @@ fn capabilities_json_uses_fixed_machine_keys() {
         linux_replay["reasonCode"],
         "LINUX_COMPLETED_EVENT_REPLAY_SUPPORTED"
     );
+    let linux_cache_preview = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"] == "cache.preview.inspect"
+        })
+        .unwrap();
+    assert_eq!(linux_cache_preview["state"], "degraded");
+    assert_eq!(
+        linux_cache_preview["reasonCode"],
+        "CACHE_PREVIEW_INSPECTION_READ_ONLY"
+    );
     for os in ["macos", "windows"] {
         let replay = json["data"]["capabilities"]
             .as_array()
@@ -246,6 +270,32 @@ fn capabilities_json_uses_fixed_machine_keys() {
         assert_eq!(
             replay["reasonCode"],
             "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE"
+        );
+
+        let cache_preview = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"] == "cache.preview.inspect"
+            })
+            .unwrap();
+        assert_eq!(
+            cache_preview["state"],
+            if os == "windows" {
+                "disabled"
+            } else {
+                "degraded"
+            }
+        );
+        assert_eq!(
+            cache_preview["reasonCode"],
+            if os == "windows" {
+                "CACHE_PREVIEW_INSPECTION_UNAVAILABLE"
+            } else {
+                "CACHE_PREVIEW_INSPECTION_READ_ONLY"
+            }
         );
     }
 
@@ -548,6 +598,390 @@ fn experimental_cargo_detect_fails_closed_before_scan_for_incompatible_builtin()
     assert_eq!(json["data"]["reasons"][0], "builtin_manifest_incompatible");
     assert_eq!(json["errors"][0]["code"], "cleaner.compatibility");
     assert!(output.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_json_reports_absent_without_creating_default_state_dir() {
+    let fixture = TempDir::new().unwrap();
+    let home = fixture.path().join("home");
+    fs::create_dir(&home).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("HOME", &home)
+        .env_remove("XDG_STATE_HOME")
+        .arg("--format")
+        .arg("json")
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["summary"]["command"], "cache.status");
+    assert_eq!(json["data"]["command"], "cache.status");
+    assert_eq!(json["data"]["disposition"], "absent");
+    assert_eq!(json["data"]["exists"], false);
+    assert_eq!(json["data"]["currentGeneration"], Value::Null);
+    assert_eq!(json["data"]["storedSchema"], Value::Null);
+    assert_eq!(json["data"]["generationCount"], "0");
+    assert_eq!(json["data"]["quarantineCount"], "0");
+    assert_eq!(json["data"]["approxBytesComplete"], true);
+    assert_eq!(
+        sorted_object_keys(&json["data"]),
+        [
+            "approxBytes",
+            "approxBytesComplete",
+            "command",
+            "currentGeneration",
+            "currentHealth",
+            "disposition",
+            "errors",
+            "exists",
+            "generationCount",
+            "quarantineCount",
+            "schemaHealth",
+            "storedSchema",
+            "warnings",
+        ]
+    );
+    assert!(json["data"].get("stateDir").is_none());
+    assert!(json["data"].get("previewRoot").is_none());
+    assert!(json["data"].get("parents").is_none());
+    assert!(json["data"].get("entries").is_none());
+    assert_eq!(json["data"]["warnings"], Value::Array(Vec::new()));
+    assert_eq!(json["data"]["errors"], Value::Array(Vec::new()));
+    assert!(!home.join(".local/state/sweepx").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_does_not_create_explicit_state_or_preview_dirs() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["data"]["disposition"], "absent");
+    assert!(!state_dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_ndjson_is_usage_error_before_state_creation() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["exitCode"], 2);
+    assert_eq!(json["errors"][0]["code"], "cache.status.invalid_format");
+    assert!(!state_dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_json_reports_state_path_usage_errors_as_an_envelope() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg("relative-state")
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["exitCode"], 2);
+    assert_eq!(json["errors"][0]["code"], "cache.status.invalid_state_dir");
+    assert!(
+        !json["errors"][0]["params"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("relative-state")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_json_reports_insecure_cache_as_an_integrity_envelope() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&preview_root).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(11).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["exitCode"], 11);
+    assert_eq!(json["errors"][0]["code"], "cache.status.inspection_failed");
+    assert!(
+        !json["errors"][0]["params"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(fixture.path().to_string_lossy().as_ref())
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cache_status_json_reports_available_for_valid_preview_cache() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let store = sweepx_cache::AtomicGenerationStore::new(&preview_root);
+    store
+        .write_generation(&sweepx_cache::StoredGeneration {
+            generation: "gen_a".to_string(),
+            schema: sweepx_cache::STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-28T00:00:00Z".to_string(),
+            preview: sweepx_cache::CompactedPreview {
+                parents: Default::default(),
+                total_estimated_bytes: 0,
+                total_records: 0,
+                visible_resource_limit: false,
+            },
+        })
+        .unwrap();
+    fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["summary"]["command"], "cache.status");
+    assert_eq!(json["data"]["disposition"], "available");
+    assert_eq!(json["data"]["exists"], true);
+    assert_eq!(json["data"]["currentGeneration"], "gen_a");
+    assert_eq!(json["data"]["generationCount"], "1");
+    assert_eq!(json["data"]["quarantineCount"], "0");
+    assert_eq!(json["data"]["currentHealth"], "available");
+    assert_eq!(json["data"]["schemaHealth"], "available");
+    assert_eq!(json["data"]["storedSchema"], "sweepx.preview.cache/v1");
+    assert_eq!(json["data"]["warnings"], Value::Array(Vec::new()));
+    assert_eq!(json["data"]["errors"], Value::Array(Vec::new()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cache_status_json_reports_degraded_for_invalid_current_pointer() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&preview_root).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(preview_root.join("current.json"), b"{not-json").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(4).get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "partial");
+    assert_eq!(json["data"]["disposition"], "degraded");
+    assert_eq!(json["data"]["exists"], true);
+    assert_eq!(json["data"]["currentHealth"], "error");
+    assert_eq!(json["data"]["schemaHealth"], "unknown");
+    assert_eq!(json["data"]["warnings"], Value::Array(Vec::new()));
+    assert_eq!(
+        json["data"]["errors"][0]["kind"],
+        "malformed_current_pointer"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cache_status_quarantine_presence_is_degraded_and_read_only() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let store = sweepx_cache::AtomicGenerationStore::new(&preview_root);
+    store
+        .write_generation(&sweepx_cache::StoredGeneration {
+            generation: "gen_a".to_string(),
+            schema: sweepx_cache::STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-28T00:00:00Z".to_string(),
+            preview: sweepx_cache::CompactedPreview {
+                parents: Default::default(),
+                total_estimated_bytes: 0,
+                total_records: 0,
+                visible_resource_limit: false,
+            },
+        })
+        .unwrap();
+    let quarantine = preview_root.join("quarantine");
+    fs::create_dir(&quarantine).unwrap();
+    fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+    let quarantined = quarantine.join("old.corrupt.json");
+    fs::write(&quarantined, b"broken").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(4).get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["data"]["disposition"], "degraded");
+    assert_eq!(json["data"]["quarantineCount"], "1");
+    assert_eq!(json["data"]["warnings"][0]["kind"], "quarantine_present");
+    assert_eq!(fs::read(&quarantined).unwrap(), b"broken");
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_human_output_is_localized() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--locale")
+        .arg("zh-CN")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("命令: cache.status"));
+    assert!(text.contains("只读缓存诊断: absent"));
+    assert!(!state_dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_status_human_output_includes_degraded_reason() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&preview_root).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(preview_root.join("current.json"), b"{not-json").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--locale")
+        .arg("en-US")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+    let output = cmd.assert().code(4).get_output().stdout.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("Errors: cache.preview.inspect.malformed_current_pointer"));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn cache_status_is_unsupported_before_state_creation() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(3).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["exitCode"], 3);
+    assert_eq!(
+        json["errors"][0]["code"],
+        "cache.status.unsupported_platform"
+    );
+    assert!(!state_dir.exists());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn cache_status_ndjson_usage_error_precedes_platform_support() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["kind"], "cache.status.result");
+    assert_eq!(json["errors"][0]["code"], "cache.status.invalid_format");
+    assert!(!state_dir.exists());
 }
 
 #[test]

@@ -6,14 +6,18 @@ use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(target_os = "windows")]
+use sweepx_core::cache_status_unsupported;
+#[cfg(unix)]
+use sweepx_core::{CacheStatusRequest, cache_status, cache_status_state_error};
 use sweepx_core::{
     CancelRequest, CleanerCargoDetectRequest, CleanerShowRequest, CoreContext, ExplainRequest,
     OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest,
-    cancel_with_store, capabilities, cleaner_cargo_detect, cleaner_list, cleaner_show,
-    core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
-    render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
-    state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
-    usage_error_output, validate_absolute_root,
+    cache_status_usage_error, cancel_with_store, capabilities, cleaner_cargo_detect, cleaner_list,
+    cleaner_show, core_error_exit_code, durable_store, explain_from_scan_json,
+    parse_locale_override, render_human_output, scan_ndjson_supported, scan_with_store,
+    serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
+    tui_detail_rescan_provider, usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
@@ -89,6 +93,10 @@ enum Commands {
         #[command(subcommand)]
         command: CleanerCommands,
     },
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
     Capabilities,
 }
 
@@ -102,6 +110,11 @@ enum CleanerCommands {
         #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
         roots: Vec<OsString>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCommands {
+    Status,
 }
 
 fn main() -> ProcessExitCode {
@@ -323,6 +336,47 @@ fn main() -> ProcessExitCode {
                     .map(RenderedResult::Cleaner)
             }
         },
+        Commands::Cache { command } => match command {
+            CacheCommands::Status => {
+                if format == OutputFormat::Ndjson {
+                    let result = RenderedResult::CacheStatus(cache_status_usage_error(
+                        &context,
+                        "cache status does not support --format ndjson",
+                    ));
+                    print_output(&context, OutputFormat::Json, &result);
+                    return ProcessExitCode::from(result.exit_code());
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let result = RenderedResult::CacheStatus(cache_status_unsupported(&context));
+                    let code = result.exit_code();
+                    print_output(&context, format, &result);
+                    return ProcessExitCode::from(code);
+                }
+                #[cfg(unix)]
+                {
+                    let state_dir =
+                        match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                let result = RenderedResult::CacheStatus(cache_status_state_error(
+                                    &context, &error,
+                                ));
+                                let code = result.exit_code();
+                                print_output(&context, format, &result);
+                                return ProcessExitCode::from(code);
+                            }
+                        };
+                    match cache_status(&context, &CacheStatusRequest { state_dir }) {
+                        Ok(result) => Ok(RenderedResult::CacheStatus(result)),
+                        Err(sweepx_core::CoreError::State(error)) => Ok(
+                            RenderedResult::CacheStatus(cache_status_state_error(&context, &error)),
+                        ),
+                        Err(error) => Err(error),
+                    }
+                }
+            }
+        },
         Commands::Capabilities => capabilities(&context).map(RenderedResult::Capabilities),
     };
 
@@ -497,6 +551,7 @@ enum RenderedResult {
     Explanation(sweepx_core::ExplanationSuccess),
     #[cfg(target_os = "linux")]
     Replay(sweepx_core::CompletedReplaySuccess),
+    CacheStatus(sweepx_core::CacheStatusSuccess),
     Snapshot(sweepx_core::SnapshotSuccess),
     Cleaner(sweepx_core::CleanerSuccess),
     Capabilities(sweepx_core::CapabilitiesSuccess),
@@ -509,6 +564,7 @@ impl RenderedResult {
             Self::Explanation(explanation) => &explanation.output,
             #[cfg(target_os = "linux")]
             Self::Replay(replay) => &replay.output,
+            Self::CacheStatus(cache) => &cache.output,
             Self::Snapshot(snapshot) => &snapshot.output,
             Self::Cleaner(cleaner) => &cleaner.output,
             Self::Capabilities(capabilities) => &capabilities.output,
@@ -574,6 +630,15 @@ mod tests {
             Ok(Cli {
                 command: Commands::Cleaner {
                     command: CleanerCommands::List
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sweepx", "cache", "status"]),
+            Ok(Cli {
+                command: Commands::Cache {
+                    command: CacheCommands::Status
                 },
                 ..
             })

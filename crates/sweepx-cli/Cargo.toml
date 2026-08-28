@@ -26,4 +26,5 @@ sweepx-tui = { version = "0.1.0", path = "../sweepx-tui" }
 [dev-dependencies]
 assert_cmd = "2.0.17"
 predicates = "3.1.3"
+sweepx-cache = { version = "0.1.0", path = "../sweepx-cache" }
 tempfile = "3.21.0"

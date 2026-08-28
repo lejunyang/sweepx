@@ -27,7 +27,7 @@ pub const MAX_EVENT_CURSOR_BYTES: usize = 1024;
 pub const MAX_EVENT_TIMESTAMP_BYTES: usize = 64;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MIN_DURABLE_CURSOR_TOKEN_BYTES: usize = 16;
-pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 8] = [
+pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 9] = [
     CapabilityCell::SCAN_LOCAL_DIRECTORY,
     CapabilityCell::SCAN_NDJSON_STREAM,
     CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
@@ -36,6 +36,7 @@ pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 8] = [
     CapabilityCell::SCAN_TUI_LIVE,
     CapabilityCell::OPERATION_CANCEL,
     CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
+    CapabilityCell::CACHE_PREVIEW_INSPECT,
 ];
 
 /// A stable, bounded capability-cell identifier.
@@ -57,6 +58,7 @@ impl CapabilityCell {
     pub const SCAN_TUI_LIVE: &'static str = "scan.tui.live";
     pub const OPERATION_CANCEL: &'static str = "operation.cancel";
     pub const OPERATION_EVENT_COMPLETED_REPLAY: &'static str = "operation.event.completed_replay";
+    pub const CACHE_PREVIEW_INSPECT: &'static str = "cache.preview.inspect";
     pub const TRASH_LOCAL_FILE: &'static str = "trash.local.file";
     pub const TRASH_LOCAL_DIRECTORY: &'static str = "trash.local.directory";
     pub const PERMANENT_LOCAL_FILE: &'static str = "permanent.local.file";
@@ -985,6 +987,9 @@ pub enum OutputKind {
     #[serde(rename = "audit.result")]
     #[schemars(rename = "audit.result")]
     AuditResult,
+    #[serde(rename = "cache.status.result")]
+    #[schemars(rename = "cache.status.result")]
+    CacheStatusResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3448,6 +3453,12 @@ mod tests {
         assert_eq!(encoded["exitCode"], 0);
         assert_eq!(encoded["requestId"], "req-1");
         assert!(encoded.get("request_id").is_none());
+        assert_eq!(
+            serde_json::to_value(OutputKind::CacheStatusResult).unwrap(),
+            json!("cache.status.result")
+        );
+        let decoded: OutputKind = serde_json::from_value(json!("cache.status.result")).unwrap();
+        assert_eq!(decoded, OutputKind::CacheStatusResult);
     }
 
     #[test]
@@ -3552,6 +3563,7 @@ mod tests {
             CapabilityCell::SCAN_NDJSON_STREAM,
             CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
             CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
+            CapabilityCell::CACHE_PREVIEW_INSPECT,
         ] {
             assert!(
                 !CapabilityCell::new(capability)

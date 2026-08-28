@@ -1,0 +1,53 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "cache.status.result",
+  "requestId": "req-cache-status-example",
+  "operationId": "op-cache-status-example",
+  "generatedAt": "2026-08-27T06:05:00Z",
+  "status": "ok",
+  "exitCode": 0,
+  "compat": {
+    "coreVersion": "0.1.0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "linux",
+      "version": "0.1.0"
+    },
+    "cleanerSetDigest": "sha256:example",
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "command": "cache.status",
+    "disposition": "absent",
+    "exists": false,
+    "currentGeneration": null,
+    "storedSchema": null,
+    "generationCount": "0",
+    "quarantineCount": "0",
+    "approxBytes": "0",
+    "approxBytesComplete": true,
+    "currentHealth": "missing",
+    "schemaHealth": "unknown",
+    "warningCount": "0",
+    "errorCount": "0"
+  },
+  "data": {
+    "command": "cache.status",
+    "disposition": "absent",
+    "exists": false,
+    "currentGeneration": null,
+    "storedSchema": null,
+    "generationCount": "0",
+    "quarantineCount": "0",
+    "approxBytes": "0",
+    "approxBytesComplete": true,
+    "currentHealth": "missing",
+    "schemaHealth": "unknown",
+    "warnings": [],
+    "errors": []
+  },
+  "warnings": [],
+  "errors": []
+}

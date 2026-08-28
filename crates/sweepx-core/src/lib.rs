@@ -31,7 +31,8 @@ use sweepx_audit::{AuditStore, ProjectionError};
 use sweepx_cache::CompactedPreview;
 #[cfg(unix)]
 use sweepx_cache::{
-    AtomicGenerationStore, BudgetUsage, CacheError, LoadResult, PreviewBudgets, PreviewCoverage,
+    AtomicGenerationStore, BudgetUsage, CacheError, CacheInspection, CacheInspectionError,
+    CacheInspectionHealth, CacheInspectionWarning, LoadResult, PreviewBudgets, PreviewCoverage,
     PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration, admit_preview,
 };
 use sweepx_canonical::canonicalize_value;
@@ -298,6 +299,11 @@ pub struct StatusReplayRequest {
     pub operation_id: String,
     pub state_dir: Option<PathBuf>,
     pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheStatusRequest {
+    pub state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -839,6 +845,11 @@ pub struct CompletedReplaySuccess {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CacheStatusSuccess {
+    pub output: OutputEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExplanationSuccess {
     pub output: OutputEnvelope,
 }
@@ -1205,6 +1216,63 @@ pub const fn scan_ndjson_supported() -> bool {
     false
 }
 
+pub const fn cache_status_supported() -> bool {
+    cfg!(unix)
+}
+
+pub fn cache_status_usage_error(context: &CoreContext, detail: &str) -> CacheStatusSuccess {
+    let mut output = cache_status_error_output(
+        context,
+        OutputStatus::Failed,
+        ExitCode::UsageError,
+        "cache.status.invalid_format",
+        detail,
+    );
+    output.summary["disposition"] = json!("unsupported");
+    output.data["disposition"] = json!("unsupported");
+    CacheStatusSuccess { output }
+}
+
+pub fn cache_status_unsupported(context: &CoreContext) -> CacheStatusSuccess {
+    CacheStatusSuccess {
+        output: cache_status_error_output(
+            context,
+            OutputStatus::Unsupported,
+            ExitCode::Unsupported,
+            "cache.status.unsupported_platform",
+            "cache status is unavailable on this platform",
+        ),
+    }
+}
+
+pub fn cache_status_state_error(context: &CoreContext, error: &StateError) -> CacheStatusSuccess {
+    let (exit_code, code, detail) = match error {
+        StateError::NonAbsoluteStateDir(_) | StateError::DefaultStateDirUnavailable => (
+            ExitCode::UsageError,
+            "cache.status.invalid_state_dir",
+            "cache status requires an absolute usable state directory",
+        ),
+        StateError::DurableStateUnsupportedOnWindows => (
+            ExitCode::Unsupported,
+            "cache.status.unsupported_platform",
+            "cache status is unavailable on this platform",
+        ),
+        _ => (
+            ExitCode::StateIntegrityUnavailable,
+            "cache.status.inspection_failed",
+            "cache status could not safely inspect preview cache state",
+        ),
+    };
+    let status = if exit_code == ExitCode::Unsupported {
+        OutputStatus::Unsupported
+    } else {
+        OutputStatus::Failed
+    };
+    CacheStatusSuccess {
+        output: cache_status_error_output(context, status, exit_code, code, detail),
+    }
+}
+
 pub fn audit_projection(store: &AuditStore) -> Result<AuditProjectionSnapshot, CoreError> {
     Ok(store.projection_snapshot()?)
 }
@@ -1515,6 +1583,143 @@ pub fn replay_completed_status(
     ))
 }
 
+#[cfg(unix)]
+pub fn cache_status(
+    _context: &CoreContext,
+    request: &CacheStatusRequest,
+) -> Result<CacheStatusSuccess, CoreError> {
+    let state_dir = request
+        .state_dir
+        .clone()
+        .ok_or(StateError::DefaultStateDirUnavailable)?;
+    if !state_dir.is_absolute() {
+        return Err(StateError::NonAbsoluteStateDir(state_dir).into());
+    }
+    if state_dir.exists() {
+        let _ = validate_existing_state_dir(&state_dir)?;
+    }
+    let preview_root = state_dir.join(PREVIEW_GENERATION_POINTER_DIR);
+    let inspection = AtomicGenerationStore::new(preview_root.clone())
+        .inspect()
+        .map_err(cache_inspection_state_error)?;
+    let disposition = cache_status_disposition(&inspection);
+    let status = cache_status_output_status(disposition);
+    let exit_code = ExitCode::from(status);
+    let mut output = OutputEnvelope::new(
+        OutputKind::CacheStatusResult,
+        RequestId::new(format!("req-cache-status-{}", nonce_tag())),
+        OperationId::new(format!("op-cache-status-{}", nonce_tag())),
+        timestamp_now(),
+        status,
+        exit_code,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "command": "cache.status",
+        "disposition": cache_status_disposition_name(disposition),
+        "exists": inspection.exists,
+        "currentGeneration": inspection.current_generation,
+        "storedSchema": (inspection.schema_health == CacheInspectionHealth::Healthy)
+            .then_some(STORED_PREVIEW_SCHEMA),
+        "generationCount": DecimalU128::new(inspection.generation_count as u128),
+        "quarantineCount": DecimalU128::new(inspection.quarantine_count as u128),
+        "approxBytes": DecimalU128::new(inspection.approx_bytes as u128),
+        "approxBytesComplete": inspection.approx_bytes_complete(),
+        "currentHealth": cache_inspection_health_name(inspection.current_health),
+        "schemaHealth": cache_inspection_health_name(inspection.schema_health),
+        "warningCount": DecimalU128::new(
+            inspection.warnings.len() as u128 + u128::from(inspection.quarantine_count > 0)
+        ),
+        "errorCount": DecimalU128::new(inspection.errors.len() as u128),
+    });
+    output.data = json!({
+        "command": "cache.status",
+        "disposition": cache_status_disposition_name(disposition),
+        "exists": inspection.exists,
+        "currentGeneration": inspection.current_generation,
+        "storedSchema": (inspection.schema_health == CacheInspectionHealth::Healthy)
+            .then_some(STORED_PREVIEW_SCHEMA),
+        "generationCount": DecimalU128::new(inspection.generation_count as u128),
+        "quarantineCount": DecimalU128::new(inspection.quarantine_count as u128),
+        "approxBytes": DecimalU128::new(inspection.approx_bytes as u128),
+        "approxBytesComplete": inspection.approx_bytes_complete(),
+        "currentHealth": cache_inspection_health_name(inspection.current_health),
+        "schemaHealth": cache_inspection_health_name(inspection.schema_health),
+        "warnings": cache_inspection_warnings_json(&inspection),
+        "errors": inspection
+            .errors
+            .iter()
+            .map(cache_inspection_error_json)
+            .collect::<Vec<_>>(),
+    });
+    if output.status == OutputStatus::Partial {
+        output.warnings = cache_status_warning_messages(&inspection);
+    }
+    if !inspection.errors.is_empty() {
+        output.errors = inspection
+            .errors
+            .iter()
+            .map(cache_status_error_message)
+            .collect();
+    }
+    Ok(CacheStatusSuccess { output })
+}
+
+fn cache_status_error_output(
+    _context: &CoreContext,
+    status: OutputStatus,
+    exit_code: ExitCode,
+    code: &str,
+    detail: &str,
+) -> OutputEnvelope {
+    let mut output = OutputEnvelope::new(
+        OutputKind::CacheStatusResult,
+        RequestId::new(format!("req-cache-status-{}", nonce_tag())),
+        OperationId::new(format!("op-cache-status-{}", nonce_tag())),
+        timestamp_now(),
+        status,
+        exit_code,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "command": "cache.status",
+        "disposition": "unsupported",
+        "warningCount": "0",
+        "errorCount": "1",
+    });
+    output.data = json!({
+        "command": "cache.status",
+        "disposition": "unsupported",
+        "exists": false,
+        "currentGeneration": null,
+        "storedSchema": null,
+        "generationCount": "0",
+        "quarantineCount": "0",
+        "approxBytes": "0",
+        "approxBytesComplete": false,
+        "currentHealth": "unknown",
+        "schemaHealth": "unknown",
+        "warnings": [],
+        "errors": [],
+    });
+    output.errors.push(protocol_error(
+        code,
+        "cache",
+        code,
+        false,
+        [("detail", detail.to_string())],
+    ));
+    output
+}
+
+#[cfg(windows)]
+pub fn cache_status(
+    _context: &CoreContext,
+    _request: &CacheStatusRequest,
+) -> Result<CacheStatusSuccess, CoreError> {
+    Err(StateError::DurableStateUnsupportedOnWindows.into())
+}
+
 pub fn cancel_with_store<S: SnapshotStore>(
     context: &CoreContext,
     request: &CancelRequest,
@@ -1594,6 +1799,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
         ),
         command_record("status", status_state, status_reason),
         command_record(
+            "cache.status",
+            cache_status_capability_state(),
+            cache_status_capability_reason(),
+        ),
+        command_record(
             "cancel",
             CapabilityState::Disabled,
             "CANCEL_LIVE_REGISTRY_ABSENT",
@@ -1643,6 +1853,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
             CapabilityState::Degraded,
             "LINUX_COMPLETED_EVENT_REPLAY_SUPPORTED",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            "cache.preview.inspect",
+            CapabilityState::Degraded,
+            "CACHE_PREVIEW_INSPECTION_READ_ONLY",
         ),
         capability_record(
             &recorded_at,
@@ -1712,6 +1930,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &recorded_at,
             &qualification_expires_at,
             OsFamily::Macos,
+            "cache.preview.inspect",
+            CapabilityState::Degraded,
+            "CACHE_PREVIEW_INSPECTION_READ_ONLY",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
             "analysis.explain.scan_json",
             CapabilityState::Qualified,
             "EXPLAIN_FROM_SCAN_JSON_SUPPORTED",
@@ -1763,6 +1989,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
             CapabilityState::Disabled,
             "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            "cache.preview.inspect",
+            CapabilityState::Disabled,
+            "CACHE_PREVIEW_INSPECTION_UNAVAILABLE",
         ),
         capability_record(
             &recorded_at,
@@ -2381,6 +2615,48 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
             catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
         ]
         .join("\n");
+    }
+    if output.kind == OutputKind::CacheStatusResult {
+        let disposition = output
+            .summary
+            .get("disposition")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let generation_count = output
+            .summary
+            .get("generationCount")
+            .and_then(json_decimal_to_usize)
+            .unwrap_or(0);
+        let quarantine_count = output
+            .summary
+            .get("quarantineCount")
+            .and_then(json_decimal_to_usize)
+            .unwrap_or(0);
+        let detail = match context.locale() {
+            Locale::ZhCn => format!(
+                "只读缓存诊断: {disposition}，generation={generation_count}，quarantine={quarantine_count}。"
+            ),
+            Locale::EnUs => format!(
+                "Read-only cache diagnostics: {disposition}, generations={generation_count}, quarantine={quarantine_count}."
+            ),
+        };
+        let mut lines = vec![
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelCommand, &MessageArgs::default()),
+                "cache.status"
+            ),
+            format!(
+                "{}: {}",
+                catalog.render(MessageKey::LabelLocale, &MessageArgs::default()),
+                context.locale().as_bcp47()
+            ),
+            detail,
+        ];
+        append_human_protocol_messages(context.locale(), &mut lines, "warning", &output.warnings);
+        append_human_protocol_messages(context.locale(), &mut lines, "error", &output.errors);
+        lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
+        return lines.join("\n");
     }
     let summary_key = match output.kind {
         OutputKind::ScanResult => {
@@ -4393,6 +4669,28 @@ fn mutation_capability_record(
     record
 }
 
+fn cache_status_capability_state() -> CapabilityState {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        CapabilityState::Degraded
+    }
+    #[cfg(target_os = "windows")]
+    {
+        CapabilityState::Disabled
+    }
+}
+
+fn cache_status_capability_reason() -> &'static str {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        "CACHE_PREVIEW_INSPECTION_READ_ONLY"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "CACHE_PREVIEW_INSPECTION_UNAVAILABLE"
+    }
+}
+
 fn os_family_name(os_family: OsFamily) -> &'static str {
     match os_family {
         OsFamily::Windows => "windows",
@@ -4448,6 +4746,12 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE" => {
             "Completed event replay is disabled because this platform has no compatible durable event journal."
         }
+        "CACHE_PREVIEW_INSPECTION_READ_ONLY" => {
+            "Preview cache inspection reads the existing preview-cache state only and never creates cache directories."
+        }
+        "CACHE_PREVIEW_INSPECTION_UNAVAILABLE" => {
+            "Preview cache inspection is disabled because this platform has no supported durable cache state."
+        }
         "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED" => {
             "Durable snapshots are disabled on Windows until current-user-private ACL and reparse-point checks are implemented."
         }
@@ -4480,6 +4784,262 @@ fn capability_reason(reason_code: &str) -> &'static str {
             "The live TUI is unavailable because the host scanner is not implemented."
         }
         _ => "Capability state is intentionally conservative.",
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheStatusDisposition {
+    Absent,
+    Available,
+    Degraded,
+}
+
+#[cfg(unix)]
+fn cache_inspection_state_error(error: CacheError) -> StateError {
+    match error {
+        CacheError::Io(error) => StateError::Io(error),
+        CacheError::Json(error) => StateError::Json(error),
+        CacheError::InsecurePath(path) => StateError::InsecureStateDir(path),
+        other => StateError::Io(io::Error::other(format!(
+            "preview cache inspection failed: {other}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn cache_status_disposition(inspection: &CacheInspection) -> CacheStatusDisposition {
+    if !inspection.exists {
+        CacheStatusDisposition::Absent
+    } else if inspection.quarantine_count > 0
+        || !inspection.warnings.is_empty()
+        || !inspection.errors.is_empty()
+        || inspection.current_health != CacheInspectionHealth::Healthy
+        || inspection.schema_health != CacheInspectionHealth::Healthy
+    {
+        CacheStatusDisposition::Degraded
+    } else {
+        CacheStatusDisposition::Available
+    }
+}
+
+#[cfg(unix)]
+fn cache_status_disposition_name(disposition: CacheStatusDisposition) -> &'static str {
+    match disposition {
+        CacheStatusDisposition::Absent => "absent",
+        CacheStatusDisposition::Available => "available",
+        CacheStatusDisposition::Degraded => "degraded",
+    }
+}
+
+#[cfg(unix)]
+fn cache_status_output_status(disposition: CacheStatusDisposition) -> OutputStatus {
+    match disposition {
+        CacheStatusDisposition::Absent | CacheStatusDisposition::Available => OutputStatus::Ok,
+        CacheStatusDisposition::Degraded => OutputStatus::Partial,
+    }
+}
+
+#[cfg(unix)]
+fn cache_inspection_health_name(health: CacheInspectionHealth) -> &'static str {
+    match health {
+        CacheInspectionHealth::Healthy => "available",
+        CacheInspectionHealth::Missing => "missing",
+        CacheInspectionHealth::Unknown => "unknown",
+        CacheInspectionHealth::Error => "error",
+    }
+}
+
+#[cfg(unix)]
+fn cache_inspection_warning_json(warning: &CacheInspectionWarning) -> Value {
+    match warning {
+        CacheInspectionWarning::GenerationScanTruncated { limit } => json!({
+            "kind": "generation_scan_truncated",
+            "limit": DecimalU128::new(*limit as u128),
+        }),
+        CacheInspectionWarning::QuarantineScanTruncated { limit } => json!({
+            "kind": "quarantine_scan_truncated",
+            "limit": DecimalU128::new(*limit as u128),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn cache_inspection_warnings_json(inspection: &CacheInspection) -> Vec<Value> {
+    let mut warnings = inspection
+        .warnings
+        .iter()
+        .map(cache_inspection_warning_json)
+        .collect::<Vec<_>>();
+    if inspection.quarantine_count > 0 {
+        warnings.push(json!({
+            "kind": "quarantine_present",
+            "count": DecimalU128::new(inspection.quarantine_count as u128),
+        }));
+    }
+    warnings
+}
+
+#[cfg(unix)]
+fn cache_inspection_error_json(error: &CacheInspectionError) -> Value {
+    match error {
+        CacheInspectionError::CurrentPointerTooLarge { bytes } => json!({
+            "kind": "current_pointer_too_large",
+            "bytes": DecimalU128::new(*bytes as u128),
+        }),
+        CacheInspectionError::MalformedCurrentPointer => json!({
+            "kind": "malformed_current_pointer",
+        }),
+        CacheInspectionError::InvalidCurrentGenerationName => json!({
+            "kind": "invalid_current_generation_name",
+        }),
+        CacheInspectionError::MissingCurrentGenerationData => json!({
+            "kind": "missing_current_generation_data",
+        }),
+        CacheInspectionError::CurrentGenerationTooLarge { bytes } => json!({
+            "kind": "current_generation_too_large",
+            "bytes": DecimalU128::new(*bytes as u128),
+        }),
+        CacheInspectionError::MalformedGenerationEnvelope => json!({
+            "kind": "malformed_generation_envelope",
+        }),
+        CacheInspectionError::GenerationChecksumMismatch => json!({
+            "kind": "generation_checksum_mismatch",
+        }),
+        CacheInspectionError::GenerationPointerMismatch => json!({
+            "kind": "generation_pointer_mismatch",
+        }),
+        CacheInspectionError::InvalidStoredGenerationName => json!({
+            "kind": "invalid_stored_generation_name",
+        }),
+        CacheInspectionError::InvalidStoredSchema { .. } => json!({
+            "kind": "invalid_stored_schema",
+        }),
+        CacheInspectionError::InvalidStoredProvenance { .. } => json!({
+            "kind": "invalid_stored_provenance",
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn cache_status_warning_message(warning: &CacheInspectionWarning) -> ProtocolMessage {
+    match warning {
+        CacheInspectionWarning::GenerationScanTruncated { limit } => protocol_error(
+            "cache.preview.inspect.generation_scan_truncated",
+            "cache",
+            "cache.preview.inspect.generation_scan_truncated",
+            false,
+            [("limit", limit.to_string())],
+        ),
+        CacheInspectionWarning::QuarantineScanTruncated { limit } => protocol_error(
+            "cache.preview.inspect.quarantine_scan_truncated",
+            "cache",
+            "cache.preview.inspect.quarantine_scan_truncated",
+            false,
+            [("limit", limit.to_string())],
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn cache_status_warning_messages(inspection: &CacheInspection) -> Vec<ProtocolMessage> {
+    let mut warnings = inspection
+        .warnings
+        .iter()
+        .map(cache_status_warning_message)
+        .collect::<Vec<_>>();
+    if inspection.quarantine_count > 0 {
+        warnings.push(protocol_error(
+            "cache.preview.inspect.quarantine_present",
+            "cache",
+            "cache.preview.inspect.quarantine_present",
+            false,
+            [("count", inspection.quarantine_count.to_string())],
+        ));
+    }
+    warnings
+}
+
+#[cfg(unix)]
+fn cache_status_error_message(error: &CacheInspectionError) -> ProtocolMessage {
+    match error {
+        CacheInspectionError::CurrentPointerTooLarge { bytes } => protocol_error(
+            "cache.preview.inspect.current_pointer_too_large",
+            "cache",
+            "cache.preview.inspect.current_pointer_too_large",
+            false,
+            [("bytes", bytes.to_string())],
+        ),
+        CacheInspectionError::MalformedCurrentPointer => protocol_error(
+            "cache.preview.inspect.malformed_current_pointer",
+            "cache",
+            "cache.preview.inspect.malformed_current_pointer",
+            false,
+            [],
+        ),
+        CacheInspectionError::InvalidCurrentGenerationName => protocol_error(
+            "cache.preview.inspect.invalid_current_generation_name",
+            "cache",
+            "cache.preview.inspect.invalid_current_generation_name",
+            false,
+            [],
+        ),
+        CacheInspectionError::MissingCurrentGenerationData => protocol_error(
+            "cache.preview.inspect.missing_current_generation_data",
+            "cache",
+            "cache.preview.inspect.missing_current_generation_data",
+            false,
+            [],
+        ),
+        CacheInspectionError::CurrentGenerationTooLarge { bytes } => protocol_error(
+            "cache.preview.inspect.current_generation_too_large",
+            "cache",
+            "cache.preview.inspect.current_generation_too_large",
+            false,
+            [("bytes", bytes.to_string())],
+        ),
+        CacheInspectionError::MalformedGenerationEnvelope => protocol_error(
+            "cache.preview.inspect.malformed_generation_envelope",
+            "cache",
+            "cache.preview.inspect.malformed_generation_envelope",
+            false,
+            [],
+        ),
+        CacheInspectionError::GenerationChecksumMismatch => protocol_error(
+            "cache.preview.inspect.generation_checksum_mismatch",
+            "cache",
+            "cache.preview.inspect.generation_checksum_mismatch",
+            false,
+            [],
+        ),
+        CacheInspectionError::GenerationPointerMismatch => protocol_error(
+            "cache.preview.inspect.generation_pointer_mismatch",
+            "cache",
+            "cache.preview.inspect.generation_pointer_mismatch",
+            false,
+            [],
+        ),
+        CacheInspectionError::InvalidStoredGenerationName => protocol_error(
+            "cache.preview.inspect.invalid_stored_generation_name",
+            "cache",
+            "cache.preview.inspect.invalid_stored_generation_name",
+            false,
+            [],
+        ),
+        CacheInspectionError::InvalidStoredSchema { .. } => protocol_error(
+            "cache.preview.inspect.invalid_stored_schema",
+            "cache",
+            "cache.preview.inspect.invalid_stored_schema",
+            false,
+            [],
+        ),
+        CacheInspectionError::InvalidStoredProvenance { .. } => protocol_error(
+            "cache.preview.inspect.invalid_stored_provenance",
+            "cache",
+            "cache.preview.inspect.invalid_stored_provenance",
+            false,
+            [],
+        ),
     }
 }
 
@@ -4618,6 +5178,7 @@ fn command_name(kind: &OutputKind) -> &'static str {
         OutputKind::StatusResult => "status",
         OutputKind::CancelResult => "cancel",
         OutputKind::CapabilitiesResult => "capabilities",
+        OutputKind::CacheStatusResult => "cache.status",
         _ => "unknown",
     }
 }
@@ -4871,7 +5432,7 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     ensure_private_dir(path)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
