@@ -22,7 +22,7 @@ Branch: `main`
 - Linux bounded SQLite event journal with one-transaction complete-stream plus terminal-snapshot persistence.
 - CI, Pages, `[publish]`-gated binary/crates publication, install scripts, and bilingual VitePress site are present.
 
-## Current milestone: read-only preview-cache diagnostics
+## Completed milestone: read-only preview-cache diagnostics
 
 The implementation is committed in `933921b` (`feat(cache): expose read-only status diagnostics`). It adds:
 
@@ -53,6 +53,14 @@ Exact boundaries:
 - VitePress site build passes with `/data00/home/lejunyang/.bun/bin/bun run docs:build` from `site/`.
 - macOS cross-check remains blocked on this Linux host because the host C compiler rejects Apple `-arch` and `-mmacosx-version-min` flags while compiling bundled SQLite; this is a toolchain/environment limitation.
 
+## Current milestone: Cargo config-scope source ledger
+
+`cleaner cargo-detect` now projects a strict `cargo.config-scope.v1` ledger at `data.hints[].evidence.cargo.configScope`. It records the workspace config pair, ancestor/Cargo-home/CLI/cwd source states, and presence-only observations for `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, and `CARGO_HOME`. Environment values and workspace `build.target-dir` values are never exposed. The public result explicitly sets `candidateAllowed=false`, `planAllowed=false`, `approvalAllowed=false`, and `executionAllowed=false`.
+
+The production collector intentionally keeps `workspace.pairSnapshot=not_checked`, downgrades time-local file absence to `not_checked`, and therefore keeps `precedenceComplete=false`, `targetDir=NotChecked(config_scope_not_checked)`, and `targetShape=Unknown(config_scope_not_checked)`. A global cap of 16 Cargo layouts plus existing fixed-input read budgets bounds the post-scan work. The JSON Schema freezes tagged states, exact environment names, 23 blocker codes, redaction rules, non-atomic pair constraints, and the report-only authority boundary; the golden and negative tests reject raw environment/config values and authority drift.
+
+Verification for this milestone includes the full workspace test suite, workspace Clippy with warnings denied, Windows GNU Core/CLI check and Clippy, schema validation, docs lint, VitePress build with Bun, formatting, and diff checks. Native macOS runtime coverage remains a CI responsibility; Linux-host cross-linking of the complete workspace to macOS is still limited by bundled SQLite's host C compiler flags.
+
 ## Next work
 
-The cache-status implementation is committed through `933921b`; the matching documentation/CI record follows in the next commit. The next active non-human-approval read-only milestone is Cargo config-scope closure. Keep it behind typed evidence and report-only behavior until global, ancestor, environment, and CLI/config override precedence can be proven without using display paths as authority. Add the remaining table-driven corrupt-cache diagnostic coverage opportunistically. Keep all mutation capability cells disabled.
+Continue with the next bounded, non-human-approval read-only milestone selected from `DESIGN.md` and `docs/ROADMAP.md`. Keep all mutation capability cells disabled. For Cargo scope specifically, do not promote effective `targetDir` until workspace-pair atomicity/case-fold evidence plus ancestor, Cargo-home, environment, CLI override, and invocation-cwd precedence are all proven without display-path authority. A caller-owned cancellation token for post-scan Cargo collection remains a small follow-up.
