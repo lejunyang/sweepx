@@ -40,7 +40,7 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 ## 状态与取消
 
-CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI。macOS 仍写 legacy operation snapshot。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。Windows durable state 禁用：默认 `state_dir=None`，显式 `--state-dir` 失败关闭。当前没有 live sink、runtime qualification 或公开 `status --watch`/NDJSON；live cancel 也仍禁用。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 仍写 legacy operation snapshot。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。Windows durable state 禁用：默认 `state_dir=None`，显式 `--state-dir` 失败关闭。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
 
 ## 导入是明确的信任边界
 
@@ -58,7 +58,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - permit 与 revalidation observer 是 simulation-specific；
 - executor 的 request 没有 native path；
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
-- audit persistence 当前仅支持 Unix；独立的 Linux scan event-state 路径已有 bounded SQLite journal 和单事务完整流/terminal persistence。event-journal crate 的 replay/reset substrate 仅供 Linux 测试，尚未接 Core/CLI；这不是 live、公开、跨平台或 runtime-qualified 的 native mutation 存储。
+- audit persistence 当前仅支持 Unix；独立的 Linux scan event-state 路径已有 bounded SQLite journal、单事务完整流/terminal persistence，以及 degraded completed-stream replay。由于该 replay 只覆盖已完成且已持久化的 stream，且事件仍在 scan 后批量构造，它仍不是 live、跨平台或 runtime-qualified 的 native mutation 存储。
 
 这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
 

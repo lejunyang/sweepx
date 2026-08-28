@@ -22,7 +22,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | Cleaner | 只读 metadata，兼容性失败关闭 |
 | 能力表达 | unsupported、degraded、report_only、disabled 分开报告 |
 
-当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标。Linux 可在 SweepX state directory 写 bounded SQLite event journal，并以单事务保存完整流与 terminal snapshot；macOS 只写 legacy terminal snapshot；Windows durable operation state 禁用，默认 `state_dir=None`，显式 `--state-dir` 失败关闭。`scan --no-state` 可显式跳过 Linux/macOS 的 operation-state 写入，并与 `--state-dir` 冲突。Linux 的 Core status journal-first；event-journal crate 的 bounded cursor replay/reset substrate 仅供 Linux 测试，尚未接 Core/CLI。这不代表 live sink、公开 watch/NDJSON、runtime qualification 或 mutation qualification；这些状态写入都不修改扫描目标。
+当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标。Linux 可在 SweepX state directory 写 bounded SQLite event journal，并以单事务保存完整流与 terminal snapshot；macOS 只写 legacy terminal snapshot；Windows durable operation state 禁用，默认 `state_dir=None`，显式 `--state-dir` 失败关闭。`scan --no-state` 可显式跳过 Linux/macOS 的 operation-state 写入，并与 `--state-dir` 冲突。Linux 的 Core status journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：它只重放已完成且已持久化的 stream，先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 replay 不是 live，不等待新事件，不创建后台 operation，也不支持 cancel。这不代表 live sink、runtime qualification 或 mutation qualification；这些状态写入都不修改扫描目标。
 
 ## 导入报告为什么只能 report-only
 

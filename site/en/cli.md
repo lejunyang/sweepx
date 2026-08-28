@@ -67,7 +67,7 @@ cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
 - The Windows backend now provides a handle-relative degraded read-only scanner through `scan` / `scan --tui`; that is not release qualification.
 - Linux may explicitly select a SQLite journal directory; macOS may select a legacy snapshot directory; do not pass `--state-dir` on Windows.
-- `scan --format ndjson` currently returns unsupported before scanning. Linux has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, and journal-first status. The event-journal crate retains a Linux-test-only bounded cursor replay/reset substrate that is not wired into Core or the CLI; events are still constructed after the scan, and the live sink, runtime qualification, and public `status --watch`/NDJSON surface remain incomplete.
+- `scan --format ndjson` currently returns unsupported before scanning. Linux has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, journal-first status, and degraded completed replay through `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`: it performs one same-snapshot full validation, then reads pages of at most 1024 events from a completed, persisted stream; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. Because events are still constructed after the scan, that replay is not live streaming, does not wait for new events, does not create a background operation, and does not support cancel, so `scan --format ndjson` remains disabled.
 
 Request machine output explicitly for scripts and integrations:
 
@@ -88,12 +88,17 @@ cargo run -p sweepx-cli -- \
   status --operation-id <OPERATION_ID>
 
 cargo run -p sweepx-cli -- \
+  --format ndjson \
+  --state-dir /absolute/path/to/sweepx-state \
+  status --operation-id <OPERATION_ID> --watch [--after SXCUR1_CURSOR]
+
+cargo run -p sweepx-cli -- \
   --format json \
   --state-dir /absolute/path/to/sweepx-state \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` only reads persisted terminal state: journal-first on Linux and from the legacy snapshot on macOS. There is no public replay, `--watch`, or status NDJSON surface. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+`status` reads persisted terminal state journal-first on Linux and supports degraded completed replay through `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]`: it covers only completed, persisted streams, performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. It does not wait for new events, does not create a background operation, and does not support cancel, so it is not live progress. macOS reads from the legacy snapshot and still has no replay/watch surface. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
 
 ## Explain from scan JSON
 

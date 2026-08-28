@@ -67,7 +67,7 @@ cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 - macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
 - Windows backend 现提供 handle-relative 的 degraded 只读扫描，并通过 `scan` / `scan --tui` 接入；这不等于发布资格。
 - Linux 可显式选择 SQLite journal 目录；macOS 可选择 legacy snapshot 目录；Windows 不要传 `--state-dir`。
-- `scan --format ndjson` 当前在扫描前返回 unsupported；Linux 已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI；事件仍在 scan 后批量构造，live sink、runtime qualification 和公开 `status --watch`/NDJSON 仍未完成。
+- `scan --format ndjson` 当前在扫描前返回 unsupported；Linux 已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 replay 不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel，因此 `scan --format ndjson` 继续 disabled。
 
 只有脚本和系统集成才需要显式机器输出：
 
@@ -88,12 +88,17 @@ cargo run -p sweepx-cli -- \
   status --operation-id <OPERATION_ID>
 
 cargo run -p sweepx-cli -- \
+  --format ndjson \
+  --state-dir /absolute/path/to/sweepx-state \
+  status --operation-id <OPERATION_ID> --watch [--after SXCUR1_CURSOR]
+
+cargo run -p sweepx-cli -- \
   --format json \
   --state-dir /absolute/path/to/sweepx-state \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` 只读取已持久化 terminal state：Linux journal-first，macOS 使用 legacy snapshot；当前没有公开 replay、`--watch` 或 status NDJSON。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+`status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
 
 ## 从 scan JSON 解释
 

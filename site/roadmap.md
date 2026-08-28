@@ -14,9 +14,9 @@ title: 路线图
 | 轨道 | 当前证据 | 未完成边界 |
 |---|---|---|
 | P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
-| P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate；macOS 保留 legacy snapshot；Windows scan handle-relative degraded | replay/reset 尚未接入 Core/CLI；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows durable state disabled；live cancel、live sink、runtime qualification、公开 `status --watch`/NDJSON 及三平台/资源 gate 未闭合 |
+| P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence、journal-first status，以及 degraded 的 `status --watch --format ndjson` completed replay；macOS 保留 legacy snapshot；Windows scan handle-relative degraded | Linux replay 只覆盖已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown-valid cursor 返回 `stream.reset_required`，malformed cursor/usage 是 usage error。它仍 non-live，不等待新事件，不创建后台 operation，也不支持 cancel；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows durable state disabled；live sink、runtime qualification、`scan --format ndjson` 与三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；TUI detail expansion 已是 single-flight 后台 rescan、2 s deadline、late result discard、32 stuck-worker cap；Cargo detector 现有有界 locator batch reader 和固定输入收集器，但 `targetDir` 仍是 `NotChecked`、`targetShape` 仍是 `Unknown`，结果继续 hint/report-only；签名/沙箱/完整跨表面资格未闭合 |
-| P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal 与单事务 complete-stream/terminal persistence 已实现，event-journal crate 保留 Linux 测试专用 replay/reset substrate | replay/reset 尚未接入 Core/CLI；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、runtime qualification、公开 watch/NDJSON、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
+| P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal、单事务 complete-stream/terminal persistence，以及 degraded completed-stream replay 已实现 | replay 仍 non-live、非 runtime-qualified，且只适用于 Linux completed stream；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、`scan --format ndjson`、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
 | P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |
 | P4+ mutation | 无公开能力 | Trash、Permanent 与发布资格全部是未来工作 |
 | 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
@@ -66,6 +66,12 @@ P4a.2 只完成了失败关闭的 qualification registry 合同。`trash.local.f
 ## 未来命令仍然只是提案
 
 `plan create/show`、trusted approval、`execute` 和任何 Permanent flag 都不在当前命令树。文档只有在真实 CLI wiring 与对应 capability qualification 落地后，才能把它们从“提案”改为“可运行”。
+
+## 新近里程碑记录
+
+| Commit | 里程碑 | 当前准确表述 |
+|---|---|---|
+| `1483246` | Linux completed-stream replay/watch for `status` | Linux 现以 degraded 形式公开 `operation.event.completed_replay`：`sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 只重放已完成且已持久化的 journal stream，先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown-valid cursor 返回 `stream.reset_required`，malformed cursor/usage 是 usage error。该 replay 不等待新事件、不创建后台 operation、不支持 cancel，且仍 non-live、非 runtime-qualified。`scan --format ndjson` 保持 disabled；macOS 仍是 legacy snapshot；Windows durable state 仍 disabled。 |
 
 ## 新近里程碑记录
 
