@@ -24,7 +24,7 @@ Branch: `main`
 
 ## Current milestone: Linux completed-stream replay
 
-The current working milestone adds:
+This milestone is committed in `1483246` (`feat(status): replay completed Linux journals`), with replay contract cleanup in `b2e93bd` (`fix(status): tighten replay contracts`) and the matching documentation record in `d4a90bb` (`docs: record completed journal replay milestone`). It adds:
 
 ```text
 sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1_CURSOR]
@@ -56,4 +56,4 @@ Exact boundaries:
 
 ## Next work
 
-After committing the current replay code and docs, continue the next non-human-approval read-only milestone. Keep all mutation capability cells disabled.
+The replay implementation and documentation are committed through `b2e93bd`. The next active non-human-approval read-only milestone is an independent `sweepx cache status` preview-cache diagnostics surface. The cache crate now has an uncommitted inspection API that must be reviewed and wired into Core/CLI. It should inspect existing cache state without creating, repairing, quarantining, or scanning anything, and report bounded stable facts such as current generation, generation/quarantine counts, approximate state bytes, schema/current-pointer health, and warnings. A second candidate is Cargo config-scope closure; keep it behind typed evidence and report-only behavior until global/ancestor/env overrides can be proven absent. Keep all mutation capability cells disabled.
