@@ -17,7 +17,7 @@
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
-| `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Cleaner manifest/trust 不兼容时在扫描前失败关闭并返回 exit 12；兼容时，只有完整规则证据才计入 match，名称线索与未知证据单列为 hint；不会产生 executable candidate、计划、授权或执行 |
+| `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Scanner 现有有界 locator batch reader，并在三平台 backend 上提供 handle-relative/handle-bound 的有界文件读取路径；Cargo 固定输入收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。当 workspace 证据成立时可投影为 `Known`，但 `targetDir` 仍因全局 override scope 未解而保持 `NotChecked`，`targetShape` 因依赖该前提而保持 `Unknown`；结果继续只产生 hint/report-only，不会产生 candidate、计划、授权或执行 |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；detail rescan 为 single-flight 后台任务，2 s deadline，导航与退出不等待非协作 worker，late result 会丢弃，且有 process-wide 32 stuck-worker cap |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
@@ -107,7 +107,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 
 - `cleaner list`：列出内置 package 及兼容性；
 - `cleaner show`：仅在兼容性检查通过后展示 manifest 与规则元数据；
-- `cleaner cargo-detect`：实验性、只读；Cleaner 兼容性先于扫描和规则求值检查。兼容版本中，`Cargo.toml` + `target/` 名称只能形成 `hint`，除非 workspace/config、target shape、完整 aggregate、boundary 与 sharing 等 required evidence 都已明确成立；
+- `cleaner cargo-detect`：实验性、只读；Cleaner 兼容性先于扫描和规则求值检查。当前实现经由 Scanner 的有界 locator batch reader 收集固定输入，只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。workspace 证据在 manifest 合法且绑定成立时可为 `known`，但由于 home/env/ancestor/CLI 等全局 override scope 仍未解决，`targetDir` 继续是 `not_checked(config_scope_not_checked)`，而依赖它的 `targetShape` 继续是 `unknown(config_scope_not_checked)`；因此 `Cargo.toml` + `target/` 名称目前仍只形成 `hint`，不会产生 candidate、计划、授权或执行；
 - 对不兼容、未知版本或证据不足的内容保持 partial、report-only 或失败关闭。
 
 当前 `0.1.0` Core 与仓库内要求 `>=1.0.0, <2.0.0` 的内置 Cleaner 不兼容，这是刻意可见的兼容性门，而不是可绕过的错误。没有 Cleaner 执行接口，也不会调用包管理器、浏览器或其他外部清理命令。

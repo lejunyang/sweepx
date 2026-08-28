@@ -23,7 +23,7 @@ features:
   - title: Runnable, but read-only
     details: Linux, macOS, and Windows now have degraded development-grade read-only scanners exposed through the same `sweepx scan` / `scan --tui` entry points. macOS traversal is handle-bound and Windows traversal is handle-relative.
   - title: Evidence never becomes authority
-    details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Reports and explanations create no deletion authority; the live TUI likewise exposes navigation only.
+    details: Imported scan JSON is forced to stale, incomplete, report-only provenance. Cargo detect can now read fixed inputs and project workspace evidence, but still emits only hints/report-only output; reports and explanations create no deletion authority.
   - title: Mutation remains sealed off
     details: There is no plan, approve, or execute CLI, no native Trash/Permanent adapter, and no implementation that deletes target files.
 ---
@@ -41,7 +41,7 @@ features:
 | `status` | reads terminal state journal-first on Linux and from the legacy snapshot on macOS; Windows durable state is disabled, `state_dir` defaults to `None`, and explicit `--state-dir` fails closed |
 | `cancel` | command exists; live cancellation is disabled |
 | `explain` | report-only analysis from bounded scan JSON |
-| Cleaner | read-only metadata list/show with compatibility gates |
+| Cleaner | read-only metadata list/show with compatibility gates; `cargo-detect` has fixed-input reads and typed evidence but remains hint/report-only |
 | CLI/TUI | one `sweepx` entry point; terminal table by default, directory browser via `scan --tui`; detail rescans run as single-flight background work with a 2 s deadline and responsive navigation/quit |
 | Trash / Permanent | absent |
 

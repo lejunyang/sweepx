@@ -30,6 +30,16 @@ cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
 The current Core is `0.1.0`, while both built-in manifests require `>=1.0.0, <2.0.0`. List therefore returns partial honestly, and show fails closed. That is expected.
 
+## Current `cargo-detect` boundary
+
+Beyond metadata, `org.sweepx.cargo-target` now also has the experimental read-only `cleaner cargo-detect` surface:
+
+- The Scanner now provides a bounded locator batch reader for fixed file reads along already-admitted locators; all three backends share that bounded contract.
+- The Cargo fixed-input collector reads only `Cargo.toml`, `.cargo/config`, and `.cargo/config.toml`, and fails closed on replacement, symlink/reparse, mount changes, resource limits, and cancellation.
+- When manifest binding is valid, typed workspace evidence can become `known`.
+- Because the global `CARGO_TARGET_DIR` override scope across home/env/ancestor/CLI sources is still unresolved, `targetDir` remains `not_checked(config_scope_not_checked)` and `targetShape` remains `unknown(config_scope_not_checked)`.
+- The result therefore remains `hint` / `report-only`: it does not create a candidate and does not open plan, approval, or execution.
+
 ## Rule output is not a cleanup action
 
 Rule evaluation may express known/unknown state, evidence, risk, and report-only status. It cannot:

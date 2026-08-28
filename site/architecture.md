@@ -26,6 +26,8 @@ bounded scan.result JSON
 
 Linux、macOS 与 Windows 均连接实际的 development-grade/degraded 只读 scanner backend；macOS traversal 为 handle-bound，Windows 为 handle-relative，三者都通过 `sweepx scan` / `scan --tui` 暴露。
 
+Scanner 还新增了一个有界 locator batch reader，供只读上层在已 admission 的 locator 上执行固定文件读取。当前最直接的使用者是 Cargo detector：它读取 `Cargo.toml` 和 `.cargo/config*` 来产生 typed evidence，但这些读取不会把结果升级为 candidate 或执行权限。
+
 ## Crate 职责
 
 | 层 | 代表 crate | 当前职责 |
@@ -43,6 +45,8 @@ CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并�
 ## 导入是明确的信任边界
 
 Core 不会因为 scan JSON 带有本项目 schema 就保留它的 live 权威。解析之后，entry/aggregate provenance 被改为 stale preview，coverage 变为 incomplete/not revalidated。Analyzer 可以据此解释，但不能把它升级为 executable candidate。当前 TUI 不导入这类 JSON，而是直接浏览本次 live scan 的 typed summary。
+
+同样地，当前 Cargo detector 虽然已经具备 handle-bound 的固定输入收集器，并能在 manifest 绑定成立时给出 `known` workspace evidence，但 `targetDir` 仍因全局 override scope 未解而保持 `not_checked`，`targetShape` 仍保持 `unknown`。因此 CLI 结果继续是 hint/report-only，而不是 plan/approval/execution authority。
 
 ## P3 为什么不算真实 executor
 

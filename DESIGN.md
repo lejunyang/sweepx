@@ -764,7 +764,7 @@ typed AST 只支持有界布尔/集合/版本/tagged-value 操作；无脚本、
 }
 ```
 
-Z0 解析已扫描的 `Cargo.toml`/lock/`.cargo/config*`，只把已 admission、out-of-source、完整且结构落入 allowlist 的 target root 提为候选；目录条件必把基础 R1 单文件风险提升为至少 R2。共享 `CARGO_TARGET_DIR`、活动 cargo/rustc/IDE、发布/签名证据或 unknown component 再升 R3/report-only。mtime 仅弱信号。Z1 `cargo metadata --no-deps --locked --offline` 只能显式 opt-in、固定 executable/argv、可丢 home/target、无网络和写监控；不调用 `cargo clean`。来源：[Cargo metadata](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html)、[Cargo clean](https://doc.rust-lang.org/cargo/commands/cargo-clean.html)（访问：2026-08-26）。
+Z0 解析已扫描的 `Cargo.toml` 与 `.cargo/config*`，只把已 admission、out-of-source、完整且结构落入 allowlist 的 target root 提为候选；目录条件必把基础 R1 单文件风险提升为至少 R2。当前实现已具备 Scanner locator batch reader，并在 Linux/macOS/Windows backend 上以有界、handle-relative/handle-bound 的方式读取固定输入；Cargo 收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。但由于 home/env/ancestor/CLI 等全局 `CARGO_TARGET_DIR` override scope 仍未解决，`cargo.targetDir` 现阶段只能在局部条件下投影，常规 detector 输出中继续保持 `NotChecked(config_scope_not_checked)`，依赖它的 `cargo.targetShape` 继续保持 `Unknown(config_scope_not_checked)`；因此当前 `cargo-detect` 结果仍是 hint/report-only，而不是 candidate/plan/approval/execution authority。共享 `CARGO_TARGET_DIR`、活动 cargo/rustc/IDE、发布/签名证据或 unknown component 再升 R3/report-only。mtime 仅弱信号。Z1 `cargo metadata --no-deps --locked --offline` 只能显式 opt-in、固定 executable/argv、可丢 home/target、无网络和写监控；不调用 `cargo clean`。来源：[Cargo metadata](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html)、[Cargo clean](https://doc.rust-lang.org/cargo/commands/cargo-clean.html)（访问：2026-08-26）。
 
 **Chromium HTTP/Code Cache**：
 

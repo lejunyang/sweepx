@@ -15,7 +15,7 @@ title: 路线图
 |---|---|---|
 | P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
 | P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate；macOS 保留 legacy snapshot；Windows scan handle-relative degraded | replay/reset 尚未接入 Core/CLI；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows durable state disabled；live cancel、live sink、runtime qualification、公开 `status --watch`/NDJSON 及三平台/资源 gate 未闭合 |
-| P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；TUI detail expansion 已是 single-flight 后台 rescan、2 s deadline、late result discard、32 stuck-worker cap；签名/沙箱/完整跨表面资格未闭合 |
+| P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；TUI detail expansion 已是 single-flight 后台 rescan、2 s deadline、late result discard、32 stuck-worker cap；Cargo detector 现有有界 locator batch reader 和固定输入收集器，但 `targetDir` 仍是 `NotChecked`、`targetShape` 仍是 `Unknown`，结果继续 hint/report-only；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal 与单事务 complete-stream/terminal persistence 已实现，event-journal crate 保留 Linux 测试专用 replay/reset substrate | replay/reset 尚未接入 Core/CLI；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、runtime qualification、公开 watch/NDJSON、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
 | P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |
 | P4+ mutation | 无公开能力 | Trash、Permanent 与发布资格全部是未来工作 |
@@ -66,3 +66,14 @@ P4a.2 只完成了失败关闭的 qualification registry 合同。`trash.local.f
 ## 未来命令仍然只是提案
 
 `plan create/show`、trusted approval、`execute` 和任何 Permanent flag 都不在当前命令树。文档只有在真实 CLI wiring 与对应 capability qualification 落地后，才能把它们从“提案”改为“可运行”。
+
+## 新近里程碑记录
+
+以下记录对应 2026-08-28 新落地、且已反映到当前文档的实现里程碑；它们是代码完成记录，不是资格声明：
+
+| Commit | 里程碑 | 当前准确表述 |
+|---|---|---|
+| `297f006` | Scanner bounded locator file reader | 新增有界 locator reader 与 batch API；沿已 admission locator 读取固定文件，拒绝 display-path authority，并对请求、组件、字节和目录枚举施加上限。Linux 有原生测试；Windows/macOS 仍以现有 backend contract 和 native CI 作为资格门。 |
+| `48d5f60` | Optional locator reads stay bound | optional relative reads 现继续绑定同一 filesystem/mount scope，并受剩余 batch byte budget 约束。 |
+| `c0343da` | Cargo fixed-input collector | Cargo 固定输入收集器通过 handle-bound 读取 `Cargo.toml` 与 `.cargo/config*`，对替换、symlink/reparse、mount 变化、资源上限和取消 fail closed。 |
+| `f042e39` | Typed Cargo evidence surfaced | `cargo-detect` 现输出 typed Cargo evidence 和独立 capability 条目；workspace evidence 可在绑定成立时变为 `Known`，但由于全局 override scope 未解，`targetDir` 仍为 `NotChecked`、`targetShape` 仍为 `Unknown`，结果继续只做 hint/report-only，`candidate/plan/approval/execution` 全为 false。 |

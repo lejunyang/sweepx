@@ -23,7 +23,7 @@ features:
   - title: 可运行，但只读
     details: Linux、macOS 与 Windows 均已有 degraded 的开发版只读 scanner，并统一通过 `sweepx scan` / `scan --tui` 接入；macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal。
   - title: 证据不会变成授权
-    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。查看报告或解释候选不会产生删除权限；live TUI 同样只有导航能力。
+    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。Cargo detector 现在能读取固定输入并投影 workspace evidence，但仍只输出 hint/report-only；查看报告或解释候选不会产生删除权限。
   - title: 破坏性路径仍封闭
     details: 当前没有 plan、approve、execute CLI，没有 native Trash/Permanent adapter，也没有任何删除目标文件的实现。
 ---
@@ -41,7 +41,7 @@ features:
 | `status` | Linux journal-first 读取 terminal snapshot；macOS 读取 legacy snapshot；Windows durable state disabled、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
-| Cleaner | 只读 list/show 元数据，带版本兼容门 |
+| Cleaner | 只读 list/show 元数据，带版本兼容门；`cargo-detect` 有固定输入读取和 typed evidence，但仍是 hint/report-only |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览；detail rescan 为 single-flight 后台任务，2 s deadline，导航/退出不中断 |
 | Trash / Permanent | 不存在 |
 
