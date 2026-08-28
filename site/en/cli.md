@@ -24,7 +24,8 @@ Global options:
 |---|---|
 | `--format human|json|ndjson` | Select display or machine output; default is `human`; scan currently rejects `ndjson` |
 | `--locale zh-CN|en-US` | Override the auto-detected display locale |
-| `--state-dir ABSOLUTE_DIR` | Select durable snapshot storage for scan/status/cancel on Unix; Windows durable state is disabled, `state_dir` defaults to `None`, and explicitly setting it fails closed |
+| `--state-dir ABSOLUTE_DIR` | Select the SQLite journal directory on Linux or legacy snapshot directory on macOS; Windows durable state is disabled, `state_dir` defaults to `None`, and explicitly setting it fails closed |
+| `scan --no-state` | Skip Linux journal or macOS legacy-snapshot writes when later status/operation state is unnecessary or the state filesystem does not support the journal; conflicts with `--state-dir` |
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
@@ -55,6 +56,8 @@ Normal pushes and pull requests run Rust, schema, site, installer, and native-CL
 
 ```bash
 cargo run -p sweepx-cli -- scan /absolute/path/to/root
+# Explicitly skip writes when later operation state is unnecessary
+cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
 - You may provide multiple roots, but every root must be absolute.
@@ -63,8 +66,8 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 - The current Linux capability is `degraded`, not release qualification.
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
 - The Windows backend now provides a handle-relative degraded read-only scanner through `scan` / `scan --tui`; that is not release qualification.
-- Do not pass `--state-dir` for a Windows scan; Unix may explicitly select durable snapshot storage.
-- `scan --format ndjson` currently returns unsupported before scanning. The protocol layer now has durable event envelope/stream validators, opaque durable-cursor constraints, and schema/golden coverage, but SQLite journaling, replay, and durable terminal persistence are still incomplete, so NDJSON remains disabled.
+- Linux may explicitly select a SQLite journal directory; macOS may select a legacy snapshot directory; do not pass `--state-dir` on Windows.
+- `scan --format ndjson` currently returns unsupported before scanning. Linux has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, and journal-first status. The event-journal crate retains a Linux-test-only bounded cursor replay/reset substrate that is not wired into Core or the CLI; events are still constructed after the scan, and the live sink, runtime qualification, and public `status --watch`/NDJSON surface remain incomplete.
 
 Request machine output explicitly for scripts and integrations:
 
@@ -76,7 +79,7 @@ sweepx --format ndjson scan /absolute/path/to/root
 
 ## Status snapshots and cancellation
 
-On Unix, after reading `operationId` from scan output, the corresponding durable snapshot can be queried:
+On Linux or macOS, after reading `operationId` from scan output, the corresponding terminal snapshot can be queried:
 
 ```bash
 cargo run -p sweepx-cli -- \
@@ -90,7 +93,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` only reads a persisted snapshot, and that durable store is currently enabled only on Unix. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+`status` only reads persisted terminal state: journal-first on Linux and from the legacy snapshot on macOS. There is no public replay, `--watch`, or status NDJSON surface. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
 
 ## Explain from scan JSON
 

@@ -1375,6 +1375,7 @@ dependencies = [
  "sweepx-catalog",
  "sweepx-cleaner-schema",
  "sweepx-cleaner-vm",
+ "sweepx-event-journal",
  "sweepx-i18n",
  "sweepx-model",
  "sweepx-platform",

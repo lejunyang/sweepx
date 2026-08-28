@@ -13,7 +13,7 @@
 |---|---|---|
 | Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
 | `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal；三者均通过 `sweepx scan` / `sweepx scan --tui` 暴露，但都不代表发布资格 |
-| `sweepx status` | Unix 上读取已持久化的 operation snapshot | Windows durable state 禁用、默认 `state_dir=None`，且显式 `--state-dir` fail-closed；它也不是后台任务监控 |
+| `sweepx status` | Linux journal-first 读取 terminal snapshot；macOS 读取 legacy operation snapshot | Windows durable state 禁用、默认 `state_dir=None`，且显式 `--state-dir` fail-closed；它也不是后台任务监控或公开 replay/watch 接口 |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
@@ -21,7 +21,7 @@
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；detail rescan 为 single-flight 后台任务，2 s deadline，导航与退出不等待非协作 worker，late result 会丢弃，且有 process-wide 32 stuck-worker cap |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
-| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；durable event envelope/stream validator 与 schema/golden 已完成，但 SQLite journal/replay/atomic terminal 尚未完成；不是阶段资格声明，没有 CLI 接线或 native target mutation |
+| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；Linux 已接入 bounded SQLite event journal，在单个事务中写入完整流与 terminal snapshot；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI，live sink、runtime qualification 和公开 `status --watch`/NDJSON 仍未完成；没有 native target mutation |
 | 真实清理 | **不可用** | Trash、Permanent、管理器 mutation 与 destructive Agent workflow 均未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
@@ -58,8 +58,11 @@ irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
 cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 # 执行 development-grade/degraded 的只读扫描；默认直接显示有界终端表格
-# Windows 不要传 --state-dir；Unix 可显式选择 durable state 目录
+# Linux 可选择 SQLite journal 目录，macOS 可选择 legacy snapshot 目录；Windows 不要传 --state-dir
 cargo run -p sweepx-cli -- scan /absolute/path/to/root
+
+# 不需要后续 status/operation state 时关闭状态写入；也适用于 journal 不支持的文件系统
+cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 
 # 扫描后进入文件管理器式 TUI（Enter/Right 进入，Esc/Backspace/Left 返回）
 cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
@@ -68,7 +71,7 @@ cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
 cargo run -p sweepx-cli -- \
   --format json scan /absolute/path/to/root > /absolute/path/to/scan.json
 
-# Unix 上读取扫描结束时保存的 snapshot
+# Linux 从 journal、macOS 从 legacy state 读取扫描结束时保存的 snapshot
 cargo run -p sweepx-cli -- \
   --format json \
   --state-dir /absolute/path/to/sweepx-state \
@@ -88,11 +91,11 @@ cargo run -p sweepx-cli -- --format json cleaner cargo-detect /absolute/path/to/
 
 ```
 
-`scan` 接受一个或多个绝对根路径。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。当前已完成 durable event envelope/stream validator、bounded durable cursor 约束以及 schema/golden 覆盖，但 SQLite journal、cursor replay 和 atomic terminal snapshot 尚未完成，因此 NDJSON 仍保持 disabled。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入；目录 detail rescan 使用 single-flight 后台任务，deadline 为 2 s，导航或退出不会等待非协作 worker，超时后的 late result 会被丢弃，并由 process-wide 32 stuck-worker cap 防止无限泄漏。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
+`scan` 接受一个或多个绝对根路径。`scan --no-state` 跳过 operation snapshot/event journal，适合不需要后续 `status`/operation state 或 state filesystem 不支持 journal 的显式只读扫描；它不能与 `--state-dir` 同时使用。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。Linux 已接入 bounded SQLite journal，在单个事务中写入完整事件流与 terminal snapshot；Core 的 `status` 优先读取 journal。event-journal crate 保留 Linux 测试专用 bounded opaque-cursor replay/reset substrate，但尚未接入 Core/CLI；事件仍在 scan 完成后批量构造，live sink、runtime qualification 和公开 `status --watch`/NDJSON 尚未完成，因此 NDJSON 继续 disabled。macOS 保留 legacy operation snapshot，没有 SQLite journal/replay；Windows durable state 继续 disabled。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入；目录 detail rescan 使用 single-flight 后台任务，deadline 为 2 s，导航或退出不会等待非协作 worker，超时后的 late result 会被丢弃，并由 process-wide 32 stuck-worker cap 防止无限泄漏。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
 
 ### `status` 与 `cancel` 的诚实语义
 
-当前扫描是同步命令。Unix 上 `status` 读取扫描结束时写入 durable state 的快照；它不是 live progress API。Windows durable snapshot state 完全禁用：默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
+当前扫描是同步命令。Linux 上 `status` journal-first 读取扫描结束时写入的 terminal snapshot；macOS 读取 legacy operation snapshot。它不是 live progress、公开 replay 或 `--watch` API。Windows durable snapshot state 完全禁用：默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。
 
 ### 导入 JSON 永远不是执行依据
 
@@ -122,7 +125,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 7. **没有降级删除。** 未来即使实现 Trash，失败、拒绝、取消或结果不明也不得自动转为 Permanent。
 8. **硬保护不可绕过。** 根目录、系统区域、home/profile 根、SweepX state、受保护 anchor 及其包含关系在未来 mutation model 中必须失败关闭。
 
-P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit/recovery 仍仅支持 Unix，且 durable event protocol 侧已经完成 envelope/stream validation 与 schema/golden 覆盖；但 SQLite journal、replay 与 atomic terminal snapshot 仍未完成，因此这条能力既不是 future native mutation 的发布级存储，也不能被写成跨平台或真实执行资格。
+P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit/recovery 仍仅支持 Unix；Linux durable event journal 已在单个事务中持久化完整流与 terminal snapshot，并提供 journal-first status。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI，也尚未形成 live sink、公开 `status --watch`/NDJSON、三平台 journal 实现或 runtime qualification。macOS 仍使用 legacy snapshot，Windows durable state 仍禁用。因此它既不是 future native mutation 的发布级存储，也不能被写成跨平台或真实执行资格。
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前它们在 Linux、macOS、Windows 上全部为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。当前没有这样的合格记录，也没有 native adapter、mutation command 或 approval UI。
 

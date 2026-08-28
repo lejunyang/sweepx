@@ -29,7 +29,7 @@ features:
 ---
 
 > [!CAUTION]
-> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。协议层已经补齐 durable event envelope/stream validator 与 schema/golden 覆盖，但 SQLite journal/replay 和 atomic terminal persistence 仍未完成，这不等于真实执行资格。
+> **SweepX 目前没有清理能力。** P3 中的计划、授权、durable audit 和 executor 是 library-only 的确定性模拟；模拟器不接收 native path，只使用 sealed fake adapter。Linux 已有 bounded SQLite journal 与单事务完整流/terminal snapshot；event-journal crate 仅保留 Linux 测试专用 bounded cursor replay/reset substrate，尚未接入 Core/CLI。这些都不等于 runtime 或真实执行资格。
 
 ## 现在能做什么
 
@@ -38,14 +38,14 @@ features:
 | Linux 目录扫描 | development-grade、read-only、degraded |
 | macOS 目录扫描 | development-grade、read-only、handle-bound degraded |
 | Windows 目录扫描 | development-grade、read-only、handle-relative degraded |
-| `status` | Unix 上读取持久化终态 snapshot；Windows durable state disabled、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
+| `status` | Linux journal-first 读取 terminal snapshot；macOS 读取 legacy snapshot；Windows durable state disabled、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门 |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览；detail rescan 为 single-flight 后台任务，2 s deadline，导航/退出不中断 |
 | Trash / Permanent | 不存在 |
 
-CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 scan 机器输出使用 JSON；durable event envelope/stream validator 已完成，但 NDJSON 仍要等 SQLite journal/replay 与 atomic terminal persistence 完成后才会开放。
+CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 scan 机器输出使用 JSON。Linux 虽已有 durable journal substrate，但事件仍在 scan 后批量构造；live sink、runtime qualification 与公开 `status --watch`/NDJSON 尚未完成，因此 NDJSON 保持禁用。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；稳定 release 尚未发布。
 
 ## 按你的问题阅读

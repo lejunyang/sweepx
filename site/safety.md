@@ -22,7 +22,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | Cleaner | 只读 metadata，兼容性失败关闭 |
 | 能力表达 | unsupported、degraded、report_only、disabled 分开报告 |
 
-当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标。Unix 上的 `scan` 可以在指定 state directory 写自己的终态 snapshot；Windows durable operation state 禁用，默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。独立的 P3 audit/protocol 路径已经完成 durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 覆盖，但 SQLite journal/replay 与 atomic terminal persistence 仍未完成；这些表面都不修改扫描目标，也不构成真实执行资格。
+当前 CLI 不请求提权，不调用清理管理器，也不因 read error 自动扩大范围。这里的“只读”针对扫描目标。Linux 可在 SweepX state directory 写 bounded SQLite event journal，并以单事务保存完整流与 terminal snapshot；macOS 只写 legacy terminal snapshot；Windows durable operation state 禁用，默认 `state_dir=None`，显式 `--state-dir` 失败关闭。`scan --no-state` 可显式跳过 Linux/macOS 的 operation-state 写入，并与 `--state-dir` 冲突。Linux 的 Core status journal-first；event-journal crate 的 bounded cursor replay/reset substrate 仅供 Linux 测试，尚未接 Core/CLI。这不代表 live sink、公开 watch/NDJSON、runtime qualification 或 mutation qualification；这些状态写入都不修改扫描目标。
 
 ## 导入报告为什么只能 report-only
 

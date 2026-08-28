@@ -15,8 +15,9 @@ absolute roots
   -> Core output envelope
   -> bounded human table | explicit JSON
   -> optional in-process file-manager TUI
-  -> durable terminal snapshot on Unix (optional state directory)
-  -> no durable terminal snapshot on Windows (state_dir defaults to None)
+  -> Linux bounded SQLite journal + terminal snapshot (unless scan --no-state)
+  -> macOS legacy terminal snapshot (unless scan --no-state)
+  -> Windows no durable state (state_dir defaults to None)
 
 bounded scan.result JSON
   -> imported provenance downgrade
@@ -30,14 +31,14 @@ Linux、macOS 与 Windows 均连接实际的 development-grade/degraded 只读 s
 | 层 | 代表 crate | 当前职责 |
 |---|---|---|
 | 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |
-| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | platform boundary、Linux 只读遍历、macOS handle-bound 只读遍历、Windows handle-relative 只读遍历、聚合，以及 Unix-only durable state |
+| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache`, `sweepx-event-journal` | platform boundary、三平台只读遍历与聚合；Linux bounded SQLite journal；macOS legacy snapshot |
 | 分析与 Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | candidate/explanation、声明式规则、内置 package |
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
 
 ## 状态与取消
 
-CLI scan 当前同步完成，并在 Unix 上启用 state directory 时保存 terminal snapshot。Windows durable state 禁用：默认 `state_dir=None`，不持久化 terminal snapshot，显式 `--state-dir` 失败关闭。`status` 不是后台 worker 查询；live cancel 也仍禁用。协议层已经完成 durable event envelope/stream validator、opaque cursor 约束与 schema/golden，但 scan NDJSON 仍因缺少 SQLite journal/replay 与 atomic terminal persistence 而保持禁用。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI。macOS 仍写 legacy operation snapshot。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。Windows durable state 禁用：默认 `state_dir=None`，显式 `--state-dir` 失败关闭。当前没有 live sink、runtime qualification 或公开 `status --watch`/NDJSON；live cancel 也仍禁用。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
 
 ## 导入是明确的信任边界
 
@@ -53,7 +54,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - permit 与 revalidation observer 是 simulation-specific；
 - executor 的 request 没有 native path；
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
-- audit persistence 当前仅支持 Unix；协议层已有 durable event validator 与 schema/golden 覆盖，但 SQLite journal/replay 与 atomic terminal persistence 尚未完成；它仍不是 native mutation 的发布级存储。
+- audit persistence 当前仅支持 Unix；独立的 Linux scan event-state 路径已有 bounded SQLite journal 和单事务完整流/terminal persistence。event-journal crate 的 replay/reset substrate 仅供 Linux 测试，尚未接 Core/CLI；这不是 live、公开、跨平台或 runtime-qualified 的 native mutation 存储。
 
 这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
 

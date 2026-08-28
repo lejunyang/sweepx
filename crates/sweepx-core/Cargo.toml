@@ -33,6 +33,7 @@ sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
 sweepx-tui = { version = "0.1.0", path = "../sweepx-tui" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+sweepx-event-journal = { version = "0.1.0", path = "../sweepx-event-journal" }
 sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-linux"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

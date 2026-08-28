@@ -11,7 +11,7 @@ Agent-safe 的含义不是“Agent 可以自动清理”，而是自动化只能
 Agent 可以在用户提供明确范围后：
 
 - 运行 `capabilities` 并报告 degraded/report-only/unsupported/disabled 状态；
-- 在用户选择的绝对根上运行 Linux、macOS 或 Windows 的 development-grade/degraded 只读扫描；Windows traversal 为 handle-relative；
+- 在用户选择的绝对根上运行 Linux、macOS 或 Windows 的 development-grade/degraded 只读扫描；不需要后续 status/operation state 或 state filesystem 不支持 journal 时，可显式使用 `scan --no-state`，但不能同时传 `--state-dir`；
 - 读取现有 JSON，解释 error、boundary、coverage 和 tagged size；scan NDJSON 当前禁用；
 - 对有界 scan JSON 运行 report-only `explain`；
 - 列出或展示 Cleaner 元数据；
@@ -32,7 +32,7 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 结构化输出与语言
 
-当前 scan 自动化应使用 JSON；NDJSON 要等 durable journal/replay 完成后才会开放。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
+当前 scan 自动化应使用 bounded JSON。Linux durable journal 已存在；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI。事件仍在 scan 后批量构造，live sink、runtime qualification 和公开 `status --watch`/NDJSON 尚未完成。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
 
 ## 未来边界仍然更窄
 

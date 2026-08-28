@@ -24,7 +24,8 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 |---|---|
 | `--format human|json|ndjson` | 选择展示或机器输出；默认 `human`；当前 scan 拒绝 `ndjson` |
 | `--locale zh-CN|en-US` | 覆盖自动检测的语言 |
-| `--state-dir ABSOLUTE_DIR` | Unix 上为 scan/status/cancel 指定 durable snapshot 目录；Windows durable state 禁用、默认 `state_dir=None`，且显式指定失败关闭 |
+| `--state-dir ABSOLUTE_DIR` | Linux 上指定 SQLite journal 目录，macOS 上指定 legacy snapshot 目录；Windows durable state 禁用、默认 `state_dir=None`，且显式指定失败关闭 |
+| `scan --no-state` | 跳过 Linux journal 或 macOS legacy snapshot 写入；适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描；不能与 `--state-dir` 同时使用 |
 
 语言解析会依次考虑显式 override、locale 环境与系统 locale，无法识别时回退到 `en-US`。机器字段和值不翻译。
 
@@ -55,6 +56,8 @@ irm https://raw.githubusercontent.com/lejunyang/sweepx/main/install.ps1 | iex
 
 ```bash
 cargo run -p sweepx-cli -- scan /absolute/path/to/root
+# 不需要后续 operation state 时显式跳过写入
+cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
 - 可以传入多个根，但每个根都必须是绝对路径。
@@ -63,8 +66,8 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 - 当前 Linux capability 是 `degraded`，不是发布资格。
 - macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
 - Windows backend 现提供 handle-relative 的 degraded 只读扫描，并通过 `scan` / `scan --tui` 接入；这不等于发布资格。
-- Windows 扫描不要传 `--state-dir`；Unix 可显式选择 durable snapshot 目录。
-- `scan --format ndjson` 当前在扫描前返回 unsupported；协议层的 durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 已完成，但 SQLite journal、replay 和 durable terminal persistence 仍未完成，所以还不会开放。
+- Linux 可显式选择 SQLite journal 目录；macOS 可选择 legacy snapshot 目录；Windows 不要传 `--state-dir`。
+- `scan --format ndjson` 当前在扫描前返回 unsupported；Linux 已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI；事件仍在 scan 后批量构造，live sink、runtime qualification 和公开 `status --watch`/NDJSON 仍未完成。
 
 只有脚本和系统集成才需要显式机器输出：
 
@@ -76,7 +79,7 @@ sweepx --format ndjson scan /absolute/path/to/root
 
 ## 状态快照与取消
 
-Unix 上从 scan 输出取得 `operationId` 后，可以查询对应的 durable snapshot：
+Linux 或 macOS 上从 scan 输出取得 `operationId` 后，可以查询对应的 terminal snapshot：
 
 ```bash
 cargo run -p sweepx-cli -- \
@@ -90,7 +93,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` 只读取已持久化 snapshot，该 durable store 当前仅在 Unix 开放。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+`status` 只读取已持久化 terminal state：Linux journal-first，macOS 使用 legacy snapshot；当前没有公开 replay、`--watch` 或 status NDJSON。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
 
 ## 从 scan JSON 解释
 

@@ -31,10 +31,12 @@ use fs2::FileExt;
 use getrandom::fill as fill_random;
 #[cfg(target_os = "linux")]
 use rusqlite::Connection;
+#[cfg(all(test, target_os = "linux"))]
+use rusqlite::OptionalExtension;
 #[cfg(target_os = "linux")]
 use rusqlite::config::DbConfig;
 #[cfg(target_os = "linux")]
-use rusqlite::{OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OpenFlags, Transaction, TransactionBehavior, params};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 use sweepx_protocol::{EventEnvelope, TerminalEventExpectation};
@@ -66,6 +68,8 @@ const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_APPEND_RESERVE_BYTES: u64 = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_BATCH_STORAGE_OVERHEAD_PER_EVENT: usize = 1024;
 #[cfg(target_os = "linux")]
 const MAX_EVENT_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "linux")]
@@ -380,6 +384,14 @@ struct StoredCursor {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PreparedEventRecord {
+    event_json: String,
+    digest: String,
+    previous_digest: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,
@@ -454,6 +466,8 @@ pub enum JournalError {
     CursorMismatch,
     #[error("event stream is already terminal")]
     AlreadyTerminal,
+    #[error("complete stream append requires an empty journal")]
+    JournalNotEmpty,
     #[error("terminal metadata does not match event terminal payload")]
     TerminalMetadataMismatch,
     #[error("stream reset is required before replay can continue")]
@@ -616,27 +630,8 @@ impl EventJournal {
             Err(JournalError::Unsupported)
         }
         #[cfg(target_os = "linux")]
-        let terminal = event
-            .terminal_payload()
-            .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
-        #[cfg(target_os = "linux")]
-        let derived_snapshot =
-            serde_json::from_slice::<serde_json::Value>(&final_snapshot.canonical_snapshot)
-                .map_err(|_| JournalError::TerminalMetadataMismatch)
-                .and_then(|value| FinalSnapshotMetadata::from_json(&value))?;
-        #[cfg(target_os = "linux")]
-        if derived_snapshot != *final_snapshot
-            || terminal.snapshot_digest != derived_snapshot.snapshot_digest
-            || terminal.snapshot_digest != derived_snapshot.terminal.snapshot_digest
-            || terminal.status != derived_snapshot.terminal.status
-            || terminal.exit_code != derived_snapshot.terminal.exit_code
-            || terminal.kind != derived_snapshot.terminal.kind
-            || event.operation_id.to_string() != derived_snapshot.operation_id
         {
-            return Err(JournalError::TerminalMetadataMismatch);
-        }
-        #[cfg(target_os = "linux")]
-        {
+            validate_terminal_snapshot_pair(event, final_snapshot)?;
             self.append_event_inner(
                 event,
                 Some(FinalSnapshotMetadata {
@@ -649,7 +644,185 @@ impl EventJournal {
         }
     }
 
-    pub fn replay_from_cursor(
+    /// Atomically appends one complete, terminal event stream to an empty journal.
+    ///
+    /// The journal owns durable positioning: caller-provided sequence, cursor, and checkpoint
+    /// fields are ignored and replaced for every event. The replacements are copied back to the
+    /// caller only after the complete stream and final snapshot commit in one `IMMEDIATE` SQLite
+    /// transaction. Any error leaves both the journal and those caller fields unchanged.
+    pub fn append_complete_stream(
+        &self,
+        events: &mut [EventEnvelope],
+        final_snapshot: &FinalSnapshotMetadata,
+    ) -> Result<(), JournalError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            let _ = events;
+            let _ = final_snapshot;
+            Err(JournalError::Unsupported)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            ensure_complete_stream_event_count(events.len())?;
+            let derived_snapshot = validated_snapshot_metadata(final_snapshot)?;
+
+            let mut connection = self.lock_connection()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let integrity = verify_database(&transaction)?;
+            if integrity.event_count != 0 {
+                return Err(JournalError::JournalNotEmpty);
+            }
+
+            let generation_nonce = stream_generation_nonce(&transaction)?;
+            let mut assigned_events = Vec::with_capacity(events.len());
+            let mut records = Vec::with_capacity(events.len());
+            let mut previous_digest = None::<String>;
+            let mut payload_bytes = derived_snapshot.canonical_snapshot.len();
+
+            for (index, source_event) in events.iter().enumerate() {
+                let sequence = u64::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(JournalError::EventLimitExceeded)?;
+                let mut event = source_event.clone();
+                event.sequence = u128::from(sequence).into();
+                event.cursor = next_durable_cursor(
+                    event.stream_id.as_str(),
+                    &event.operation_id.to_string(),
+                    sequence,
+                    &generation_nonce,
+                    previous_digest.as_deref().unwrap_or("genesis"),
+                );
+                event.checkpoint.durable = true;
+                event.checkpoint.last_durable_sequence = u128::from(sequence).into();
+                event.validate_for_durable_stream().map_err(|source| {
+                    JournalError::ProtocolValidation(
+                        EventStreamValidationError::InvalidEvent { index, source }.to_string(),
+                    )
+                })?;
+
+                let event_json = canonical_event_json(&event)?;
+                if event_json.len() > MAX_EVENT_BYTES {
+                    return Err(JournalError::EventTooLarge);
+                }
+                payload_bytes =
+                    checked_complete_stream_payload_bytes(payload_bytes, event_json.len())?;
+                let digest = digest_event_record(
+                    sequence,
+                    previous_digest.as_deref(),
+                    event_json.as_bytes(),
+                );
+                records.push(PreparedEventRecord {
+                    event_json,
+                    digest: digest.clone(),
+                    previous_digest: previous_digest.clone(),
+                });
+                previous_digest = Some(digest);
+                assigned_events.push(event);
+            }
+
+            validate_terminal_event_against_snapshot(
+                assigned_events.last().ok_or_else(|| {
+                    JournalError::ProtocolValidation(
+                        EventStreamValidationError::EmptyStream.to_string(),
+                    )
+                })?,
+                &derived_snapshot,
+            )?;
+            validate_durable_event_stream(&assigned_events, &derived_snapshot.terminal)
+                .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
+            ensure_append_budget(&self.anchored_root, payload_bytes)?;
+
+            {
+                let mut insert_event = transaction.prepare(
+                    "INSERT INTO journal_events(sequence,stream_id,operation_id,cursor,event_json,digest,previous_digest,terminal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                )?;
+                let mut insert_cursor = transaction.prepare(
+                    "INSERT INTO durable_cursors(cursor,sequence,digest,stream_id,operation_id) VALUES(?1,?2,?3,?4,?5)",
+                )?;
+                for (event, record) in assigned_events.iter().zip(records.iter()) {
+                    let sequence = i64::try_from(u128::from(event.sequence))
+                        .map_err(|_| JournalError::EventLimitExceeded)?;
+                    insert_event
+                        .execute(params![
+                            sequence,
+                            event.stream_id.as_str(),
+                            event.operation_id.to_string(),
+                            event.cursor.as_str(),
+                            record.event_json.as_str(),
+                            record.digest.as_str(),
+                            record.previous_digest.as_deref(),
+                            event.is_terminal_type(),
+                        ])
+                        .map_err(map_sqlite_quota_error)?;
+                    insert_cursor
+                        .execute(params![
+                            event.cursor.as_str(),
+                            event.sequence.to_string(),
+                            record.digest.as_str(),
+                            event.stream_id.as_str(),
+                            event.operation_id.to_string(),
+                        ])
+                        .map_err(map_sqlite_quota_error)?;
+                }
+            }
+
+            let first = assigned_events
+                .first()
+                .ok_or(JournalError::Corruption("prepared stream is empty"))?;
+            let last = assigned_events
+                .last()
+                .ok_or(JournalError::Corruption("prepared stream is empty"))?;
+            let last_record = records
+                .last()
+                .ok_or(JournalError::Corruption("prepared stream record is empty"))?;
+            let terminal_sequence = i64::try_from(u128::from(last.sequence))
+                .map_err(|_| JournalError::EventLimitExceeded)?;
+            let metadata_updates = transaction.execute(
+                "UPDATE stream_meta SET stream_id=?1,operation_id=?2,snapshot_digest=?3,snapshot_json=?4,terminal_sequence=?5 WHERE singleton=1 AND stream_id IS NULL AND operation_id IS NULL AND snapshot_digest IS NULL AND snapshot_json IS NULL AND terminal_sequence IS NULL",
+                params![
+                    first.stream_id.as_str(),
+                    first.operation_id.to_string(),
+                    derived_snapshot.snapshot_digest.as_str(),
+                    derived_snapshot.canonical_snapshot.as_slice(),
+                    terminal_sequence,
+                ],
+            )
+            .map_err(map_sqlite_quota_error)?;
+            if metadata_updates != 1 {
+                return Err(JournalError::Corruption(
+                    "complete stream metadata was not empty",
+                ));
+            }
+            let head_updates = transaction.execute(
+                "UPDATE journal_head SET sequence=?1,digest=?2,cursor=?3 WHERE singleton=1 AND sequence=0 AND digest IS NULL AND cursor IS NULL",
+                params![
+                    terminal_sequence,
+                    last_record.digest.as_str(),
+                    last.cursor.as_str(),
+                ],
+            )
+            .map_err(map_sqlite_quota_error)?;
+            if head_updates != 1 {
+                return Err(JournalError::Corruption(
+                    "complete stream journal head was not empty",
+                ));
+            }
+
+            transaction.commit().map_err(map_sqlite_quota_error)?;
+            for (target, assigned) in events.iter_mut().zip(assigned_events) {
+                target.sequence = assigned.sequence;
+                target.cursor = assigned.cursor;
+                target.checkpoint = assigned.checkpoint;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn replay_from_cursor(
         &self,
         cursor: Option<&DurableCursor>,
         limit: usize,
@@ -666,28 +839,40 @@ impl EventJournal {
                 return Err(JournalError::InvalidReplayLimit);
             }
             let connection = self.lock_connection()?;
+            let integrity = verify_database(&connection)?;
+            let latest_cursor = integrity.latest_cursor.clone();
             let transaction = connection.unchecked_transaction()?;
-            let _ = verify_database(&transaction)?;
-
+            let current_head: (i64, Option<String>, Option<String>) = transaction.query_row(
+                "SELECT sequence,digest,cursor FROM journal_head WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if current_head.0
+                != i64::try_from(integrity.latest_sequence).map_err(|_| {
+                    JournalError::Corruption("verified sequence does not fit SQLite")
+                })?
+                || current_head.1 != integrity.latest_record_digest
+                || current_head.2 != integrity.latest_cursor
+            {
+                return Err(JournalError::StateIdentityChanged);
+            }
             let start_sequence = match cursor {
                 None => 1_i64,
                 Some(cursor) => {
-                    let stored = lookup_cursor(&transaction, cursor.as_str())?
-                        .ok_or(JournalError::UnknownCursor)?;
+                    let Some(stored) = lookup_cursor(&transaction, cursor.as_str())? else {
+                        transaction.commit()?;
+                        return Ok(ReplayBatch {
+                            events: Vec::new(),
+                            reset_required: true,
+                            next_cursor: latest_cursor,
+                        });
+                    };
                     parse_i64(&stored.sequence)?
                         .checked_add(1)
                         .ok_or(JournalError::Corruption("cursor sequence overflow"))?
                 }
             };
 
-            let terminal_sequence: Option<i64> = transaction
-                .query_row(
-                    "SELECT terminal_sequence FROM stream_meta WHERE singleton=1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
             let latest_sequence: i64 = transaction.query_row(
                 "SELECT sequence FROM journal_head WHERE singleton=1",
                 [],
@@ -696,17 +881,6 @@ impl EventJournal {
 
             if start_sequence > latest_sequence + 1 {
                 return Err(JournalError::UnknownCursor);
-            }
-
-            let reset_required = terminal_sequence.is_some_and(|terminal| {
-                start_sequence > terminal && start_sequence <= latest_sequence
-            });
-            if reset_required {
-                return Ok(ReplayBatch {
-                    events: Vec::new(),
-                    reset_required: true,
-                    next_cursor: None,
-                });
             }
 
             let mut statement = transaction.prepare(
@@ -819,8 +993,16 @@ impl EventJournal {
         if event_json.len() > MAX_EVENT_BYTES {
             return Err(JournalError::EventTooLarge);
         }
+        let append_bytes = event_json
+            .len()
+            .checked_add(
+                final_snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.canonical_snapshot.len()),
+            )
+            .ok_or(JournalError::QuotaExceeded)?;
         let mut connection = self.lock_connection()?;
-        ensure_append_budget(&self.anchored_root, event_json.len())?;
+        ensure_append_budget(&self.anchored_root, append_bytes)?;
         let integrity = verify_database(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -1034,6 +1216,7 @@ fn stream_generation_nonce(connection: &Connection) -> Result<String, JournalErr
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn lookup_cursor(
     connection: &Connection,
     cursor: &str,
@@ -1291,6 +1474,91 @@ fn timestamp_nanoseconds(value: &str) -> Result<i128, JournalError> {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_complete_stream_event_count(event_count: usize) -> Result<(), JournalError> {
+    if event_count > MAX_EVENTS as usize {
+        return Err(JournalError::EventLimitExceeded);
+    }
+    if event_count == 0 {
+        return Err(JournalError::ProtocolValidation(
+            EventStreamValidationError::EmptyStream.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn checked_complete_stream_payload_bytes(
+    accumulated: usize,
+    event_bytes: usize,
+) -> Result<usize, JournalError> {
+    let total = accumulated
+        .checked_add(event_bytes)
+        .and_then(|value| value.checked_add(MAX_BATCH_STORAGE_OVERHEAD_PER_EVENT))
+        .ok_or(JournalError::QuotaExceeded)?;
+    let reserve =
+        usize::try_from(MAX_APPEND_RESERVE_BYTES).map_err(|_| JournalError::QuotaExceeded)?;
+    let maximum_payload = usize::try_from(MAX_DATABASE_BYTES)
+        .map_err(|_| JournalError::QuotaExceeded)?
+        .checked_sub(reserve)
+        .ok_or(JournalError::QuotaExceeded)?;
+    if total > maximum_payload {
+        return Err(JournalError::QuotaExceeded);
+    }
+    Ok(total)
+}
+
+#[cfg(target_os = "linux")]
+fn map_sqlite_quota_error(error: rusqlite::Error) -> JournalError {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        JournalError::QuotaExceeded
+    } else {
+        JournalError::Database(error)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validated_snapshot_metadata(
+    final_snapshot: &FinalSnapshotMetadata,
+) -> Result<FinalSnapshotMetadata, JournalError> {
+    let value = serde_json::from_slice::<serde_json::Value>(&final_snapshot.canonical_snapshot)
+        .map_err(|_| JournalError::TerminalMetadataMismatch)?;
+    let derived = FinalSnapshotMetadata::from_json(&value)?;
+    if derived != *final_snapshot {
+        return Err(JournalError::TerminalMetadataMismatch);
+    }
+    Ok(derived)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_terminal_event_against_snapshot(
+    event: &EventEnvelope,
+    final_snapshot: &FinalSnapshotMetadata,
+) -> Result<(), JournalError> {
+    let terminal = event
+        .terminal_payload()
+        .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
+    if terminal.snapshot_digest != final_snapshot.snapshot_digest
+        || terminal.snapshot_digest != final_snapshot.terminal.snapshot_digest
+        || terminal.status != final_snapshot.terminal.status
+        || terminal.exit_code != final_snapshot.terminal.exit_code
+        || terminal.kind != final_snapshot.terminal.kind
+        || event.operation_id.to_string() != final_snapshot.operation_id
+    {
+        return Err(JournalError::TerminalMetadataMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_terminal_snapshot_pair(
+    event: &EventEnvelope,
+    final_snapshot: &FinalSnapshotMetadata,
+) -> Result<(), JournalError> {
+    let derived_snapshot = validated_snapshot_metadata(final_snapshot)?;
+    validate_terminal_event_against_snapshot(event, &derived_snapshot)
+}
+
+#[cfg(target_os = "linux")]
 fn map_stream_validation_error(error: EventStreamValidationError) -> JournalError {
     match error {
         EventStreamValidationError::SequenceMismatch { .. }
@@ -1410,6 +1678,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn parse_i64(value: &str) -> Result<i64, JournalError> {
     value
         .parse()
@@ -2084,6 +2353,25 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn unassigned_complete_stream(final_snapshot: &FinalSnapshotMetadata) -> Vec<EventEnvelope> {
+        let mut events = vec![
+            started("producer-start".to_string(), 1),
+            progress("producer-progress".to_string(), 2),
+            terminal(
+                "producer-terminal".to_string(),
+                3,
+                final_snapshot.snapshot_digest(),
+            ),
+        ];
+        for event in &mut events {
+            event.sequence = DecimalU128::new(99);
+            event.checkpoint.durable = false;
+            event.checkpoint.last_durable_sequence = DecimalU128::ZERO;
+        }
+        events
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn happy_replay_and_validate_all() {
         let temp = TempDir::new().unwrap();
@@ -2141,15 +2429,254 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn unknown_cursor_and_gap_fail_closed() {
+    fn complete_stream_append_assigns_positions_and_commits_terminal_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("complete-stream");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+
+        journal
+            .append_complete_stream(&mut events, &final_snapshot)
+            .unwrap();
+
+        let mut cursors = std::collections::BTreeSet::new();
+        for (index, event) in events.iter().enumerate() {
+            let sequence = u128::try_from(index + 1).unwrap();
+            assert_eq!(u128::from(event.sequence), sequence);
+            assert!(event.cursor.starts_with("sxcur1."));
+            assert!(cursors.insert(event.cursor.as_str()));
+            assert!(event.checkpoint.durable);
+            assert_eq!(u128::from(event.checkpoint.last_durable_sequence), sequence);
+        }
+
+        let replay = journal.replay_from_cursor(None, 10).unwrap();
+        assert!(!replay.reset_required);
+        assert_eq!(replay.events, events);
+        assert_eq!(
+            replay.next_cursor.as_deref(),
+            events.last().map(|event| event.cursor.as_str())
+        );
+        let stored_snapshot = journal.read_final_snapshot().unwrap().unwrap();
+        assert_eq!(stored_snapshot, final_snapshot);
+        let integrity = journal.verify_integrity().unwrap();
+        assert_eq!(integrity.event_count, 3);
+        assert_eq!(integrity.latest_sequence, 3);
+        assert_eq!(integrity.last_durable_sequence, 3);
+        assert_eq!(integrity.terminal_sequence, Some(3));
+        assert!(integrity.has_terminal_snapshot());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_validation_failure_keeps_journal_and_input_unchanged() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("invalid-midstream");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+        events[1].stream_id = "different-stream".to_string();
+        let original = events.clone();
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &final_snapshot),
+            Err(JournalError::ProtocolValidation(message))
+                if message.contains("streamId changes at index 1")
+        ));
+        assert_eq!(events, original);
+        assert_eq!(journal.verify_integrity().unwrap().event_count, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_sqlite_failure_rolls_back_every_insert() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("forced-rollback");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+        let original = events.clone();
+        {
+            let connection = journal.lock_connection().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_second_batch_insert BEFORE INSERT ON journal_events WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'forced batch failure'); END;",
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &final_snapshot),
+            Err(JournalError::Database(_))
+        ));
+        assert_eq!(events, original);
+        let integrity = journal.verify_integrity().unwrap();
+        assert_eq!(integrity.event_count, 0);
+        assert_eq!(integrity.terminal_sequence, None);
+        assert_eq!(journal.read_final_snapshot().unwrap(), None);
+        let connection = journal.lock_connection().unwrap();
+        let cursor_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM durable_cursors", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cursor_count, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_requires_empty_journal() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let cursor = next_cursor(&journal, None, 1);
+        journal.append_event(&started(cursor, 1)).unwrap();
+        let final_snapshot = snapshot("nonempty");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+        let original = events.clone();
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &final_snapshot),
+            Err(JournalError::JournalNotEmpty)
+        ));
+        assert_eq!(events, original);
+        let integrity = journal.verify_integrity().unwrap();
+        assert_eq!(integrity.event_count, 1);
+        assert_eq!(integrity.terminal_sequence, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_rejects_terminal_snapshot_mismatch_atomically() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let event_snapshot = snapshot("event-terminal");
+        let persisted_snapshot = snapshot("persisted-terminal");
+        let mut events = unassigned_complete_stream(&event_snapshot);
+        let original = events.clone();
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &persisted_snapshot),
+            Err(JournalError::TerminalMetadataMismatch)
+        ));
+        assert_eq!(events, original);
+        assert_eq!(journal.verify_integrity().unwrap().event_count, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_count_and_aggregate_size_are_bounded() {
+        assert!(matches!(
+            ensure_complete_stream_event_count(0),
+            Err(JournalError::ProtocolValidation(_))
+        ));
+        assert!(matches!(
+            ensure_complete_stream_event_count(MAX_EVENTS as usize + 1),
+            Err(JournalError::EventLimitExceeded)
+        ));
+        let maximum_payload = (MAX_DATABASE_BYTES - MAX_APPEND_RESERVE_BYTES) as usize;
+        assert_eq!(
+            checked_complete_stream_payload_bytes(
+                maximum_payload - MAX_BATCH_STORAGE_OVERHEAD_PER_EVENT - 1,
+                1
+            )
+            .unwrap(),
+            maximum_payload
+        );
+        assert!(matches!(
+            checked_complete_stream_payload_bytes(
+                maximum_payload - MAX_BATCH_STORAGE_OVERHEAD_PER_EVENT,
+                1
+            ),
+            Err(JournalError::QuotaExceeded)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sqlite_full_is_reported_as_journal_quota() {
+        let sqlite = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            Some("database or disk is full".to_string()),
+        );
+        assert!(matches!(
+            map_sqlite_quota_error(sqlite),
+            JournalError::QuotaExceeded
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_api_rejects_too_many_events_without_side_effects() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("event-limit");
+        let template = progress("producer-position".to_string(), 7);
+        let mut events = vec![template; MAX_EVENTS as usize + 1];
+        let first_before = events.first().unwrap().clone();
+        let last_before = events.last().unwrap().clone();
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &final_snapshot),
+            Err(JournalError::EventLimitExceeded)
+        ));
+        assert_eq!(events.first(), Some(&first_before));
+        assert_eq!(events.last(), Some(&last_before));
+        assert_eq!(journal.verify_integrity().unwrap().event_count, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_stream_api_rejects_aggregate_quota_without_side_effects() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("aggregate-quota");
+        let mut events = Vec::with_capacity(130);
+        events.push(started("producer-start".to_string(), 1));
+        for sequence in 2..130_u128 {
+            let mut event = progress("producer-progress".to_string(), sequence);
+            event.emitted_at = "2026-08-28T00:00:01Z".to_string();
+            event.payload = serde_json::json!({ "blob": "x".repeat(250 * 1024) });
+            events.push(event);
+        }
+        events.push(terminal(
+            "producer-terminal".to_string(),
+            130,
+            final_snapshot.snapshot_digest(),
+        ));
+        events.last_mut().unwrap().emitted_at = "2026-08-28T00:00:02Z".to_string();
+        for event in &mut events {
+            event.sequence = DecimalU128::new(999);
+            event.checkpoint.durable = false;
+            event.checkpoint.last_durable_sequence = DecimalU128::ZERO;
+        }
+        let first_before = events.first().unwrap().clone();
+        let last_before = events.last().unwrap().clone();
+
+        assert!(matches!(
+            journal.append_complete_stream(&mut events, &final_snapshot),
+            Err(JournalError::QuotaExceeded)
+        ));
+        assert_eq!(events.first(), Some(&first_before));
+        assert_eq!(events.last(), Some(&last_before));
+        let integrity = journal.verify_integrity().unwrap();
+        assert_eq!(integrity.event_count, 0);
+        assert_eq!(integrity.latest_cursor, None);
+        assert_eq!(journal.read_final_snapshot().unwrap(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unknown_well_formed_cursor_requires_snapshot_reset() {
         let temp = TempDir::new().unwrap();
         let root = private_root(&temp);
         let journal = EventJournal::open(&root).unwrap();
         let cursor = DurableCursor::parse("sxcur1.unknown-token-000").unwrap();
-        assert!(matches!(
-            journal.replay_from_cursor(Some(&cursor), 10),
-            Err(JournalError::UnknownCursor)
-        ));
+        let replay = journal.replay_from_cursor(Some(&cursor), 10).unwrap();
+        assert!(replay.reset_required);
+        assert!(replay.events.is_empty());
+        assert!(replay.next_cursor.is_none());
         assert!(matches!(
             DurableCursor::parse("sxcur1.bad/path token"),
             Err(JournalError::UnknownCursor)
@@ -2324,10 +2851,13 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let first_root = private_root(&temp);
         let first = EventJournal::open(&first_root).unwrap();
-        let first_cursor = first
+        let first_position = first
             .next_append_position("stream-1", "op-1", true)
-            .unwrap()
-            .cursor;
+            .unwrap();
+        let first_cursor = first_position.cursor.clone();
+        first
+            .append_event(&started(first_cursor.as_str().to_string(), 1))
+            .unwrap();
         drop(first);
 
         let second_root = temp.path().join("second-journal");
@@ -2337,15 +2867,34 @@ mod tests {
             .create(&second_root)
             .unwrap();
         let second = EventJournal::open(&second_root).unwrap();
-        let second_cursor = second
-            .next_append_position("stream-1", "op-1", true)
-            .unwrap()
-            .cursor;
-        assert_ne!(first_cursor, second_cursor);
-        assert!(matches!(
-            second.replay_from_cursor(Some(&first_cursor), 8),
-            Err(JournalError::UnknownCursor)
-        ));
+        let final_snapshot = snapshot("second-generation");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+        second
+            .append_complete_stream(&mut events, &final_snapshot)
+            .unwrap();
+        let second_cursor = events[0].cursor.clone();
+        let latest_cursor = events.last().unwrap().cursor.clone();
+        assert_ne!(first_cursor.as_str(), second_cursor);
+        let replay = second.replay_from_cursor(Some(&first_cursor), 8).unwrap();
+        assert!(replay.reset_required);
+        assert!(replay.events.is_empty());
+        assert_eq!(replay.next_cursor, Some(latest_cursor));
+        let resume = second
+            .replay_from_cursor(
+                Some(
+                    &DurableCursor::parse(replay.next_cursor.unwrap())
+                        .expect("journal-issued reset cursor is valid"),
+                ),
+                8,
+            )
+            .unwrap();
+        assert!(!resume.reset_required);
+        assert!(resume.events.is_empty());
+        assert!(resume.next_cursor.is_none());
+        assert_eq!(
+            second.read_final_snapshot().unwrap().unwrap(),
+            final_snapshot
+        );
     }
 
     #[cfg(target_os = "linux")]

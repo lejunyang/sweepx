@@ -11,7 +11,7 @@ use sweepx_core::{
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
     render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
     state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
-    validate_absolute_root,
+    usage_error_output, validate_absolute_root,
 };
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
@@ -56,6 +56,8 @@ enum Commands {
     Scan {
         #[arg(long)]
         tui: bool,
+        #[arg(long)]
+        no_state: bool,
         #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
         roots: Vec<OsString>,
     },
@@ -111,7 +113,28 @@ fn main() -> ProcessExitCode {
     let format: OutputFormat = cli.format.into();
 
     let result = match cli.command {
-        Commands::Scan { tui, roots } => {
+        Commands::Scan {
+            tui,
+            no_state,
+            roots,
+        } => {
+            if no_state && cli.state_dir.is_some() {
+                let message = "--no-state cannot be combined with --state-dir";
+                if format == OutputFormat::Human {
+                    eprintln!("{message}");
+                } else {
+                    let output = usage_error_output("cli.conflicting_state_options", message);
+                    if format == OutputFormat::Ndjson {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&output).expect("output serializable")
+                        );
+                    } else {
+                        println!("{}", serialize_json(&output));
+                    }
+                }
+                return ProcessExitCode::from(2);
+            }
             if tui
                 && let Err(message) = validate_tui_environment(
                     format,
@@ -126,7 +149,7 @@ fn main() -> ProcessExitCode {
                 eprintln!("{SCAN_NDJSON_UNAVAILABLE_MESSAGE}");
                 return ProcessExitCode::from(3);
             }
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), no_state) {
                 Ok(value) => value,
                 Err(code) => return code,
             };
@@ -174,7 +197,7 @@ fn main() -> ProcessExitCode {
         )
         .map(RenderedResult::Explanation),
         Commands::Status { operation_id } => {
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), false) {
                 Ok(value) => value,
                 Err(code) => return code,
             };
@@ -200,7 +223,7 @@ fn main() -> ProcessExitCode {
             }
         }
         Commands::Cancel { operation_id } => {
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref()) {
+            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), false) {
                 Ok(value) => value,
                 Err(code) => return code,
             };
@@ -346,7 +369,11 @@ fn tui_exit_code(scan_exit_code: u8, browser_exit: BrowserExit) -> u8 {
 
 fn resolve_state_store(
     explicit: Option<&std::path::Path>,
+    no_state: bool,
 ) -> Result<(Option<PathBuf>, Option<sweepx_core::DurableSnapshotStore>), ProcessExitCode> {
+    if no_state {
+        return Ok((None, None));
+    }
     let state_dir = match state_dir_from_explicit_or_default(explicit) {
         Ok(value) => value,
         Err(error) => {

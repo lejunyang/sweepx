@@ -223,15 +223,16 @@ sweepx [global-options] <command>
 
 | Flag | 语义与约束 |
 |---|---|
-| `--format human\|json\|ndjson` | 默认 `human`；JSON 只输出一个终态 envelope；NDJSON 只输出 durable event envelope。当前 scan NDJSON 因 journal/replay 未实现而在 admission 前返回 unsupported。机器格式 stdout 不混入日志，诊断走 stderr。 |
+| `--format human\|json\|ndjson` | 默认 `human`；JSON 只输出一个终态 envelope；NDJSON 只输出 durable event envelope。Linux 已有 bounded SQLite journal、单事务完整流/terminal snapshot 与 journal-first status；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI。事件仍在 scan 后批量构造，live sink、runtime qualification 和公开 `status --watch`/NDJSON 尚未闭合，因此 scan NDJSON 仍在 admission 前返回 unsupported。机器格式 stdout 不混入日志，诊断走 stderr。 |
 | `--output FILE` | 非交互命令可把选定格式写入新文件；默认 stdout。以当前用户私有权限写同目录临时文件并 no-replace 原子发布，拒绝 symlink、已存在路径和 `approve`；输出失败不重放已执行 action，结果从 audit/status 恢复。 |
 | `--locale zh-CN\|en-US` | 只影响 human 文案，不影响 enum/digest。 |
 | `--no-color`、`--quiet` | 只影响显示；不得隐藏终态 error/unknown/partial。 |
 | `--request-id UUID` | 客户端关联 ID，不参与授权；重复 ID 不使动作幂等。 |
-| `--state-dir PATH` | 只能选择当前用户私有、非 symlink/reparse 的 SweepX 状态目录；不能指向 scan target、root、Trash 或共享目录。Windows 当前因尚未实现 current-user-private DACL 与逐组件 reparse 检查而完全拒绝 durable state。执行时改变 state-dir 会使 plan/authorization 不可用。 |
-| `--after CURSOR` | `status --watch --format ndjson` 从 durable event cursor 续读；不重跑扫描或动作。 |
+| `--state-dir PATH` | 只能选择当前用户私有、非 symlink/reparse 的 SweepX 状态目录；不能指向 scan target、root、Trash 或共享目录。Linux 在此写 SQLite journal，macOS 保留 legacy operation snapshot。Windows 当前因尚未实现 current-user-private DACL 与逐组件 reparse 检查而完全拒绝 durable state。执行时改变 state-dir 会使 plan/authorization 不可用。 |
+| `scan --no-state` | 显式关闭只读扫描的 operation snapshot/event journal 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的扫描；不能与 `--state-dir` 组合，且命令结束后不能用 `status` 恢复该 operation。 |
+| `--after CURSOR` | **目标合同，当前公共 CLI 尚未实现。** 未来由 `status --watch --format ndjson` 从 durable event cursor 续读，不重跑扫描或动作。当前 `status` 只读取 terminal state，不接受 `--watch`、`--after` 或 NDJSON。 |
 
-flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失败即 exit 2，不做宽松转换。以上 flags 默认适用于所有非 `approve` 命令，例外已在表内列明；`--after` 只允许 `status --watch --format ndjson`，`--output` 与 interactive `approve` 冲突，`--quiet` 不得与 HumanApproval 合并以隐藏 exact plan 或 ApprovalSurface，`--detach` 只用于产生持久 operation ID 的 scan（未来若 execute 支持也必须复用同一 cancel/status 契约）。任何不适用或冲突组合在 admission 前返回结构化 `USAGE`，不会部分执行。
+flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失败即 exit 2，不做宽松转换。以上 flags 默认适用于所有非 `approve` 命令，例外已在表内列明；目标合同中的 `--after` 只允许 `status --watch --format ndjson`，当前 CLI 尚无这两个选项。`--output` 与 interactive `approve` 冲突，`--quiet` 不得与 HumanApproval 合并以隐藏 exact plan 或 ApprovalSurface，`--detach` 只用于产生持久 operation ID 的 scan（未来若 execute 支持也必须复用同一 cancel/status 契约）。任何不适用或冲突组合在 admission 前返回结构化 `USAGE`，不会部分执行。
 
 `scan` 的关键 flags：
 
@@ -332,7 +333,7 @@ Error {
 
 ### 5.2 可恢复 NDJSON
 
-这是目标合同，不代表当前 CLI 已提供该能力。当前 `scan --format ndjson` 在扫描、root validation 和 state 创建之前返回 unsupported；不得把现有内存 progress vector 暴露成非 durable stream。只有 durable journal、cursor replay/reset 与 durable `operation.terminal` 同时实现并通过 contract tests 后才可启用。
+这是目标合同，不代表当前 CLI 已提供该能力。当前 `scan --format ndjson` 在扫描、root validation 和 state 创建之前返回 unsupported；不得把 scan 完成后批量构造的 event vector 冒充 live stream。Linux 已有 bounded SQLite journal，在单个事务中写入完整 stream 与 terminal snapshot，Core `status` journal-first。event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate，但尚未接入 Core/CLI。仍需完成 live sink、runtime qualification 与公开 `status --watch`/NDJSON contract 才可启用。macOS 仍为 legacy snapshot，Windows durable state 仍禁用。
 
 每一行是完整 JSON 对象，使用 `sweepx.event/v1`：
 
@@ -355,7 +356,7 @@ Error {
 
 每条 event 的 `payload.compat` 或 `operation.started.payload.compat` 必须携带与单结果相同的 `requiredFeatures[]`、`extensions[]` 和版本摘要；后续 event 以该 operation compatibility snapshot 为准。
 
-同一 stream 的 `sequence` 严格递增；交付是 at-least-once，消费者用 `(streamId, sequence)` 去重。`cursor` 绑定 stream、sequence 和 checkpoint digest，客户端不得自行构造。`status --operation-id ID --watch --after CURSOR --format ndjson` 从 durable journal 续读，不重启 operation。terminal event 必须 durable；中间 progress 可合并，但错误、boundary、incomplete reason、intent、outcome 和 terminal 不可丢。
+同一 stream 的 `sequence` 严格递增；交付是 at-least-once，消费者用 `(streamId, sequence)` 去重。`cursor` 绑定 stream、sequence 和 checkpoint digest，客户端不得自行构造。目标合同中的 `status --operation-id ID --watch --after CURSOR --format ndjson` 将从 durable journal 续读，不重启 operation；当前公共 CLI 尚未实现 `--watch`、`--after` 或 status NDJSON。terminal event 必须 durable；中间 progress 可合并，但错误、boundary、incomplete reason、intent、outcome 和 terminal 不可丢。
 
 事件保留受配额限制。请求的 cursor 早于可用范围时，服务先发 `stream.reset_required`，payload 包含 `requestedSequence`、`availableFromSequence` 和 `snapshotRef`；客户端读取 `status` snapshot 后从新 cursor 继续，不能把缺口当作无事件。断线不会取消已 detach operation；前台命令收到 SIGINT 时只请求 cancel，并继续到 terminal/reconciliation 摘要。
 

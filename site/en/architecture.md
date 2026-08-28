@@ -15,8 +15,9 @@ absolute roots
   -> Core output envelope
   -> bounded human table | explicit JSON
   -> optional in-process file-manager TUI
-  -> durable terminal snapshot on Unix (optional state directory)
-  -> no durable terminal snapshot on Windows (state_dir defaults to None)
+  -> Linux bounded SQLite journal + terminal snapshot (unless scan --no-state)
+  -> macOS legacy terminal snapshot (unless scan --no-state)
+  -> Windows no durable state (state_dir defaults to None)
 
 bounded scan.result JSON
   -> imported provenance downgrade
@@ -30,14 +31,14 @@ Linux, macOS, and Windows connect real development-grade/degraded read-only scan
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
-| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache` | Platform boundaries, Linux read-only traversal, macOS handle-bound traversal, Windows handle-relative traversal, aggregation, and Unix-only durable state |
+| Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache`, `sweepx-event-journal` | Platform boundaries and read-only traversal/aggregation on all three platforms; the Linux bounded SQLite journal; the macOS legacy snapshot |
 | Analysis and Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 
 ## State and cancellation
 
-CLI scan completes synchronously and saves a terminal snapshot when a state directory is enabled on Unix. Windows durable state is disabled: `state_dir` defaults to `None`, no terminal snapshot is persisted, and explicit `--state-dir` fails closed. `status` is not connected to a background worker; live cancellation also remains disabled. The protocol layer now validates durable event envelopes/streams and durable-cursor shape, but scan NDJSON still stays disabled until SQLite journaling/replay and atomic terminal persistence exist. `cancel` returns an honest disposition; that is why its capability is disabled.
+CLI scan completes synchronously. On Linux, events are constructed as a batch after scanning, then the complete stream and terminal snapshot are committed to a bounded SQLite journal in one transaction; Core `status` is journal-first. The event-journal crate retains a Linux-test-only bounded cursor replay/reset substrate that is not wired into Core or the CLI. macOS still writes the legacy operation snapshot. `scan --no-state` skips the corresponding operation-state writes for read-only scans that do not need later status/operation state or whose state filesystem does not support the journal, and it conflicts with `--state-dir`. Windows durable state is disabled: `state_dir` defaults to `None`, and explicit `--state-dir` fails closed. There is no live sink, runtime qualification, or public `status --watch`/NDJSON surface; live cancellation also remains disabled. `cancel` returns an honest disposition, which is why its capability is disabled.
 
 ## Import is an explicit trust boundary
 
@@ -53,7 +54,7 @@ The P3 library layering deliberately leaves nowhere to plug in native mutation:
 - permits and the revalidation observer are simulation-specific;
 - executor requests contain no native path;
 - the adapter trait is sealed and its only implementation is deterministic and fake.
-- audit persistence is currently Unix-only; protocol-level durable event validation and schema/golden coverage now exist, but SQLite journaling/replay and atomic terminal persistence remain incomplete. It is still not release-grade native-mutation storage.
+- audit persistence is currently Unix-only; the separate Linux scan event-state path has a bounded SQLite journal and one-transaction complete-stream/terminal persistence. The event-journal crate replay/reset substrate is Linux-test-only and not wired into Core or the CLI; this is not live, public, cross-platform, runtime-qualified native-mutation storage.
 
 That supports state-machine and crash-semantics tests without deleting a target. The audit library performs filesystem I/O for its own state files; that is not mutation of scanned targets.
 

@@ -12,6 +12,17 @@ use tempfile::TempDir;
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
+
+#[cfg(target_os = "linux")]
+fn only_child_directory(path: &std::path::Path) -> PathBuf {
+    let entries = fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_dir());
+    entries.into_iter().next().unwrap()
+}
 #[cfg(unix)]
 #[test]
 fn locale_override_beats_environment_for_human_output() {
@@ -566,6 +577,7 @@ fn scan_defaults_to_a_human_readable_file_table() {
     cmd.current_dir(cli_crate_dir())
         .env("LANG", "en_US.UTF-8")
         .arg("scan")
+        .arg("--no-state")
         .arg(&root);
     let output = cmd.assert().get_output().stdout.clone();
     let text = String::from_utf8(output).unwrap();
@@ -576,6 +588,132 @@ fn scan_defaults_to_a_human_readable_file_table() {
     assert!(text.contains("Summary: 1 roots, 1 entries"));
     assert!(text.contains("0 boundaries, 0 errors"));
     assert!(!text.trim_start().starts_with('{'));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn no_state_scan_skips_default_state_directory() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let state_home = fixture.path().join("state-home");
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("XDG_STATE_HOME", &state_home)
+        .arg("--format")
+        .arg("json")
+        .arg("scan")
+        .arg("--no-state")
+        .arg(&root);
+    cmd.assert().success();
+
+    assert!(!state_home.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_default_state_environment_fails_closed_without_explicit_opt_out() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("HOME")
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("no default state directory is available")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn no_state_scan_skips_an_unsafe_default_state_path() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let redirected_state_home = fixture.path().join("redirected-state-home");
+    fs::create_dir(&redirected_state_home).unwrap();
+    let unsafe_state_home = fixture.path().join("state-home");
+    symlink(&redirected_state_home, &unsafe_state_home).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("XDG_STATE_HOME", &unsafe_state_home)
+        .arg("--format")
+        .arg("json")
+        .arg("scan")
+        .arg("--no-state")
+        .arg(&root);
+    cmd.assert().success();
+
+    assert!(!redirected_state_home.join("sweepx").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn default_state_symlink_ancestor_fails_before_creating_redirected_state() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let redirected_state_home = fixture.path().join("redirected-state-home");
+    fs::create_dir(&redirected_state_home).unwrap();
+    let unsafe_state_home = fixture.path().join("state-home");
+    symlink(&redirected_state_home, &unsafe_state_home).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("XDG_STATE_HOME", &unsafe_state_home)
+        .arg("scan")
+        .arg(&root);
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("must not be a symlink")
+    );
+    assert!(!redirected_state_home.join("sweepx").exists());
+}
+
+#[test]
+fn no_state_conflicts_with_explicit_state_directory() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg("--no-state")
+        .arg(fixture.path());
+    let output = cmd.assert().code(2).get_output().clone();
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["exitCode"], 2);
+    assert_eq!(json["errors"][0]["code"], "cli.conflicting_state_options");
+    assert_eq!(
+        json["errors"][0]["params"]["detail"],
+        "--no-state cannot be combined with --state-dir"
+    );
+    assert!(!state_dir.exists());
 }
 
 #[cfg(target_os = "windows")]
@@ -739,7 +877,7 @@ fn scan_ndjson_is_rejected_before_state_creation_or_root_validation() {
     let output = cmd.assert().code(3).get_output().clone();
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("disabled until SweepX has a durable event journal"));
+    assert!(stderr.contains("disabled until SweepX has a runtime-qualified live event stream"));
     assert!(!stderr.contains("scan root must be absolute"));
     assert!(!state_dir.exists());
 }
@@ -764,6 +902,9 @@ fn scan_json_persists_snapshot_for_status_lookup() {
     let scan_stdout = scan.assert().get_output().stdout.clone();
     let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
     let operation_id = scan_json["operationId"].as_str().unwrap().to_string();
+    let journal_dir = only_child_directory(&state_dir.join("event-journals"));
+    assert!(journal_dir.join("journal.db").is_file());
+    assert!(!state_dir.join("operations").exists());
 
     let mut status = cli_command();
     status
@@ -801,6 +942,82 @@ fn scan_json_persists_snapshot_for_status_lookup() {
             "terminalEventType",
             "updatedAt",
         ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_stdout = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
+    let operation_id = scan_json["operationId"].as_str().unwrap();
+    let journal_dir = only_child_directory(&state_dir.join("event-journals"));
+    let digest = journal_dir.file_name().unwrap().to_string_lossy();
+
+    let operations = state_dir.join("operations");
+    fs::create_dir(&operations).unwrap();
+    fs::set_permissions(&operations, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        operations.join(format!("{digest}.json")),
+        serde_json::to_vec(&json!({
+            "schema": "sweepx.operation-snapshot/v1",
+            "operationId": operation_id,
+            "requestId": "legacy-request",
+            "command": "scan",
+            "state": "completed",
+            "status": "ok",
+            "exitCode": 0,
+            "createdAt": "2026-08-28T00:00:00Z",
+            "updatedAt": "2026-08-28T00:00:00Z",
+            "locale": "en-US",
+            "rootPaths": [],
+            "scanId": null,
+            "terminalEventType": "operation.terminal",
+            "entryCount": "0",
+            "errorCount": "0",
+            "boundaryCount": "0",
+            "error": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let journal = journal_dir.join("journal.db");
+    let mut bytes = fs::read(&journal).unwrap();
+    bytes[0] ^= 0xff;
+    fs::write(&journal, bytes).unwrap();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(operation_id);
+    let output = status.assert().code(11).get_output().clone();
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("event journal failed")
     );
 }
 

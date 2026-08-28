@@ -35,6 +35,8 @@ use sweepx_cache::{
 use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
 use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
+#[cfg(target_os = "linux")]
+use sweepx_event_journal::{EventJournal, FinalSnapshotMetadata};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
 #[cfg(unix)]
 use sweepx_model::EvidenceValue;
@@ -79,8 +81,7 @@ const SNAPSHOT_SCHEMA: &str = "sweepx.operation-snapshot/v1";
 const OPERATION_ID_MAX_LEN: usize = 128;
 pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
-pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str =
-    "scan --format ndjson is disabled until SweepX has a durable event journal and replay support";
+pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str = "scan --format ndjson is disabled until SweepX has a runtime-qualified live event stream and public replay/watch support";
 #[cfg(unix)]
 const PREVIEW_GENERATION_POINTER_DIR: &str = "preview-cache";
 const CACHE_LOAD_MODE_MISS: &str = "miss";
@@ -889,6 +890,10 @@ pub enum StateError {
     #[error("state directory must be absolute: {0}")]
     NonAbsoluteStateDir(PathBuf),
     #[error(
+        "no default state directory is available; set XDG_STATE_HOME or HOME, pass --state-dir, or use scan --no-state"
+    )]
+    DefaultStateDirUnavailable,
+    #[error(
         "durable state is disabled on Windows until current-user-private ACL and reparse-point checks are implemented"
     )]
     DurableStateUnsupportedOnWindows,
@@ -904,6 +909,9 @@ pub enum StateError {
     Io(#[from] io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[cfg(target_os = "linux")]
+    #[error("event journal failed: {0}")]
+    EventJournal(#[from] sweepx_event_journal::JournalError),
 }
 
 /// Whether the current build can safely persist operation snapshots.
@@ -967,6 +975,75 @@ impl DurableSnapshotStore {
         Ok(self
             .operations_dir()?
             .join(format!("{}.json", digest_hex(operation_id.as_str()))))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn journal_dir(&self, operation_id: &ValidatedOperationId) -> PathBuf {
+        self.base_dir
+            .join("event-journals")
+            .join(digest_hex(operation_id.as_str()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn journal_path_if_present(
+        &self,
+        operation_id: &ValidatedOperationId,
+    ) -> Result<Option<PathBuf>, StateError> {
+        let journals = self.base_dir.join("event-journals");
+        match fs::symlink_metadata(&journals) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StateError::SymlinkStateDir(journals));
+            }
+            Ok(metadata) if metadata.is_dir() => ensure_private_dir(&journals)?,
+            Ok(_) => return Err(StateError::InvalidStateDir(journals)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let path = self.journal_dir(operation_id);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err(StateError::SymlinkStateDir(path))
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                ensure_private_dir(&path)?;
+                Ok(Some(path))
+            }
+            Ok(_) => Err(StateError::InvalidStateDir(path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_journal(
+        &self,
+        operation_id: &ValidatedOperationId,
+    ) -> Result<EventJournal, StateError> {
+        let journals = self.base_dir.join("event-journals");
+        validate_or_prepare_private_subdir(&journals)?;
+        Ok(EventJournal::open(self.journal_dir(operation_id))?)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_journal(
+        &self,
+        operation_id: &ValidatedOperationId,
+    ) -> Result<Option<EventJournal>, StateError> {
+        let Some(path) = self.journal_path_if_present(operation_id)? else {
+            return Ok(None);
+        };
+        for required in ["journal.db", "stream.lock"] {
+            if let Err(error) = fs::symlink_metadata(path.join(required)) {
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Err(sweepx_event_journal::JournalError::Corruption(
+                        "journal file is missing",
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(Some(EventJournal::open(path)?))
     }
 }
 
@@ -1182,10 +1259,6 @@ pub fn scan_with_store<S: SnapshotStore>(
         }
 
         let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
-        if let Some(store) = store {
-            store.save(&snapshot)?;
-        }
-
         let events = build_scan_events(
             &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
             &ids.operation_id,
@@ -1196,6 +1269,22 @@ pub fn scan_with_store<S: SnapshotStore>(
             &started_at,
             monotonic.elapsed(),
         );
+        #[cfg(target_os = "linux")]
+        let events = {
+            let mut events = events;
+            if let Some(state_dir) = request.state_dir.as_deref() {
+                persist_scan_journal(state_dir, &snapshot, &mut events)?;
+            } else if let Some(store) = store {
+                // In-memory callers retain the generic snapshot seam. Durable CLI
+                // scans always take the journal path above and never write legacy JSON.
+                store.save(&snapshot)?;
+            }
+            events
+        };
+        #[cfg(not(target_os = "linux"))]
+        if let Some(store) = store {
+            store.save(&snapshot)?;
+        }
 
         Ok(ScanSuccess {
             output,
@@ -1211,7 +1300,12 @@ pub fn status_with_store<S: SnapshotStore>(
     request: &StatusRequest,
     store: Option<&S>,
 ) -> Result<SnapshotSuccess, CoreError> {
-    let snapshot = load_snapshot(context, &request.operation_id, store)?;
+    let snapshot = load_snapshot_preferring_journal(
+        context,
+        &request.operation_id,
+        store,
+        request.state_dir.as_deref(),
+    )?;
     let output = status_output_from_snapshot(&request.operation_id, snapshot.as_ref());
     Ok(SnapshotSuccess { output, snapshot })
 }
@@ -1221,7 +1315,12 @@ pub fn cancel_with_store<S: SnapshotStore>(
     request: &CancelRequest,
     store: Option<&S>,
 ) -> Result<SnapshotSuccess, CoreError> {
-    let snapshot = load_snapshot(context, &request.operation_id, store)?;
+    let snapshot = load_snapshot_preferring_journal(
+        context,
+        &request.operation_id,
+        store,
+        request.state_dir.as_deref(),
+    )?;
     let output = cancel_output_from_snapshot(&request.operation_id, snapshot.as_ref());
     Ok(SnapshotSuccess { output, snapshot })
 }
@@ -2776,14 +2875,30 @@ fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
 
 #[cfg(unix)]
 fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
+    if !path.is_absolute() {
+        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
+    }
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        if current.exists() {
-            let meta = fs::symlink_metadata(&current)?;
-            if meta.file_type().is_symlink() {
-                return Err(StateError::SymlinkStateDir(current));
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(StateError::SymlinkStateDir(current));
+                }
+                if !meta.is_dir() {
+                    return Err(StateError::InvalidStateDir(current));
+                }
             }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&current)?;
+                set_private_dir_mode(&current)?;
+                let meta = fs::symlink_metadata(&current)?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(StateError::SymlinkStateDir(current));
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -3448,6 +3563,65 @@ fn load_snapshot<S: SnapshotStore>(
         Some(store) => Ok(store.load(validated.as_str())?),
         None => Ok(None),
     }
+}
+
+fn load_snapshot_preferring_journal<S: SnapshotStore>(
+    context: &CoreContext,
+    operation_id: &str,
+    store: Option<&S>,
+    state_dir: Option<&Path>,
+) -> Result<Option<OperationSnapshot>, CoreError> {
+    #[cfg(target_os = "linux")]
+    if let Some(state_dir) = state_dir {
+        let validated = ValidatedOperationId::parse(operation_id)
+            .map_err(|_| CoreError::InvalidOperationId(operation_id.to_string()))?;
+        let durable = DurableSnapshotStore::new(state_dir)?;
+        if let Some(journal) = durable.open_journal(&validated)? {
+            let snapshot = journal
+                .read_final_snapshot()
+                .map_err(StateError::from)?
+                .ok_or_else(|| {
+                    StateError::from(sweepx_event_journal::JournalError::Corruption(
+                        "terminal snapshot is missing",
+                    ))
+                })?;
+            let decoded: OperationSnapshot = serde_json::from_slice(snapshot.canonical_snapshot())?;
+            if decoded.operation_id != validated.as_str() {
+                return Err(StateError::InvalidOperationId(operation_id.to_string()).into());
+            }
+            return Ok(Some(decoded));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = state_dir;
+    load_snapshot(context, operation_id, store)
+}
+
+#[cfg(target_os = "linux")]
+fn persist_scan_journal(
+    state_dir: &Path,
+    snapshot: &OperationSnapshot,
+    events: &mut [EventEnvelope],
+) -> Result<(), CoreError> {
+    let store = DurableSnapshotStore::new(state_dir)?;
+    let operation_id = ValidatedOperationId::parse(&snapshot.operation_id)?;
+    let journal = store.create_journal(&operation_id)?;
+    let snapshot_value = serde_json::to_value(snapshot)?;
+    let final_snapshot =
+        FinalSnapshotMetadata::from_json(&snapshot_value).map_err(StateError::from)?;
+    let terminal = events
+        .last_mut()
+        .ok_or_else(|| StateError::InvalidOperationId(snapshot.operation_id.clone()))?;
+    terminal.payload = json!({
+        "status": snapshot.status,
+        "exitCode": snapshot.exit_code,
+        "kind": OutputKind::ScanResult,
+        "snapshotDigest": final_snapshot.snapshot_digest(),
+    });
+    journal
+        .append_complete_stream(events, &final_snapshot)
+        .map_err(StateError::from)?;
+    Ok(())
 }
 
 fn snapshot_from_output(
@@ -4249,7 +4423,18 @@ pub fn state_dir_from_explicit_or_default(
             }
             Ok(Some(path.to_path_buf()))
         }
-        None => Ok(default_state_dir()),
+        None => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(default_state_dir())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                default_state_dir()
+                    .map(Some)
+                    .ok_or(StateError::DefaultStateDirUnavailable)
+            }
+        }
     }
 }
 
@@ -4273,6 +4458,34 @@ fn home_dir() -> Option<PathBuf> {
 
 pub fn parse_locale_override(raw: &str) -> Result<Locale, sweepx_i18n::LocaleParseError> {
     raw.parse()
+}
+
+pub fn usage_error_output(code: &str, detail: &str) -> OutputEnvelope {
+    let ids = fresh_operation_ids("usage", &[]);
+    let mut output = OutputEnvelope::new(
+        OutputKind::ScanResult,
+        ids.request_id,
+        ids.operation_id,
+        timestamp_now(),
+        OutputStatus::Failed,
+        ExitCode::UsageError,
+        compat_snapshot(current_os_family()),
+    );
+    output.data = json!({
+        "scanId": Value::Null,
+        "roots": [],
+        "entries": [],
+        "aggregates": [],
+        "boundaries": [],
+    });
+    output.errors.push(protocol_error(
+        code,
+        "usage",
+        code,
+        false,
+        [("detail", detail.to_string())],
+    ));
+    output
 }
 
 pub fn validate_absolute_root(path: &OsStr) -> Result<PathBuf, CoreError> {
@@ -4335,6 +4548,8 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
     }
+    #[cfg(unix)]
+    validate_or_prepare_private_ancestor_chain(path)?;
     if path.exists() {
         let meta = fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
@@ -4354,6 +4569,8 @@ fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
     if !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows);
     }
+    #[cfg(unix)]
+    validate_or_prepare_private_ancestor_chain(path)?;
     if path.exists() {
         let meta = fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
@@ -4887,6 +5104,148 @@ mod tests {
         );
         let mode = fs::metadata(entry).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_fixture_with_journal(
+        state_dir: &Path,
+    ) -> (CoreContext, DurableSnapshotStore, ScanSuccess) {
+        let root = state_dir.parent().unwrap().join("scan-root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let store = DurableSnapshotStore::new(state_dir).unwrap();
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(state_dir.to_path_buf()),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        (context, store, scan)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scan_journal_is_the_only_new_terminal_snapshot_truth() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let (context, store, scan) = scan_fixture_with_journal(&state_dir);
+        let validated = ValidatedOperationId::parse(&scan.snapshot.operation_id).unwrap();
+        let journal_dir = store.journal_dir(&validated);
+
+        assert!(journal_dir.join("journal.db").is_file());
+        assert!(!state_dir.join("operations").exists());
+        assert_eq!(
+            fs::metadata(&journal_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let journal = EventJournal::open(&journal_dir).unwrap();
+        let final_snapshot = journal.read_final_snapshot().unwrap().unwrap();
+        assert_eq!(
+            final_snapshot.canonical_snapshot(),
+            sweepx_canonical::canonical_json_bytes(&scan.snapshot).unwrap()
+        );
+        let stored_snapshot: OperationSnapshot =
+            serde_json::from_slice(final_snapshot.canonical_snapshot()).unwrap();
+        assert_eq!(stored_snapshot, scan.snapshot);
+        let terminal = scan.events.last().unwrap();
+        let terminal_payload = terminal.terminal_payload().unwrap();
+        assert_eq!(terminal_payload.status, scan.snapshot.status);
+        assert_eq!(terminal_payload.exit_code as u8, scan.snapshot.exit_code);
+        assert_eq!(terminal_payload.kind, OutputKind::ScanResult);
+        assert_eq!(
+            terminal_payload.snapshot_digest,
+            final_snapshot.snapshot_digest()
+        );
+        drop(journal);
+
+        let status = status_with_store(
+            &context,
+            &StatusRequest {
+                operation_id: scan.snapshot.operation_id.clone(),
+                state_dir: Some(state_dir),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(status.snapshot, Some(scan.snapshot));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_snapshot_fallback_requires_journal_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let store = DurableSnapshotStore::new(&state_dir).unwrap();
+        let snapshot = OperationSnapshot {
+            schema: SNAPSHOT_SCHEMA.to_string(),
+            operation_id: "op-legacy-only".to_string(),
+            request_id: "req-legacy-only".to_string(),
+            command: "scan".to_string(),
+            state: OperationState::Completed,
+            status: OutputStatus::Ok,
+            exit_code: 0,
+            created_at: timestamp_now(),
+            updated_at: timestamp_now(),
+            locale: "en-US".to_string(),
+            root_paths: vec!["/tmp/legacy".to_string()],
+            scan_id: Some("scan-legacy".to_string()),
+            terminal_event_type: Some("operation.terminal".to_string()),
+            entry_count: Some("1".to_string()),
+            error_count: Some("0".to_string()),
+            boundary_count: Some("0".to_string()),
+            error: None,
+        };
+        store.save(&snapshot).unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+
+        let status = status_with_store(
+            &context,
+            &StatusRequest {
+                operation_id: snapshot.operation_id.clone(),
+                state_dir: Some(state_dir.clone()),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(status.snapshot, Some(snapshot.clone()));
+
+        let validated = ValidatedOperationId::parse(&snapshot.operation_id).unwrap();
+        let journal_dir = store.journal_dir(&validated);
+        validate_or_prepare_private_subdir(&journal_dir).unwrap();
+        fs::write(journal_dir.join("journal.db"), b"corrupt").unwrap();
+        fs::write(journal_dir.join("stream.lock"), b"").unwrap();
+        fs::set_permissions(
+            journal_dir.join("journal.db"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::set_permissions(
+            journal_dir.join("stream.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let error = status_with_store(
+            &context,
+            &StatusRequest {
+                operation_id: snapshot.operation_id.clone(),
+                state_dir: Some(state_dir),
+            },
+            Some(&store),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CoreError::State(_)), "{error:?}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

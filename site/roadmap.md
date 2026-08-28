@@ -14,9 +14,9 @@ title: 路线图
 | 轨道 | 当前证据 | 未完成边界 |
 |---|---|---|
 | P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
-| P1 scanner CLI | Linux read-only scan degraded；macOS handle-bound scan degraded；Windows handle-relative scan degraded；三者均通过 `scan` / `scan --tui` 暴露；Unix status snapshot 可用 | Windows durable state disabled，默认 `state_dir=None`，显式 `--state-dir` fail-closed；live cancel disabled；协议层 validator 已有但 scan NDJSON 仍 disabled；三平台/资源 gate 未闭合 |
+| P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status；event-journal crate 保留 Linux 测试专用 bounded cursor replay/reset substrate；macOS 保留 legacy snapshot；Windows scan handle-relative degraded | replay/reset 尚未接入 Core/CLI；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows durable state disabled；live cancel、live sink、runtime qualification、公开 `status --watch`/NDJSON 及三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` live 目录浏览、metadata-only Cleaner 可运行 | imported explain input report-only；TUI detail expansion 已是 single-flight 后台 rescan、2 s deadline、late result discard、32 stuck-worker cap；签名/沙箱/完整跨表面资格未闭合 |
-| P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；durable event envelope/stream validator 与 schema/golden 已完成 | 没有 CLI wiring、可信 HumanApproval broker、native path、真实 revalidation、SQLite journal/replay、atomic terminal persistence 或 platform adapter；阶段尚未资格化 |
+| P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal 与单事务 complete-stream/terminal persistence 已实现，event-journal crate 保留 Linux 测试专用 replay/reset substrate | replay/reset 尚未接入 Core/CLI；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、runtime qualification、公开 watch/NDJSON、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
 | P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |
 | P4+ mutation | 无公开能力 | Trash、Permanent 与发布资格全部是未来工作 |
 | 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
