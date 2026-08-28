@@ -47,6 +47,7 @@ use sweepx_model::{
     CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
     OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
+pub use sweepx_platform::CancellationToken;
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
 #[cfg(target_os = "linux")]
 use sweepx_protocol::StreamResetSnapshotRef;
@@ -69,7 +70,7 @@ use thiserror::Error;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use sweepx_platform::{CancellationToken, ScanRoot};
+use sweepx_platform::ScanRoot;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_scanner::{
     DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest, DetailRescanner,
@@ -2337,7 +2338,20 @@ pub fn cleaner_cargo_detect(
     context: &CoreContext,
     request: &CleanerCargoDetectRequest,
 ) -> Result<CleanerSuccess, CoreError> {
-    cleaner_cargo_detect_with_scope_runtime(context, request, || {
+    let cancel = CancellationToken::new();
+    cleaner_cargo_detect_with_cancel(context, request, &cancel)
+}
+
+/// Runs Cargo detection with caller-owned cancellation for the post-scan evidence stage.
+///
+/// The synchronous filesystem scan currently owns a separate internal token; cancelling this
+/// token before or during that scan is observed when fixed-input Cargo collection begins.
+pub fn cleaner_cargo_detect_with_cancel(
+    context: &CoreContext,
+    request: &CleanerCargoDetectRequest,
+    cancel: &CancellationToken,
+) -> Result<CleanerSuccess, CoreError> {
+    cleaner_cargo_detect_with_scope_runtime(context, request, cancel, || {
         cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
             std::env::var_os("CARGO_TARGET_DIR").is_some(),
             std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some(),
@@ -2349,6 +2363,7 @@ pub fn cleaner_cargo_detect(
 fn cleaner_cargo_detect_with_scope_runtime<F>(
     context: &CoreContext,
     request: &CleanerCargoDetectRequest,
+    cancel: &CancellationToken,
     config_scope_runtime: F,
 ) -> Result<CleanerSuccess, CoreError>
 where
@@ -2422,7 +2437,6 @@ where
         HostPlatformScanner::new(),
         cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
     );
-    let cancel = CancellationToken::new();
     let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
         &scan.summary,
         cleaner,
@@ -2430,19 +2444,9 @@ where
         source_scan_warning_count,
         &reader,
         config_scope_runtime,
-        &cancel,
+        cancel,
     )?;
-    let status = match detected.terminal_disposition() {
-        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Complete => OutputStatus::Ok,
-        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Partial => {
-            OutputStatus::Partial
-        }
-        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Cancelled => {
-            OutputStatus::Cancelled
-        }
-    };
-    let exit_code = ExitCode::from(status);
-    let reason_code = detected.primary_reason_code();
+    let (status, exit_code, reason_code) = cargo_detect_terminal_projection(&detected);
 
     let ids = fresh_operation_ids("cleaner-cargo-detect", &request.roots);
     let mut output = OutputEnvelope::new(
@@ -2498,6 +2502,25 @@ where
         ));
     }
     Ok(CleanerSuccess { output })
+}
+
+fn cargo_detect_terminal_projection(
+    detected: &cargo_cleaner_detect::ExperimentalCargoDetectResult,
+) -> (OutputStatus, ExitCode, &'static str) {
+    let status = match detected.terminal_disposition() {
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Complete => OutputStatus::Ok,
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Partial => {
+            OutputStatus::Partial
+        }
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Cancelled => {
+            OutputStatus::Cancelled
+        }
+    };
+    (
+        status,
+        ExitCode::from(status),
+        detected.primary_reason_code(),
+    )
 }
 
 pub fn tui_read_from_scan_json(
@@ -6516,11 +6539,14 @@ mod tests {
             sweepx_i18n::LocaleSource::Default,
         ));
         let invoked = AtomicBool::new(false);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
         let result = cleaner_cargo_detect_with_scope_runtime(
             &context,
             &CleanerCargoDetectRequest {
                 roots: vec![PathBuf::from("/path-that-must-not-be-scanned")],
             },
+            &cancel,
             || {
                 invoked.store(true, Ordering::SeqCst);
                 cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true)
@@ -6528,8 +6554,56 @@ mod tests {
         )
         .expect("incompatible cleaner should return a structured envelope");
 
+        assert_eq!(result.output.status, OutputStatus::Failed);
         assert_eq!(result.output.exit_code, ExitCode::CleanerTrustOrCompat);
+        assert_eq!(result.output.summary["scanPerformed"], false);
+        assert_eq!(
+            result.output.summary["reasonCode"],
+            cargo_cleaner_detect::BUILTIN_MANIFEST_INCOMPATIBLE
+        );
+        assert_eq!(result.output.data["builtinManifestCompatible"], false);
+        assert!(
+            result
+                .output
+                .errors
+                .iter()
+                .any(|error| error.code == "cleaner.compatibility")
+        );
         assert!(!invoked.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn legacy_cargo_detect_wrapper_preserves_compatibility_gate_semantics() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let request = CleanerCargoDetectRequest {
+            roots: vec![PathBuf::from("/path-that-must-not-be-scanned")],
+        };
+        let legacy = cleaner_cargo_detect(&context, &request)
+            .expect("legacy wrapper should return the compatibility envelope");
+        let caller_cancel = CancellationToken::new();
+        let caller_owned = cleaner_cargo_detect_with_cancel(&context, &request, &caller_cancel)
+            .expect("fresh caller token should return the compatibility envelope");
+
+        for result in [&legacy, &caller_owned] {
+            assert_eq!(result.output.status, OutputStatus::Failed);
+            assert_eq!(result.output.exit_code, ExitCode::CleanerTrustOrCompat);
+            assert_eq!(result.output.summary["scanPerformed"], false);
+            assert_eq!(
+                result.output.summary["reasonCode"],
+                cargo_cleaner_detect::BUILTIN_MANIFEST_INCOMPATIBLE
+            );
+            assert_eq!(result.output.data["builtinManifestCompatible"], false);
+            assert!(
+                result
+                    .output
+                    .errors
+                    .iter()
+                    .any(|error| error.code == "cleaner.compatibility")
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

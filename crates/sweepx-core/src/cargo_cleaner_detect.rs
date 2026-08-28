@@ -1380,6 +1380,67 @@ mod tests {
         assert!(!hint.executable);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_real_detector_propagates_pre_cancelled_token_without_authority() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        let summary = live_linux_summary(&root, "cargo-detect-linux-cancelled");
+        let cleaner = compatible_cleaner();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = detect_live_cargo_cleaner_candidates(
+            &summary,
+            &cleaner,
+            false,
+            0,
+            &live_reader(),
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.terminal_disposition(),
+            ExperimentalCargoTerminalDisposition::Cancelled
+        );
+        assert_eq!(result.primary_reason_code(), "cancelled");
+        assert!(result.matches.is_empty());
+        assert_eq!(result.hints.len(), 1);
+        let hint = &result.hints[0];
+        assert_eq!(
+            hint.disposition,
+            ExperimentalCargoDetectDisposition::ReportOnly
+        );
+        assert!(!hint.executable);
+        assert!(hint.rule_evaluation.report_only);
+        for reason_code in [
+            hint.evidence.cargo.workspace.reason_code.as_deref(),
+            hint.evidence.cargo.target_dir.reason_code.as_deref(),
+            hint.evidence.cargo.target_shape.reason_code.as_deref(),
+        ] {
+            assert_eq!(reason_code, Some("cancelled"));
+        }
+
+        let payload = experimental_cargo_detect_json(&result);
+        assert_eq!(payload["readOnly"], true);
+        assert_eq!(payload["candidateAllowed"], false);
+        assert_eq!(payload["planAllowed"], false);
+        assert_eq!(payload["approvalAllowed"], false);
+        assert_eq!(payload["executionAllowed"], false);
+        assert!(payload["hints"][0].get("candidate").is_none());
+        assert!(payload["hints"][0].get("plan").is_none());
+
+        let (status, exit_code, reason_code) = crate::cargo_detect_terminal_projection(&result);
+        assert_eq!(status, sweepx_protocol::OutputStatus::Cancelled);
+        assert_eq!(exit_code, sweepx_protocol::ExitCode::Cancelled);
+        assert_eq!(reason_code, "cancelled");
+    }
+
     #[test]
     fn stable_json_schema_includes_cargo_projection_without_candidate_or_plan_fields() {
         let summary = complete_layout_summary();

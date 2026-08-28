@@ -11,13 +11,14 @@ use sweepx_core::cache_status_unsupported;
 #[cfg(unix)]
 use sweepx_core::{CacheStatusRequest, cache_status, cache_status_state_error};
 use sweepx_core::{
-    CancelRequest, CleanerCargoDetectRequest, CleanerShowRequest, CoreContext, ExplainRequest,
-    OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest,
-    cache_status_usage_error, cancel_with_store, capabilities, cleaner_cargo_detect, cleaner_list,
-    cleaner_show, core_error_exit_code, durable_store, explain_from_scan_json,
-    parse_locale_override, render_human_output, scan_ndjson_supported, scan_with_store,
-    serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
-    tui_detail_rescan_provider, usage_error_output, validate_absolute_root,
+    CancelRequest, CancellationToken, CleanerCargoDetectRequest, CleanerShowRequest, CoreContext,
+    ExplainRequest, OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError,
+    StatusRequest, cache_status_usage_error, cancel_with_store, capabilities,
+    cleaner_cargo_detect_with_cancel, cleaner_list, cleaner_show, core_error_exit_code,
+    durable_store, explain_from_scan_json, parse_locale_override, render_human_output,
+    scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
+    state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
+    usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
@@ -332,8 +333,13 @@ fn main() -> ProcessExitCode {
                         return ProcessExitCode::from(2);
                     }
                 };
-                cleaner_cargo_detect(&context, &CleanerCargoDetectRequest { roots })
-                    .map(RenderedResult::Cleaner)
+                let cancel = CancellationToken::new();
+                cleaner_cargo_detect_with_cancel(
+                    &context,
+                    &CleanerCargoDetectRequest { roots },
+                    &cancel,
+                )
+                .map(RenderedResult::Cleaner)
             }
         },
         Commands::Cache { command } => match command {
