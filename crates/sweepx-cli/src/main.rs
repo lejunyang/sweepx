@@ -1,5 +1,7 @@
 use std::ffi::OsString;
 use std::io::IsTerminal;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
@@ -13,6 +15,8 @@ use sweepx_core::{
     state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
     usage_error_output, validate_absolute_root,
 };
+#[cfg(target_os = "linux")]
+use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
 use sweepx_protocol::OutputEnvelope;
 use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser_with_detail_rescan};
@@ -72,6 +76,10 @@ enum Commands {
     Status {
         #[arg(long)]
         operation_id: String,
+        #[arg(long)]
+        watch: bool,
+        #[arg(long)]
+        after: Option<String>,
     },
     Cancel {
         #[arg(long)]
@@ -196,7 +204,56 @@ fn main() -> ProcessExitCode {
             },
         )
         .map(RenderedResult::Explanation),
-        Commands::Status { operation_id } => {
+        Commands::Status {
+            operation_id,
+            watch,
+            after,
+        } => {
+            if after.is_some() && !watch {
+                let message = "--after requires --watch";
+                eprintln!("{message}");
+                return ProcessExitCode::from(2);
+            }
+            if watch && format != OutputFormat::Ndjson {
+                let message = "--watch requires --format ndjson";
+                eprintln!("{message}");
+                return ProcessExitCode::from(2);
+            }
+            if watch {
+                #[cfg(not(target_os = "linux"))]
+                {
+                    eprintln!("completed journal replay is unsupported on this platform");
+                    return ProcessExitCode::from(3);
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let state_dir =
+                        match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                eprintln!("{error}");
+                                return ProcessExitCode::from(state_error_exit_code(&error));
+                            }
+                        };
+                    let request = StatusReplayRequest {
+                        operation_id,
+                        state_dir,
+                        after,
+                    };
+                    let result = replay_completed_status(&context, &request);
+                    match result {
+                        Ok(result) => {
+                            let exit_code = replay_exit_code(&result);
+                            print_output(&context, format, &RenderedResult::Replay(result));
+                            return ProcessExitCode::from(exit_code);
+                        }
+                        Err(error) => {
+                            eprintln!("{error}");
+                            return ProcessExitCode::from(replay_error_exit_code(&error));
+                        }
+                    }
+                }
+            }
             let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), false) {
                 Ok(value) => value,
                 Err(code) => return code,
@@ -417,6 +474,16 @@ fn print_output(context: &CoreContext, format: OutputFormat, result: &RenderedRe
             RenderedResult::Scan(scan) => {
                 print!("{}", serialize_ndjson(&scan.events));
             }
+            #[cfg(target_os = "linux")]
+            RenderedResult::Replay(replay) => {
+                let stdout = std::io::stdout();
+                let mut lock = stdout.lock();
+                for event in &replay.events {
+                    serde_json::to_writer(&mut lock, event).expect("event serializable");
+                    lock.write_all(b"\n").expect("newline write");
+                    lock.flush().expect("stdout flush");
+                }
+            }
             _ => {
                 let line = serde_json::to_string(result.output()).expect("output serializable");
                 println!("{line}");
@@ -428,6 +495,8 @@ fn print_output(context: &CoreContext, format: OutputFormat, result: &RenderedRe
 enum RenderedResult {
     Scan(sweepx_core::ScanSuccess),
     Explanation(sweepx_core::ExplanationSuccess),
+    #[cfg(target_os = "linux")]
+    Replay(sweepx_core::CompletedReplaySuccess),
     Snapshot(sweepx_core::SnapshotSuccess),
     Cleaner(sweepx_core::CleanerSuccess),
     Capabilities(sweepx_core::CapabilitiesSuccess),
@@ -438,6 +507,8 @@ impl RenderedResult {
         match self {
             Self::Scan(scan) => &scan.output,
             Self::Explanation(explanation) => &explanation.output,
+            #[cfg(target_os = "linux")]
+            Self::Replay(replay) => &replay.output,
             Self::Snapshot(snapshot) => &snapshot.output,
             Self::Cleaner(cleaner) => &cleaner.output,
             Self::Capabilities(capabilities) => &capabilities.output,
@@ -446,6 +517,29 @@ impl RenderedResult {
 
     fn exit_code(&self) -> u8 {
         self.output().conservative_exit_code() as u8
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn replay_exit_code(result: &sweepx_core::CompletedReplaySuccess) -> u8 {
+    if result.reset_required {
+        0
+    } else {
+        result.terminal_exit_code as u8
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn replay_error_exit_code(error: &sweepx_core::CoreError) -> u8 {
+    match error {
+        sweepx_core::CoreError::InvalidOperationId(_)
+        | sweepx_core::CoreError::InvalidReplayCursor(_) => 2,
+        sweepx_core::CoreError::ReplayUnsupported(_) => 3,
+        sweepx_core::CoreError::ReplayNotFound(_) => 8,
+        sweepx_core::CoreError::State(StateError::DurableStateUnsupportedOnWindows)
+        | sweepx_core::CoreError::State(StateError::DefaultStateDirUnavailable) => 3,
+        sweepx_core::CoreError::State(_) => 11,
+        _ => core_error_exit_code(error) as u8,
     }
 }
 

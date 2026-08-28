@@ -2,10 +2,14 @@
 //!
 //! The hash chain detects accidental corruption and inconsistent partial state. It is deliberately
 //! unkeyed and therefore is not authentication against a same-user or offline writer. The public
-//! NDJSON capability remains disabled until Core owns journal lifecycle and replay end to end.
+//! Core exposes Linux-only NDJSON replay for completed persisted streams; live scan NDJSON remains
+//! disabled until a runtime-qualified live event sink exists.
 //! The 32 MiB size value is an admission target backed by SQLite page limits and conservative
 //! pre-append headroom, not a wall-clock or exact post-commit byte guarantee. This foundation uses
-//! full verification on each operation; it does not yet claim the design's one-second runtime gate.
+//! replay sessions verify one bounded snapshot up front and page only over that immutable snapshot.
+//! They do not follow later appends and therefore do not expose live streaming. Other journal
+//! operations still verify the durable state before acting, and this crate does not yet claim the
+//! design's one-second runtime gate.
 
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
@@ -31,8 +35,6 @@ use fs2::FileExt;
 use getrandom::fill as fill_random;
 #[cfg(target_os = "linux")]
 use rusqlite::Connection;
-#[cfg(all(test, target_os = "linux"))]
-use rusqlite::OptionalExtension;
 #[cfg(target_os = "linux")]
 use rusqlite::config::DbConfig;
 #[cfg(target_os = "linux")]
@@ -73,8 +75,10 @@ const MAX_BATCH_STORAGE_OVERHEAD_PER_EVENT: usize = 1024;
 #[cfg(target_os = "linux")]
 const MAX_EVENT_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "linux")]
+const MAX_REPLAY_DECODED_BYTES: usize = 192 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_CURSOR_BYTES: usize = 512;
+const MAX_CURSOR_BYTES: usize = sweepx_protocol::MAX_EVENT_CURSOR_BYTES;
 #[cfg(target_os = "linux")]
 const MAX_EVENTS: i64 = 50_000;
 #[cfg(target_os = "linux")]
@@ -87,6 +91,159 @@ pub struct ReplayBatch {
     pub next_cursor: Option<String>,
 }
 
+/// An immutable, fully verified view of one bounded journal generation.
+///
+/// Opening a session verifies the complete durable journal once. Page reads then operate only on
+/// that verified snapshot: they never observe later appends, wait for events, or poll for changes.
+#[derive(Debug)]
+pub struct ReplaySession {
+    events: Vec<EventEnvelope>,
+    #[cfg(target_os = "linux")]
+    cursor_offsets: BTreeMap<String, usize>,
+    integrity: JournalIntegrity,
+    final_snapshot: Option<FinalSnapshotMetadata>,
+}
+
+#[derive(Debug)]
+pub enum OwnedReplay {
+    ResetRequired { next_cursor: Option<String> },
+    Pages(ReplayPages),
+}
+
+#[derive(Debug)]
+pub struct ReplayPages {
+    events: std::vec::IntoIter<EventEnvelope>,
+    limit: usize,
+}
+
+impl Iterator for ReplayPages {
+    type Item = ReplayBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.events.len() == 0 {
+            return None;
+        }
+        let mut events = Vec::with_capacity(self.limit.min(self.events.len()));
+        for _ in 0..self.limit {
+            let Some(event) = self.events.next() else {
+                break;
+            };
+            events.push(event);
+        }
+        let next_cursor = events.last().map(|event| event.cursor.clone());
+        Some(ReplayBatch {
+            events,
+            reset_required: false,
+            next_cursor,
+        })
+    }
+}
+
+impl ReplaySession {
+    /// Returns at most `limit` verified events after `cursor`.
+    ///
+    /// `limit` must be in `1..=1024`. An unknown, well-formed cursor requests a reset to this
+    /// session's latest verified cursor. The session remains frozen even if its journal is later
+    /// appended to.
+    pub fn replay_from_cursor(
+        &self,
+        cursor: Option<&DurableCursor>,
+        limit: usize,
+    ) -> Result<ReplayBatch, JournalError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            let _ = cursor;
+            let _ = limit;
+            Err(JournalError::Unsupported)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if !(1..=1024).contains(&limit) {
+                return Err(JournalError::InvalidReplayLimit);
+            }
+
+            let start_offset = match cursor {
+                None => 0,
+                Some(cursor) => {
+                    let Some(offset) = self.cursor_offsets.get(cursor.as_str()).copied() else {
+                        return Ok(ReplayBatch {
+                            events: Vec::new(),
+                            reset_required: true,
+                            next_cursor: self.integrity.latest_cursor.clone(),
+                        });
+                    };
+                    offset
+                }
+            };
+            let end_offset = start_offset.saturating_add(limit).min(self.events.len());
+            let events = self.events[start_offset..end_offset].to_vec();
+            let next_cursor = events.last().map(|event| event.cursor.clone());
+
+            Ok(ReplayBatch {
+                events,
+                reset_required: false,
+                next_cursor,
+            })
+        }
+    }
+
+    /// Consumes this verified session into bounded owned pages without cloning event payloads.
+    pub fn into_replay_pages(
+        self,
+        cursor: Option<&DurableCursor>,
+    ) -> Result<OwnedReplay, JournalError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            let _ = cursor;
+            Err(JournalError::Unsupported)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let start_offset = match cursor {
+                None => 0,
+                Some(cursor) => {
+                    let Some(offset) = self.cursor_offsets.get(cursor.as_str()).copied() else {
+                        return Ok(OwnedReplay::ResetRequired {
+                            next_cursor: self.integrity.latest_cursor.clone(),
+                        });
+                    };
+                    offset
+                }
+            };
+            let mut events = self.events.into_iter();
+            for _ in 0..start_offset {
+                let _ = events.next();
+            }
+            Ok(OwnedReplay::Pages(ReplayPages {
+                events,
+                limit: 1024,
+            }))
+        }
+    }
+
+    /// The number of events covered by the session's full integrity verification.
+    pub fn verified_event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// The latest cursor in the immutable verified snapshot, if it is non-empty.
+    pub fn latest_cursor(&self) -> Option<&str> {
+        self.integrity.latest_cursor.as_deref()
+    }
+
+    /// Integrity facts frozen by the same transaction that supplied replay events and metadata.
+    pub fn integrity(&self) -> &JournalIntegrity {
+        &self.integrity
+    }
+
+    /// The terminal snapshot frozen by the session's verification transaction, when complete.
+    pub fn final_snapshot(&self) -> Option<&FinalSnapshotMetadata> {
+        self.final_snapshot.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalIntegrity {
     pub event_count: u64,
@@ -95,6 +252,8 @@ pub struct JournalIntegrity {
     pub latest_cursor: Option<String>,
     pub last_durable_sequence: u64,
     pub snapshot_digest: Option<String>,
+    decoded_event_bytes: usize,
+    cursor_index_bytes: usize,
     latest_record_digest: Option<String>,
     latest_emitted_at_ns: Option<i128>,
     latest_monotonic_offset_ns: Option<u128>,
@@ -219,6 +378,10 @@ impl FinalSnapshotMetadata {
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }
+
+    pub fn terminal_expectation(&self) -> &TerminalEventExpectation {
+        &self.terminal
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -319,7 +482,7 @@ impl DurableCursor {
     pub fn parse(value: impl Into<String>) -> Result<Self, JournalError> {
         let value = value.into();
         let Some(token) = value.strip_prefix("sxcur1.") else {
-            return Err(JournalError::UnknownCursor);
+            return Err(JournalError::MalformedCursor);
         };
         if value.len() > MAX_CURSOR_BYTES
             || token.len() < sweepx_protocol::MIN_DURABLE_CURSOR_TOKEN_BYTES
@@ -327,7 +490,7 @@ impl DurableCursor {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         {
-            return Err(JournalError::UnknownCursor);
+            return Err(JournalError::MalformedCursor);
         }
         Ok(Self(value))
     }
@@ -392,6 +555,14 @@ struct PreparedEventRecord {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct VerifiedJournal {
+    integrity: JournalIntegrity,
+    events: Vec<EventEnvelope>,
+    final_snapshot: Option<FinalSnapshotMetadata>,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,
@@ -422,6 +593,8 @@ pub enum JournalError {
     Unsupported,
     #[error("state directory must be absolute")]
     StateDirNotAbsolute,
+    #[error("event journal state does not exist")]
+    StateNotFound,
     #[error("state directory {0} contains unsafe components")]
     UnsafeStateDir(String),
     #[error("state path {0} must not be a symlink")]
@@ -440,12 +613,14 @@ pub enum JournalError {
     QuotaExceeded,
     #[error("event payload exceeds durable journal limit")]
     EventTooLarge,
+    #[error("decoded replay exceeds in-memory journal limit")]
+    ReplayMemoryLimitExceeded,
     #[error("terminal snapshot exceeds durable journal limit")]
     SnapshotTooLarge,
     #[error("journal has reached its event limit")]
     EventLimitExceeded,
-    #[error("cursor is unknown or invalid for this stream")]
-    UnknownCursor,
+    #[error("cursor is malformed")]
+    MalformedCursor,
     #[error("requested replay limit must be between 1 and 1024")]
     InvalidReplayLimit,
     #[error("event stream identity drift detected")]
@@ -490,22 +665,62 @@ pub enum JournalError {
 
 impl EventJournal {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, JournalError> {
+        Self::open_inner(root.as_ref(), true, true)
+    }
+
+    /// Opens and verifies one replay session without first performing a redundant full-journal
+    /// verification. No journal handle escapes before the session snapshot is verified.
+    pub fn open_verified_replay_session(
+        root: impl AsRef<Path>,
+    ) -> Result<ReplaySession, JournalError> {
+        let root = root.as_ref();
+        #[cfg(target_os = "linux")]
+        {
+            ensure_existing_private_state_dir(root)?;
+            for required in [LOCK_FILE, DATABASE_FILE] {
+                match fs::symlink_metadata(root.join(required)) {
+                    Ok(_) => ensure_private_regular_file(&root.join(required))?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(JournalError::StateNotFound);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Self::open_inner(root, false, false)?.snapshot_replay_session()
+    }
+
+    fn open_inner(
+        root: &Path,
+        verify_full_state: bool,
+        create_if_missing: bool,
+    ) -> Result<Self, JournalError> {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = root;
+            let _ = verify_full_state;
+            let _ = create_if_missing;
             Err(JournalError::Unsupported)
         }
         #[cfg(target_os = "linux")]
         {
-            let root = root.as_ref().to_path_buf();
-            ensure_private_state_dir(&root)?;
+            let root = root.to_path_buf();
+            if create_if_missing {
+                ensure_private_state_dir(&root)?;
+            } else {
+                ensure_existing_private_state_dir(&root)?;
+            }
             let root_directory = open_state_directory(&root)?;
             ensure_local_filesystem(&root_directory)?;
             let root_identity = file_identity(&root_directory)?;
             let anchored_root =
                 PathBuf::from(format!("/proc/self/fd/{}", root_directory.as_raw_fd()));
             let lock_path = anchored_root.join(LOCK_FILE);
-            let lock_file = open_lock_file(&lock_path)?;
+            let lock_file = if create_if_missing {
+                open_lock_file(&lock_path)?
+            } else {
+                open_existing_lock_file(&lock_path)?
+            };
             ensure_local_filesystem(&lock_file)?;
             let lock_identity = file_identity(&lock_file)?;
             lock_file
@@ -513,8 +728,10 @@ impl EventJournal {
                 .map_err(|_| JournalError::ConcurrentWriterDenied)?;
             let database_path = anchored_root.join(DATABASE_FILE);
             let database_preexisting = database_path.exists();
-            if !database_preexisting {
+            if !database_preexisting && create_if_missing {
                 create_private_database_file(&database_path)?;
+            } else if !database_preexisting {
+                return Err(JournalError::StateNotFound);
             }
             ensure_private_regular_file(&database_path)?;
             ensure_private_regular_file_if_exists(&root.join(format!("{DATABASE_FILE}-wal")))?;
@@ -544,7 +761,7 @@ impl EventJournal {
                 connection: Mutex::new(connection),
                 _lock: ExclusiveLock { file: lock_file },
             };
-            {
+            if verify_full_state {
                 let connection = journal.lock_connection()?;
                 let _ = verify_database(&connection)?;
             }
@@ -680,6 +897,9 @@ impl EventJournal {
             let mut records = Vec::with_capacity(events.len());
             let mut previous_digest = None::<String>;
             let mut payload_bytes = derived_snapshot.canonical_snapshot.len();
+            let mut replay_decoded_bytes =
+                derived_snapshot.canonical_snapshot.len().saturating_mul(4);
+            let mut replay_cursor_index_bytes = 0_usize;
 
             for (index, source_event) in events.iter().enumerate() {
                 let sequence = u64::try_from(index)
@@ -709,6 +929,18 @@ impl EventJournal {
                 }
                 payload_bytes =
                     checked_complete_stream_payload_bytes(payload_bytes, event_json.len())?;
+                replay_decoded_bytes = replay_decoded_bytes
+                    .checked_add(estimated_event_heap_bytes(event_json.len()))
+                    .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+                replay_cursor_index_bytes = replay_cursor_index_bytes
+                    .checked_add(estimated_cursor_index_bytes(&event.cursor))
+                    .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+                if replay_decoded_bytes
+                    .checked_add(replay_cursor_index_bytes)
+                    .is_none_or(|bytes| bytes > MAX_REPLAY_DECODED_BYTES)
+                {
+                    return Err(JournalError::ReplayMemoryLimitExceeded);
+                }
                 let digest = digest_event_record(
                     sequence,
                     previous_digest.as_deref(),
@@ -821,90 +1053,35 @@ impl EventJournal {
         }
     }
 
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn replay_from_cursor(
-        &self,
-        cursor: Option<&DurableCursor>,
-        limit: usize,
-    ) -> Result<ReplayBatch, JournalError> {
+    /// Opens an immutable replay snapshot after verifying the complete durable journal once.
+    ///
+    /// The returned session serves explicit bounded pages and never observes events appended after
+    /// it was opened. This is a finite replay primitive, not a live stream or watch API.
+    fn snapshot_replay_session(&self) -> Result<ReplaySession, JournalError> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = cursor;
-            let _ = limit;
             Err(JournalError::Unsupported)
         }
         #[cfg(target_os = "linux")]
         {
-            if !(1..=1024).contains(&limit) {
-                return Err(JournalError::InvalidReplayLimit);
-            }
             let connection = self.lock_connection()?;
-            let integrity = verify_database(&connection)?;
-            let latest_cursor = integrity.latest_cursor.clone();
             let transaction = connection.unchecked_transaction()?;
-            let current_head: (i64, Option<String>, Option<String>) = transaction.query_row(
-                "SELECT sequence,digest,cursor FROM journal_head WHERE singleton=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            if current_head.0
-                != i64::try_from(integrity.latest_sequence).map_err(|_| {
-                    JournalError::Corruption("verified sequence does not fit SQLite")
-                })?
-                || current_head.1 != integrity.latest_record_digest
-                || current_head.2 != integrity.latest_cursor
-            {
-                return Err(JournalError::StateIdentityChanged);
-            }
-            let start_sequence = match cursor {
-                None => 1_i64,
-                Some(cursor) => {
-                    let Some(stored) = lookup_cursor(&transaction, cursor.as_str())? else {
-                        transaction.commit()?;
-                        return Ok(ReplayBatch {
-                            events: Vec::new(),
-                            reset_required: true,
-                            next_cursor: latest_cursor,
-                        });
-                    };
-                    parse_i64(&stored.sequence)?
-                        .checked_add(1)
-                        .ok_or(JournalError::Corruption("cursor sequence overflow"))?
+            let verified = verify_database_snapshot(&transaction)?;
+            let mut cursor_offsets = BTreeMap::new();
+            for (offset, event) in verified.events.iter().enumerate() {
+                if cursor_offsets
+                    .insert(event.cursor.clone(), offset + 1)
+                    .is_some()
+                {
+                    return Err(JournalError::TamperDetected);
                 }
-            };
-
-            let latest_sequence: i64 = transaction.query_row(
-                "SELECT sequence FROM journal_head WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )?;
-
-            if start_sequence > latest_sequence + 1 {
-                return Err(JournalError::UnknownCursor);
             }
-
-            let mut statement = transaction.prepare(
-                "SELECT event_json,cursor FROM journal_events WHERE sequence>=?1 ORDER BY sequence LIMIT ?2",
-            )?;
-            let rows = statement.query_map(params![start_sequence, limit as i64], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut events = Vec::new();
-            let mut next_cursor = None;
-            for row in rows {
-                let (json, stored_cursor) = row?;
-                let event: EventEnvelope =
-                    serde_json::from_str(&json).map_err(|_| JournalError::TamperDetected)?;
-                next_cursor = Some(stored_cursor);
-                events.push(event);
-            }
-            drop(statement);
             transaction.commit()?;
-
-            Ok(ReplayBatch {
-                events,
-                reset_required: false,
-                next_cursor,
+            Ok(ReplaySession {
+                events: verified.events,
+                cursor_offsets,
+                integrity: verified.integrity,
+                final_snapshot: verified.final_snapshot,
             })
         }
     }
@@ -1004,6 +1181,20 @@ impl EventJournal {
         let mut connection = self.lock_connection()?;
         ensure_append_budget(&self.anchored_root, append_bytes)?;
         let integrity = verify_database(&connection)?;
+        let projected_replay_bytes = integrity
+            .decoded_event_bytes
+            .checked_add(integrity.cursor_index_bytes)
+            .and_then(|bytes| bytes.checked_add(estimated_event_heap_bytes(event_json.len())))
+            .and_then(|bytes| bytes.checked_add(estimated_cursor_index_bytes(&event.cursor)))
+            .and_then(|bytes| {
+                bytes.checked_add(final_snapshot.as_ref().map_or(0, |snapshot| {
+                    snapshot.canonical_snapshot.len().saturating_mul(4)
+                }))
+            })
+            .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+        if projected_replay_bytes > MAX_REPLAY_DECODED_BYTES {
+            return Err(JournalError::ReplayMemoryLimitExceeded);
+        }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let (
@@ -1216,30 +1407,12 @@ fn stream_generation_nonce(connection: &Connection) -> Result<String, JournalErr
 }
 
 #[cfg(target_os = "linux")]
-#[cfg(all(test, target_os = "linux"))]
-fn lookup_cursor(
-    connection: &Connection,
-    cursor: &str,
-) -> Result<Option<StoredCursor>, JournalError> {
-    connection
-        .query_row(
-            "SELECT stream_id,operation_id,sequence,digest FROM durable_cursors WHERE cursor=?1",
-            [cursor],
-            |row| {
-                Ok(StoredCursor {
-                    stream_id: row.get(0)?,
-                    operation_id: row.get(1)?,
-                    sequence: row.get(2)?,
-                    digest: row.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalError> {
+    Ok(verify_database_snapshot(connection)?.integrity)
 }
 
 #[cfg(target_os = "linux")]
-fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalError> {
+fn verify_database_snapshot(connection: &Connection) -> Result<VerifiedJournal, JournalError> {
     verify_connection_pragmas(connection)?;
     verify_initialized_database(connection)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -1252,6 +1425,8 @@ fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalE
     )?;
     let mut rows = statement.query([])?;
     let mut events = Vec::new();
+    let mut decoded_event_bytes = 0_usize;
+    let mut cursor_index_bytes = 0_usize;
     let mut cursor_rows = Vec::new();
     let mut previous_digest = None::<String>;
     let mut latest_cursor = None::<String>;
@@ -1272,6 +1447,19 @@ fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalE
         let event_json: String = row.get(4)?;
         if event_json.len() > MAX_EVENT_BYTES {
             return Err(JournalError::EventTooLarge);
+        }
+        let estimated_event_bytes = estimated_event_heap_bytes(event_json.len());
+        decoded_event_bytes = decoded_event_bytes
+            .checked_add(estimated_event_bytes)
+            .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+        cursor_index_bytes = cursor_index_bytes
+            .checked_add(estimated_cursor_index_bytes(&stored_cursor))
+            .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+        if decoded_event_bytes
+            .checked_add(cursor_index_bytes)
+            .is_none_or(|bytes| bytes > MAX_REPLAY_DECODED_BYTES)
+        {
+            return Err(JournalError::ReplayMemoryLimitExceeded);
         }
         let stored_digest: String = row.get(5)?;
         let stored_previous: Option<String> = row.get(6)?;
@@ -1416,34 +1604,37 @@ fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalE
     {
         return Err(JournalError::Corruption("snapshot metadata mismatch"));
     }
-    if let (Some(snapshot_digest), Some(snapshot_json)) = (&meta.2, &meta.3) {
+    let final_snapshot = if let (Some(snapshot_digest), Some(snapshot_json)) = (&meta.2, &meta.3) {
         if snapshot_json.len() > MAX_SNAPSHOT_BYTES
             || sha256_digest(snapshot_json) != *snapshot_digest
         {
             return Err(JournalError::TamperDetected);
         }
-        let _: serde_json::Value =
+        let projected_replay_bytes = decoded_event_bytes
+            .checked_add(cursor_index_bytes)
+            .and_then(|bytes| bytes.checked_add(snapshot_json.len().saturating_mul(4)))
+            .ok_or(JournalError::ReplayMemoryLimitExceeded)?;
+        if projected_replay_bytes > MAX_REPLAY_DECODED_BYTES {
+            return Err(JournalError::ReplayMemoryLimitExceeded);
+        }
+        let value: serde_json::Value =
             serde_json::from_slice(snapshot_json).map_err(|_| JournalError::TamperDetected)?;
-    }
+        let snapshot =
+            FinalSnapshotMetadata::from_json(&value).map_err(|_| JournalError::TamperDetected)?;
+        if snapshot.snapshot_digest != *snapshot_digest {
+            return Err(JournalError::TamperDetected);
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     verify_cursor_table(connection, &cursor_rows)?;
     if !events.is_empty() {
-        let expectation = if let Some(snapshot_digest) = meta.2.clone() {
-            let terminal = events
-                .last()
-                .ok_or(JournalError::Corruption("missing terminal"))?
-                .terminal_payload()
-                .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
-            Some(TerminalEventExpectation::new(
-                terminal.status,
-                terminal.exit_code,
-                terminal.kind,
-                snapshot_digest,
-            ))
-        } else {
-            None
-        };
-        if let Some(expectation) = expectation {
-            validate_durable_event_stream(&events, &expectation)
+        if let Some(snapshot) = &final_snapshot {
+            if meta.1.as_deref() != Some(snapshot.operation_id()) {
+                return Err(JournalError::TamperDetected);
+            }
+            validate_durable_event_stream(&events, snapshot.terminal_expectation())
                 .map_err(map_stream_validation_error)?;
         } else if events.iter().any(EventEnvelope::is_terminal_type) {
             return Err(JournalError::Corruption(
@@ -1452,17 +1643,23 @@ fn verify_database(connection: &Connection) -> Result<JournalIntegrity, JournalE
         }
     }
 
-    Ok(JournalIntegrity {
-        event_count: latest_sequence,
-        terminal_sequence,
-        latest_sequence,
-        latest_cursor,
-        last_durable_sequence,
-        snapshot_digest: meta.2,
-        latest_record_digest: previous_digest,
-        latest_emitted_at_ns,
-        latest_monotonic_offset_ns,
-        generation_nonce,
+    Ok(VerifiedJournal {
+        integrity: JournalIntegrity {
+            event_count: latest_sequence,
+            terminal_sequence,
+            latest_sequence,
+            latest_cursor,
+            last_durable_sequence,
+            snapshot_digest: meta.2,
+            decoded_event_bytes,
+            cursor_index_bytes,
+            latest_record_digest: previous_digest,
+            latest_emitted_at_ns,
+            latest_monotonic_offset_ns,
+            generation_nonce,
+        },
+        events,
+        final_snapshot,
     })
 }
 
@@ -1637,6 +1834,25 @@ fn canonical_event_json(event: &EventEnvelope) -> Result<String, JournalError> {
 }
 
 #[cfg(target_os = "linux")]
+fn estimated_event_heap_bytes(encoded_bytes: usize) -> usize {
+    // serde_json::Value may use several allocations per node. A four-times encoded-size
+    // allowance plus the envelope itself is a conservative admission estimate; it is not an
+    // allocator-exact RSS measurement.
+    encoded_bytes
+        .saturating_mul(4)
+        .saturating_add(std::mem::size_of::<EventEnvelope>())
+}
+
+#[cfg(target_os = "linux")]
+fn estimated_cursor_index_bytes(cursor: &str) -> usize {
+    // Charge both the owned key and conservative B-tree node/allocator overhead.
+    cursor
+        .len()
+        .saturating_add(std::mem::size_of::<(String, usize)>())
+        .saturating_add(128)
+}
+
+#[cfg(target_os = "linux")]
 fn base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
@@ -1675,14 +1891,6 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
     }
     out
-}
-
-#[cfg(target_os = "linux")]
-#[cfg(all(test, target_os = "linux"))]
-fn parse_i64(value: &str) -> Result<i64, JournalError> {
-    value
-        .parse()
-        .map_err(|_| JournalError::Corruption("invalid stored integer"))
 }
 
 #[cfg(target_os = "linux")]
@@ -1821,6 +2029,38 @@ fn ensure_private_state_dir(root: &Path) -> Result<(), JournalError> {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_existing_private_state_dir(root: &Path) -> Result<(), JournalError> {
+    if !root.is_absolute() {
+        return Err(JournalError::StateDirNotAbsolute);
+    }
+    let mut current = PathBuf::from("/");
+    for component in root.components() {
+        match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(part) => current.push(part),
+            _ => return Err(JournalError::UnsafeStateDir(root.display().to_string())),
+        }
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(JournalError::StateNotFound);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(JournalError::SymlinkRejected(current.display().to_string()));
+        }
+        if !metadata.is_dir() {
+            return Err(JournalError::UnsafeStateDir(current.display().to_string()));
+        }
+        if current == root {
+            validate_private_directory(&current, &metadata)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), JournalError> {
     use std::os::unix::fs::MetadataExt;
     if !metadata.is_dir()
@@ -1945,6 +2185,28 @@ fn open_lock_file(path: &Path) -> Result<File, JournalError> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    ensure_private_regular_file(path)?;
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+fn open_existing_lock_file(path: &Path) -> Result<File, JournalError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(JournalError::SymlinkRejected(path.display().to_string()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(JournalError::StateNotFound);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     ensure_private_regular_file(path)?;
@@ -2404,7 +2666,11 @@ mod tests {
             3,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        let replay = journal.replay_from_cursor(None, 10).unwrap();
+        let replay = journal
+            .snapshot_replay_session()
+            .unwrap()
+            .replay_from_cursor(None, 10)
+            .unwrap();
         assert!(!replay.reset_required);
         assert_eq!(replay.events.len(), 3);
         let all = journal
@@ -2450,7 +2716,11 @@ mod tests {
             assert_eq!(u128::from(event.checkpoint.last_durable_sequence), sequence);
         }
 
-        let replay = journal.replay_from_cursor(None, 10).unwrap();
+        let replay = journal
+            .snapshot_replay_session()
+            .unwrap()
+            .replay_from_cursor(None, 10)
+            .unwrap();
         assert!(!replay.reset_required);
         assert_eq!(replay.events, events);
         assert_eq!(
@@ -2465,6 +2735,240 @@ mod tests {
         assert_eq!(integrity.last_durable_sequence, 3);
         assert_eq!(integrity.terminal_sequence, Some(3));
         assert!(integrity.has_terminal_snapshot());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_session_pages_one_verified_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("paged-replay");
+        let mut events = unassigned_complete_stream(&final_snapshot);
+        journal
+            .append_complete_stream(&mut events, &final_snapshot)
+            .unwrap();
+
+        let session = journal.snapshot_replay_session().unwrap();
+        assert_eq!(session.verified_event_count(), 3);
+        assert_eq!(
+            session.latest_cursor(),
+            events.last().map(|event| event.cursor.as_str())
+        );
+        assert_eq!(session.integrity().event_count, 3);
+        assert_eq!(session.integrity().latest_sequence, 3);
+        assert_eq!(session.integrity().terminal_sequence, Some(3));
+        let frozen_snapshot = session.final_snapshot().unwrap();
+        assert_eq!(frozen_snapshot, &final_snapshot);
+        assert_eq!(
+            frozen_snapshot.terminal_expectation().exit_code,
+            OutputStatus::Ok.into()
+        );
+        assert_eq!(
+            frozen_snapshot.canonical_snapshot(),
+            final_snapshot.canonical_snapshot()
+        );
+
+        let first = session.replay_from_cursor(None, 1).unwrap();
+        assert!(!first.reset_required);
+        assert_eq!(first.events, events[0..1]);
+        assert_eq!(
+            first.next_cursor.as_deref(),
+            Some(events[0].cursor.as_str())
+        );
+
+        let first_cursor = DurableCursor::parse(first.next_cursor.unwrap()).unwrap();
+        let second = session.replay_from_cursor(Some(&first_cursor), 1).unwrap();
+        assert!(!second.reset_required);
+        assert_eq!(second.events, events[1..2]);
+        assert_eq!(
+            second.next_cursor.as_deref(),
+            Some(events[1].cursor.as_str())
+        );
+
+        let second_cursor = DurableCursor::parse(second.next_cursor.unwrap()).unwrap();
+        let third = session.replay_from_cursor(Some(&second_cursor), 1).unwrap();
+        assert_eq!(third.events, events[2..3]);
+        assert_eq!(
+            third.next_cursor.as_deref(),
+            Some(events[2].cursor.as_str())
+        );
+
+        let terminal_cursor = DurableCursor::parse(third.next_cursor.unwrap()).unwrap();
+        let exhausted = session
+            .replay_from_cursor(Some(&terminal_cursor), 1)
+            .unwrap();
+        assert!(!exhausted.reset_required);
+        assert!(exhausted.events.is_empty());
+        assert_eq!(exhausted.next_cursor, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn consuming_replay_yields_bounded_pages_without_empty_tail() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let final_snapshot = snapshot("owned-pages");
+        let mut events = Vec::with_capacity(1_026);
+        events.push(started("producer-start".to_string(), 1));
+        for sequence in 2..=1_025_u128 {
+            let mut event = progress(format!("producer-{sequence}"), sequence);
+            event.emitted_at = "2026-08-28T00:00:00Z".to_string();
+            events.push(event);
+        }
+        let mut terminal = terminal(
+            "producer-terminal".to_string(),
+            1_026,
+            final_snapshot.snapshot_digest(),
+        );
+        terminal.emitted_at = "2026-08-28T00:00:00Z".to_string();
+        events.push(terminal);
+        for event in &mut events {
+            event.sequence = DecimalU128::new(99);
+            event.checkpoint.durable = false;
+            event.checkpoint.last_durable_sequence = DecimalU128::ZERO;
+        }
+        journal
+            .append_complete_stream(&mut events, &final_snapshot)
+            .unwrap();
+
+        let after = DurableCursor::parse(events[0].cursor.clone()).unwrap();
+        let owned = journal
+            .snapshot_replay_session()
+            .unwrap()
+            .into_replay_pages(Some(&after))
+            .unwrap();
+        let OwnedReplay::Pages(mut pages) = owned else {
+            panic!("known cursor must not reset");
+        };
+        let first = pages.next().unwrap();
+        let second = pages.next().unwrap();
+        assert_eq!(first.events.len(), 1_024);
+        assert_eq!(second.events.len(), 1);
+        assert!(pages.next().is_none());
+        assert_eq!(first.events, events[1..1_025]);
+        assert_eq!(second.events, events[1_025..]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_session_enforces_page_limit() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let session = journal.snapshot_replay_session().unwrap();
+
+        assert!(matches!(
+            session.replay_from_cursor(None, 0),
+            Err(JournalError::InvalidReplayLimit)
+        ));
+        assert!(matches!(
+            session.replay_from_cursor(None, 1025),
+            Err(JournalError::InvalidReplayLimit)
+        ));
+        assert!(
+            session
+                .replay_from_cursor(None, 1)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(
+            session
+                .replay_from_cursor(None, 1024)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verified_replay_open_never_creates_missing_state() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing-journal");
+        assert!(matches!(
+            EventJournal::open_verified_replay_session(&missing),
+            Err(JournalError::StateNotFound)
+        ));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn durable_cursor_accepts_the_protocol_maximum_length() {
+        let token_len = MAX_CURSOR_BYTES - "sxcur1.".len();
+        let cursor = format!("sxcur1.{}", "a".repeat(token_len));
+        assert_eq!(cursor.len(), sweepx_protocol::MAX_EVENT_CURSOR_BYTES);
+        assert!(DurableCursor::parse(cursor).is_ok());
+        assert!(matches!(
+            DurableCursor::parse(format!("sxcur1.{}", "a".repeat(token_len + 1))),
+            Err(JournalError::MalformedCursor)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_session_never_follows_later_appends() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let first_cursor = next_cursor(&journal, None, 1);
+        let first_event = started(first_cursor.clone(), 1);
+        journal.append_event(&first_event).unwrap();
+        let session = journal.snapshot_replay_session().unwrap();
+
+        let second_cursor = next_cursor(&journal, Some(&latest_digest(&journal)), 2);
+        let second_event = progress(second_cursor, 2);
+        journal.append_event(&second_event).unwrap();
+
+        assert_eq!(
+            session.replay_from_cursor(None, 1024).unwrap().events,
+            vec![first_event]
+        );
+        let first_cursor = DurableCursor::parse(first_cursor).unwrap();
+        let exhausted = session
+            .replay_from_cursor(Some(&first_cursor), 1024)
+            .unwrap();
+        assert!(!exhausted.reset_required);
+        assert!(exhausted.events.is_empty());
+
+        let refreshed = journal.snapshot_replay_session().unwrap();
+        assert_eq!(
+            refreshed
+                .replay_from_cursor(Some(&first_cursor), 1024)
+                .unwrap()
+                .events,
+            vec![second_event]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_session_open_fails_closed_on_cursor_index_corruption() {
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let first_cursor = next_cursor(&journal, None, 1);
+        journal.append_event(&started(first_cursor, 1)).unwrap();
+        assert!(
+            journal
+                .snapshot_replay_session()
+                .unwrap()
+                .final_snapshot()
+                .is_none()
+        );
+        {
+            let connection = journal.lock_connection().unwrap();
+            connection
+                .execute("UPDATE durable_cursors SET digest='sha256:tampered'", [])
+                .unwrap();
+        }
+
+        assert!(matches!(
+            journal.snapshot_replay_session(),
+            Err(JournalError::TamperDetected)
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -2673,13 +3177,33 @@ mod tests {
         let root = private_root(&temp);
         let journal = EventJournal::open(&root).unwrap();
         let cursor = DurableCursor::parse("sxcur1.unknown-token-000").unwrap();
-        let replay = journal.replay_from_cursor(Some(&cursor), 10).unwrap();
+        let replay = journal
+            .snapshot_replay_session()
+            .unwrap()
+            .replay_from_cursor(Some(&cursor), 10)
+            .unwrap();
         assert!(replay.reset_required);
         assert!(replay.events.is_empty());
         assert!(replay.next_cursor.is_none());
         assert!(matches!(
             DurableCursor::parse("sxcur1.bad/path token"),
-            Err(JournalError::UnknownCursor)
+            Err(JournalError::MalformedCursor)
+        ));
+    }
+
+    #[test]
+    fn malformed_cursor_is_distinct_from_unknown_cursor() {
+        assert!(matches!(
+            DurableCursor::parse("not-a-durable-cursor"),
+            Err(JournalError::MalformedCursor)
+        ));
+        assert!(matches!(
+            DurableCursor::parse("sxcur1.short"),
+            Err(JournalError::MalformedCursor)
+        ));
+        assert!(matches!(
+            DurableCursor::parse("sxcur1.bad/path token"),
+            Err(JournalError::MalformedCursor)
         ));
     }
 
@@ -2875,11 +3399,12 @@ mod tests {
         let second_cursor = events[0].cursor.clone();
         let latest_cursor = events.last().unwrap().cursor.clone();
         assert_ne!(first_cursor.as_str(), second_cursor);
-        let replay = second.replay_from_cursor(Some(&first_cursor), 8).unwrap();
+        let session = second.snapshot_replay_session().unwrap();
+        let replay = session.replay_from_cursor(Some(&first_cursor), 8).unwrap();
         assert!(replay.reset_required);
         assert!(replay.events.is_empty());
         assert_eq!(replay.next_cursor, Some(latest_cursor));
-        let resume = second
+        let resume = session
             .replay_from_cursor(
                 Some(
                     &DurableCursor::parse(replay.next_cursor.unwrap())
@@ -3035,7 +3560,11 @@ mod tests {
         let cursor =
             DurableCursor::parse(journal.verify_integrity().unwrap().latest_cursor.unwrap())
                 .unwrap();
-        let replay = journal.replay_from_cursor(Some(&cursor), 10).unwrap();
+        let replay = journal
+            .snapshot_replay_session()
+            .unwrap()
+            .replay_from_cursor(Some(&cursor), 10)
+            .unwrap();
         assert!(!replay.reset_required);
         assert!(replay.events.is_empty());
         drop(journal);

@@ -47,6 +47,8 @@ use sweepx_model::{
     OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
 };
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
+#[cfg(target_os = "linux")]
+use sweepx_protocol::StreamResetSnapshotRef;
 use sweepx_protocol::{
     AuditProjectionSnapshot, CapabilityCell, CapabilityEvidence, CapabilityRecordV1,
     CompatSnapshot, EventCheckpoint, EventEnvelope, EventPhase, EventType, EvidenceClass, ExitCode,
@@ -289,6 +291,13 @@ pub struct ScanRequest {
 pub struct StatusRequest {
     pub operation_id: String,
     pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusReplayRequest {
+    pub operation_id: String,
+    pub state_dir: Option<PathBuf>,
+    pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -821,6 +830,15 @@ pub struct SnapshotSuccess {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CompletedReplaySuccess {
+    pub output: OutputEnvelope,
+    pub events: Vec<EventEnvelope>,
+    pub terminal_snapshot: OperationSnapshot,
+    pub terminal_exit_code: ExitCode,
+    pub reset_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExplanationSuccess {
     pub output: OutputEnvelope,
 }
@@ -883,6 +901,12 @@ pub enum CoreError {
     TuiRead(String),
     #[error("tui view-model load failed: {0}")]
     TuiViewModel(String),
+    #[error("invalid replay cursor: {0}")]
+    InvalidReplayCursor(String),
+    #[error("completed replay is unsupported: {0}")]
+    ReplayUnsupported(String),
+    #[error("completed replay not found: {0}")]
+    ReplayNotFound(String),
     #[error(transparent)]
     AuditProjection(#[from] ProjectionError),
 }
@@ -967,6 +991,15 @@ impl DurableSnapshotStore {
         Ok(Self { base_dir })
     }
 
+    #[cfg(target_os = "linux")]
+    fn open_existing(base_dir: impl Into<PathBuf>) -> Result<Option<Self>, StateError> {
+        let base_dir = base_dir.into();
+        if !validate_existing_state_dir(&base_dir)? {
+            return Ok(None);
+        }
+        Ok(Some(Self { base_dir }))
+    }
+
     fn operations_dir(&self) -> Result<PathBuf, StateError> {
         let path = self.base_dir.join("operations");
         validate_or_prepare_private_subdir(&path)?;
@@ -977,6 +1010,37 @@ impl DurableSnapshotStore {
         Ok(self
             .operations_dir()?
             .join(format!("{}.json", digest_hex(operation_id.as_str()))))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn existing_snapshot_is_present(
+        &self,
+        operation_id: &ValidatedOperationId,
+    ) -> Result<bool, StateError> {
+        let operations = self.base_dir.join("operations");
+        match fs::symlink_metadata(&operations) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StateError::SymlinkStateDir(operations));
+            }
+            Ok(metadata) if metadata.is_dir() => ensure_private_dir(&operations)?,
+            Ok(_) => return Err(StateError::InvalidStateDir(operations)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        let path = operations.join(format!("{}.json", digest_hex(operation_id.as_str())));
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(StateError::InvalidStateDir(path));
+        }
+        #[cfg(unix)]
+        if metadata.uid() != current_euid() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(StateError::InsecureStateDir(path));
+        }
+        Ok(true)
     }
 
     #[cfg(target_os = "linux")]
@@ -1046,6 +1110,28 @@ impl DurableSnapshotStore {
             }
         }
         Ok(Some(EventJournal::open(path)?))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_replay_session(
+        &self,
+        operation_id: &ValidatedOperationId,
+    ) -> Result<Option<sweepx_event_journal::ReplaySession>, StateError> {
+        let Some(path) = self.journal_path_if_present(operation_id)? else {
+            return Ok(None);
+        };
+        for required in ["journal.db", "stream.lock"] {
+            if let Err(error) = fs::symlink_metadata(path.join(required)) {
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Err(sweepx_event_journal::JournalError::Corruption(
+                        "journal file is missing",
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(Some(EventJournal::open_verified_replay_session(path)?))
     }
 }
 
@@ -1312,6 +1398,123 @@ pub fn status_with_store<S: SnapshotStore>(
     Ok(SnapshotSuccess { output, snapshot })
 }
 
+#[cfg(target_os = "linux")]
+pub fn replay_completed_status(
+    _context: &CoreContext,
+    request: &StatusReplayRequest,
+) -> Result<CompletedReplaySuccess, CoreError> {
+    let validated = ValidatedOperationId::parse(&request.operation_id)
+        .map_err(|_| CoreError::InvalidOperationId(request.operation_id.clone()))?;
+    let state_dir = request
+        .state_dir
+        .as_deref()
+        .ok_or(StateError::DefaultStateDirUnavailable)?;
+    let Some(durable) = DurableSnapshotStore::open_existing(state_dir)? else {
+        return Err(CoreError::ReplayNotFound(request.operation_id.clone()));
+    };
+    let session = match durable.open_replay_session(&validated)? {
+        Some(session) => session,
+        None if durable.existing_snapshot_is_present(&validated)? => {
+            return Err(CoreError::ReplayUnsupported(request.operation_id.clone()));
+        }
+        None => return Err(CoreError::ReplayNotFound(request.operation_id.clone())),
+    };
+    let final_snapshot = session.final_snapshot().ok_or_else(|| {
+        StateError::from(sweepx_event_journal::JournalError::Corruption(
+            "terminal snapshot is missing",
+        ))
+    })?;
+    if final_snapshot.operation_id() != validated.as_str() {
+        return Err(StateError::InvalidOperationId(request.operation_id.clone()).into());
+    }
+    let terminal_snapshot: OperationSnapshot =
+        serde_json::from_slice(final_snapshot.canonical_snapshot())?;
+    let terminal_exit_code = final_snapshot.terminal_expectation().exit_code;
+    let parsed_after = request
+        .after
+        .as_deref()
+        .map(|cursor| {
+            sweepx_event_journal::DurableCursor::parse(cursor.to_string())
+                .map_err(|_| CoreError::InvalidReplayCursor(cursor.to_string()))
+        })
+        .transpose()?;
+    let owned_replay = session
+        .into_replay_pages(parsed_after.as_ref())
+        .map_err(StateError::from)?;
+    let (events, reset_required, next_cursor) = match owned_replay {
+        sweepx_event_journal::OwnedReplay::ResetRequired { next_cursor } => {
+            let resume_after = next_cursor.as_deref().ok_or_else(|| {
+                StateError::from(sweepx_event_journal::JournalError::Corruption(
+                    "completed replay reset is missing its high-water cursor",
+                ))
+            })?;
+            (
+                vec![stream_reset_required_event(
+                    &request.operation_id,
+                    request
+                        .after
+                        .as_deref()
+                        .expect("reset only follows requested cursor"),
+                    resume_after,
+                )],
+                true,
+                next_cursor,
+            )
+        }
+        sweepx_event_journal::OwnedReplay::Pages(pages) => {
+            let mut events = Vec::new();
+            let mut next_cursor = None;
+            for page in pages {
+                next_cursor = page.next_cursor;
+                events.extend(page.events);
+            }
+            (events, false, next_cursor)
+        }
+    };
+    let mut output = OutputEnvelope::new(
+        OutputKind::StatusResult,
+        RequestId::new(format!("req-status-watch-{}", nonce_tag())),
+        OperationId::new(format!("op-status-watch-{}", nonce_tag())),
+        timestamp_now(),
+        terminal_snapshot.status,
+        terminal_exit_code,
+        compat_snapshot(current_os_family()),
+    );
+    output.summary = json!({
+        "found": true,
+        "operationId": terminal_snapshot.operation_id,
+        "state": terminal_snapshot.state,
+        "watch": true,
+        "resetRequired": reset_required,
+        "eventCount": DecimalU128::new(events.len() as u128),
+        "nextCursor": next_cursor,
+    });
+    output.data = json!({
+        "operationId": terminal_snapshot.operation_id,
+        "watch": true,
+        "resetRequired": output.summary["resetRequired"].clone(),
+        "eventCount": output.summary["eventCount"].clone(),
+        "nextCursor": output.summary["nextCursor"].clone(),
+    });
+    Ok(CompletedReplaySuccess {
+        output,
+        events,
+        terminal_snapshot,
+        terminal_exit_code,
+        reset_required,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn replay_completed_status(
+    _context: &CoreContext,
+    _request: &StatusReplayRequest,
+) -> Result<CompletedReplaySuccess, CoreError> {
+    Err(CoreError::ReplayUnsupported(
+        "completed journal replay is available only on Linux".to_string(),
+    ))
+}
+
 pub fn cancel_with_store<S: SnapshotStore>(
     context: &CoreContext,
     request: &CancelRequest,
@@ -1423,7 +1626,7 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             OsFamily::Linux,
             "scan.ndjson.stream",
             CapabilityState::Disabled,
-            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+            "SCAN_NDJSON_LIVE_SINK_UNQUALIFIED",
         ),
         capability_record(
             &recorded_at,
@@ -1432,6 +1635,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "operation.snapshot.durable",
             CapabilityState::Qualified,
             "STATUS_SNAPSHOT_SUPPORTED",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Linux,
+            CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
+            CapabilityState::Degraded,
+            "LINUX_COMPLETED_EVENT_REPLAY_SUPPORTED",
         ),
         capability_record(
             &recorded_at,
@@ -1479,7 +1690,7 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             OsFamily::Macos,
             "scan.ndjson.stream",
             CapabilityState::Disabled,
-            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+            "SCAN_NDJSON_LIVE_SINK_UNQUALIFIED",
         ),
         capability_record(
             &recorded_at,
@@ -1488,6 +1699,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "operation.snapshot.durable",
             CapabilityState::Qualified,
             "STATUS_SNAPSHOT_SUPPORTED",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Macos,
+            CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
+            CapabilityState::Disabled,
+            "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE",
         ),
         capability_record(
             &recorded_at,
@@ -1527,7 +1746,7 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             OsFamily::Windows,
             "scan.ndjson.stream",
             CapabilityState::Disabled,
-            "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT",
+            "SCAN_NDJSON_LIVE_SINK_UNQUALIFIED",
         ),
         capability_record(
             &recorded_at,
@@ -1536,6 +1755,14 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "operation.snapshot.durable",
             CapabilityState::Disabled,
             "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED",
+        ),
+        capability_record(
+            &recorded_at,
+            &qualification_expires_at,
+            OsFamily::Windows,
+            CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
+            CapabilityState::Disabled,
+            "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE",
         ),
         capability_record(
             &recorded_at,
@@ -3654,6 +3881,46 @@ fn persist_scan_journal(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn stream_reset_required_event(
+    operation_id: &str,
+    requested_cursor: &str,
+    resume_after: &str,
+) -> EventEnvelope {
+    let control_id = digest_hex(&format!(
+        "{operation_id}:{requested_cursor}:{}",
+        nonce_tag()
+    ));
+    let event = EventEnvelope {
+        schema: sweepx_protocol::EVENT_SCHEMA.to_string(),
+        stream_id: format!("replay-control-{}", &control_id[..24]),
+        operation_id: OperationId::new(operation_id.to_string()),
+        sequence: DecimalU128::new(1),
+        cursor: format!("sxcur1.control-{}", &control_id[24..48]),
+        emitted_at: timestamp_now(),
+        monotonic_offset_ns: DecimalU128::ZERO,
+        r#type: EventType::StreamResetRequired,
+        phase: EventPhase::Audit,
+        payload: json!({
+            "requestedCursor": requested_cursor,
+            "availableFromSequence": "1",
+            "snapshotRef": StreamResetSnapshotRef {
+                operation_id: operation_id.to_string(),
+            },
+            "resumeAfter": resume_after,
+        }),
+        terminal: false,
+        checkpoint: EventCheckpoint {
+            durable: false,
+            last_durable_sequence: DecimalU128::ZERO,
+        },
+    };
+    event
+        .validate()
+        .expect("reset control payload must validate");
+    event
+}
+
 fn snapshot_from_output(
     output: &OutputEnvelope,
     command: &str,
@@ -4171,10 +4438,16 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "CANCEL_LIVE_REGISTRY_ABSENT" => {
             "Cancel is disabled because P1 does not maintain a live in-process operation registry."
         }
-        "SCAN_NDJSON_DURABLE_JOURNAL_ABSENT" => {
-            "Scan NDJSON is disabled until a durable event journal and replay path are implemented."
+        "SCAN_NDJSON_LIVE_SINK_UNQUALIFIED" => {
+            "Scan NDJSON is disabled until a runtime-qualified live scan event sink is implemented."
         }
         "STATUS_SNAPSHOT_SUPPORTED" => "Status reads durable snapshots only.",
+        "LINUX_COMPLETED_EVENT_REPLAY_SUPPORTED" => {
+            "Linux status can replay a fully verified, already-completed persisted event stream; it is not live scan streaming."
+        }
+        "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE" => {
+            "Completed event replay is disabled because this platform has no compatible durable event journal."
+        }
         "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED" => {
             "Durable snapshots are disabled on Windows until current-user-private ACL and reparse-point checks are implemented."
         }
@@ -4264,6 +4537,7 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         CoreError::NonAbsoluteRoot(_)
         | CoreError::MissingRoots
         | CoreError::InvalidOperationId(_)
+        | CoreError::InvalidReplayCursor(_)
         | CoreError::InvalidAnalysisInputLimit
         | CoreError::NonAbsoluteAnalysisInput(_)
         | CoreError::AnalysisInputTooLarge { .. }
@@ -4274,6 +4548,8 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         CoreError::CleanerCompat { .. }
         | CoreError::CleanerCatalogTrust(_)
         | CoreError::ProductionCatalogTrust(_) => ExitCode::CleanerTrustOrCompat,
+        CoreError::ReplayUnsupported(_) => ExitCode::Unsupported,
+        CoreError::ReplayNotFound(_) => ExitCode::OperationFailed,
         CoreError::State(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::AuditProjection(_) => ExitCode::StateIntegrityUnavailable,
         CoreError::Scan(_)
@@ -4593,6 +4869,30 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     }
     set_private_dir_mode(path)?;
     ensure_private_dir(path)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
+    if !path.is_absolute() {
+        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(StateError::SymlinkStateDir(current));
+        }
+        if !metadata.is_dir() {
+            return Err(StateError::InvalidStateDir(current));
+        }
+    }
+    ensure_private_dir(path)?;
+    Ok(true)
 }
 
 fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {

@@ -27,7 +27,7 @@ pub const MAX_EVENT_CURSOR_BYTES: usize = 1024;
 pub const MAX_EVENT_TIMESTAMP_BYTES: usize = 64;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MIN_DURABLE_CURSOR_TOKEN_BYTES: usize = 16;
-pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 7] = [
+pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 8] = [
     CapabilityCell::SCAN_LOCAL_DIRECTORY,
     CapabilityCell::SCAN_NDJSON_STREAM,
     CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
@@ -35,6 +35,7 @@ pub const KNOWN_READ_ONLY_CAPABILITY_CELLS: [&str; 7] = [
     CapabilityCell::CATALOG_CLEANER_READ,
     CapabilityCell::SCAN_TUI_LIVE,
     CapabilityCell::OPERATION_CANCEL,
+    CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
 ];
 
 /// A stable, bounded capability-cell identifier.
@@ -55,6 +56,7 @@ impl CapabilityCell {
     pub const CATALOG_CLEANER_READ: &'static str = "catalog.cleaner.read";
     pub const SCAN_TUI_LIVE: &'static str = "scan.tui.live";
     pub const OPERATION_CANCEL: &'static str = "operation.cancel";
+    pub const OPERATION_EVENT_COMPLETED_REPLAY: &'static str = "operation.event.completed_replay";
     pub const TRASH_LOCAL_FILE: &'static str = "trash.local.file";
     pub const TRASH_LOCAL_DIRECTORY: &'static str = "trash.local.directory";
     pub const PERMANENT_LOCAL_FILE: &'static str = "permanent.local.file";
@@ -1415,6 +1417,9 @@ impl EventEnvelope {
         if self.is_terminal_type() && self.checkpoint.durable {
             self.terminal_payload()?;
         }
+        if self.r#type == EventType::StreamResetRequired {
+            self.stream_reset_required_payload()?;
+        }
 
         Ok(())
     }
@@ -1422,6 +1427,9 @@ impl EventEnvelope {
     /// Applies the single-event checks plus the opaque cursor format reserved for durable replay.
     pub fn validate_for_durable_stream(&self) -> Result<(), EventValidationError> {
         self.validate()?;
+        if self.r#type == EventType::StreamResetRequired {
+            return Err(EventValidationError::DeliveryControlInDurableStream);
+        }
         validate_durable_event_cursor(&self.cursor)?;
         if self.is_terminal_type() {
             if !self.checkpoint.durable {
@@ -1449,6 +1457,36 @@ impl EventEnvelope {
         }
         Ok(payload)
     }
+
+    /// Returns the typed payload carried by a replay delivery-control reset event.
+    ///
+    /// Reset controls are not members of the canonical durable operation stream. They use a
+    /// separate control stream and direct the consumer to the terminal snapshot before resuming
+    /// from the journal-owned high-water cursor.
+    pub fn stream_reset_required_payload(
+        &self,
+    ) -> Result<StreamResetRequiredPayload, EventValidationError> {
+        if self.r#type != EventType::StreamResetRequired {
+            return Err(EventValidationError::NotStreamResetRequiredEvent);
+        }
+        if self.checkpoint.durable {
+            return Err(EventValidationError::DeliveryControlMustNotBeDurable);
+        }
+        let payload: StreamResetRequiredPayload = serde_json::from_value(self.payload.clone())
+            .map_err(|error| EventValidationError::InvalidStreamResetPayload(error.to_string()))?;
+        validate_durable_event_cursor(&payload.requested_cursor)?;
+        validate_event_id(
+            &payload.snapshot_ref.operation_id,
+            "payload.snapshotRef.operationId",
+        )?;
+        validate_durable_event_cursor(&payload.resume_after)?;
+        if payload.available_from_sequence != DecimalU128::new(1) {
+            return Err(EventValidationError::InvalidStreamResetPayload(
+                "availableFromSequence must be 1 for completed-stream replay".to_string(),
+            ));
+        }
+        Ok(payload)
+    }
 }
 
 /// The exact payload carried by `operation.terminal`.
@@ -1459,6 +1497,23 @@ pub struct TerminalEventPayload {
     pub exit_code: ExitCode,
     pub kind: OutputKind,
     pub snapshot_digest: String,
+}
+
+/// Delivery-control payload emitted when a syntactically valid replay cursor is not known by
+/// the selected completed journal generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamResetRequiredPayload {
+    pub requested_cursor: String,
+    pub available_from_sequence: DecimalU128,
+    pub snapshot_ref: StreamResetSnapshotRef,
+    pub resume_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamResetSnapshotRef {
+    pub operation_id: String,
 }
 
 /// Expected terminal facts supplied by the owner of the final durable snapshot.
@@ -1644,7 +1699,11 @@ pub enum EventValidationError {
     },
     TerminalNotDurable,
     NotTerminalEvent,
+    NotStreamResetRequiredEvent,
     InvalidTerminalPayload(String),
+    InvalidStreamResetPayload(String),
+    DeliveryControlInDurableStream,
+    DeliveryControlMustNotBeDurable,
     InvalidSnapshotDigest,
     TerminalExitTooWeak {
         status: OutputStatus,
@@ -1706,8 +1765,20 @@ impl fmt::Display for EventValidationError {
             ),
             Self::TerminalNotDurable => formatter.write_str("operation.terminal must be durable"),
             Self::NotTerminalEvent => formatter.write_str("event is not operation.terminal"),
+            Self::NotStreamResetRequiredEvent => {
+                formatter.write_str("event is not stream.reset_required")
+            }
             Self::InvalidTerminalPayload(error) => {
                 write!(formatter, "invalid operation.terminal payload: {error}")
+            }
+            Self::InvalidStreamResetPayload(error) => {
+                write!(formatter, "invalid stream.reset_required payload: {error}")
+            }
+            Self::DeliveryControlInDurableStream => formatter.write_str(
+                "stream.reset_required is a delivery control, not a durable stream event",
+            ),
+            Self::DeliveryControlMustNotBeDurable => {
+                formatter.write_str("stream.reset_required must use a non-durable checkpoint")
             }
             Self::InvalidSnapshotDigest => formatter
                 .write_str("operation.terminal snapshotDigest must be a lowercase sha256 digest"),
@@ -1884,6 +1955,7 @@ fn validate_event_cursor(value: &str) -> Result<(), EventValidationError> {
 }
 
 fn validate_durable_event_cursor(value: &str) -> Result<(), EventValidationError> {
+    validate_event_cursor(value)?;
     let Some(token) = value.strip_prefix("sxcur1.") else {
         return Err(EventValidationError::InvalidDurableCursor);
     };
@@ -3104,6 +3176,73 @@ mod tests {
         assert!(!non_terminal.is_terminal_type());
     }
 
+    #[test]
+    fn stream_reset_payload_is_typed_and_rejects_unknown_fields() {
+        let event = EventEnvelope {
+            schema: EVENT_SCHEMA.to_string(),
+            stream_id: "replay-control-op-1".to_string(),
+            operation_id: OperationId::new("op-1"),
+            sequence: DecimalU128::new(1),
+            cursor: "sxcur1.control-token-0001".to_string(),
+            emitted_at: "2026-08-26T00:00:00Z".to_string(),
+            monotonic_offset_ns: DecimalU128::ZERO,
+            r#type: EventType::StreamResetRequired,
+            phase: EventPhase::Audit,
+            payload: json!({
+                "requestedCursor": "sxcur1.unknown-token-0001",
+                "availableFromSequence": "1",
+                "snapshotRef": { "operationId": "op-1" },
+                "resumeAfter": "sxcur1.terminal-token-001"
+            }),
+            terminal: false,
+            checkpoint: EventCheckpoint {
+                durable: false,
+                last_durable_sequence: DecimalU128::ZERO,
+            },
+        };
+        event.validate().unwrap();
+        let payload = event.stream_reset_required_payload().unwrap();
+        assert_eq!(payload.snapshot_ref.operation_id, "op-1");
+        assert_eq!(payload.available_from_sequence, DecimalU128::new(1));
+        assert!(matches!(
+            event.validate_for_durable_stream(),
+            Err(EventValidationError::DeliveryControlInDurableStream)
+        ));
+
+        let mut durable_control = event.clone();
+        durable_control.checkpoint.durable = true;
+        durable_control.checkpoint.last_durable_sequence = durable_control.sequence;
+        assert!(matches!(
+            durable_control.validate(),
+            Err(EventValidationError::DeliveryControlMustNotBeDurable)
+        ));
+
+        let mut unknown_field = event.clone();
+        unknown_field.payload["unexpected"] = json!(true);
+        assert!(matches!(
+            unknown_field.stream_reset_required_payload(),
+            Err(EventValidationError::InvalidStreamResetPayload(_))
+        ));
+
+        let mut invalid_available_from = event;
+        invalid_available_from.payload["availableFromSequence"] = json!("2");
+        assert!(matches!(
+            invalid_available_from.stream_reset_required_payload(),
+            Err(EventValidationError::InvalidStreamResetPayload(_))
+        ));
+
+        let oversized = format!("sxcur1.{}", "a".repeat(MAX_EVENT_CURSOR_BYTES));
+        let mut oversized_cursor = invalid_available_from;
+        oversized_cursor.payload["requestedCursor"] = json!(oversized);
+        assert!(matches!(
+            oversized_cursor.stream_reset_required_payload(),
+            Err(EventValidationError::FieldTooLong {
+                field: "cursor",
+                ..
+            })
+        ));
+    }
+
     fn durable_event_stream_example() -> Vec<EventEnvelope> {
         include_str!("../../../schemas/examples/sweepx.event.durable-stream.golden.ndjson")
             .lines()
@@ -3408,10 +3547,11 @@ mod tests {
     }
 
     #[test]
-    fn disabled_stream_and_state_cells_are_classified_read_only() {
+    fn stream_state_and_completed_replay_cells_are_classified_read_only() {
         for capability in [
             CapabilityCell::SCAN_NDJSON_STREAM,
             CapabilityCell::OPERATION_SNAPSHOT_DURABLE,
+            CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY,
         ] {
             assert!(
                 !CapabilityCell::new(capability)

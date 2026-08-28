@@ -210,9 +210,82 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "stream.reset_required"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "checkpoint": {
+            "required": [
+              "durable",
+              "lastDurableSequence"
+            ],
+            "properties": {
+              "durable": {
+                "const": false
+              },
+              "lastDurableSequence": {
+                "const": "0"
+              }
+            }
+          },
+          "payload": {
+            "$ref": "#/$defs/streamResetRequiredPayload"
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "streamResetRequiredPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedCursor",
+        "availableFromSequence",
+        "snapshotRef",
+        "resumeAfter"
+      ],
+      "properties": {
+        "requestedCursor": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^sxcur1\\.[A-Za-z0-9_-]{16,}$"
+        },
+        "availableFromSequence": {
+          "const": "1"
+        },
+        "snapshotRef": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operationId"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            }
+          }
+        },
+        "resumeAfter": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^sxcur1\\.[A-Za-z0-9_-]{16,}$"
+        }
+      }
+    },
     "durableTerminalPayload": {
       "type": "object",
       "additionalProperties": false,

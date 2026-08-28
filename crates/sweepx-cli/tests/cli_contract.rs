@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
@@ -57,7 +59,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
     assert_eq!(json["summary"]["commandCount"], "8");
-    assert_eq!(json["summary"]["capabilityCount"], "34");
+    assert_eq!(json["summary"]["capabilityCount"], "37");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert!(commands.iter().all(|command| command["mutating"] == false));
     assert!(commands.iter().all(|command| {
@@ -213,6 +215,39 @@ fn capabilities_json_uses_fixed_machine_keys() {
         })
         .unwrap();
     assert_eq!(linux_snapshot["state"], "qualified");
+
+    let linux_replay = json["data"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["qualificationKey"]["osFamily"] == "linux"
+                && item["qualificationKey"]["capability"]
+                    == CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY
+        })
+        .unwrap();
+    assert_eq!(linux_replay["state"], "degraded");
+    assert_eq!(
+        linux_replay["reasonCode"],
+        "LINUX_COMPLETED_EVENT_REPLAY_SUPPORTED"
+    );
+    for os in ["macos", "windows"] {
+        let replay = json["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["qualificationKey"]["osFamily"] == os
+                    && item["qualificationKey"]["capability"]
+                        == CapabilityCell::OPERATION_EVENT_COMPLETED_REPLAY
+            })
+            .unwrap();
+        assert_eq!(replay["state"], "disabled");
+        assert_eq!(
+            replay["reasonCode"],
+            "COMPLETED_EVENT_REPLAY_JOURNAL_UNAVAILABLE"
+        );
+    }
 
     let windows_scan = json["data"]["capabilities"]
         .as_array()
@@ -891,6 +926,387 @@ fn scan_ndjson_is_rejected_before_state_creation_or_root_validation() {
     assert!(!state_dir.exists());
 }
 
+#[test]
+fn status_watch_after_requires_watch() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("status")
+        .arg("--operation-id")
+        .arg("op-1")
+        .arg("--after")
+        .arg("sxcur1.invalid-token");
+
+    let output = cmd.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--after requires --watch"));
+}
+
+#[test]
+fn status_watch_requires_ndjson() {
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("status")
+        .arg("--operation-id")
+        .arg("op-1")
+        .arg("--watch");
+
+    let output = cmd.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--watch requires --format ndjson"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_replays_completed_journal_events() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_stdout = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
+    let operation_id = scan_json["operationId"].as_str().unwrap().to_string();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(&operation_id)
+        .arg("--watch");
+    let output = status.assert().success().get_output().clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(!events.is_empty());
+    assert_eq!(events.last().unwrap()["type"], "operation.terminal");
+    assert!(
+        events.last().unwrap()["payload"]["snapshotDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    let resume_cursor = events.first().unwrap()["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut resumed = cli_command();
+    resumed
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(&operation_id)
+        .arg("--watch")
+        .arg("--after")
+        .arg(&resume_cursor);
+    let resumed_stdout = resumed.assert().success().get_output().stdout.clone();
+    let resumed_events = String::from_utf8(resumed_stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(resumed_events, events[1..]);
+
+    let terminal_cursor = events.last().unwrap()["cursor"].as_str().unwrap();
+    let mut exhausted = cli_command();
+    exhausted
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(&operation_id)
+        .arg("--watch")
+        .arg("--after")
+        .arg(terminal_cursor);
+    exhausted.assert().success().stdout("");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_unknown_cursor_emits_one_reset_control() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_stdout = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
+    let operation_id = scan_json["operationId"].as_str().unwrap();
+
+    let mut full_replay = cli_command();
+    full_replay
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(operation_id)
+        .arg("--watch");
+    let full_stdout = full_replay.assert().success().get_output().stdout.clone();
+    let expected_high_water = String::from_utf8(full_stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .next_back()
+        .unwrap()["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let requested = "sxcur1.unknown-generation-token-0001";
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(operation_id)
+        .arg("--watch")
+        .arg("--after")
+        .arg(requested);
+    let stdout = status.assert().success().get_output().stdout.clone();
+    let lines = String::from_utf8(stdout).unwrap();
+    let events = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    let reset = &events[0];
+    assert_eq!(reset["type"], "stream.reset_required");
+    assert_eq!(reset["terminal"], false);
+    assert_eq!(reset["payload"]["requestedCursor"], requested);
+    assert_eq!(reset["payload"]["availableFromSequence"], "1");
+    assert_eq!(reset["payload"]["snapshotRef"]["operationId"], operation_id);
+    assert!(
+        reset["payload"]["resumeAfter"]
+            .as_str()
+            .unwrap()
+            .starts_with("sxcur1.")
+    );
+    assert_eq!(reset["payload"]["resumeAfter"], expected_high_water);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_with_malformed_cursor_exits_usage_error() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_stdout = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
+    let operation_id = scan_json["operationId"].as_str().unwrap().to_string();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(&operation_id)
+        .arg("--watch")
+        .arg("--after")
+        .arg("not-a-durable-cursor");
+
+    let output = status.assert().code(2).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid replay cursor"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_missing_operation_returns_not_found() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg("op-missing")
+        .arg("--watch");
+    let output = status.assert().code(8).get_output().clone();
+    assert!(output.stdout.is_empty());
+    assert!(!state_dir.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_missing_operation_does_not_create_legacy_directory() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    fs::create_dir(&state_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg("op-missing")
+        .arg("--watch");
+    let output = status.assert().code(8).get_output().clone();
+    assert!(output.stdout.is_empty());
+    assert!(!state_dir.join("operations").exists());
+    assert!(!state_dir.join("event-journals").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_watch_legacy_only_snapshot_is_unsupported() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+    let state_dir = fixture.path().join("state");
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_stdout = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_stdout).unwrap();
+    let operation_id = scan_json["operationId"].as_str().unwrap().to_string();
+    let journal_dir = only_child_directory(&state_dir.join("event-journals"));
+    let digest = journal_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    fs::remove_dir_all(&journal_dir).unwrap();
+
+    let operations = state_dir.join("operations");
+    fs::create_dir_all(&operations).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&operations, fs::Permissions::from_mode(0o700)).unwrap();
+    let legacy_path = operations.join(format!("{digest}.json"));
+    fs::write(
+        &legacy_path,
+        serde_json::to_vec(&json!({
+            "schema": "sweepx.operation-snapshot/v1",
+            "operationId": operation_id,
+            "requestId": "legacy-request",
+            "command": "scan",
+            "state": "completed",
+            "status": "ok",
+            "exitCode": 0,
+            "createdAt": "2026-08-28T00:00:00Z",
+            "updatedAt": "2026-08-28T00:00:00Z",
+            "locale": "en-US",
+            "rootPaths": [],
+            "scanId": null,
+            "terminalEventType": "operation.terminal",
+            "entryCount": "0",
+            "errorCount": "0",
+            "boundaryCount": "0",
+            "error": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(&operation_id)
+        .arg("--watch");
+    status.assert().code(3);
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn status_watch_is_unsupported_off_linux() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg("op-1")
+        .arg("--watch");
+    status.assert().code(3);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn scan_json_persists_snapshot_for_status_lookup() {
@@ -957,8 +1373,6 @@ fn scan_json_persists_snapshot_for_status_lookup() {
 #[cfg(target_os = "linux")]
 #[test]
 fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = TempDir::new().unwrap();
     let root = fixture.path().join("root");
     fs::create_dir(&root).unwrap();
@@ -1025,6 +1439,25 @@ fn corrupt_journal_does_not_fall_back_to_same_id_legacy_snapshot() {
     assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("event journal failed")
+    );
+
+    let mut watch = cli_command();
+    watch
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("ndjson")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .arg("--operation-id")
+        .arg(operation_id)
+        .arg("--watch");
+    let watch_output = watch.assert().code(11).get_output().clone();
+    assert!(watch_output.stdout.is_empty());
+    assert!(
+        String::from_utf8(watch_output.stderr)
             .unwrap()
             .contains("event journal failed")
     );
