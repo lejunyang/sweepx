@@ -413,12 +413,20 @@ impl<P: PlatformScanner> LocatorReader<P> {
 
     fn validate_base_directory(&self, base: &ScannedEntry) -> Result<(), LocatorReadError> {
         let identity = base
-            .identity
-            .as_ref()
+            .validated_identity()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
             .ok_or(LocatorReadError::InvalidRequest)?;
         if base.object_type != ObjectType::Directory
             || identity.parent_id.is_some()
             || identity.entry_id != identity.scan_root_id
+            || !matches!(
+                base.provenance,
+                sweepx_model::FieldProvenance::LiveObservation { .. }
+            )
+            || !matches!(
+                base.coverage.provenance,
+                sweepx_model::FieldProvenance::LiveObservation { .. }
+            )
             || base
                 .executable_native_locator()
                 .map_err(|_| LocatorReadError::InvalidRequest)?
@@ -1485,7 +1493,14 @@ mod tests {
         let mut base = summary.roots[0].clone();
         base.display_path = "/forged/reporting/path".to_string();
 
-        let observed = reader()
+        let paged = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_directory_batch_entries: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+        let observed = paged
             .observe_cargo_config_pair(&base, &CancellationToken::new())
             .unwrap();
 
@@ -1694,5 +1709,21 @@ mod tests {
                 Err(LocatorReadError::ResourceLimit)
             );
         }
+    }
+
+    #[test]
+    fn cargo_config_pair_rejects_stale_base_provenance() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        let mut summary = scan(&root, "cargo-pair-stale-base");
+        summary.roots[0].provenance = sweepx_model::FieldProvenance::StalePreview {
+            observed_at: "2026-08-28T00:00:00Z".to_string(),
+        };
+
+        assert_eq!(
+            reader().observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new()),
+            Err(LocatorReadError::InvalidRequest)
+        );
     }
 }
