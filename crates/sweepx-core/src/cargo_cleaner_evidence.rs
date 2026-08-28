@@ -22,6 +22,8 @@ use sweepx_scanner::{
 
 const CARGO_WORKSPACE_EVIDENCE_SCHEMA: &str = "cargo.workspace.v1";
 const CARGO_TARGET_DIR_EVIDENCE_SCHEMA: &str = "cargo.config.target-dir.v1";
+const CARGO_CONFIG_SCOPE_EVIDENCE_SCHEMA: &str = "cargo.config-scope.v1";
+const CARGO_WORKSPACE_TARGET_DIR_DECLARATION_SCHEMA: &str = "cargo.config.workspace-target-dir.v1";
 const CARGO_TARGET_SHAPE_EVIDENCE_SCHEMA: &str = "cargo.target-shape.v1";
 const CARGO_CONFIG_DECODER_ID: &str = "cargo-workspace-config-v1";
 const MAX_CARGO_INPUT_FILE_BYTES: usize = 4 * 1024 * 1024;
@@ -88,7 +90,6 @@ enum CargoEvidenceReason {
     ConfigReadFailed,
     ConfigScopeNotChecked,
     DuplicateTomlKey,
-    EnvironmentExpansionUnsupported,
     IncompleteScan,
     InvalidRelativeTargetDir,
     MalformedToml,
@@ -102,6 +103,7 @@ enum CargoEvidenceReason {
     TargetEntryMissing,
     UnexpectedTargetComponent,
     UnknownObjectType,
+    UnsupportedConfigInclude,
     UnsupportedManifestShape,
 }
 
@@ -115,7 +117,6 @@ impl CargoEvidenceReason {
             Self::ConfigReadFailed => "config_read_failed",
             Self::ConfigScopeNotChecked => "config_scope_not_checked",
             Self::DuplicateTomlKey => "duplicate_toml_key",
-            Self::EnvironmentExpansionUnsupported => "environment_expansion_unsupported",
             Self::IncompleteScan => "incomplete_scan",
             Self::InvalidRelativeTargetDir => "invalid_relative_target_dir",
             Self::MalformedToml => "malformed_toml",
@@ -129,6 +130,7 @@ impl CargoEvidenceReason {
             Self::TargetEntryMissing => "target_entry_missing",
             Self::UnexpectedTargetComponent => "unexpected_target_component",
             Self::UnknownObjectType => "unknown_object_type",
+            Self::UnsupportedConfigInclude => "unsupported_config_include",
             Self::UnsupportedManifestShape => "unsupported_manifest_shape",
         }
     }
@@ -155,7 +157,9 @@ struct CargoWorkspaceEvidenceV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CargoTargetDirSource {
-    WorkspaceDefault,
+    Default,
+    Config,
+    ConfigToml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,7 +198,7 @@ enum CargoConfigFile<'a> {
     Present(&'a [u8]),
     VerifiedAbsent,
     NotChecked,
-    ReadFailed,
+    ReadFailed(CargoEvidenceReason),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,13 +208,101 @@ enum CollectedCargoConfigFile<'a> {
     Failed(CargoEvidenceReason),
 }
 
+/// Redacted process-context observations captured by the caller. The decoder deliberately accepts
+/// presence only: it cannot inspect, retain, or serialize an environment value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CargoConfigScopeRuntime {
+    cargo_target_dir: CargoEnvironmentPresence,
+    cargo_build_target_dir: CargoEnvironmentPresence,
+    cargo_home: CargoEnvironmentPresence,
+}
+
+impl CargoConfigScopeRuntime {
+    pub(crate) const fn from_presence(
+        cargo_target_dir_present: bool,
+        cargo_build_target_dir_present: bool,
+        cargo_home_present: bool,
+    ) -> Self {
+        Self {
+            cargo_target_dir: CargoEnvironmentPresence::from_present(cargo_target_dir_present),
+            cargo_build_target_dir: CargoEnvironmentPresence::from_present(
+                cargo_build_target_dir_present,
+            ),
+            cargo_home: CargoEnvironmentPresence::from_present(cargo_home_present),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CargoEnvironmentPresence {
+    PresentRedacted,
+    VerifiedAbsent,
+}
+
+impl CargoEnvironmentPresence {
+    const fn from_present(present: bool) -> Self {
+        if present {
+            Self::PresentRedacted
+        } else {
+            Self::VerifiedAbsent
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum CargoConfigExternalSourceInput {
+    VerifiedAbsent,
+    NotChecked,
+    Failed(CargoEvidenceReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum CargoInvocationCwdInput {
+    BoundToWorkspaceRoot,
+    NotChecked,
+    Failed(CargoEvidenceReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoWorkspacePairInput {
+    StableSnapshot,
+    NotChecked,
+    Failed(CargoEvidenceReason),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CargoConfigScopeInputs {
+    runtime: CargoConfigScopeRuntime,
+    workspace_pair: CargoWorkspacePairInput,
+    ancestor_configs: CargoConfigExternalSourceInput,
+    cargo_home_config: CargoConfigExternalSourceInput,
+    cli_target_dir: CargoConfigExternalSourceInput,
+    cli_config_overrides: CargoConfigExternalSourceInput,
+    invocation_cwd: CargoInvocationCwdInput,
+}
+
+impl CargoConfigScopeInputs {
+    const fn production(runtime: CargoConfigScopeRuntime) -> Self {
+        Self {
+            runtime,
+            workspace_pair: CargoWorkspacePairInput::NotChecked,
+            ancestor_configs: CargoConfigExternalSourceInput::NotChecked,
+            cargo_home_config: CargoConfigExternalSourceInput::NotChecked,
+            cli_target_dir: CargoConfigExternalSourceInput::NotChecked,
+            cli_config_overrides: CargoConfigExternalSourceInput::NotChecked,
+            invocation_cwd: CargoInvocationCwdInput::NotChecked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CargoConfigInputs<'a> {
     config: CargoConfigFile<'a>,
     config_toml: CargoConfigFile<'a>,
-    /// This must be true only when the caller has separately established that no environment,
-    /// ancestor, home, or command-line Cargo configuration can override this workspace config.
-    override_sources_verified_absent: bool,
+    scope: CargoConfigScopeInputs,
 }
 
 impl Default for CargoConfigInputs<'_> {
@@ -218,15 +310,314 @@ impl Default for CargoConfigInputs<'_> {
         Self {
             config: CargoConfigFile::NotChecked,
             config_toml: CargoConfigFile::NotChecked,
-            override_sources_verified_absent: false,
+            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
+                false, false, false,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoConfigFileState {
+    Present,
+    VerifiedAbsent,
+    NotChecked { reason_code: CargoEvidenceReason },
+    Failed { reason_code: CargoEvidenceReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CargoWorkspaceConfigSelection {
+    Config,
+    ConfigToml,
+    None,
+    NotChecked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoWorkspacePairState {
+    StableSnapshot,
+    NotChecked { reason_code: CargoEvidenceReason },
+    Failed { reason_code: CargoEvidenceReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoWorkspaceTargetDirDeclarationV1 {
+    schema: &'static str,
+    decoder_id: &'static str,
+    relative_components: Vec<String>,
+    relative_path: String,
+    source: CargoTargetDirSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoWorkspaceTargetDirDeclaration {
+    Known {
+        value: CargoWorkspaceTargetDirDeclarationV1,
+    },
+    VerifiedAbsent,
+    NotChecked {
+        reason_code: CargoEvidenceReason,
+    },
+    Unknown {
+        reason_code: CargoEvidenceReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoWorkspaceConfigScopeEvidence {
+    pair_snapshot: CargoWorkspacePairState,
+    config: CargoConfigFileState,
+    config_toml: CargoConfigFileState,
+    selected: CargoWorkspaceConfigSelection,
+    target_dir_declaration: CargoWorkspaceTargetDirDeclaration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoWorkspaceConfigScopeProjection {
+    pair_snapshot: CargoWorkspacePairState,
+    config: CargoConfigFileState,
+    config_toml: CargoConfigFileState,
+    selected: CargoWorkspaceConfigSelection,
+    target_dir_declaration: CargoWorkspaceTargetDirDeclarationProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoWorkspaceTargetDirDeclarationProjection {
+    Known {
+        source: CargoTargetDirSource,
+        value_redacted: bool,
+    },
+    VerifiedAbsent,
+    NotChecked {
+        reason_code: CargoEvidenceReason,
+    },
+    Unknown {
+        reason_code: CargoEvidenceReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoConfigExternalSourceState {
+    VerifiedAbsent,
+    NotChecked { reason_code: CargoEvidenceReason },
+    Failed { reason_code: CargoEvidenceReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoEnvironmentVariableEvidence {
+    name: &'static str,
+    state: CargoEnvironmentPresence,
+    value_redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoConfigEnvironmentEvidence {
+    cargo_target_dir: CargoEnvironmentVariableEvidence,
+    cargo_build_target_dir: CargoEnvironmentVariableEvidence,
+    cargo_home: CargoEnvironmentVariableEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoConfigCliEvidence {
+    target_dir: CargoConfigExternalSourceState,
+    config_overrides: CargoConfigExternalSourceState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoInvocationCwdBinding {
+    BoundToWorkspaceRoot,
+    NotChecked { reason_code: CargoEvidenceReason },
+    Failed { reason_code: CargoEvidenceReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CargoConfigScopeBlocker {
+    AncestorConfigsFailed,
+    AncestorConfigsNotChecked,
+    CargoBuildTargetDirPresentRedacted,
+    CargoHomeConfigFailed,
+    CargoHomeConfigNotChecked,
+    CargoHomePresentRedacted,
+    CargoTargetDirPresentRedacted,
+    CliConfigOverridesFailed,
+    CliConfigOverridesNotChecked,
+    CliTargetDirFailed,
+    CliTargetDirNotChecked,
+    InvocationCwdBindingFailed,
+    InvocationCwdNotBound,
+    WorkspaceConfigDuplicateKey,
+    WorkspaceConfigIncludeUnsupported,
+    WorkspaceConfigMalformed,
+    WorkspaceConfigNotChecked,
+    WorkspaceConfigPairFailed,
+    WorkspaceConfigPairNotStable,
+    WorkspaceConfigReadFailed,
+    WorkspaceConfigResourceLimit,
+    WorkspaceConfigShapeUnsupported,
+    WorkspaceTargetDirInvalid,
+}
+
+impl CargoConfigScopeBlocker {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::AncestorConfigsFailed => "ancestor_configs_failed",
+            Self::AncestorConfigsNotChecked => "ancestor_configs_not_checked",
+            Self::CargoBuildTargetDirPresentRedacted => "cargo_build_target_dir_present_redacted",
+            Self::CargoHomeConfigFailed => "cargo_home_config_failed",
+            Self::CargoHomeConfigNotChecked => "cargo_home_config_not_checked",
+            Self::CargoHomePresentRedacted => "cargo_home_present_redacted",
+            Self::CargoTargetDirPresentRedacted => "cargo_target_dir_present_redacted",
+            Self::CliConfigOverridesFailed => "cli_config_overrides_failed",
+            Self::CliConfigOverridesNotChecked => "cli_config_overrides_not_checked",
+            Self::CliTargetDirFailed => "cli_target_dir_failed",
+            Self::CliTargetDirNotChecked => "cli_target_dir_not_checked",
+            Self::InvocationCwdBindingFailed => "invocation_cwd_binding_failed",
+            Self::InvocationCwdNotBound => "invocation_cwd_not_bound",
+            Self::WorkspaceConfigDuplicateKey => "workspace_config_duplicate_key",
+            Self::WorkspaceConfigIncludeUnsupported => "workspace_config_include_unsupported",
+            Self::WorkspaceConfigMalformed => "workspace_config_malformed",
+            Self::WorkspaceConfigNotChecked => "workspace_config_not_checked",
+            Self::WorkspaceConfigPairFailed => "workspace_config_pair_failed",
+            Self::WorkspaceConfigPairNotStable => "workspace_config_pair_not_stable",
+            Self::WorkspaceConfigReadFailed => "workspace_config_read_failed",
+            Self::WorkspaceConfigResourceLimit => "workspace_config_resource_limit",
+            Self::WorkspaceConfigShapeUnsupported => "workspace_config_shape_unsupported",
+            Self::WorkspaceTargetDirInvalid => "workspace_target_dir_invalid",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct CargoConfigScopeEvidenceV1 {
+    schema: &'static str,
+    decoder_id: &'static str,
+    workspace: CargoWorkspaceConfigScopeEvidence,
+    ancestor_configs: CargoConfigExternalSourceState,
+    cargo_home_config: CargoConfigExternalSourceState,
+    environment: CargoConfigEnvironmentEvidence,
+    cli: CargoConfigCliEvidence,
+    invocation_cwd: CargoInvocationCwdBinding,
+    precedence_complete: bool,
+    blockers: Vec<CargoConfigScopeBlocker>,
+}
+
+impl CargoConfigScopeEvidenceV1 {
+    pub(crate) fn projected(&self) -> CargoConfigScopeProjectionV1 {
+        let pair_is_stable = matches!(
+            self.workspace.pair_snapshot,
+            CargoWorkspacePairState::StableSnapshot
+        );
+        let project_file = |state: &CargoConfigFileState| match (pair_is_stable, state) {
+            (false, CargoConfigFileState::VerifiedAbsent) => CargoConfigFileState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+            },
+            _ => state.clone(),
+        };
+        CargoConfigScopeProjectionV1 {
+            schema: self.schema,
+            decoder_id: self.decoder_id,
+            workspace: CargoWorkspaceConfigScopeProjection {
+                pair_snapshot: self.workspace.pair_snapshot.clone(),
+                config: project_file(&self.workspace.config),
+                config_toml: project_file(&self.workspace.config_toml),
+                selected: self.workspace.selected,
+                target_dir_declaration: match &self.workspace.target_dir_declaration {
+                    CargoWorkspaceTargetDirDeclaration::Known { value } => {
+                        CargoWorkspaceTargetDirDeclarationProjection::Known {
+                            source: value.source,
+                            value_redacted: true,
+                        }
+                    }
+                    CargoWorkspaceTargetDirDeclaration::VerifiedAbsent => {
+                        CargoWorkspaceTargetDirDeclarationProjection::VerifiedAbsent
+                    }
+                    CargoWorkspaceTargetDirDeclaration::NotChecked { reason_code } => {
+                        CargoWorkspaceTargetDirDeclarationProjection::NotChecked {
+                            reason_code: *reason_code,
+                        }
+                    }
+                    CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } => {
+                        CargoWorkspaceTargetDirDeclarationProjection::Unknown {
+                            reason_code: *reason_code,
+                        }
+                    }
+                },
+            },
+            ancestor_configs: self.ancestor_configs.clone(),
+            cargo_home_config: self.cargo_home_config.clone(),
+            environment: self.environment.clone(),
+            cli: self.cli.clone(),
+            invocation_cwd: self.invocation_cwd.clone(),
+            precedence_complete: self.precedence_complete,
+            blockers: self
+                .blockers
+                .iter()
+                .copied()
+                .map(CargoConfigScopeBlocker::code)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoConfigScopeProjectionV1 {
+    schema: &'static str,
+    decoder_id: &'static str,
+    workspace: CargoWorkspaceConfigScopeProjection,
+    ancestor_configs: CargoConfigExternalSourceState,
+    cargo_home_config: CargoConfigExternalSourceState,
+    environment: CargoConfigEnvironmentEvidence,
+    cli: CargoConfigCliEvidence,
+    invocation_cwd: CargoInvocationCwdBinding,
+    precedence_complete: bool,
+    blockers: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CargoTypedEvidenceV1 {
     workspace: CargoEvidence<CargoWorkspaceEvidenceV1>,
+    config_scope: CargoConfigScopeEvidenceV1,
     target_dir: CargoEvidence<CargoTargetDirEvidenceV1>,
     target_shape: CargoEvidence<CargoTargetShapeEvidenceV1>,
     not_shared: CargoEvidence<()>,
@@ -255,6 +646,10 @@ impl CargoTypedEvidenceV1 {
             CargoEvidence::Known { value } => Some(value.workspace_id.as_str()),
             CargoEvidence::Unknown { .. } | CargoEvidence::NotChecked { .. } => None,
         }
+    }
+
+    pub(crate) fn config_scope_projection(&self) -> CargoConfigScopeProjectionV1 {
+        self.config_scope.projected()
     }
 
     pub(crate) const fn target_dir_state(&self) -> CargoEvidenceStateProjection {
@@ -306,8 +701,8 @@ impl CargoTypedEvidenceV1 {
     }
 }
 
-/// Opaque until a future handle-bound reader is implemented in this module. Private fields prevent
-/// another crate module from pairing arbitrary bytes with trusted scan identities.
+/// Constructed only after the handle-bound collector reopens the admitted scan identities. Private
+/// fields prevent another crate module from pairing arbitrary bytes with trusted scan identities.
 pub(crate) struct HandleBoundCargoInputs<'a> {
     root_entry_id: &'a ScanEntryId,
     manifest_entry_id: &'a ScanEntryId,
@@ -325,6 +720,7 @@ pub(crate) fn produce_cargo_typed_evidence(
     if !summary_identity_graph_is_unique_and_complete(summary) {
         return CargoTypedEvidenceV1 {
             workspace: unknown(CargoEvidenceReason::MissingIdentity),
+            config_scope: decode_config_scope(input.config_inputs),
             target_dir: unknown(CargoEvidenceReason::MissingIdentity),
             target_shape: unknown(CargoEvidenceReason::MissingIdentity),
             not_shared: CargoEvidence::NotChecked {
@@ -352,7 +748,7 @@ pub(crate) fn produce_cargo_typed_evidence(
         });
     }
     let budget = validate_input_budget(files);
-    let (workspace, target_dir) = match budget {
+    let (workspace, mut config_scope) = match budget {
         Ok(()) => (
             decode_bound_workspace_manifest(
                 summary,
@@ -360,9 +756,50 @@ pub(crate) fn produce_cargo_typed_evidence(
                 input.manifest_entry_id,
                 input.manifest_bytes,
             ),
-            decode_effective_target_dir(input.config_inputs),
+            decode_config_scope(input.config_inputs),
         ),
-        Err(reason) => (unknown(reason), unknown(reason)),
+        Err(reason) => (
+            unknown(reason),
+            config_scope_for_input_failure(input.config_inputs, reason),
+        ),
+    };
+    normalize_config_scope(&mut config_scope);
+    // This milestone records a workspace declaration, but deliberately does not claim an effective
+    // target directory until every precedence source and the invocation cwd are bound. Production
+    // collection always leaves those sources unresolved.
+    let target_dir = if !matches!(
+        config_scope.workspace.pair_snapshot,
+        CargoWorkspacePairState::StableSnapshot
+    ) {
+        CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        }
+    } else if let CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } =
+        config_scope.workspace.target_dir_declaration
+    {
+        unknown(
+            if reason_code == CargoEvidenceReason::UnsupportedConfigInclude {
+                // Preserve the existing v1 targetDir reason while the additive scope ledger exposes
+                // the more precise include-specific blocker.
+                CargoEvidenceReason::UnsupportedManifestShape
+            } else {
+                reason_code
+            },
+        )
+    } else if matches!(
+        (input.config_inputs.config, input.config_inputs.config_toml),
+        (CargoConfigFile::Present(_), CargoConfigFile::Present(_))
+    ) {
+        // Preserve the already-published conservative v1 reason for dual config names. The scope
+        // ledger records Cargo's selected extensionless file, but effective resolution remains
+        // intentionally unavailable until the invocation context and all higher sources are bound.
+        unknown(CargoEvidenceReason::AmbiguousConfig)
+    } else if config_scope.precedence_complete {
+        decode_effective_target_dir(input.config_inputs, &config_scope)
+    } else {
+        CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        }
     };
     let target_shape = match (&workspace, &target_dir) {
         (CargoEvidence::Known { value: workspace }, CargoEvidence::Known { value: target_dir }) => {
@@ -375,6 +812,7 @@ pub(crate) fn produce_cargo_typed_evidence(
     };
     CargoTypedEvidenceV1 {
         workspace,
+        config_scope,
         target_dir,
         target_shape,
         not_shared: CargoEvidence::NotChecked {
@@ -392,30 +830,35 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
     root_entry_id: &ScanEntryId,
     manifest_entry_id: &ScanEntryId,
     target_entry_id: &ScanEntryId,
+    config_scope_runtime: CargoConfigScopeRuntime,
     cancel: &CancellationToken,
 ) -> CargoTypedEvidenceV1 {
     if !summary_identity_graph_is_unique_and_complete(summary) {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
+            config_scope_runtime,
         );
     }
     let Some(root) = unique_root_entry(summary, root_entry_id) else {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
+            config_scope_runtime,
         );
     };
     let Some(manifest) = unique_summary_entry(summary, manifest_entry_id) else {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
+            config_scope_runtime,
         );
     };
     if unique_summary_entry(summary, target_entry_id).is_none() {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
+            config_scope_runtime,
         );
     }
 
@@ -443,7 +886,7 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
         Ok(batch) => batch,
         Err(error) => {
             let reason = map_locator_batch_error(error);
-            return fail_closed_cargo_evidence(reason, reason);
+            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
         }
     };
 
@@ -454,20 +897,23 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
             return fail_closed_cargo_evidence(
                 CargoEvidenceReason::MissingManifest,
                 CargoEvidenceReason::MissingManifest,
+                config_scope_runtime,
             );
         }
         LocatorFileRead::Failed(failure) => {
             let reason = map_manifest_read_failure(failure);
-            return fail_closed_cargo_evidence(reason, reason);
+            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
         }
     };
     let collected_config = map_config_file_read(batch.files.get(1));
     let collected_config_toml = map_config_file_read(batch.files.get(2));
-    let config_failure_reason = match (collected_config, collected_config_toml) {
-        (CollectedCargoConfigFile::Failed(reason), _)
-        | (_, CollectedCargoConfigFile::Failed(reason)) => Some(reason),
-        _ => None,
-    };
+    let config_failure_reason = [collected_config, collected_config_toml]
+        .into_iter()
+        .filter_map(|config| match config {
+            CollectedCargoConfigFile::Failed(reason) => Some(reason),
+            CollectedCargoConfigFile::Present(_) | CollectedCargoConfigFile::VerifiedAbsent => None,
+        })
+        .min_by_key(|reason| cargo_config_failure_precedence(*reason));
     let input = HandleBoundCargoInputs {
         root_entry_id,
         manifest_entry_id,
@@ -475,7 +921,7 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
         config_inputs: CargoConfigInputs {
             config: collected_config.into_decode_input(),
             config_toml: collected_config_toml.into_decode_input(),
-            override_sources_verified_absent: false,
+            scope: CargoConfigScopeInputs::production(config_scope_runtime),
         },
         target_entry_id,
     };
@@ -490,9 +936,11 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
 fn fail_closed_cargo_evidence(
     workspace_reason: CargoEvidenceReason,
     target_reason: CargoEvidenceReason,
+    config_scope_runtime: CargoConfigScopeRuntime,
 ) -> CargoTypedEvidenceV1 {
     CargoTypedEvidenceV1 {
         workspace: unknown(workspace_reason),
+        config_scope: config_scope_for_failure(target_reason, config_scope_runtime),
         target_dir: unknown(target_reason),
         target_shape: unknown(match target_reason {
             CargoEvidenceReason::ConfigScopeNotChecked => workspace_reason,
@@ -567,7 +1015,7 @@ impl<'a> CollectedCargoConfigFile<'a> {
         match self {
             Self::Present(bytes) => CargoConfigFile::Present(bytes),
             Self::VerifiedAbsent => CargoConfigFile::VerifiedAbsent,
-            Self::Failed(_) => CargoConfigFile::ReadFailed,
+            Self::Failed(reason) => CargoConfigFile::ReadFailed(reason),
         }
     }
 }
@@ -866,50 +1314,419 @@ fn decode_workspace_manifest(
     }
 }
 
-fn decode_effective_target_dir(
-    inputs: CargoConfigInputs<'_>,
-) -> CargoEvidence<CargoTargetDirEvidenceV1> {
-    match (inputs.config, inputs.config_toml) {
-        (CargoConfigFile::Present(_), CargoConfigFile::Present(_)) => {
-            return unknown(CargoEvidenceReason::AmbiguousConfig);
+fn decode_config_scope(inputs: CargoConfigInputs<'_>) -> CargoConfigScopeEvidenceV1 {
+    let workspace = decode_workspace_config_scope(
+        inputs.config,
+        inputs.config_toml,
+        inputs.scope.workspace_pair,
+    );
+    let scope = inputs.scope;
+    let environment = CargoConfigEnvironmentEvidence {
+        cargo_target_dir: environment_evidence("CARGO_TARGET_DIR", scope.runtime.cargo_target_dir),
+        cargo_build_target_dir: environment_evidence(
+            "CARGO_BUILD_TARGET_DIR",
+            scope.runtime.cargo_build_target_dir,
+        ),
+        cargo_home: environment_evidence("CARGO_HOME", scope.runtime.cargo_home),
+    };
+    let mut evidence = CargoConfigScopeEvidenceV1 {
+        schema: CARGO_CONFIG_SCOPE_EVIDENCE_SCHEMA,
+        decoder_id: CARGO_CONFIG_DECODER_ID,
+        workspace,
+        ancestor_configs: project_external_source(scope.ancestor_configs),
+        cargo_home_config: project_external_source(scope.cargo_home_config),
+        environment,
+        cli: CargoConfigCliEvidence {
+            target_dir: project_external_source(scope.cli_target_dir),
+            config_overrides: project_external_source(scope.cli_config_overrides),
+        },
+        invocation_cwd: project_invocation_cwd(scope.invocation_cwd),
+        precedence_complete: false,
+        blockers: Vec::new(),
+    };
+    normalize_config_scope(&mut evidence);
+    evidence
+}
+
+fn decode_workspace_config_scope(
+    config: CargoConfigFile<'_>,
+    config_toml: CargoConfigFile<'_>,
+    pair_snapshot: CargoWorkspacePairInput,
+) -> CargoWorkspaceConfigScopeEvidence {
+    let config_state = project_config_file_state(config);
+    let config_toml_state = project_config_file_state(config_toml);
+    // The two files are read through separate bounded requests. Without a directory-generation
+    // snapshot (and case-fold collision evidence on case-insensitive filesystems), their joint
+    // presence/absence cannot be promoted into a stable selection. Preserve each time-local read
+    // result, but keep the pair and its declaration explicitly not checked.
+    let pair_is_stable = matches!(pair_snapshot, CargoWorkspacePairInput::StableSnapshot);
+    let (selected, selected_file) = match (pair_is_stable, config, config_toml) {
+        (true, CargoConfigFile::Present(bytes), _) => (
+            CargoWorkspaceConfigSelection::Config,
+            Some((CargoTargetDirSource::Config, bytes)),
+        ),
+        (true, CargoConfigFile::VerifiedAbsent, CargoConfigFile::Present(bytes)) => (
+            CargoWorkspaceConfigSelection::ConfigToml,
+            Some((CargoTargetDirSource::ConfigToml, bytes)),
+        ),
+        (true, CargoConfigFile::VerifiedAbsent, CargoConfigFile::VerifiedAbsent) => {
+            (CargoWorkspaceConfigSelection::None, None)
         }
-        (CargoConfigFile::ReadFailed, _) | (_, CargoConfigFile::ReadFailed) => {
-            return unknown(CargoEvidenceReason::ConfigReadFailed);
+        (false, CargoConfigFile::Present(bytes), _) => (
+            CargoWorkspaceConfigSelection::NotChecked,
+            Some((CargoTargetDirSource::Config, bytes)),
+        ),
+        (false, CargoConfigFile::VerifiedAbsent, CargoConfigFile::Present(bytes)) => (
+            CargoWorkspaceConfigSelection::NotChecked,
+            Some((CargoTargetDirSource::ConfigToml, bytes)),
+        ),
+        _ => (CargoWorkspaceConfigSelection::NotChecked, None),
+    };
+    let target_dir_declaration = match selected_file {
+        Some((source, bytes)) => decode_workspace_target_dir_declaration(source, bytes),
+        None if pair_is_stable
+            && matches!(
+                (config, config_toml),
+                (
+                    CargoConfigFile::VerifiedAbsent,
+                    CargoConfigFile::VerifiedAbsent
+                )
+            ) =>
+        {
+            CargoWorkspaceTargetDirDeclaration::VerifiedAbsent
         }
-        // Relative Cargo config paths are resolved from the invocation/config location, not from
-        // an arbitrary workspace root. Until a handle-bound resolver supplies that context, any
-        // present workspace config remains unknown instead of manufacturing an effective path.
-        (CargoConfigFile::Present(bytes), CargoConfigFile::VerifiedAbsent)
-        | (CargoConfigFile::VerifiedAbsent, CargoConfigFile::Present(bytes)) => {
-            if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
-                return unknown(CargoEvidenceReason::ResourceLimit);
+        None if matches!(config, CargoConfigFile::ReadFailed(_))
+            || matches!(config_toml, CargoConfigFile::ReadFailed(_)) =>
+        {
+            CargoWorkspaceTargetDirDeclaration::Unknown {
+                reason_code: config_failure_reason(config, config_toml),
             }
-            let table = match parse_toml(bytes) {
-                Ok(table) => table,
-                Err(reason) => return unknown(reason),
-            };
-            if contains_unsupported_include(&toml::Value::Table(table)) {
-                return unknown(CargoEvidenceReason::UnsupportedManifestShape);
+        }
+        None => CargoWorkspaceTargetDirDeclaration::NotChecked {
+            reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+    };
+    CargoWorkspaceConfigScopeEvidence {
+        pair_snapshot: match pair_snapshot {
+            CargoWorkspacePairInput::StableSnapshot => CargoWorkspacePairState::StableSnapshot,
+            CargoWorkspacePairInput::NotChecked => CargoWorkspacePairState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+            },
+            CargoWorkspacePairInput::Failed(reason_code) => {
+                CargoWorkspacePairState::Failed { reason_code }
             }
-            return CargoEvidence::NotChecked {
-                reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        config: config_state,
+        config_toml: config_toml_state,
+        selected,
+        target_dir_declaration,
+    }
+}
+
+fn project_config_file_state(file: CargoConfigFile<'_>) -> CargoConfigFileState {
+    match file {
+        CargoConfigFile::Present(_) => CargoConfigFileState::Present,
+        CargoConfigFile::VerifiedAbsent => CargoConfigFileState::VerifiedAbsent,
+        CargoConfigFile::NotChecked => CargoConfigFileState::NotChecked {
+            reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        CargoConfigFile::ReadFailed(reason_code) => CargoConfigFileState::Failed { reason_code },
+    }
+}
+
+fn config_failure_reason(
+    config: CargoConfigFile<'_>,
+    config_toml: CargoConfigFile<'_>,
+) -> CargoEvidenceReason {
+    [config, config_toml]
+        .into_iter()
+        .filter_map(|file| match file {
+            CargoConfigFile::ReadFailed(reason) => Some(reason),
+            CargoConfigFile::Present(_)
+            | CargoConfigFile::VerifiedAbsent
+            | CargoConfigFile::NotChecked => None,
+        })
+        .min_by_key(|reason| cargo_config_failure_precedence(*reason))
+        .unwrap_or(CargoEvidenceReason::ConfigReadFailed)
+}
+
+fn decode_workspace_target_dir_declaration(
+    source: CargoTargetDirSource,
+    bytes: &[u8],
+) -> CargoWorkspaceTargetDirDeclaration {
+    if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
+        return CargoWorkspaceTargetDirDeclaration::Unknown {
+            reason_code: CargoEvidenceReason::ResourceLimit,
+        };
+    }
+    let table = match parse_toml(bytes) {
+        Ok(table) => table,
+        Err(reason) => {
+            return CargoWorkspaceTargetDirDeclaration::Unknown {
+                reason_code: reason,
             };
         }
-        (CargoConfigFile::VerifiedAbsent, CargoConfigFile::VerifiedAbsent) => {}
-        (CargoConfigFile::NotChecked, _) | (_, CargoConfigFile::NotChecked) => {
-            return CargoEvidence::NotChecked {
-                reason: CargoEvidenceReason::ConfigScopeNotChecked,
+    };
+    if table.contains_key("include") {
+        return CargoWorkspaceTargetDirDeclaration::Unknown {
+            reason_code: CargoEvidenceReason::UnsupportedConfigInclude,
+        };
+    }
+    let Some(build) = table.get("build") else {
+        return CargoWorkspaceTargetDirDeclaration::VerifiedAbsent;
+    };
+    let Some(build) = build.as_table() else {
+        return CargoWorkspaceTargetDirDeclaration::Unknown {
+            reason_code: CargoEvidenceReason::UnsupportedManifestShape,
+        };
+    };
+    let Some(value) = build.get("target-dir") else {
+        return CargoWorkspaceTargetDirDeclaration::VerifiedAbsent;
+    };
+    let Some(value) = value.as_str() else {
+        return CargoWorkspaceTargetDirDeclaration::Unknown {
+            reason_code: CargoEvidenceReason::UnsupportedManifestShape,
+        };
+    };
+    let relative_components = match validate_relative_target_dir(value) {
+        Ok(components) => components,
+        Err(reason) => {
+            return CargoWorkspaceTargetDirDeclaration::Unknown {
+                reason_code: reason,
             };
+        }
+    };
+    CargoWorkspaceTargetDirDeclaration::Known {
+        value: CargoWorkspaceTargetDirDeclarationV1 {
+            schema: CARGO_WORKSPACE_TARGET_DIR_DECLARATION_SCHEMA,
+            decoder_id: CARGO_CONFIG_DECODER_ID,
+            relative_path: relative_components.join("/"),
+            relative_components,
+            source,
+        },
+    }
+}
+
+fn cargo_config_failure_precedence(reason: CargoEvidenceReason) -> u8 {
+    match reason {
+        CargoEvidenceReason::Cancelled => 0,
+        CargoEvidenceReason::ResourceLimit => 1,
+        CargoEvidenceReason::ConfigReadFailed => 2,
+        _ => 3,
+    }
+}
+
+fn environment_evidence(
+    name: &'static str,
+    state: CargoEnvironmentPresence,
+) -> CargoEnvironmentVariableEvidence {
+    CargoEnvironmentVariableEvidence {
+        name,
+        state,
+        value_redacted: matches!(state, CargoEnvironmentPresence::PresentRedacted),
+    }
+}
+
+fn project_external_source(
+    input: CargoConfigExternalSourceInput,
+) -> CargoConfigExternalSourceState {
+    match input {
+        CargoConfigExternalSourceInput::VerifiedAbsent => {
+            CargoConfigExternalSourceState::VerifiedAbsent
+        }
+        CargoConfigExternalSourceInput::NotChecked => CargoConfigExternalSourceState::NotChecked {
+            reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        CargoConfigExternalSourceInput::Failed(reason_code) => {
+            CargoConfigExternalSourceState::Failed { reason_code }
         }
     }
-    if !inputs.override_sources_verified_absent {
+}
+
+fn project_invocation_cwd(input: CargoInvocationCwdInput) -> CargoInvocationCwdBinding {
+    match input {
+        CargoInvocationCwdInput::BoundToWorkspaceRoot => {
+            CargoInvocationCwdBinding::BoundToWorkspaceRoot
+        }
+        CargoInvocationCwdInput::NotChecked => CargoInvocationCwdBinding::NotChecked {
+            reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        CargoInvocationCwdInput::Failed(reason_code) => {
+            CargoInvocationCwdBinding::Failed { reason_code }
+        }
+    }
+}
+
+fn normalize_config_scope(evidence: &mut CargoConfigScopeEvidenceV1) {
+    let mut blockers = config_scope_blockers(evidence);
+    sort_and_dedup_blockers(&mut blockers);
+    evidence.precedence_complete = blockers.is_empty();
+    evidence.blockers = blockers;
+}
+
+fn config_scope_blockers(evidence: &CargoConfigScopeEvidenceV1) -> Vec<CargoConfigScopeBlocker> {
+    let mut blockers = Vec::new();
+    match evidence.workspace.pair_snapshot {
+        CargoWorkspacePairState::StableSnapshot => {}
+        CargoWorkspacePairState::NotChecked { .. } => {
+            blockers.push(CargoConfigScopeBlocker::WorkspaceConfigPairNotStable);
+        }
+        CargoWorkspacePairState::Failed { .. } => {
+            blockers.push(CargoConfigScopeBlocker::WorkspaceConfigPairFailed);
+        }
+    }
+    match (
+        &evidence.workspace.pair_snapshot,
+        &evidence.workspace.target_dir_declaration,
+    ) {
+        (
+            CargoWorkspacePairState::StableSnapshot,
+            CargoWorkspaceTargetDirDeclaration::Known { .. },
+        )
+        | (
+            CargoWorkspacePairState::StableSnapshot,
+            CargoWorkspaceTargetDirDeclaration::VerifiedAbsent,
+        ) => {}
+        (_, CargoWorkspaceTargetDirDeclaration::Unknown { reason_code }) => {
+            blockers.push(workspace_config_blocker(*reason_code))
+        }
+        (CargoWorkspacePairState::StableSnapshot, _) => {
+            blockers.push(CargoConfigScopeBlocker::WorkspaceConfigNotChecked);
+        }
+        _ => {}
+    }
+    collect_external_blocker(
+        &mut blockers,
+        &evidence.ancestor_configs,
+        CargoConfigScopeBlocker::AncestorConfigsNotChecked,
+        CargoConfigScopeBlocker::AncestorConfigsFailed,
+    );
+    collect_external_blocker(
+        &mut blockers,
+        &evidence.cargo_home_config,
+        CargoConfigScopeBlocker::CargoHomeConfigNotChecked,
+        CargoConfigScopeBlocker::CargoHomeConfigFailed,
+    );
+    collect_external_blocker(
+        &mut blockers,
+        &evidence.cli.target_dir,
+        CargoConfigScopeBlocker::CliTargetDirNotChecked,
+        CargoConfigScopeBlocker::CliTargetDirFailed,
+    );
+    collect_external_blocker(
+        &mut blockers,
+        &evidence.cli.config_overrides,
+        CargoConfigScopeBlocker::CliConfigOverridesNotChecked,
+        CargoConfigScopeBlocker::CliConfigOverridesFailed,
+    );
+    match evidence.invocation_cwd {
+        CargoInvocationCwdBinding::BoundToWorkspaceRoot => {}
+        CargoInvocationCwdBinding::NotChecked { .. } => {
+            blockers.push(CargoConfigScopeBlocker::InvocationCwdNotBound);
+        }
+        CargoInvocationCwdBinding::Failed { .. } => {
+            blockers.push(CargoConfigScopeBlocker::InvocationCwdBindingFailed);
+        }
+    }
+    if evidence.environment.cargo_target_dir.state == CargoEnvironmentPresence::PresentRedacted {
+        blockers.push(CargoConfigScopeBlocker::CargoTargetDirPresentRedacted);
+    }
+    if evidence.environment.cargo_build_target_dir.state
+        == CargoEnvironmentPresence::PresentRedacted
+    {
+        blockers.push(CargoConfigScopeBlocker::CargoBuildTargetDirPresentRedacted);
+    }
+    if evidence.environment.cargo_home.state == CargoEnvironmentPresence::PresentRedacted {
+        blockers.push(CargoConfigScopeBlocker::CargoHomePresentRedacted);
+    }
+    blockers
+}
+
+fn sort_and_dedup_blockers(blockers: &mut Vec<CargoConfigScopeBlocker>) {
+    blockers.sort();
+    blockers.dedup();
+}
+
+fn collect_external_blocker(
+    blockers: &mut Vec<CargoConfigScopeBlocker>,
+    state: &CargoConfigExternalSourceState,
+    not_checked: CargoConfigScopeBlocker,
+    failed: CargoConfigScopeBlocker,
+) {
+    match state {
+        CargoConfigExternalSourceState::VerifiedAbsent => {}
+        CargoConfigExternalSourceState::NotChecked { .. } => blockers.push(not_checked),
+        CargoConfigExternalSourceState::Failed { .. } => blockers.push(failed),
+    }
+}
+
+fn workspace_config_blocker(reason: CargoEvidenceReason) -> CargoConfigScopeBlocker {
+    match reason {
+        CargoEvidenceReason::DuplicateTomlKey => {
+            CargoConfigScopeBlocker::WorkspaceConfigDuplicateKey
+        }
+        CargoEvidenceReason::AmbiguousConfig => CargoConfigScopeBlocker::WorkspaceConfigNotChecked,
+        CargoEvidenceReason::MalformedToml => CargoConfigScopeBlocker::WorkspaceConfigMalformed,
+        CargoEvidenceReason::ResourceLimit => CargoConfigScopeBlocker::WorkspaceConfigResourceLimit,
+        CargoEvidenceReason::ConfigReadFailed => CargoConfigScopeBlocker::WorkspaceConfigReadFailed,
+        CargoEvidenceReason::InvalidRelativeTargetDir => {
+            CargoConfigScopeBlocker::WorkspaceTargetDirInvalid
+        }
+        CargoEvidenceReason::UnsupportedConfigInclude => {
+            CargoConfigScopeBlocker::WorkspaceConfigIncludeUnsupported
+        }
+        CargoEvidenceReason::UnsupportedManifestShape => {
+            CargoConfigScopeBlocker::WorkspaceConfigShapeUnsupported
+        }
+        _ => CargoConfigScopeBlocker::WorkspaceConfigNotChecked,
+    }
+}
+
+fn decode_effective_target_dir(
+    _inputs: CargoConfigInputs<'_>,
+    scope: &CargoConfigScopeEvidenceV1,
+) -> CargoEvidence<CargoTargetDirEvidenceV1> {
+    if !scope.precedence_complete {
         return CargoEvidence::NotChecked {
             reason: CargoEvidenceReason::ConfigScopeNotChecked,
         };
     }
-    known_target_dir(
-        CargoTargetDirSource::WorkspaceDefault,
-        DEFAULT_TARGET_COMPONENT,
+    match &scope.workspace.target_dir_declaration {
+        CargoWorkspaceTargetDirDeclaration::Known { value } => {
+            known_target_dir(value.source, &value.relative_path)
+        }
+        CargoWorkspaceTargetDirDeclaration::VerifiedAbsent => {
+            known_target_dir(CargoTargetDirSource::Default, DEFAULT_TARGET_COMPONENT)
+        }
+        CargoWorkspaceTargetDirDeclaration::NotChecked { .. } => CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } => unknown(*reason_code),
+    }
+}
+
+fn config_scope_for_input_failure(
+    inputs: CargoConfigInputs<'_>,
+    reason: CargoEvidenceReason,
+) -> CargoConfigScopeEvidenceV1 {
+    let mut scope = decode_config_scope(inputs);
+    scope.workspace.target_dir_declaration = CargoWorkspaceTargetDirDeclaration::Unknown {
+        reason_code: reason,
+    };
+    normalize_config_scope(&mut scope);
+    scope
+}
+
+fn config_scope_for_failure(
+    reason: CargoEvidenceReason,
+    runtime: CargoConfigScopeRuntime,
+) -> CargoConfigScopeEvidenceV1 {
+    config_scope_for_input_failure(
+        CargoConfigInputs {
+            scope: CargoConfigScopeInputs::production(runtime),
+            ..CargoConfigInputs::default()
+        },
+        reason,
     )
 }
 
@@ -937,13 +1754,9 @@ fn validate_relative_target_dir(value: &str) -> Result<Vec<String>, CargoEvidenc
         || value.len() > MAX_TARGET_DIR_BYTES
         || value.starts_with('/')
         || value.starts_with('\\')
-        || value.starts_with('~')
         || has_windows_prefix(value)
     {
         return Err(CargoEvidenceReason::InvalidRelativeTargetDir);
-    }
-    if value.contains('$') || value.contains('%') || value.contains('{') || value.contains('}') {
-        return Err(CargoEvidenceReason::EnvironmentExpansionUnsupported);
     }
     let mut components = Vec::new();
     if value.contains('\\') {
@@ -1361,6 +2174,18 @@ fn unknown<T>(reason: CargoEvidenceReason) -> CargoEvidence<T> {
     CargoEvidence::Unknown { reason }
 }
 
+#[cfg(test)]
+pub(crate) fn test_config_scope_projection(
+    runtime: CargoConfigScopeRuntime,
+) -> CargoConfigScopeProjectionV1 {
+    decode_config_scope(CargoConfigInputs {
+        config: CargoConfigFile::VerifiedAbsent,
+        config_toml: CargoConfigFile::VerifiedAbsent,
+        scope: CargoConfigScopeInputs::production(runtime),
+    })
+    .projected()
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod linux_real_stack_tests {
     use super::*;
@@ -1443,6 +2268,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         );
 
@@ -1473,6 +2299,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         );
 
@@ -1480,6 +2307,54 @@ mod linux_real_stack_tests {
         assert!(matches!(
             evidence.target_dir,
             CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+    }
+
+    #[test]
+    fn collector_records_workspace_declaration_without_promoting_effective_target() {
+        let (temp, summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-workspace-declaration");
+        let root = temp.path().join("workspace");
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo").join("config.toml"),
+            b"[build]\ntarget-dir='build/cargo'\n",
+        )
+        .unwrap();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            CargoConfigScopeRuntime::from_presence(true, true, true),
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            evidence.config_scope.workspace.target_dir_declaration,
+            CargoWorkspaceTargetDirDeclaration::Known {
+                value: CargoWorkspaceTargetDirDeclarationV1 {
+                    source: CargoTargetDirSource::ConfigToml,
+                    ref relative_path,
+                    ..
+                }
+            } if relative_path == "build/cargo"
+        ));
+        assert!(!evidence.config_scope.precedence_complete);
+        assert!(matches!(
+            evidence.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            evidence.target_shape,
+            CargoEvidence::Unknown {
                 reason: CargoEvidenceReason::ConfigScopeNotChecked
             }
         ));
@@ -1501,6 +2376,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         );
 
@@ -1526,6 +2402,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         );
 
@@ -1556,6 +2433,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         );
 
@@ -1577,6 +2455,7 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &cancel,
         );
 
@@ -1712,37 +2591,23 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_defaults_only_after_complete_absence_proof() {
+    fn full_test_snapshot_can_decode_default_but_production_scope_never_does() {
         assert_target_dir(
-            verified_absent_configs(),
+            fully_closed_configs(),
             "target",
-            CargoTargetDirSource::WorkspaceDefault,
+            CargoTargetDirSource::Default,
         );
-
-        for value in [
-            "/tmp/target",
-            "../target",
-            "a//b",
-            "C:/target",
-            "$HOME/target",
-            "%TEMP%/target",
-        ] {
-            let input = format!("[build]\ntarget-dir={value:?}");
-            assert!(matches!(
-                decode_effective_target_dir(CargoConfigInputs {
-                    config: CargoConfigFile::Present(input.as_bytes()),
-                    config_toml: CargoConfigFile::VerifiedAbsent,
-                    override_sources_verified_absent: true,
-                }),
-                CargoEvidence::Unknown { .. } | CargoEvidence::NotChecked { .. }
-            ));
-        }
+        let production = CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
+                false, false, false,
+            )),
+        };
+        let scope = decode_config_scope(production);
+        assert!(!scope.precedence_complete);
         assert!(matches!(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::VerifiedAbsent,
-                config_toml: CargoConfigFile::Present(b"[build]\ntarget-dir='build/cargo'"),
-                override_sources_verified_absent: true,
-            }),
+            decode_effective_target_dir(production, &scope),
             CargoEvidence::NotChecked {
                 reason: CargoEvidenceReason::ConfigScopeNotChecked
             }
@@ -1750,74 +2615,181 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_rejects_duplicate_malformed_and_ambiguous_config() {
-        assert!(matches!(
-            decode_effective_target_dir(CargoConfigInputs::default()),
-            CargoEvidence::NotChecked {
-                reason: CargoEvidenceReason::ConfigScopeNotChecked
-            }
-        ));
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::ReadFailed,
-                config_toml: CargoConfigFile::VerifiedAbsent,
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::ConfigReadFailed,
-        );
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::Present(b"[build]\ntarget-dir='a'\ntarget-dir='b'"),
-                config_toml: CargoConfigFile::VerifiedAbsent,
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::DuplicateTomlKey,
-        );
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::Present(b"[build"),
-                config_toml: CargoConfigFile::VerifiedAbsent,
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::MalformedToml,
-        );
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::Present(b""),
-                config_toml: CargoConfigFile::Present(b""),
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::AmbiguousConfig,
+    fn workspace_config_precedence_parses_exact_target_dir_declaration() {
+        let inputs = CargoConfigInputs {
+            config: CargoConfigFile::Present(b"[build]\ntarget-dir='from-config'"),
+            config_toml: CargoConfigFile::Present(b"[build]\ntarget-dir='ignored-toml'"),
+            scope: fully_closed_scope(),
+        };
+        let scope = decode_config_scope(inputs);
+        assert!(scope.precedence_complete);
+        assert_eq!(
+            scope.workspace.selected,
+            CargoWorkspaceConfigSelection::Config
         );
         assert!(matches!(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::Present(b"[build]\ntarget-dir='build\\cargo'"),
-                config_toml: CargoConfigFile::VerifiedAbsent,
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidence::NotChecked {
-                reason: CargoEvidenceReason::ConfigScopeNotChecked
-            }
+            scope.workspace.target_dir_declaration,
+            CargoWorkspaceTargetDirDeclaration::Known {
+                value: CargoWorkspaceTargetDirDeclarationV1 {
+                    source: CargoTargetDirSource::Config,
+                    ref relative_path,
+                    ..
+                }
+            } if relative_path == "from-config"
         ));
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::VerifiedAbsent,
-                config_toml: CargoConfigFile::Present(
-                    b"include=['override.toml']\n[build]\ntarget-dir='target'",
-                ),
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::UnsupportedManifestShape,
+        assert_target_dir(inputs, "from-config", CargoTargetDirSource::Config);
+    }
+
+    #[test]
+    fn literal_shell_like_characters_are_valid_relative_config_components() {
+        for value in [
+            "~cache",
+            "dollar$target",
+            "brace{target}",
+            "percent%target",
+            "build target",
+        ] {
+            let input = format!("[build]\ntarget-dir={value:?}");
+            let inputs = CargoConfigInputs {
+                config: CargoConfigFile::Present(input.as_bytes()),
+                config_toml: CargoConfigFile::VerifiedAbsent,
+                scope: fully_closed_scope(),
+            };
+            assert_target_dir(inputs, value, CargoTargetDirSource::Config);
+        }
+    }
+
+    #[test]
+    fn workspace_config_failures_are_typed_and_block_precedence() {
+        for (bytes, reason, blocker) in [
+            (
+                b"[build]\ntarget-dir='a'\ntarget-dir='b'".as_slice(),
+                CargoEvidenceReason::DuplicateTomlKey,
+                CargoConfigScopeBlocker::WorkspaceConfigDuplicateKey,
+            ),
+            (
+                b"[build".as_slice(),
+                CargoEvidenceReason::MalformedToml,
+                CargoConfigScopeBlocker::WorkspaceConfigMalformed,
+            ),
+            (
+                b"include=['override.toml']\n[build]\ntarget-dir='target'".as_slice(),
+                CargoEvidenceReason::UnsupportedConfigInclude,
+                CargoConfigScopeBlocker::WorkspaceConfigIncludeUnsupported,
+            ),
+            (
+                b"[build]\ntarget-dir='../custom'".as_slice(),
+                CargoEvidenceReason::InvalidRelativeTargetDir,
+                CargoConfigScopeBlocker::WorkspaceTargetDirInvalid,
+            ),
+        ] {
+            let inputs = CargoConfigInputs {
+                config: CargoConfigFile::Present(bytes),
+                config_toml: CargoConfigFile::VerifiedAbsent,
+                scope: fully_closed_scope(),
+            };
+            let scope = decode_config_scope(inputs);
+            assert!(!scope.precedence_complete);
+            assert!(scope.blockers.contains(&blocker));
+            assert!(matches!(
+                scope.workspace.target_dir_declaration,
+                CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } if reason_code == reason
+            ));
+            let (mut summary, target_id) = shape_summary(&[("debug", ObjectType::Directory)]);
+            summary
+                .entries
+                .push(scan_entry(5, 1, Some(1), "Cargo.toml", ObjectType::File));
+            let expected_target_reason = if reason == CargoEvidenceReason::UnsupportedConfigInclude
+            {
+                CargoEvidenceReason::UnsupportedManifestShape
+            } else {
+                reason
+            };
+            assert_unknown(
+                produce_cargo_typed_evidence(
+                    HandleBoundCargoInputs {
+                        root_entry_id: &entry_id_for(1),
+                        manifest_entry_id: &entry_id_for(5),
+                        manifest_bytes: b"[workspace]",
+                        config_inputs: inputs,
+                        target_entry_id: &target_id,
+                    },
+                    &summary,
+                )
+                .target_dir,
+                expected_target_reason,
+            );
+        }
+    }
+
+    #[test]
+    fn config_scope_serialization_is_redacted_and_blockers_are_sorted_and_deduplicated() {
+        let inputs = CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
+                true, true, true,
+            )),
+        };
+        let mut scope = decode_config_scope(inputs);
+        scope
+            .blockers
+            .push(CargoConfigScopeBlocker::CliTargetDirNotChecked);
+        normalize_config_scope(&mut scope);
+        assert!(scope.blockers.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            scope
+                .blockers
+                .iter()
+                .filter(|blocker| { **blocker == CargoConfigScopeBlocker::CliTargetDirNotChecked })
+                .count(),
+            1
         );
-        assert_unknown(
-            decode_effective_target_dir(CargoConfigInputs {
-                config: CargoConfigFile::VerifiedAbsent,
-                config_toml: CargoConfigFile::Present(
-                    b"[build]\ntarget-dir='target'\n[future]\ninclude='override.toml'",
+
+        let serialized = serde_json::to_string(&scope.projected()).unwrap();
+        assert!(serialized.contains("CARGO_TARGET_DIR"));
+        assert!(serialized.contains("CARGO_BUILD_TARGET_DIR"));
+        assert!(serialized.contains("CARGO_HOME"));
+        assert!(serialized.contains("present_redacted"));
+        for secret in ["/secret/target", "/secret/cargo-home", "non-unicode"] {
+            assert!(!serialized.contains(secret));
+        }
+    }
+
+    #[test]
+    fn sealed_source_failures_and_cwd_binding_are_explicit() {
+        let inputs = CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs {
+                runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+                workspace_pair: CargoWorkspacePairInput::Failed(
+                    CargoEvidenceReason::ConfigReadFailed,
                 ),
-                override_sources_verified_absent: true,
-            }),
-            CargoEvidenceReason::UnsupportedManifestShape,
+                ancestor_configs: CargoConfigExternalSourceInput::Failed(
+                    CargoEvidenceReason::ConfigReadFailed,
+                ),
+                cargo_home_config: CargoConfigExternalSourceInput::NotChecked,
+                cli_target_dir: CargoConfigExternalSourceInput::VerifiedAbsent,
+                cli_config_overrides: CargoConfigExternalSourceInput::Failed(
+                    CargoEvidenceReason::ConfigReadFailed,
+                ),
+                invocation_cwd: CargoInvocationCwdInput::Failed(
+                    CargoEvidenceReason::MissingIdentity,
+                ),
+            },
+        };
+        let scope = decode_config_scope(inputs);
+        assert!(!scope.precedence_complete);
+        assert_eq!(
+            scope.blockers,
+            vec![
+                CargoConfigScopeBlocker::AncestorConfigsFailed,
+                CargoConfigScopeBlocker::CargoHomeConfigNotChecked,
+                CargoConfigScopeBlocker::CliConfigOverridesFailed,
+                CargoConfigScopeBlocker::InvocationCwdBindingFailed,
+                CargoConfigScopeBlocker::WorkspaceConfigPairFailed,
+            ]
         );
     }
 
@@ -2115,7 +3087,7 @@ mod tests {
             root_entry_id: &entry_id_for(1),
             manifest_entry_id: &entry_id_for(5),
             manifest_bytes: b"[workspace]",
-            config_inputs: verified_absent_configs(),
+            config_inputs: fully_closed_configs(),
             target_entry_id: &target_id,
         };
         let evidence = produce_cargo_typed_evidence(input, &summary);
@@ -2148,7 +3120,8 @@ mod tests {
         expected: &str,
         source: CargoTargetDirSource,
     ) {
-        let evidence = decode_effective_target_dir(inputs);
+        let scope = decode_config_scope(inputs);
+        let evidence = decode_effective_target_dir(inputs, &scope);
         let CargoEvidence::Known { value } = evidence else {
             panic!("expected known evidence: {evidence:?}");
         };
@@ -2156,11 +3129,23 @@ mod tests {
         assert_eq!(value.source, source);
     }
 
-    fn verified_absent_configs() -> CargoConfigInputs<'static> {
+    fn fully_closed_scope() -> CargoConfigScopeInputs {
+        CargoConfigScopeInputs {
+            runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+            workspace_pair: CargoWorkspacePairInput::StableSnapshot,
+            ancestor_configs: CargoConfigExternalSourceInput::VerifiedAbsent,
+            cargo_home_config: CargoConfigExternalSourceInput::VerifiedAbsent,
+            cli_target_dir: CargoConfigExternalSourceInput::VerifiedAbsent,
+            cli_config_overrides: CargoConfigExternalSourceInput::VerifiedAbsent,
+            invocation_cwd: CargoInvocationCwdInput::BoundToWorkspaceRoot,
+        }
+    }
+
+    fn fully_closed_configs() -> CargoConfigInputs<'static> {
         CargoConfigInputs {
             config: CargoConfigFile::VerifiedAbsent,
             config_toml: CargoConfigFile::VerifiedAbsent,
-            override_sources_verified_absent: true,
+            scope: fully_closed_scope(),
         }
     }
 
@@ -2184,7 +3169,7 @@ mod tests {
                 .map(|value| (*value).to_string())
                 .collect(),
             relative_path: components.join("/"),
-            source: CargoTargetDirSource::WorkspaceDefault,
+            source: CargoTargetDirSource::Default,
         }
     }
 

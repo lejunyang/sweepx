@@ -2337,6 +2337,23 @@ pub fn cleaner_cargo_detect(
     context: &CoreContext,
     request: &CleanerCargoDetectRequest,
 ) -> Result<CleanerSuccess, CoreError> {
+    cleaner_cargo_detect_with_scope_runtime(context, request, || {
+        cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
+            std::env::var_os("CARGO_TARGET_DIR").is_some(),
+            std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some(),
+            std::env::var_os("CARGO_HOME").is_some(),
+        )
+    })
+}
+
+fn cleaner_cargo_detect_with_scope_runtime<F>(
+    context: &CoreContext,
+    request: &CleanerCargoDetectRequest,
+    config_scope_runtime: F,
+) -> Result<CleanerSuccess, CoreError>
+where
+    F: FnOnce() -> cargo_cleaner_evidence::CargoConfigScopeRuntime,
+{
     // Compatibility and trust are admission gates, not annotations on a best-effort result.
     // Resolve them before touching any caller-selected scan root or evaluating package rules.
     let cleaner_catalog = resolve_cleaner_catalog()?;
@@ -2390,6 +2407,7 @@ pub fn cleaner_cargo_detect(
         ));
         return Ok(CleanerSuccess { output });
     }
+    let config_scope_runtime = config_scope_runtime();
     let scan = scan_with_store(
         context,
         &ScanRequest {
@@ -2411,6 +2429,7 @@ pub fn cleaner_cargo_detect(
         source_scan_incomplete,
         source_scan_warning_count,
         &reader,
+        config_scope_runtime,
         &cancel,
     )?;
     let status = match detected.terminal_disposition() {
@@ -6488,6 +6507,31 @@ mod tests {
         assert_eq!(core_error_exit_code(&error), ExitCode::CleanerTrustOrCompat);
     }
 
+    #[test]
+    fn cargo_detect_compatibility_gate_precedes_runtime_scope_collection() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let invoked = AtomicBool::new(false);
+        let result = cleaner_cargo_detect_with_scope_runtime(
+            &context,
+            &CleanerCargoDetectRequest {
+                roots: vec![PathBuf::from("/path-that-must-not-be-scanned")],
+            },
+            || {
+                invoked.store(true, Ordering::SeqCst);
+                cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true)
+            },
+        )
+        .expect("incompatible cleaner should return a structured envelope");
+
+        assert_eq!(result.output.exit_code, ExitCode::CleanerTrustOrCompat);
+        assert!(!invoked.load(Ordering::SeqCst));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn cleaner_cargo_detect_live_linux_path_reports_typed_read_only_evidence() {
@@ -6526,6 +6570,7 @@ mod tests {
             scan.output.status == OutputStatus::Partial,
             scan.output.warnings.len(),
             &reader,
+            cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -6569,6 +6614,76 @@ mod tests {
         assert_eq!(hint["executable"], false);
         assert!(hint.get("candidate").is_none());
         assert!(hint.get("plan").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cargo_config_scope_runtime_presence_is_redacted_in_core_output() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::create_dir(root.join("target").join("debug")).unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let request = CleanerCargoDetectRequest { roots: vec![root] };
+
+        // The public built-in is intentionally incompatible with this development Core. This
+        // helper exercises the same live scan/collector/output path with a deterministic,
+        // presence-only runtime snapshot and never stores environment values.
+        let cleaner_catalog = resolve_cleaner_catalog().unwrap();
+        let mut cleaner = cargo_cleaner_detect::cargo_cleaner(&cleaner_catalog.cleaners)
+            .unwrap()
+            .clone();
+        cleaner.compatible = true;
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: request.roots,
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+        let reader = sweepx_scanner::LocatorReader::new(
+            HostPlatformScanner::new(),
+            cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
+        );
+        let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
+            &scan.summary,
+            &cleaner,
+            scan.output.status == OutputStatus::Partial,
+            scan.output.warnings.len(),
+            &reader,
+            cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let payload = cargo_cleaner_detect::experimental_cargo_detect_json(&detected);
+        let scope = &payload["hints"][0]["evidence"]["cargo"]["configScope"];
+        assert_eq!(scope["precedenceComplete"], false);
+        for key in ["cargoTargetDir", "cargoBuildTargetDir", "cargoHome"] {
+            assert_eq!(scope["environment"][key]["state"], "present_redacted");
+            assert_eq!(scope["environment"][key]["valueRedacted"], true);
+        }
+        let serialized = serde_json::to_string(&payload).unwrap();
+        for secret in [
+            "sweepx-live-secret-target-dir",
+            "sweepx-live-secret-build-target-dir",
+            "sweepx-live-secret-cargo-home",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        assert_eq!(
+            payload["hints"][0]["evidence"]["cargo"]["targetDir"]["state"],
+            "not_checked"
+        );
+        assert_eq!(payload["planAllowed"], false);
+        assert_eq!(payload["approvalAllowed"], false);
+        assert_eq!(payload["executionAllowed"], false);
     }
 
     #[test]

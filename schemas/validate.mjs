@@ -68,6 +68,10 @@ const validations = [
   },
   {
     schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
+    file: path.join(schemaDir, "examples", "sweepx.output.cargo-detect.result.example.json")
+  },
+  {
+    schemaId: "https://sweepx.dev/schemas/sweepx.output/v1",
     file: path.join(schemaDir, "examples", "sweepx.output.cancel.result.example.json")
   },
   {
@@ -967,6 +971,432 @@ const resultSchemaCases = [
       output.status = "unsupported";
       output.exitCode = 11;
       output.data.approxBytesComplete = false;
+    }
+  },
+  {
+    name: "cargo detect result locks the config-scope golden shape",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate() {}
+  },
+  {
+    name: "cargo detect incompatible gate keeps every authority disabled",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      output.status = "failed";
+      output.exitCode = 12;
+      output.summary = {
+        command: "cleaner.cargo-detect",
+        cleanerId: "org.sweepx.cargo-target",
+        experimental: true,
+        liveOnly: true,
+        scanPerformed: false,
+        matchCount: "0",
+        hintCount: "0",
+        rootCount: "1",
+        reasonCode: "builtin_manifest_incompatible",
+        cleanerSetDigest: "sha256:example"
+      };
+      output.data = {
+        command: "cleaner.cargo-detect",
+        experimental: true,
+        liveOnly: true,
+        scanPerformed: false,
+        builtinManifestCompatible: false,
+        matchCount: "0",
+        hintCount: "0",
+        matches: [],
+        hints: [],
+        reasons: ["builtin_manifest_incompatible"],
+        readOnly: true,
+        candidateAllowed: false,
+        planAllowed: false,
+        approvalAllowed: false,
+        executionAllowed: false
+      };
+      output.warnings = [];
+      output.errors = [{
+        code: "cleaner.compatibility",
+        class: "cleaner",
+        messageKey: "cleaner.compatibility",
+        params: {
+          cleanerRef: "org.sweepx.cargo-target@0.1.0",
+          requiredCore: ">=1.0.0, <2.0.0",
+          currentCore: "0.1.0"
+        },
+        retryable: false
+      }];
+    }
+  },
+  {
+    name: "cargo detect incompatible gate cannot enable candidate projection",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.status = "failed";
+      output.exitCode = 12;
+      output.summary = {
+        command: "cleaner.cargo-detect",
+        cleanerId: "org.sweepx.cargo-target",
+        experimental: true,
+        liveOnly: true,
+        scanPerformed: false,
+        matchCount: "0",
+        hintCount: "0",
+        rootCount: "1",
+        reasonCode: "builtin_manifest_incompatible",
+        cleanerSetDigest: "sha256:example"
+      };
+      output.data = {
+        command: "cleaner.cargo-detect",
+        experimental: true,
+        liveOnly: true,
+        scanPerformed: false,
+        builtinManifestCompatible: false,
+        matchCount: "0",
+        hintCount: "0",
+        matches: [],
+        hints: [],
+        reasons: ["builtin_manifest_incompatible"],
+        readOnly: true,
+        candidateAllowed: true,
+        planAllowed: false,
+        approvalAllowed: false,
+        executionAllowed: false
+      };
+      output.warnings = [];
+      output.errors = [];
+    }
+  },
+  {
+    name: "cargo detect rejects an unknown config-scope schema",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.schema = "cargo.config-scope.v2";
+    }
+  },
+  {
+    name: "cargo detect rejects snake_case config-scope fields",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.precedence_complete = scope.precedenceComplete;
+      delete scope.precedenceComplete;
+    }
+  },
+  {
+    name: "cargo detect requires a typed workspace pair snapshot",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.pairSnapshot =
+        "not_checked";
+    }
+  },
+  {
+    name: "cargo detect rejects an untagged config file state",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.config = {};
+    }
+  },
+  {
+    name: "cargo detect rejects atomic absence claims without a stable pair snapshot",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.configToml = {
+        state: "verified_absent"
+      };
+    }
+  },
+  {
+    name: "cargo detect binds each environment field to its exact variable name",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.environment.cargoTargetDir.name =
+        "CARGO_HOME";
+    }
+  },
+  {
+    name: "cargo detect rejects raw environment values",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.environment.cargoTargetDir.value =
+        "/private/target";
+    }
+  },
+  {
+    name: "cargo detect requires present environment values to be redacted",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.environment.cargoTargetDir.valueRedacted =
+        false;
+    }
+  },
+  {
+    name: "cargo detect rejects redaction claims for absent environment values",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.environment.cargoHome.valueRedacted =
+        true;
+    }
+  },
+  {
+    name: "cargo detect rejects unknown config-scope blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers.push("unknown_blocker");
+    }
+  },
+  {
+    name: "cargo detect rejects duplicate config-scope blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const blockers = output.data.hints[0].evidence.cargo.configScope.blockers;
+      blockers.push(blockers[0]);
+    }
+  },
+  {
+    name: "cargo detect rejects too many config-scope blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers = Array.from(
+        { length: 24 },
+        (_, index) => `blocker_${index}`
+      );
+    }
+  },
+  {
+    name: "cargo detect rejects raw workspace target-dir values",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.targetDirDeclaration.value =
+        "private-target";
+    }
+  },
+  {
+    name: "cargo detect rejects workspace target-dir path components",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.targetDirDeclaration.relativeComponents =
+        ["private-target"];
+    }
+  },
+  {
+    name: "cargo detect requires workspace target-dir declaration redaction",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.targetDirDeclaration.valueRedacted =
+        false;
+    }
+  },
+  {
+    name: "cargo detect workspace declaration source matches its observed config file",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.targetDirDeclaration.source =
+        "config_toml";
+    }
+  },
+  {
+    name: "cargo detect rejects a config declaration without a present config file",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.workspace.config = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+    }
+  },
+  {
+    name: "cargo detect rejects a config-toml declaration without a present config-toml file",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.config = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+      workspace.targetDirDeclaration.source = "config_toml";
+    }
+  },
+  {
+    name: "cargo detect accepts a non-atomic config-toml declaration with downgraded config absence",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.config = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+      workspace.configToml = { state: "present" };
+      workspace.targetDirDeclaration.source = "config_toml";
+    }
+  },
+  {
+    name: "cargo detect rejects a stable absent pair with a known declaration",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.pairSnapshot = { state: "stable_snapshot" };
+      workspace.config = { state: "verified_absent" };
+      workspace.configToml = { state: "verified_absent" };
+      workspace.selected = "none";
+    }
+  },
+  {
+    name: "cargo detect stable config-toml selection matches both file states",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.pairSnapshot = { state: "stable_snapshot" };
+      workspace.config = { state: "verified_absent" };
+      workspace.configToml = { state: "present" };
+      workspace.selected = "config_toml";
+      workspace.targetDirDeclaration.source = "config_toml";
+    }
+  },
+  {
+    name: "cargo detect rejects a stable config-toml file selected as config",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.pairSnapshot = { state: "stable_snapshot" };
+      workspace.config = { state: "verified_absent" };
+      workspace.configToml = { state: "present" };
+      workspace.selected = "config";
+      workspace.targetDirDeclaration.source = "config_toml";
+    }
+  },
+  {
+    name: "cargo detect rejects a stable present config selected as none",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.pairSnapshot = { state: "stable_snapshot" };
+      workspace.config = { state: "present" };
+      workspace.configToml = { state: "verified_absent" };
+      workspace.selected = "none";
+    }
+  },
+  {
+    name: "cargo detect stable pair prefers extensionless config when both files are present",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const workspace = output.data.hints[0].evidence.cargo.configScope.workspace;
+      workspace.pairSnapshot = { state: "stable_snapshot" };
+      workspace.config = { state: "present" };
+      workspace.configToml = { state: "present" };
+      workspace.selected = "config";
+      workspace.targetDirDeclaration = {
+        state: "known",
+        source: "config",
+        valueRedacted: true
+      };
+    }
+  },
+  {
+    name: "cargo detect cannot claim complete precedence",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.precedenceComplete = true;
+    }
+  },
+  {
+    name: "cargo detect cannot promote targetDir to known",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.targetDir = {
+        state: "known",
+        reasonCode: null,
+        relativePath: "target"
+      };
+    }
+  },
+  {
+    name: "cargo detect not-checked targetDir has the config-scope reason",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.targetDir.reasonCode = "missing_identity";
+    }
+  },
+  {
+    name: "cargo detect cannot promote targetShape to known",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.targetShape = {
+        state: "known",
+        reasonCode: null,
+        classification: "recognized_generated_structure"
+      };
+    }
+  },
+  {
+    name: "cargo detect rejects candidate authority",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].candidate = { id: "forbidden" };
+    }
+  },
+  {
+    name: "cargo detect cannot enable candidate projection",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.candidateAllowed = true;
+    }
+  },
+  {
+    name: "cargo detect rejects plan authority",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.plan = { id: "forbidden" };
+    }
+  },
+  {
+    name: "cargo detect cannot enable approval",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.approvalAllowed = true;
+    }
+  },
+  {
+    name: "cargo detect cannot enable execution",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.executionAllowed = true;
     }
   },
   {

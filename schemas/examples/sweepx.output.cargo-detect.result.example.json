@@ -1,0 +1,241 @@
+{
+  "schema": "sweepx.output/v1",
+  "kind": "cleaner.result",
+  "requestId": "req-cargo-detect-example",
+  "operationId": "op-cargo-detect-example",
+  "generatedAt": "2026-08-28T06:05:00Z",
+  "status": "partial",
+  "exitCode": 4,
+  "compat": {
+    "coreVersion": "0.1.0",
+    "scannerSemanticsVersion": 1,
+    "safetyPolicyVersion": 1,
+    "platformAdapter": {
+      "id": "linux",
+      "version": "0.1.0"
+    },
+    "cleanerSetDigest": "sha256:example",
+    "requiredFeatures": [],
+    "extensions": []
+  },
+  "summary": {
+    "command": "cleaner.cargo-detect",
+    "cleanerId": "org.sweepx.cargo-target",
+    "experimental": true,
+    "liveOnly": true,
+    "matchCount": "0",
+    "hintCount": "1",
+    "rootCount": "1",
+    "reasonCode": "cargo_required_evidence_unknown",
+    "sourceScanIncomplete": false,
+    "sourceScanWarningCount": "0",
+    "sourceScanErrorCount": "0",
+    "sourceScanBoundaryCount": "0",
+    "sourceScanPartialBoundaryCount": "0",
+    "sourceScanIncompleteAggregateCount": "0",
+    "cleanerSetDigest": "sha256:example"
+  },
+  "data": {
+    "command": "cleaner.cargo-detect",
+    "experimental": true,
+    "liveOnly": true,
+    "builtinManifestCompatible": true,
+    "matchCount": "0",
+    "hintCount": "1",
+    "matches": [],
+    "hints": [
+      {
+        "observationId": "cargo-target-observation:scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:3",
+        "cleanerId": "org.sweepx.cargo-target",
+        "cleanerVersion": "0.1.0",
+        "ruleId": "cargo-target-v1",
+        "displayPath": "/workspace/target",
+        "observedRoot": "/workspace",
+        "disposition": "report_only",
+        "reasonCodes": [
+          "cargo_config_target_dir_evidence_unknown",
+          "cargo_rule_fact_unknown",
+          "cargo_rule_inference_true",
+          "cargo_target_shape_unknown"
+        ],
+        "executable": false,
+        "ruleEvaluation": {
+          "factState": "unknown",
+          "inferenceState": "known_true",
+          "provisionalRisk": "R2",
+          "reportOnly": true
+        },
+        "evidence": {
+          "identity": {
+            "scanId": "cargo-detect-example",
+            "rootEntryId": "scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:1",
+            "manifestEntryId": "scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:2",
+            "targetEntryId": "scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:3",
+            "targetParentEntryId": "scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:1",
+            "nativeLocatorValidated": true,
+            "rootParentLineageBound": true,
+            "sameFilesystemDomain": true,
+            "sameVolumeOrMount": true
+          },
+          "cargo": {
+            "workspace": {
+              "state": "known",
+              "reasonCode": null,
+              "workspaceId": "scan-entry:v1:Y2FyZ28tZGV0ZWN0LWV4YW1wbGU:1"
+            },
+            "configScope": {
+              "schema": "cargo.config-scope.v1",
+              "decoderId": "cargo-workspace-config-v1",
+              "workspace": {
+                "pairSnapshot": {
+                  "state": "not_checked",
+                  "reasonCode": "config_scope_not_checked"
+                },
+                "config": {
+                  "state": "present"
+                },
+                "configToml": {
+                  "state": "not_checked",
+                  "reasonCode": "config_scope_not_checked"
+                },
+                "selected": "not_checked",
+                "targetDirDeclaration": {
+                  "state": "known",
+                  "source": "config",
+                  "valueRedacted": true
+                }
+              },
+              "ancestorConfigs": {
+                "state": "not_checked",
+                "reasonCode": "config_scope_not_checked"
+              },
+              "cargoHomeConfig": {
+                "state": "not_checked",
+                "reasonCode": "config_scope_not_checked"
+              },
+              "environment": {
+                "cargoTargetDir": {
+                  "name": "CARGO_TARGET_DIR",
+                  "state": "present_redacted",
+                  "valueRedacted": true
+                },
+                "cargoBuildTargetDir": {
+                  "name": "CARGO_BUILD_TARGET_DIR",
+                  "state": "verified_absent",
+                  "valueRedacted": false
+                },
+                "cargoHome": {
+                  "name": "CARGO_HOME",
+                  "state": "verified_absent",
+                  "valueRedacted": false
+                }
+              },
+              "cli": {
+                "targetDir": {
+                  "state": "not_checked",
+                  "reasonCode": "config_scope_not_checked"
+                },
+                "configOverrides": {
+                  "state": "not_checked",
+                  "reasonCode": "config_scope_not_checked"
+                }
+              },
+              "invocationCwd": {
+                "state": "not_checked",
+                "reasonCode": "config_scope_not_checked"
+              },
+              "precedenceComplete": false,
+              "blockers": [
+                "ancestor_configs_not_checked",
+                "cargo_home_config_not_checked",
+                "cargo_target_dir_present_redacted",
+                "cli_config_overrides_not_checked",
+                "cli_target_dir_not_checked",
+                "invocation_cwd_not_bound",
+                "workspace_config_pair_not_stable"
+              ]
+            },
+            "targetDir": {
+              "state": "not_checked",
+              "reasonCode": "config_scope_not_checked",
+              "relativePath": null
+            },
+            "targetShape": {
+              "state": "unknown",
+              "reasonCode": "config_scope_not_checked",
+              "classification": null
+            },
+            "notShared": {
+              "state": "not_checked",
+              "reasonCode": "sharing_not_checked"
+            },
+            "activity": {
+              "state": "not_checked",
+              "reasonCode": "activity_not_checked"
+            }
+          },
+          "required": {
+            "workspace": "known",
+            "configuredTargetDir": "not_checked",
+            "targetShape": "unknown",
+            "finalCompleteAggregate": "known",
+            "noBoundary": "known",
+            "notShared": "not_checked",
+            "activity": "not_checked"
+          },
+          "aggregate": {
+            "state": "known",
+            "revision": "1",
+            "coverage": {
+              "state": "complete",
+              "complete": true,
+              "incomplete_reasons": [],
+              "details_lost": false,
+              "provenance": {
+                "kind": "live_observation",
+                "observed_at": "2026-08-28T06:05:00Z",
+                "method": "metadata_no_follow"
+              }
+            },
+            "arithmeticState": "exact",
+            "potentiallyReclaimableBytes": {
+              "state": "known",
+              "value": "4096"
+            }
+          }
+        }
+      }
+    ],
+    "reasons": [
+      "cargo_config_target_dir_evidence_unknown",
+      "cargo_rule_fact_unknown",
+      "cargo_rule_inference_true",
+      "cargo_target_shape_unknown"
+    ],
+    "sourceScan": {
+      "incomplete": false,
+      "warningCount": "0",
+      "errorCount": "0",
+      "boundaryCount": "0",
+      "partialBoundaryCount": "0",
+      "incompleteAggregateCount": "0"
+    },
+    "readOnly": true,
+    "candidateAllowed": false,
+    "planAllowed": false,
+    "approvalAllowed": false,
+    "executionAllowed": false
+  },
+  "warnings": [
+    {
+      "code": "cleaner.cargo_detect.experimental",
+      "class": "cleaner",
+      "messageKey": "cleaner.cargo_detect.experimental",
+      "params": {
+        "reasonCode": "cargo_required_evidence_unknown"
+      },
+      "retryable": false
+    }
+  ],
+  "errors": []
+}

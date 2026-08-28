@@ -15,8 +15,8 @@ use sweepx_scanner::{LocatorReader, ScanSummary};
 use crate::{
     CORE_VERSION, CoreError, LoadedBuiltInCleaner,
     cargo_cleaner_evidence::{
-        CargoEvidenceStateProjection, CargoTypedEvidenceV1,
-        collect_and_produce_cargo_typed_evidence,
+        CargoConfigScopeProjectionV1, CargoConfigScopeRuntime, CargoEvidenceStateProjection,
+        CargoTypedEvidenceV1, collect_and_produce_cargo_typed_evidence,
     },
 };
 
@@ -35,6 +35,8 @@ const SOURCE_SCAN_WARNING: &str = "source_scan_warning";
 const CARGO_REQUIRED_EVIDENCE_UNKNOWN: &str = "cargo_required_evidence_unknown";
 const CARGO_RULE_MATCH_REPORT_ONLY: &str = "cargo_rule_match_report_only";
 const NO_CARGO_TARGET_HINT: &str = "no_cargo_target_hint";
+const CARGO_LAYOUT_LIMIT: usize = 16;
+const CARGO_LAYOUT_LIMIT_REACHED: &str = "cargo_layout_limit_reached";
 pub const BUILTIN_MANIFEST_INCOMPATIBLE: &str = "builtin_manifest_incompatible";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -124,6 +126,7 @@ pub struct ExperimentalCargoStateEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentalCargoTypedEvidence {
     pub workspace: ExperimentalCargoWorkspaceEvidence,
+    pub config_scope: CargoConfigScopeProjectionV1,
     pub target_dir: ExperimentalCargoTargetDirEvidence,
     pub target_shape: ExperimentalCargoTargetShapeEvidence,
     pub not_shared: ExperimentalCargoStateEvidence,
@@ -287,6 +290,7 @@ pub fn detect_live_cargo_cleaner_candidates(
     source_scan_incomplete: bool,
     source_scan_warning_count: usize,
     reader: &LocatorReader<impl PlatformScanner>,
+    config_scope_runtime: CargoConfigScopeRuntime,
     cancel: &CancellationToken,
 ) -> Result<ExperimentalCargoDetectResult, CoreError> {
     detect_live_cargo_cleaner_candidates_with_collector(
@@ -301,6 +305,7 @@ pub fn detect_live_cargo_cleaner_candidates(
                 &layout.root.identity.entry_id,
                 &layout.manifest.identity.entry_id,
                 &layout.target.identity.entry_id,
+                config_scope_runtime,
                 cancel,
             ))
         },
@@ -343,8 +348,14 @@ where
 
     let mut matches = Vec::new();
     let mut hints = Vec::new();
-    let scan_evidence = scan_evidence(summary, source_scan_incomplete, source_scan_warning_count);
-    for layout in bound_cargo_layout_hints(summary) {
+    let mut scan_evidence =
+        scan_evidence(summary, source_scan_incomplete, source_scan_warning_count);
+    let layouts = bound_cargo_layout_hints(summary);
+    let layouts_truncated = layouts.len() > CARGO_LAYOUT_LIMIT;
+    if layouts_truncated {
+        scan_evidence.incomplete = true;
+    }
+    for layout in layouts.into_iter().take(CARGO_LAYOUT_LIMIT) {
         let cargo = collect_typed_evidence(&layout);
         let aggregate_lookup = target_aggregate(summary, &layout.target);
         let aggregate = match aggregate_lookup {
@@ -404,6 +415,9 @@ where
     }
     if source_scan_warning_count > 0 {
         reasons.insert(SOURCE_SCAN_WARNING.to_string());
+    }
+    if layouts_truncated {
+        reasons.insert(CARGO_LAYOUT_LIMIT_REACHED.to_string());
     }
     Ok(ExperimentalCargoDetectResult {
         matches,
@@ -752,6 +766,7 @@ fn project_collected_cargo_typed_evidence(
             reason_code: evidence.workspace_reason_code().map(str::to_string),
             workspace_id: evidence.workspace_id().map(str::to_string),
         },
+        config_scope: evidence.config_scope_projection(),
         target_dir: ExperimentalCargoTargetDirEvidence {
             state: project_state(evidence.target_dir_state()),
             reason_code: evidence.target_dir_reason_code().map(str::to_string),
@@ -862,6 +877,7 @@ pub fn experimental_cargo_detect_json(result: &ExperimentalCargoDetectResult) ->
         "reasons": result.reasons,
         "sourceScan": result.scan,
         "readOnly": true,
+        "candidateAllowed": false,
         "planAllowed": false,
         "approvalAllowed": false,
         "executionAllowed": false
@@ -881,6 +897,7 @@ pub fn incompatible_cargo_detect_json() -> serde_json::Value {
         "hints": [],
         "reasons": [BUILTIN_MANIFEST_INCOMPATIBLE],
         "readOnly": true,
+        "candidateAllowed": false,
         "planAllowed": false,
         "approvalAllowed": false,
         "executionAllowed": false
@@ -906,6 +923,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     use sweepx_scanner::{HostPlatformScanner, LocatorReader};
 
+    fn empty_config_scope_projection() -> CargoConfigScopeProjectionV1 {
+        let inputs = crate::cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
+            false, false, false,
+        );
+        crate::cargo_cleaner_evidence::test_config_scope_projection(inputs)
+    }
+
     #[test]
     fn experimental_json_is_read_only_and_uses_separate_hint_projection() {
         let summary = complete_layout_summary();
@@ -920,6 +944,7 @@ mod tests {
         assert_eq!(payload["matchCount"], "0");
         assert_eq!(payload["hintCount"], "1");
         assert_eq!(payload["readOnly"], true);
+        assert_eq!(payload["candidateAllowed"], false);
         assert_eq!(payload["planAllowed"], false);
         assert_eq!(payload["approvalAllowed"], false);
         assert_eq!(payload["executionAllowed"], false);
@@ -1115,6 +1140,106 @@ mod tests {
     }
 
     #[test]
+    fn cargo_layout_collection_is_globally_bounded() {
+        let mut summary = ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        };
+        for index in 0..=CARGO_LAYOUT_LIMIT {
+            let base = (index as u128).saturating_mul(3).saturating_add(1);
+            let root = root_entry(base, base + 100, base + 200);
+            let manifest = child_entry(
+                base + 1,
+                &root,
+                "Cargo.toml",
+                ObjectType::File,
+                base + 100,
+                base + 200,
+            );
+            let target = child_entry(
+                base + 2,
+                &root,
+                "target",
+                ObjectType::Directory,
+                base + 100,
+                base + 200,
+            );
+            summary.aggregates.push(target_aggregate_for(&target));
+            summary.roots.push(root);
+            summary.entries.push(manifest);
+            summary.entries.push(target);
+        }
+        let cleaner = compatible_cleaner();
+        let result = detect_with_unknown_collector(&summary, &cleaner, false, 0).unwrap();
+
+        assert_eq!(result.hints.len(), CARGO_LAYOUT_LIMIT);
+        assert!(result.scan.incomplete);
+        assert!(
+            result
+                .reasons
+                .contains(&CARGO_LAYOUT_LIMIT_REACHED.to_string())
+        );
+        assert!(result.hints.iter().all(|hint| {
+            hint.reason_codes
+                .contains(&SOURCE_SCAN_INCOMPLETE.to_string())
+        }));
+    }
+
+    #[test]
+    fn redacted_config_scope_projection_has_stable_shape() {
+        let scope = crate::cargo_cleaner_evidence::test_config_scope_projection(
+            CargoConfigScopeRuntime::from_presence(true, true, true),
+        );
+        let wire = serde_json::to_value(scope).unwrap();
+
+        assert_eq!(wire["schema"], "cargo.config-scope.v1");
+        assert_eq!(wire["decoderId"], "cargo-workspace-config-v1");
+        assert_eq!(wire["precedenceComplete"], false);
+        assert_eq!(wire["workspace"]["pairSnapshot"]["state"], "not_checked");
+        assert_eq!(wire["workspace"]["config"]["state"], "not_checked");
+        assert_eq!(wire["workspace"]["configToml"]["state"], "not_checked");
+        assert_eq!(wire["workspace"]["selected"], "not_checked");
+        assert_eq!(
+            wire["workspace"]["targetDirDeclaration"]["state"],
+            "not_checked"
+        );
+        for key in ["cargoTargetDir", "cargoBuildTargetDir", "cargoHome"] {
+            assert_eq!(wire["environment"][key]["state"], "present_redacted");
+            assert_eq!(wire["environment"][key]["valueRedacted"], true);
+            assert!(wire["environment"][key].get("value").is_none());
+        }
+        assert_eq!(wire["ancestorConfigs"]["state"], "not_checked");
+        assert_eq!(wire["cargoHomeConfig"]["state"], "not_checked");
+        assert_eq!(wire["cli"]["targetDir"]["state"], "not_checked");
+        assert_eq!(wire["cli"]["configOverrides"]["state"], "not_checked");
+        assert_eq!(wire["invocationCwd"]["state"], "not_checked");
+        let blockers = wire["blockers"].as_array().unwrap();
+        assert!(
+            blockers
+                .windows(2)
+                .all(|pair| pair[0].as_str() < pair[1].as_str())
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|value| value == "cargo_target_dir_present_redacted")
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|value| value == "cargo_build_target_dir_present_redacted")
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|value| value == "cargo_home_present_redacted")
+        );
+    }
+
+    #[test]
     fn invalid_or_cross_domain_native_binding_is_not_an_observation() {
         let mut missing_locator = complete_layout_summary();
         missing_locator.entries[1].native_locator = None;
@@ -1198,6 +1323,7 @@ mod tests {
             false,
             0,
             &live_reader(),
+            CargoConfigScopeRuntime::from_presence(false, false, false),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -1210,6 +1336,17 @@ mod tests {
             ExperimentalEvidenceState::Known
         );
         assert!(hint.evidence.cargo.workspace.workspace_id.is_some());
+        let config_scope = serde_json::to_value(&hint.evidence.cargo.config_scope).unwrap();
+        assert_eq!(config_scope["schema"], "cargo.config-scope.v1");
+        assert_eq!(config_scope["precedenceComplete"], false);
+        assert_eq!(
+            config_scope["environment"]["cargoTargetDir"]["state"],
+            "verified_absent"
+        );
+        assert_eq!(
+            config_scope["environment"]["cargoBuildTargetDir"]["state"],
+            "verified_absent"
+        );
         assert_eq!(
             hint.evidence.cargo.target_dir.state,
             ExperimentalEvidenceState::NotChecked
@@ -1256,9 +1393,20 @@ mod tests {
         )
         .unwrap();
         let payload = experimental_cargo_detect_json(&result);
-
         let hint = &payload["hints"][0];
         assert_eq!(hint["evidence"]["cargo"]["workspace"]["state"], "known");
+        assert_eq!(
+            hint["evidence"]["cargo"]["configScope"]["schema"],
+            "cargo.config-scope.v1"
+        );
+        assert_eq!(
+            hint["evidence"]["cargo"]["configScope"]["precedenceComplete"],
+            false
+        );
+        assert_eq!(
+            hint["evidence"]["cargo"]["configScope"]["workspace"]["config"]["state"],
+            "not_checked"
+        );
         assert_eq!(
             hint["evidence"]["cargo"]["targetDir"]["state"],
             "not_checked"
@@ -1274,6 +1422,7 @@ mod tests {
         );
         assert!(hint.get("candidate").is_none());
         assert!(hint.get("plan").is_none());
+        assert_eq!(payload["candidateAllowed"], false);
         assert_eq!(payload["planAllowed"], false);
         assert_eq!(payload["approvalAllowed"], false);
         assert_eq!(payload["executionAllowed"], false);
@@ -1301,6 +1450,7 @@ mod tests {
                 reason_code: Some("missing_identity".to_string()),
                 workspace_id: None,
             },
+            config_scope: empty_config_scope_projection(),
             target_dir: ExperimentalCargoTargetDirEvidence {
                 state: ExperimentalEvidenceState::Unknown,
                 reason_code: Some("missing_identity".to_string()),
@@ -1329,6 +1479,7 @@ mod tests {
                 reason_code: None,
                 workspace_id: Some("scan-cargo-detect:1".to_string()),
             },
+            config_scope: empty_config_scope_projection(),
             target_dir: ExperimentalCargoTargetDirEvidence {
                 state: ExperimentalEvidenceState::NotChecked,
                 reason_code: Some("config_scope_not_checked".to_string()),

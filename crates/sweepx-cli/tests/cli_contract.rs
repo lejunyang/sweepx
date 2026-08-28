@@ -586,6 +586,7 @@ fn experimental_cargo_detect_fails_closed_before_scan_for_incompatible_builtin()
         "builtin_manifest_incompatible"
     );
     assert_eq!(json["data"]["readOnly"], true);
+    assert_eq!(json["data"]["candidateAllowed"], false);
     assert_eq!(json["data"]["planAllowed"], false);
     assert_eq!(json["data"]["approvalAllowed"], false);
     assert_eq!(json["data"]["executionAllowed"], false);
@@ -598,6 +599,40 @@ fn experimental_cargo_detect_fails_closed_before_scan_for_incompatible_builtin()
     assert_eq!(json["data"]["reasons"][0], "builtin_manifest_incompatible");
     assert_eq!(json["errors"][0]["code"], "cleaner.compatibility");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cargo_detect_compatibility_gate_does_not_disclose_environment_values() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let target_sentinel = "sweepx-secret-target-dir-sentinel";
+    let build_target_sentinel = "sweepx-secret-build-target-dir-sentinel";
+    let home_sentinel = "sweepx-secret-cargo-home-sentinel";
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .env("CARGO_TARGET_DIR", target_sentinel)
+        .env("CARGO_BUILD_TARGET_DIR", build_target_sentinel)
+        .env("CARGO_HOME", home_sentinel)
+        .arg("--format")
+        .arg("json")
+        .arg("cleaner")
+        .arg("cargo-detect")
+        .arg(&root);
+
+    let output = cmd.assert().code(12).get_output().clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for secret in [target_sentinel, build_target_sentinel, home_sentinel] {
+        assert!(!stdout.contains(secret));
+        assert!(!stderr.contains(secret));
+    }
 }
 
 #[cfg(unix)]

@@ -113,6 +113,50 @@
     {
       "if": {
         "properties": {
+          "kind": { "const": "cleaner.result" },
+          "summary": {
+            "properties": {
+              "command": { "const": "cleaner.cargo-detect" },
+              "scanPerformed": { "const": false }
+            },
+            "required": ["command", "scanPerformed"]
+          }
+        },
+        "required": ["kind", "summary"]
+      },
+      "then": {
+        "properties": {
+          "status": { "const": "failed" },
+          "exitCode": { "const": 12 },
+          "data": { "$ref": "#/$defs/cargoDetectIncompatibleData" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "cleaner.result" },
+          "summary": {
+            "properties": {
+              "command": { "const": "cleaner.cargo-detect" }
+            },
+            "required": ["command"],
+            "not": { "required": ["scanPerformed"] }
+          }
+        },
+        "required": ["kind", "summary"]
+      },
+      "then": {
+        "properties": {
+          "status": { "enum": ["ok", "partial", "cancelled"] },
+          "exitCode": { "enum": [0, 4, 10] },
+          "data": { "$ref": "#/$defs/cargoDetectCompatibleData" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "kind": {
             "const": "plan.result"
           }
@@ -334,6 +378,64 @@
             }
           }
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "cleaner.result"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "anyOf": [
+          {
+            "properties": {
+              "summary": {
+                "properties": {
+                  "command": {
+                    "const": "cleaner.cargo-detect"
+                  }
+                },
+                "required": [
+                  "command"
+                ]
+              }
+            },
+            "required": [
+              "summary"
+            ]
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "command": {
+                    "const": "cleaner.cargo-detect"
+                  }
+                },
+                "required": [
+                  "command"
+                ]
+              }
+            },
+            "required": [
+              "data"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "summary": {
+            "$ref": "#/$defs/cargoDetectResultSummary"
+          },
+          "data": {
+            "$ref": "#/$defs/cargoDetectResultData"
+          }
+        }
       }
     },
     {
@@ -1606,6 +1708,1201 @@
           }
         }
       }
+    },
+    "cargoEvidenceReasonCode": {
+      "type": "string",
+      "enum": [
+        "activity_not_checked",
+        "ambiguous_config",
+        "boundary_present",
+        "cancelled",
+        "config_read_failed",
+        "config_scope_not_checked",
+        "duplicate_toml_key",
+        "incomplete_scan",
+        "invalid_relative_target_dir",
+        "malformed_toml",
+        "missing_identity",
+        "missing_manifest",
+        "manifest_read_failed",
+        "missing_target_aggregate",
+        "multiple_target_entries",
+        "resource_limit",
+        "sharing_not_checked",
+        "target_entry_missing",
+        "unexpected_target_component",
+        "unknown_object_type",
+        "unsupported_config_include",
+        "unsupported_manifest_shape"
+      ]
+    },
+    "cargoConfigFileState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "present" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "verified_absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "not_checked" },
+            "reasonCode": { "const": "config_scope_not_checked" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "failed" },
+            "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoWorkspacePairSnapshot": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "stable_snapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "not_checked" },
+            "reasonCode": { "const": "config_scope_not_checked" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "failed" },
+            "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoExternalSourceState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "verified_absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "not_checked" },
+            "reasonCode": { "const": "config_scope_not_checked" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "failed" },
+            "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoInvocationCwdState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "bound_to_workspace_root" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "not_checked" },
+            "reasonCode": { "const": "config_scope_not_checked" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "failed" },
+            "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoWorkspaceTargetDirDeclaration": {
+      "$comment": "The public projection intentionally contains no target-dir value, relativePath, or relativeComponents. A known declaration identifies only its workspace config source.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "source", "valueRedacted"],
+          "properties": {
+            "state": { "const": "known" },
+            "source": { "enum": ["config", "config_toml"] },
+            "valueRedacted": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "verified_absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "not_checked" },
+            "reasonCode": { "const": "config_scope_not_checked" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reasonCode"],
+          "properties": {
+            "state": { "const": "unknown" },
+            "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoEnvironmentVariableEvidence": {
+      "$comment": "Only variable presence is observable. Values are never admitted into this wire shape.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "state", "valueRedacted"],
+          "properties": {
+            "name": {
+              "enum": ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_HOME"]
+            },
+            "state": { "const": "present_redacted" },
+            "valueRedacted": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "state", "valueRedacted"],
+          "properties": {
+            "name": {
+              "enum": ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_HOME"]
+            },
+            "state": { "const": "verified_absent" },
+            "valueRedacted": { "const": false }
+          }
+        }
+      ]
+    },
+    "cargoConfigScopeBlocker": {
+      "type": "string",
+      "enum": [
+        "ancestor_configs_failed",
+        "ancestor_configs_not_checked",
+        "cargo_build_target_dir_present_redacted",
+        "cargo_home_config_failed",
+        "cargo_home_config_not_checked",
+        "cargo_home_present_redacted",
+        "cargo_target_dir_present_redacted",
+        "cli_config_overrides_failed",
+        "cli_config_overrides_not_checked",
+        "cli_target_dir_failed",
+        "cli_target_dir_not_checked",
+        "invocation_cwd_binding_failed",
+        "invocation_cwd_not_bound",
+        "workspace_config_duplicate_key",
+        "workspace_config_include_unsupported",
+        "workspace_config_malformed",
+        "workspace_config_not_checked",
+        "workspace_config_pair_failed",
+        "workspace_config_pair_not_stable",
+        "workspace_config_read_failed",
+        "workspace_config_resource_limit",
+        "workspace_config_shape_unsupported",
+        "workspace_target_dir_invalid"
+      ]
+    },
+    "cargoConfigScopeV1": {
+      "$comment": "Read-only source ledger. Per-file observations are not an atomic pair unless pairSnapshot is stable_snapshot; precedenceComplete remains false for the current production collector.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "decoderId",
+        "workspace",
+        "ancestorConfigs",
+        "cargoHomeConfig",
+        "environment",
+        "cli",
+        "invocationCwd",
+        "precedenceComplete",
+        "blockers"
+      ],
+      "properties": {
+        "schema": { "const": "cargo.config-scope.v1" },
+        "decoderId": { "const": "cargo-workspace-config-v1" },
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pairSnapshot",
+            "config",
+            "configToml",
+            "selected",
+            "targetDirDeclaration"
+          ],
+          "properties": {
+            "pairSnapshot": { "$ref": "#/$defs/cargoWorkspacePairSnapshot" },
+            "config": { "$ref": "#/$defs/cargoConfigFileState" },
+            "configToml": { "$ref": "#/$defs/cargoConfigFileState" },
+            "selected": {
+              "enum": ["config", "config_toml", "none", "not_checked"]
+            },
+            "targetDirDeclaration": {
+              "$ref": "#/$defs/cargoWorkspaceTargetDirDeclaration"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "targetDirDeclaration": {
+                    "properties": {
+                      "state": { "const": "known" },
+                      "source": { "const": "config" }
+                    },
+                    "required": ["state", "source"]
+                  }
+                },
+                "required": ["targetDirDeclaration"]
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "targetDirDeclaration": {
+                    "properties": {
+                      "state": { "const": "known" },
+                      "source": { "const": "config_toml" }
+                    },
+                    "required": ["state", "source"]
+                  }
+                },
+                "required": ["targetDirDeclaration"]
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "properties": {
+                      "state": { "enum": ["verified_absent", "not_checked"] }
+                    },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "targetDirDeclaration": {
+                    "properties": {
+                      "state": { "const": "known" },
+                      "source": { "const": "config_toml" }
+                    },
+                    "required": ["state", "source"]
+                  }
+                },
+                "required": ["pairSnapshot", "targetDirDeclaration"]
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "selected": { "const": "config" } },
+                "required": ["selected"]
+              },
+              "then": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  },
+                  "targetDirDeclaration": {
+                    "not": {
+                      "properties": { "state": { "const": "not_checked" } },
+                      "required": ["state"]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "selected": { "const": "config_toml" } },
+                "required": ["selected"]
+              },
+              "then": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  },
+                  "targetDirDeclaration": {
+                    "not": {
+                      "properties": { "state": { "const": "not_checked" } },
+                      "required": ["state"]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "selected": { "const": "none" } },
+                "required": ["selected"]
+              },
+              "then": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "targetDirDeclaration": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["pairSnapshot", "config"]
+              },
+              "then": {
+                "properties": { "selected": { "const": "config" } }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["pairSnapshot", "config", "configToml"]
+              },
+              "then": {
+                "properties": { "selected": { "const": "config_toml" } }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": { "state": { "const": "stable_snapshot" } },
+                    "required": ["state"]
+                  },
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["pairSnapshot", "config", "configToml"]
+              },
+              "then": {
+                "properties": { "selected": { "const": "none" } }
+              }
+            }
+          ]
+        },
+        "ancestorConfigs": { "$ref": "#/$defs/cargoExternalSourceState" },
+        "cargoHomeConfig": { "$ref": "#/$defs/cargoExternalSourceState" },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cargoTargetDir", "cargoBuildTargetDir", "cargoHome"],
+          "properties": {
+            "cargoTargetDir": {
+              "allOf": [
+                { "$ref": "#/$defs/cargoEnvironmentVariableEvidence" },
+                { "properties": { "name": { "const": "CARGO_TARGET_DIR" } } }
+              ]
+            },
+            "cargoBuildTargetDir": {
+              "allOf": [
+                { "$ref": "#/$defs/cargoEnvironmentVariableEvidence" },
+                { "properties": { "name": { "const": "CARGO_BUILD_TARGET_DIR" } } }
+              ]
+            },
+            "cargoHome": {
+              "allOf": [
+                { "$ref": "#/$defs/cargoEnvironmentVariableEvidence" },
+                { "properties": { "name": { "const": "CARGO_HOME" } } }
+              ]
+            }
+          }
+        },
+        "cli": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["targetDir", "configOverrides"],
+          "properties": {
+            "targetDir": { "$ref": "#/$defs/cargoExternalSourceState" },
+            "configOverrides": { "$ref": "#/$defs/cargoExternalSourceState" }
+          }
+        },
+        "invocationCwd": { "$ref": "#/$defs/cargoInvocationCwdState" },
+        "precedenceComplete": { "const": false },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 23,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/cargoConfigScopeBlocker" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "workspace": {
+                "properties": {
+                  "pairSnapshot": {
+                    "properties": {
+                      "state": { "enum": ["not_checked", "failed"] }
+                    },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["pairSnapshot"]
+              }
+            },
+            "required": ["workspace"]
+          },
+          "then": {
+            "properties": {
+              "workspace": {
+                "properties": {
+                  "config": {
+                    "not": {
+                      "properties": { "state": { "const": "verified_absent" } },
+                      "required": ["state"]
+                    }
+                  },
+                  "configToml": {
+                    "not": {
+                      "properties": { "state": { "const": "verified_absent" } },
+                      "required": ["state"]
+                    }
+                  },
+                  "selected": { "const": "not_checked" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cargoDetectWorkspaceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reasonCode", "workspaceId"],
+      "properties": {
+        "state": { "enum": ["known", "unknown", "not_checked"] },
+        "reasonCode": {
+          "oneOf": [
+            { "$ref": "#/$defs/cargoEvidenceReasonCode" },
+            { "type": "null" }
+          ]
+        },
+        "workspaceId": {
+          "oneOf": [
+            { "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "known" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "reasonCode": { "type": "null" },
+              "workspaceId": {
+                "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" },
+              "workspaceId": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "cargoDetectTargetDirEvidence": {
+      "$comment": "The current production collector cannot establish full Cargo precedence, so it never exports a known target directory or a relative path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reasonCode", "relativePath"],
+      "properties": {
+        "state": { "enum": ["not_checked", "unknown"] },
+        "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" },
+        "relativePath": { "type": "null" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "not_checked" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "reasonCode": { "const": "config_scope_not_checked" }
+            }
+          }
+        }
+      ]
+    },
+    "cargoDetectTargetShapeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reasonCode", "classification"],
+      "properties": {
+        "state": { "const": "unknown" },
+        "reasonCode": { "$ref": "#/$defs/cargoEvidenceReasonCode" },
+        "classification": { "type": "null" }
+      }
+    },
+    "cargoAggregateCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "complete", "incomplete_reasons", "details_lost", "provenance"],
+      "properties": {
+        "state": { "enum": ["complete", "incomplete", "details_lost"] },
+        "complete": { "type": "boolean" },
+        "incomplete_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/reasonCode" }
+        },
+        "details_lost": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/cargoAggregateProvenance" }
+      }
+    },
+    "cargoAggregateProvenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observed_at", "method"],
+          "properties": {
+            "kind": { "const": "live_observation" },
+            "observed_at": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            },
+            "method": { "$ref": "#/$defs/methodId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observed_at", "validation", "token"],
+          "properties": {
+            "kind": { "const": "validated_cache" },
+            "observed_at": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            },
+            "validation": { "$ref": "#/$defs/methodId" },
+            "token": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "inputs", "algorithm"],
+          "properties": {
+            "kind": { "const": "derived_from_current" },
+            "inputs": { "type": "array", "items": { "type": "string" } },
+            "algorithm": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observed_at"],
+          "properties": {
+            "kind": { "const": "stale_preview" },
+            "observed_at": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/rfc3339Timestamp"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "unknown" },
+            "reason": { "$ref": "#/$defs/reasonCode" }
+          }
+        }
+      ]
+    },
+    "cargoDetectAggregateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "revision",
+        "coverage",
+        "arithmeticState",
+        "potentiallyReclaimableBytes"
+      ],
+      "properties": {
+        "state": { "enum": ["known", "unknown"] },
+        "revision": {
+          "oneOf": [
+            { "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString" },
+            { "type": "null" }
+          ]
+        },
+        "coverage": {
+          "oneOf": [
+            { "$ref": "#/$defs/cargoAggregateCoverage" },
+            { "type": "null" }
+          ]
+        },
+        "arithmeticState": {
+          "oneOf": [
+            { "enum": ["exact", "lower_bound", "overflowed", "unknown"] },
+            { "type": "null" }
+          ]
+        },
+        "potentiallyReclaimableBytes": {
+          "oneOf": [
+            { "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "known" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "revision": {
+                "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+              },
+              "coverage": { "$ref": "#/$defs/cargoAggregateCoverage" },
+              "arithmeticState": { "const": "exact" },
+              "potentiallyReclaimableBytes": {
+                "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/taggedValue"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cargoDetectObservation": {
+      "$comment": "A report-only observation is not a Candidate, plan, approval, or execution authorization. Unknown fields are rejected.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observationId",
+        "cleanerId",
+        "cleanerVersion",
+        "ruleId",
+        "displayPath",
+        "observedRoot",
+        "disposition",
+        "reasonCodes",
+        "executable",
+        "ruleEvaluation",
+        "evidence"
+      ],
+      "properties": {
+        "observationId": {
+          "type": "string",
+          "pattern": "^cargo-target-observation:scan-entry:v1:[A-Za-z0-9_-]+:[1-9][0-9]*$"
+        },
+        "cleanerId": { "const": "org.sweepx.cargo-target" },
+        "cleanerVersion": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        },
+        "ruleId": { "const": "cargo-target-v1" },
+        "displayPath": { "type": "string" },
+        "observedRoot": { "type": "string" },
+        "disposition": { "const": "report_only" },
+        "reasonCodes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+$"
+          }
+        },
+        "executable": { "const": false },
+        "ruleEvaluation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["factState", "inferenceState", "provisionalRisk", "reportOnly"],
+          "properties": {
+            "factState": { "enum": ["known_true", "known_false", "unknown"] },
+            "inferenceState": { "enum": ["known_true", "known_false", "unknown"] },
+            "provisionalRisk": {
+              "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/riskTier"
+            },
+            "reportOnly": { "const": true }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "cargo", "required", "aggregate"],
+          "properties": {
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "scanId",
+                "rootEntryId",
+                "manifestEntryId",
+                "targetEntryId",
+                "targetParentEntryId",
+                "nativeLocatorValidated",
+                "rootParentLineageBound",
+                "sameFilesystemDomain",
+                "sameVolumeOrMount"
+              ],
+              "properties": {
+                "scanId": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+                },
+                "rootEntryId": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+                },
+                "manifestEntryId": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+                },
+                "targetEntryId": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+                },
+                "targetParentEntryId": {
+                  "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/scanEntryId"
+                },
+                "nativeLocatorValidated": { "const": true },
+                "rootParentLineageBound": { "const": true },
+                "sameFilesystemDomain": { "const": true },
+                "sameVolumeOrMount": { "const": true }
+              }
+            },
+            "cargo": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["workspace", "configScope", "targetDir", "targetShape", "notShared", "activity"],
+              "properties": {
+                "workspace": { "$ref": "#/$defs/cargoDetectWorkspaceEvidence" },
+                "configScope": { "$ref": "#/$defs/cargoConfigScopeV1" },
+                "targetDir": { "$ref": "#/$defs/cargoDetectTargetDirEvidence" },
+                "targetShape": { "$ref": "#/$defs/cargoDetectTargetShapeEvidence" },
+                "notShared": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["state", "reasonCode"],
+                  "properties": {
+                    "state": { "const": "not_checked" },
+                    "reasonCode": { "const": "sharing_not_checked" }
+                  }
+                },
+                "activity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["state", "reasonCode"],
+                  "properties": {
+                    "state": { "const": "not_checked" },
+                    "reasonCode": { "const": "activity_not_checked" }
+                  }
+                }
+              }
+            },
+            "required": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "workspace",
+                "configuredTargetDir",
+                "targetShape",
+                "finalCompleteAggregate",
+                "noBoundary",
+                "notShared",
+                "activity"
+              ],
+              "properties": {
+                "workspace": { "enum": ["known", "unknown", "not_checked"] },
+                "configuredTargetDir": { "enum": ["unknown", "not_checked"] },
+                "targetShape": { "const": "unknown" },
+                "finalCompleteAggregate": { "enum": ["known", "unknown"] },
+                "noBoundary": { "enum": ["known", "unknown"] },
+                "notShared": { "const": "not_checked" },
+                "activity": { "const": "not_checked" }
+              }
+            },
+            "aggregate": { "$ref": "#/$defs/cargoDetectAggregateEvidence" }
+          }
+        }
+      }
+    },
+    "cargoDetectSourceScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incomplete",
+        "warningCount",
+        "errorCount",
+        "boundaryCount",
+        "partialBoundaryCount",
+        "incompleteAggregateCount"
+      ],
+      "properties": {
+        "incomplete": { "type": "boolean" },
+        "warningCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "errorCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "boundaryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "partialBoundaryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "incompleteAggregateCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        }
+      }
+    },
+    "cargoDetectCompatibleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "experimental",
+        "liveOnly",
+        "builtinManifestCompatible",
+        "matchCount",
+        "hintCount",
+        "matches",
+        "hints",
+        "reasons",
+        "sourceScan",
+        "readOnly",
+        "candidateAllowed",
+        "planAllowed",
+        "approvalAllowed",
+        "executionAllowed"
+      ],
+      "properties": {
+        "command": { "const": "cleaner.cargo-detect" },
+        "experimental": { "const": true },
+        "liveOnly": { "const": true },
+        "builtinManifestCompatible": { "const": true },
+        "matchCount": { "const": "0" },
+        "hintCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "matches": {
+          "type": "array",
+          "maxItems": 0,
+          "items": { "$ref": "#/$defs/cargoDetectObservation" }
+        },
+        "hints": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/cargoDetectObservation" }
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+        },
+        "sourceScan": { "$ref": "#/$defs/cargoDetectSourceScan" },
+        "readOnly": { "const": true },
+        "candidateAllowed": { "const": false },
+        "planAllowed": { "const": false },
+        "approvalAllowed": { "const": false },
+        "executionAllowed": { "const": false }
+      }
+    },
+    "cargoDetectIncompatibleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "experimental",
+        "liveOnly",
+        "scanPerformed",
+        "builtinManifestCompatible",
+        "matchCount",
+        "hintCount",
+        "matches",
+        "hints",
+        "reasons",
+        "readOnly",
+        "candidateAllowed",
+        "planAllowed",
+        "approvalAllowed",
+        "executionAllowed"
+      ],
+      "properties": {
+        "command": { "const": "cleaner.cargo-detect" },
+        "experimental": { "const": true },
+        "liveOnly": { "const": true },
+        "scanPerformed": { "const": false },
+        "builtinManifestCompatible": { "const": false },
+        "matchCount": { "const": "0" },
+        "hintCount": { "const": "0" },
+        "matches": { "type": "array", "maxItems": 0 },
+        "hints": { "type": "array", "maxItems": 0 },
+        "reasons": {
+          "type": "array",
+          "prefixItems": [{ "const": "builtin_manifest_incompatible" }],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "readOnly": { "const": true },
+        "candidateAllowed": { "const": false },
+        "planAllowed": { "const": false },
+        "approvalAllowed": { "const": false },
+        "executionAllowed": { "const": false }
+      }
+    },
+    "cargoDetectResultData": {
+      "oneOf": [
+        { "$ref": "#/$defs/cargoDetectCompatibleData" },
+        { "$ref": "#/$defs/cargoDetectIncompatibleData" }
+      ]
+    },
+    "cargoDetectCompatibleSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "cleanerId",
+        "experimental",
+        "liveOnly",
+        "matchCount",
+        "hintCount",
+        "rootCount",
+        "reasonCode",
+        "sourceScanIncomplete",
+        "sourceScanWarningCount",
+        "sourceScanErrorCount",
+        "sourceScanBoundaryCount",
+        "sourceScanPartialBoundaryCount",
+        "sourceScanIncompleteAggregateCount",
+        "cleanerSetDigest"
+      ],
+      "properties": {
+        "command": { "const": "cleaner.cargo-detect" },
+        "cleanerId": { "const": "org.sweepx.cargo-target" },
+        "experimental": { "const": true },
+        "liveOnly": { "const": true },
+        "matchCount": { "const": "0" },
+        "hintCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "rootCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "reasonCode": {
+          "enum": [
+            "cancelled",
+            "source_scan_incomplete",
+            "cargo_required_evidence_unknown",
+            "no_cargo_target_hint"
+          ]
+        },
+        "sourceScanIncomplete": { "type": "boolean" },
+        "sourceScanWarningCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "sourceScanErrorCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "sourceScanBoundaryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "sourceScanPartialBoundaryCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "sourceScanIncompleteAggregateCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "cleanerSetDigest": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "cargoDetectIncompatibleSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "cleanerId",
+        "experimental",
+        "liveOnly",
+        "scanPerformed",
+        "matchCount",
+        "hintCount",
+        "rootCount",
+        "reasonCode",
+        "cleanerSetDigest"
+      ],
+      "properties": {
+        "command": { "const": "cleaner.cargo-detect" },
+        "cleanerId": { "const": "org.sweepx.cargo-target" },
+        "experimental": { "const": true },
+        "liveOnly": { "const": true },
+        "scanPerformed": { "const": false },
+        "matchCount": { "const": "0" },
+        "hintCount": { "const": "0" },
+        "rootCount": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/decimalString"
+        },
+        "reasonCode": { "const": "builtin_manifest_incompatible" },
+        "cleanerSetDigest": {
+          "$ref": "https://sweepx.dev/schemas/common/v1#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "cargoDetectResultSummary": {
+      "oneOf": [
+        { "$ref": "#/$defs/cargoDetectCompatibleSummary" },
+        { "$ref": "#/$defs/cargoDetectIncompatibleSummary" }
+      ]
     },
     "operationState": {
       "type": "string",
