@@ -16,6 +16,7 @@ use sweepx_model::{
 };
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::{
+    CargoConfigMemberObservation, CargoConfigPairConsistency, CargoConfigPairObservation,
     LocatorBatchReadRequest, LocatorFileRead, LocatorFileRequest, LocatorReadError,
     LocatorReadFailure, LocatorReadLimits, LocatorReader, ProgressEvent, ScanSummary,
 };
@@ -204,7 +205,7 @@ enum CargoConfigFile<'a> {
 #[derive(Debug, Clone, Copy)]
 enum CollectedCargoConfigFile<'a> {
     Present(&'a [u8]),
-    VerifiedAbsent,
+    AbsentDuringEnumeration,
     Failed(CargoEvidenceReason),
 }
 
@@ -767,14 +768,7 @@ pub(crate) fn produce_cargo_typed_evidence(
     // This milestone records a workspace declaration, but deliberately does not claim an effective
     // target directory until every precedence source and the invocation cwd are bound. Production
     // collection always leaves those sources unresolved.
-    let target_dir = if !matches!(
-        config_scope.workspace.pair_snapshot,
-        CargoWorkspacePairState::StableSnapshot
-    ) {
-        CargoEvidence::NotChecked {
-            reason: CargoEvidenceReason::ConfigScopeNotChecked,
-        }
-    } else if let CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } =
+    let target_dir = if let CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } =
         config_scope.workspace.target_dir_declaration
     {
         unknown(
@@ -786,6 +780,13 @@ pub(crate) fn produce_cargo_typed_evidence(
                 reason_code
             },
         )
+    } else if !matches!(
+        config_scope.workspace.pair_snapshot,
+        CargoWorkspacePairState::StableSnapshot
+    ) {
+        CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        }
     } else if matches!(
         (input.config_inputs.config, input.config_inputs.config_toml),
         (CargoConfigFile::Present(_), CargoConfigFile::Present(_))
@@ -862,20 +863,7 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
         );
     }
 
-    let config_components = [fixed_native_name(".cargo"), fixed_native_name("config")];
-    let config_toml_components = [
-        fixed_native_name(".cargo"),
-        fixed_native_name("config.toml"),
-    ];
-    let requests = [
-        LocatorFileRequest::ScannedFile { entry: manifest },
-        LocatorFileRequest::RelativeOptional {
-            components: &config_components,
-        },
-        LocatorFileRequest::RelativeOptional {
-            components: &config_toml_components,
-        },
-    ];
+    let requests = [LocatorFileRequest::ScannedFile { entry: manifest }];
     let batch = match reader.read_batch(
         LocatorBatchReadRequest {
             base_directory: root,
@@ -905,15 +893,32 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
             return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
         }
     };
-    let collected_config = map_config_file_read(batch.files.get(1));
-    let collected_config_toml = map_config_file_read(batch.files.get(2));
+    let config_pair = match reader.observe_cargo_config_pair(root, cancel) {
+        Ok(observed) => observed,
+        Err(error) => {
+            let reason = map_locator_batch_error(error);
+            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
+        }
+    };
+    let collected_config = map_config_pair_member_read(&config_pair.config);
+    let collected_config_toml = map_config_pair_member_read(&config_pair.config_toml);
     let config_failure_reason = [collected_config, collected_config_toml]
         .into_iter()
         .filter_map(|config| match config {
             CollectedCargoConfigFile::Failed(reason) => Some(reason),
-            CollectedCargoConfigFile::Present(_) | CollectedCargoConfigFile::VerifiedAbsent => None,
+            CollectedCargoConfigFile::Present(_)
+            | CollectedCargoConfigFile::AbsentDuringEnumeration => None,
         })
         .min_by_key(|reason| cargo_config_failure_precedence(*reason));
+    let pair_failure_reason = config_failure_reason.filter(|reason| {
+        matches!(
+            reason,
+            CargoEvidenceReason::AmbiguousConfig
+                | CargoEvidenceReason::Cancelled
+                | CargoEvidenceReason::ResourceLimit
+                | CargoEvidenceReason::ConfigReadFailed
+        )
+    });
     let input = HandleBoundCargoInputs {
         root_entry_id,
         manifest_entry_id,
@@ -921,7 +926,10 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
         config_inputs: CargoConfigInputs {
             config: collected_config.into_decode_input(),
             config_toml: collected_config_toml.into_decode_input(),
-            scope: CargoConfigScopeInputs::production(config_scope_runtime),
+            scope: cargo_config_scope_inputs(
+                config_scope_runtime,
+                cargo_workspace_pair_input(&config_pair, pair_failure_reason),
+            ),
         },
         target_entry_id,
     };
@@ -1003,7 +1011,8 @@ fn map_manifest_read_failure(failure: &LocatorReadFailure) -> CargoEvidenceReaso
         | LocatorReadFailure::MountChanged
         | LocatorReadFailure::InvalidBinding
         | LocatorReadFailure::SymlinkOrReparse
-        | LocatorReadFailure::NotRegular => CargoEvidenceReason::MissingManifest,
+        | LocatorReadFailure::NotRegular
+        | LocatorReadFailure::AmbiguousAlias => CargoEvidenceReason::MissingManifest,
         LocatorReadFailure::ReadFailed
         | LocatorReadFailure::ProviderOrOffline
         | LocatorReadFailure::Unavailable => CargoEvidenceReason::ManifestReadFailed,
@@ -1014,24 +1023,53 @@ impl<'a> CollectedCargoConfigFile<'a> {
     fn into_decode_input(self) -> CargoConfigFile<'a> {
         match self {
             Self::Present(bytes) => CargoConfigFile::Present(bytes),
-            Self::VerifiedAbsent => CargoConfigFile::VerifiedAbsent,
+            Self::AbsentDuringEnumeration => CargoConfigFile::NotChecked,
             Self::Failed(reason) => CargoConfigFile::ReadFailed(reason),
         }
     }
 }
 
-fn map_config_file_read(read: Option<&LocatorFileRead>) -> CollectedCargoConfigFile<'_> {
+fn cargo_workspace_pair_input(
+    pair: &CargoConfigPairObservation,
+    failure: Option<CargoEvidenceReason>,
+) -> CargoWorkspacePairInput {
+    match (pair.consistency, failure) {
+        (_, Some(reason)) => CargoWorkspacePairInput::Failed(reason),
+        (CargoConfigPairConsistency::NonAtomic, None) => CargoWorkspacePairInput::NotChecked,
+    }
+}
+
+fn cargo_config_scope_inputs(
+    runtime: CargoConfigScopeRuntime,
+    workspace_pair: CargoWorkspacePairInput,
+) -> CargoConfigScopeInputs {
+    CargoConfigScopeInputs {
+        runtime,
+        workspace_pair,
+        ..CargoConfigScopeInputs::production(runtime)
+    }
+}
+
+fn map_config_pair_member_read(
+    read: &CargoConfigMemberObservation,
+) -> CollectedCargoConfigFile<'_> {
     match read {
-        Some(LocatorFileRead::Present(result)) => {
-            CollectedCargoConfigFile::Present(result.bytes.as_slice())
+        CargoConfigMemberObservation::Present(_) => CollectedCargoConfigFile::Present(
+            read.observed_bytes()
+                .expect("present config observation carries bytes"),
+        ),
+        CargoConfigMemberObservation::AbsentDuringEnumeration => {
+            CollectedCargoConfigFile::AbsentDuringEnumeration
         }
-        Some(LocatorFileRead::VerifiedAbsent) => CollectedCargoConfigFile::VerifiedAbsent,
-        Some(LocatorFileRead::Failed(failure)) => match failure {
+        CargoConfigMemberObservation::Failed(failure) => match failure {
             LocatorReadFailure::Cancelled => {
                 CollectedCargoConfigFile::Failed(CargoEvidenceReason::Cancelled)
             }
             LocatorReadFailure::ResourceLimit => {
                 CollectedCargoConfigFile::Failed(CargoEvidenceReason::ResourceLimit)
+            }
+            LocatorReadFailure::AmbiguousAlias => {
+                CollectedCargoConfigFile::Failed(CargoEvidenceReason::AmbiguousConfig)
             }
             LocatorReadFailure::IdentityMismatch
             | LocatorReadFailure::MountChanged
@@ -1044,22 +1082,6 @@ fn map_config_file_read(read: Option<&LocatorFileRead>) -> CollectedCargoConfigF
                 CollectedCargoConfigFile::Failed(CargoEvidenceReason::ConfigReadFailed)
             }
         },
-        None => CollectedCargoConfigFile::Failed(CargoEvidenceReason::ConfigReadFailed),
-    }
-}
-
-fn fixed_native_name(value: &str) -> NativeName {
-    #[cfg(unix)]
-    {
-        NativeName::unix(value.as_bytes().to_vec())
-    }
-    #[cfg(windows)]
-    {
-        NativeName::windows_utf16(value.encode_utf16().collect::<Vec<_>>())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        NativeName::unix(value.as_bytes().to_vec())
     }
 }
 
@@ -1355,10 +1377,9 @@ fn decode_workspace_config_scope(
 ) -> CargoWorkspaceConfigScopeEvidence {
     let config_state = project_config_file_state(config);
     let config_toml_state = project_config_file_state(config_toml);
-    // The two files are read through separate bounded requests. Without a directory-generation
-    // snapshot (and case-fold collision evidence on case-insensitive filesystems), their joint
-    // presence/absence cannot be promoted into a stable selection. Preserve each time-local read
-    // result, but keep the pair and its declaration explicitly not checked.
+    // Production observes both names through one retained directory handle and one bounded cursor,
+    // but no platform-sealed directory generation exists yet. The observation therefore cannot
+    // exclude create/delete/rename ABA and must not be promoted into a stable selection.
     let pair_is_stable = matches!(pair_snapshot, CargoWorkspacePairInput::StableSnapshot);
     let (selected, selected_file) = match (pair_is_stable, config, config_toml) {
         (true, CargoConfigFile::Present(bytes), _) => (
@@ -1376,7 +1397,11 @@ fn decode_workspace_config_scope(
             CargoWorkspaceConfigSelection::NotChecked,
             Some((CargoTargetDirSource::Config, bytes)),
         ),
-        (false, CargoConfigFile::VerifiedAbsent, CargoConfigFile::Present(bytes)) => (
+        (
+            false,
+            CargoConfigFile::VerifiedAbsent | CargoConfigFile::NotChecked,
+            CargoConfigFile::Present(bytes),
+        ) => (
             CargoWorkspaceConfigSelection::NotChecked,
             Some((CargoTargetDirSource::ConfigToml, bytes)),
         ),
@@ -1662,10 +1687,10 @@ fn collect_external_blocker(
 
 fn workspace_config_blocker(reason: CargoEvidenceReason) -> CargoConfigScopeBlocker {
     match reason {
+        CargoEvidenceReason::AmbiguousConfig => CargoConfigScopeBlocker::WorkspaceConfigNotChecked,
         CargoEvidenceReason::DuplicateTomlKey => {
             CargoConfigScopeBlocker::WorkspaceConfigDuplicateKey
         }
-        CargoEvidenceReason::AmbiguousConfig => CargoConfigScopeBlocker::WorkspaceConfigNotChecked,
         CargoEvidenceReason::MalformedToml => CargoConfigScopeBlocker::WorkspaceConfigMalformed,
         CargoEvidenceReason::ResourceLimit => CargoConfigScopeBlocker::WorkspaceConfigResourceLimit,
         CargoEvidenceReason::ConfigReadFailed => CargoConfigScopeBlocker::WorkspaceConfigReadFailed,
@@ -2280,6 +2305,22 @@ mod linux_real_stack_tests {
             }
         ));
         assert!(matches!(
+            evidence.config_scope.workspace.config,
+            CargoConfigFileState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            evidence.config_scope.workspace.config_toml,
+            CargoConfigFileState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert_eq!(
+            evidence.config_scope.workspace.selected,
+            CargoWorkspaceConfigSelection::NotChecked
+        );
+        assert!(matches!(
             evidence.target_shape,
             CargoEvidence::Unknown {
                 reason: CargoEvidenceReason::ConfigScopeNotChecked
@@ -2310,6 +2351,22 @@ mod linux_real_stack_tests {
                 reason: CargoEvidenceReason::ConfigScopeNotChecked
             }
         ));
+        assert!(matches!(
+            evidence.config_scope.workspace.config,
+            CargoConfigFileState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            evidence.config_scope.workspace.config_toml,
+            CargoConfigFileState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert_eq!(
+            evidence.config_scope.workspace.selected,
+            CargoWorkspaceConfigSelection::NotChecked
+        );
     }
 
     #[test]
@@ -2409,6 +2466,57 @@ mod linux_real_stack_tests {
         assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
         assert_unknown(evidence.target_dir, CargoEvidenceReason::ConfigReadFailed);
         assert_unknown(evidence.target_shape, CargoEvidenceReason::ConfigReadFailed);
+    }
+
+    #[test]
+    fn alias_collision_maps_to_pair_failed_and_does_not_upgrade_absence() {
+        let (temp, summary, manifest_id, target_id) = workspace_layout("cargo-fixed-alias");
+        let root = temp.path().join("workspace");
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo").join("CONFIG"),
+            b"[build]\ntarget-dir='alias'\n",
+        )
+        .unwrap();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
+        assert!(matches!(
+            evidence.config_scope.workspace.pair_snapshot,
+            CargoWorkspacePairState::Failed {
+                reason_code: CargoEvidenceReason::AmbiguousConfig
+            }
+        ));
+        assert!(
+            evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::WorkspaceConfigNotChecked)
+        );
+        assert!(matches!(
+            evidence.config_scope.workspace.config,
+            CargoConfigFileState::Failed {
+                reason_code: CargoEvidenceReason::AmbiguousConfig
+            }
+        ));
+        assert!(matches!(
+            evidence.config_scope.workspace.config_toml,
+            CargoConfigFileState::Failed {
+                reason_code: CargoEvidenceReason::AmbiguousConfig
+            }
+        ));
+        assert_unknown(evidence.target_dir, CargoEvidenceReason::AmbiguousConfig);
+        assert_unknown(evidence.target_shape, CargoEvidenceReason::AmbiguousConfig);
     }
 
     #[test]

@@ -1320,6 +1320,51 @@ const resultSchemaCases = [
     }
   },
   {
+    name: "cargo detect accepts a non-atomic alias failure without authority",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const cargo = output.data.hints[0].evidence.cargo;
+      cargo.configScope.workspace.pairSnapshot = {
+        state: "failed",
+        reasonCode: "ambiguous_config"
+      };
+      cargo.configScope.workspace.config = {
+        state: "failed",
+        reasonCode: "ambiguous_config"
+      };
+      cargo.configScope.workspace.configToml = {
+        state: "failed",
+        reasonCode: "ambiguous_config"
+      };
+      cargo.configScope.workspace.selected = "not_checked";
+      cargo.configScope.workspace.targetDirDeclaration = {
+        state: "unknown",
+        reasonCode: "ambiguous_config"
+      };
+      cargo.configScope.blockers = [
+        "ancestor_configs_not_checked",
+        "cargo_home_config_not_checked",
+        "cargo_target_dir_present_redacted",
+        "cli_config_overrides_not_checked",
+        "cli_target_dir_not_checked",
+        "invocation_cwd_not_bound",
+        "workspace_config_not_checked",
+        "workspace_config_pair_failed"
+      ];
+      cargo.targetDir = {
+        state: "unknown",
+        reasonCode: "ambiguous_config",
+        relativePath: null
+      };
+      cargo.targetShape = {
+        state: "unknown",
+        reasonCode: "ambiguous_config",
+        classification: null
+      };
+    }
+  },
+  {
     name: "cargo detect cannot claim complete precedence",
     file: "sweepx.output.cargo-detect.result.example.json",
     expected: false,

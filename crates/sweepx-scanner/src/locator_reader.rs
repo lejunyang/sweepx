@@ -72,6 +72,40 @@ pub struct LocatorBatchReadResult {
     pub total_bytes: usize,
 }
 
+/// One fixed Cargo configuration member observed during a single, bounded directory walk.
+///
+/// `AbsentDuringEnumeration` is deliberately weaker than `LocatorFileRead::VerifiedAbsent`:
+/// without a platform-sealed directory generation it is only a time-local observation and must
+/// never be promoted into an atomic absence claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoConfigMemberObservation {
+    Present(Box<PresentRegularFileRead>),
+    AbsentDuringEnumeration,
+    Failed(LocatorReadFailure),
+}
+
+impl CargoConfigMemberObservation {
+    pub fn observed_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Present(read) => Some(read.bytes.as_slice()),
+            Self::AbsentDuringEnumeration | Self::Failed(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoConfigPairConsistency {
+    NonAtomic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoConfigPairObservation {
+    pub consistency: CargoConfigPairConsistency,
+    pub config: CargoConfigMemberObservation,
+    pub config_toml: CargoConfigMemberObservation,
+    pub total_bytes: usize,
+}
+
 #[derive(Debug, Default)]
 struct BatchBudget {
     enumerated_entries: usize,
@@ -100,6 +134,8 @@ pub enum LocatorReadFailure {
     ProviderOrOffline,
     #[error("platform operation unavailable")]
     Unavailable,
+    #[error("fixed-name alias or duplicate is ambiguous")]
+    AmbiguousAlias,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -184,6 +220,135 @@ impl<P: PlatformScanner> LocatorReader<P> {
         })
     }
 
+    /// Observes Cargo's two workspace-local config names through one retained `.cargo` handle and
+    /// one bounded enumeration cursor. This deliberately returns `NonAtomic`: directory
+    /// enumeration alone cannot exclude create/delete/rename ABA on any supported platform.
+    pub fn observe_cargo_config_pair(
+        &self,
+        base_directory: &ScannedEntry,
+        cancel: &CancellationToken,
+    ) -> Result<CargoConfigPairObservation, LocatorReadError> {
+        self.validate_base_directory(base_directory)?;
+        self.validate_cargo_pair_budget(base_directory)?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadError::Cancelled);
+        }
+        let mut budget = BatchBudget::default();
+        let mut root = match self.reopen_base(base_directory, cancel, &mut budget) {
+            Ok(root) => root,
+            Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
+                return Err(LocatorReadError::Cancelled);
+            }
+            Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                return Err(LocatorReadError::ResourceLimit);
+            }
+            Err(ReadAttempt::Absent) | Err(ReadAttempt::Failed(_)) => {
+                return Err(LocatorReadError::InvalidRequest);
+            }
+        };
+        let mut cargo = match self.find_cargo_directory(&mut root, cancel, &mut budget) {
+            Ok(Some(cargo)) => cargo,
+            Ok(None) | Err(ReadAttempt::Absent) => {
+                return Ok(CargoConfigPairObservation {
+                    consistency: CargoConfigPairConsistency::NonAtomic,
+                    config: CargoConfigMemberObservation::AbsentDuringEnumeration,
+                    config_toml: CargoConfigMemberObservation::AbsentDuringEnumeration,
+                    total_bytes: 0,
+                });
+            }
+            Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
+                return Err(LocatorReadError::Cancelled);
+            }
+            Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                return Err(LocatorReadError::ResourceLimit);
+            }
+            Err(ReadAttempt::Failed(failure)) => return Ok(pair_failed(failure)),
+        };
+        let mut config = None;
+        let mut config_toml = None;
+        let mut saw_config = false;
+        let mut saw_config_toml = false;
+        let mut total_bytes = 0usize;
+        let mut alias_collision = false;
+        let mut observation_failure = None;
+
+        loop {
+            let batch = match self.next_directory_batch(&mut cargo, cancel, &mut budget) {
+                Ok(batch) => batch,
+                Err(failure) => return Ok(pair_failed(failure)),
+            };
+            for child in &batch.entries {
+                let slot = cargo_config_slot(&child.file_name);
+                match slot {
+                    CargoConfigSlot::Other => {}
+                    CargoConfigSlot::Alias => {
+                        alias_collision = true;
+                    }
+                    CargoConfigSlot::Config => {
+                        if saw_config {
+                            alias_collision = true;
+                        } else {
+                            saw_config = true;
+                            let observed = self.read_cargo_config_member(
+                                &cargo,
+                                child,
+                                &mut total_bytes,
+                                cancel,
+                            );
+                            if let Err(failure) = &observed {
+                                observation_failure.get_or_insert_with(|| failure.clone());
+                            }
+                            config = Some(observed);
+                        }
+                    }
+                    CargoConfigSlot::ConfigToml => {
+                        if saw_config_toml {
+                            alias_collision = true;
+                        } else {
+                            saw_config_toml = true;
+                            let observed = self.read_cargo_config_member(
+                                &cargo,
+                                child,
+                                &mut total_bytes,
+                                cancel,
+                            );
+                            if let Err(failure) = &observed {
+                                observation_failure.get_or_insert_with(|| failure.clone());
+                            }
+                            config_toml = Some(observed);
+                        }
+                    }
+                }
+            }
+            if batch.end_of_directory {
+                break;
+            }
+        }
+
+        if alias_collision {
+            return Ok(pair_failed(LocatorReadFailure::AmbiguousAlias));
+        }
+        if let Some(failure) = observation_failure {
+            return Ok(pair_failed(failure));
+        }
+        let config = match config {
+            Some(Err(failure)) => return Ok(pair_failed(failure)),
+            Some(Ok(read)) => CargoConfigMemberObservation::Present(Box::new(read)),
+            None => CargoConfigMemberObservation::AbsentDuringEnumeration,
+        };
+        let config_toml = match config_toml {
+            Some(Err(failure)) => return Ok(pair_failed(failure)),
+            Some(Ok(read)) => CargoConfigMemberObservation::Present(Box::new(read)),
+            None => CargoConfigMemberObservation::AbsentDuringEnumeration,
+        };
+        Ok(CargoConfigPairObservation {
+            consistency: CargoConfigPairConsistency::NonAtomic,
+            config,
+            config_toml,
+            total_bytes,
+        })
+    }
+
     fn validate_batch(
         &self,
         request: &LocatorBatchReadRequest<'_>,
@@ -244,6 +409,187 @@ impl<P: PlatformScanner> LocatorReader<P> {
             return Err(LocatorReadError::ResourceLimit);
         }
         Ok(())
+    }
+
+    fn validate_base_directory(&self, base: &ScannedEntry) -> Result<(), LocatorReadError> {
+        let identity = base
+            .identity
+            .as_ref()
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        if base.object_type != ObjectType::Directory
+            || identity.parent_id.is_some()
+            || identity.entry_id != identity.scan_root_id
+            || base
+                .executable_native_locator()
+                .map_err(|_| LocatorReadError::InvalidRequest)?
+                .is_none()
+        {
+            return Err(LocatorReadError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    fn validate_cargo_pair_budget(&self, base: &ScannedEntry) -> Result<(), LocatorReadError> {
+        if self.limits.max_requests < 3 {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        let locator = base
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let base_components = locator
+            .parent_reopen_recipe
+            .len()
+            .checked_add(1)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        let cargo_directory_components = base_components
+            .checked_add(1)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        let member_components = base_components
+            .checked_add(2)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        let total_components = member_components
+            .checked_mul(2)
+            .and_then(|members| members.checked_add(cargo_directory_components))
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        if member_components > self.limits.max_components_per_request
+            || total_components > self.limits.max_total_components
+        {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        Ok(())
+    }
+
+    fn next_directory_batch(
+        &self,
+        directory: &mut OpenedDirectory<P::DirectoryHandle>,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> Result<sweepx_platform::DirectoryEntryBatch, LocatorReadFailure> {
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled);
+        }
+        let remaining_entries = self
+            .limits
+            .max_directory_entries
+            .saturating_sub(budget.enumerated_entries);
+        let remaining_bytes = self
+            .limits
+            .max_directory_bytes
+            .saturating_sub(budget.enumerated_bytes);
+        if remaining_entries == 0 || remaining_bytes == 0 {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        let limits = DirectoryReadLimits {
+            max_batch_entries: self
+                .limits
+                .max_directory_batch_entries
+                .min(remaining_entries),
+            max_batch_bytes: self.limits.max_directory_batch_bytes.min(remaining_bytes),
+        };
+        if limits.max_batch_entries == 0 || limits.max_batch_bytes == 0 {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        let batch = self
+            .platform
+            .enumerate_children(&mut directory.handle, cancel, limits)
+            .map_err(map_platform_failure)?;
+        if batch.entries.is_empty() && !batch.end_of_directory {
+            return Err(LocatorReadFailure::Unavailable);
+        }
+        let retained_bytes = batch.entries.iter().try_fold(0usize, |total, child| {
+            child
+                .estimated_retained_bytes()
+                .and_then(|bytes| total.checked_add(bytes))
+        });
+        if batch.entries.len() > limits.max_batch_entries
+            || retained_bytes.is_none_or(|bytes| bytes > limits.max_batch_bytes)
+        {
+            return Err(LocatorReadFailure::Unavailable);
+        }
+        budget.enumerated_entries = budget
+            .enumerated_entries
+            .checked_add(batch.entries.len())
+            .ok_or(LocatorReadFailure::ResourceLimit)?;
+        budget.enumerated_bytes = budget
+            .enumerated_bytes
+            .checked_add(retained_bytes.expect("batch bytes checked above"))
+            .ok_or(LocatorReadFailure::ResourceLimit)?;
+        Ok(batch)
+    }
+
+    fn read_cargo_config_member(
+        &self,
+        cargo: &OpenedDirectory<P::DirectoryHandle>,
+        child: &DirectoryEntryRecord,
+        total_bytes: &mut usize,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
+        let walked =
+            match inspect_bound_child(&self.platform, &cargo.handle, &cargo.path, child, cancel) {
+                Ok(walked) => walked,
+                Err(error) => {
+                    return Err(map_platform_failure(error));
+                }
+            };
+        let metadata = match walked {
+            WalkEntry::File(metadata) => metadata,
+            WalkEntry::Link(_) => {
+                return Err(LocatorReadFailure::SymlinkOrReparse);
+            }
+            WalkEntry::Directory(_) => {
+                return Err(LocatorReadFailure::NotRegular);
+            }
+            WalkEntry::Boundary(boundary) => {
+                return Err(map_boundary_failure(boundary.kind));
+            }
+            WalkEntry::Error(error) => {
+                return Err(map_walk_failure(error.kind));
+            }
+        };
+        let (Some(identity), Some(filesystem), Some(mount)) = (
+            metadata.identity,
+            metadata.filesystem_identity,
+            metadata.mount_identity,
+        ) else {
+            return Err(LocatorReadFailure::IdentityMismatch);
+        };
+        if let Err(ReadAttempt::Failed(failure)) =
+            validate_same_scope(&cargo.metadata, &filesystem, &mount)
+        {
+            return Err(failure);
+        }
+        let remaining = self.limits.max_total_bytes.saturating_sub(*total_bytes);
+        let max_bytes = self.limits.max_file_bytes.min(remaining);
+        let request = match BoundedRegularFileReadRequest::previously_observed(
+            child.file_name.clone(),
+            identity,
+            filesystem,
+            mount,
+            max_bytes,
+        ) {
+            Ok(request) => request,
+            Err(_) => {
+                return Err(LocatorReadFailure::InvalidBinding);
+            }
+        };
+        let read = match read_bound_regular_file(&self.platform, &cargo.handle, &request, cancel) {
+            Ok(read) => read,
+            Err(error) => {
+                return match map_file_read_error(error) {
+                    ReadAttempt::Failed(failure) => Err(failure),
+                    ReadAttempt::Absent => Err(LocatorReadFailure::IdentityMismatch),
+                };
+            }
+        };
+        let Some(next_total) = total_bytes.checked_add(read.bytes.len()) else {
+            return Err(LocatorReadFailure::ResourceLimit);
+        };
+        if next_total > self.limits.max_total_bytes {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        *total_bytes = next_total;
+        Ok(read)
     }
 
     fn read_scanned_file(
@@ -499,6 +845,69 @@ impl<P: PlatformScanner> LocatorReader<P> {
         }
     }
 
+    fn find_cargo_directory(
+        &self,
+        parent: &mut OpenedDirectory<P::DirectoryHandle>,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> Result<Option<OpenedDirectory<P::DirectoryHandle>>, ReadAttempt> {
+        let expected = fixed_native_name(".cargo");
+        let mut opened_cargo = None;
+        loop {
+            let batch = self
+                .next_directory_batch(parent, cancel, budget)
+                .map_err(ReadAttempt::Failed)?;
+            for child in &batch.entries {
+                if ascii_case_fold_matches(&child.file_name, ".cargo")
+                    && child.file_name != expected
+                {
+                    return Err(ReadAttempt::Failed(LocatorReadFailure::AmbiguousAlias));
+                }
+                if child.file_name == expected {
+                    if opened_cargo.is_some() {
+                        return Err(ReadAttempt::Failed(LocatorReadFailure::AmbiguousAlias));
+                    }
+                    let walked = inspect_bound_child(
+                        &self.platform,
+                        &parent.handle,
+                        &parent.path,
+                        child,
+                        cancel,
+                    )
+                    .map_err(|error| ReadAttempt::Failed(map_platform_failure(error)))?;
+                    let WalkEntry::Directory(opened) = walked else {
+                        return Err(ReadAttempt::Failed(match walked {
+                            WalkEntry::Link(_) => LocatorReadFailure::SymlinkOrReparse,
+                            WalkEntry::Boundary(boundary) => map_boundary_failure(boundary.kind),
+                            WalkEntry::Error(error) => map_walk_failure(error.kind),
+                            WalkEntry::File(_) => LocatorReadFailure::NotRegular,
+                            WalkEntry::Directory(_) => unreachable!(),
+                        }));
+                    };
+                    let filesystem = opened
+                        .metadata
+                        .filesystem_identity
+                        .as_ref()
+                        .ok_or(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch))?;
+                    let mount = opened
+                        .metadata
+                        .mount_identity
+                        .as_ref()
+                        .ok_or(ReadAttempt::Failed(LocatorReadFailure::MountChanged))?;
+                    validate_same_scope(&parent.metadata, filesystem, mount)?;
+                    opened_cargo = Some(OpenedDirectory {
+                        path: opened.metadata.path.clone(),
+                        metadata: opened.metadata,
+                        handle: opened.handle,
+                    });
+                }
+            }
+            if batch.end_of_directory {
+                return Ok(opened_cargo);
+            }
+        }
+    }
+
     fn find_child(
         &self,
         directory: &mut OpenedDirectory<P::DirectoryHandle>,
@@ -600,6 +1009,66 @@ struct OpenedDirectory<D> {
 enum ReadAttempt {
     Absent,
     Failed(LocatorReadFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoConfigSlot {
+    Config,
+    ConfigToml,
+    Alias,
+    Other,
+}
+
+fn cargo_config_slot(name: &NativeName) -> CargoConfigSlot {
+    if *name == fixed_native_name("config") {
+        CargoConfigSlot::Config
+    } else if *name == fixed_native_name("config.toml") {
+        CargoConfigSlot::ConfigToml
+    } else if ascii_case_fold_matches(name, "config")
+        || ascii_case_fold_matches(name, "config.toml")
+    {
+        CargoConfigSlot::Alias
+    } else {
+        CargoConfigSlot::Other
+    }
+}
+
+fn ascii_case_fold_matches(name: &NativeName, expected: &str) -> bool {
+    match name {
+        NativeName::UnixBytes(bytes) => bytes.eq_ignore_ascii_case(expected.as_bytes()),
+        NativeName::WindowsUtf16(units) => {
+            let expected: Vec<u16> = expected.encode_utf16().collect();
+            units.len() == expected.len()
+                && units.iter().zip(expected).all(|(actual, expected)| {
+                    u8::try_from(*actual)
+                        .is_ok_and(|actual| actual.eq_ignore_ascii_case(&(expected as u8)))
+                })
+        }
+    }
+}
+
+fn fixed_native_name(value: &str) -> NativeName {
+    #[cfg(unix)]
+    {
+        NativeName::unix(value.as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    {
+        NativeName::windows_utf16(value.encode_utf16().collect::<Vec<_>>())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        NativeName::unix(value.as_bytes().to_vec())
+    }
+}
+
+fn pair_failed(failure: LocatorReadFailure) -> CargoConfigPairObservation {
+    CargoConfigPairObservation {
+        consistency: CargoConfigPairConsistency::NonAtomic,
+        config: CargoConfigMemberObservation::Failed(failure.clone()),
+        config_toml: CargoConfigMemberObservation::Failed(failure),
+        total_bytes: 0,
+    }
 }
 
 fn validate_component(
@@ -999,5 +1468,231 @@ mod tests {
             result.files[1],
             LocatorFileRead::Failed(LocatorReadFailure::ResourceLimit)
         ));
+    }
+
+    #[test]
+    fn cargo_config_pair_uses_one_non_atomic_observation_and_ignores_display_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(root.join(".cargo/config"), b"[build]\ntarget-dir='one'\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            b"[build]\ntarget-dir='two'\n",
+        )
+        .unwrap();
+        let summary = scan(&root, "cargo-pair-observation");
+        let mut base = summary.roots[0].clone();
+        base.display_path = "/forged/reporting/path".to_string();
+
+        let observed = reader()
+            .observe_cargo_config_pair(&base, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert!(matches!(
+            &observed.config,
+            CargoConfigMemberObservation::Present(read)
+                if read.bytes == b"[build]\ntarget-dir='one'\n"
+        ));
+        assert!(matches!(
+            &observed.config_toml,
+            CargoConfigMemberObservation::Present(read)
+                if read.bytes == b"[build]\ntarget-dir='two'\n"
+        ));
+    }
+
+    #[test]
+    fn cargo_config_pair_absence_is_explicitly_non_atomic() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(root.join("other"), b"ignored").unwrap();
+        let summary = scan(&root, "cargo-pair-absence");
+
+        let observed = reader()
+            .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert_eq!(
+            observed.config,
+            CargoConfigMemberObservation::AbsentDuringEnumeration
+        );
+        assert_eq!(
+            observed.config_toml,
+            CargoConfigMemberObservation::AbsentDuringEnumeration
+        );
+    }
+
+    #[test]
+    fn missing_cargo_directory_is_explicitly_non_atomic() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cargo-directory-missing");
+
+        let observed = reader()
+            .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert_eq!(
+            observed.config,
+            CargoConfigMemberObservation::AbsentDuringEnumeration
+        );
+        assert_eq!(
+            observed.config_toml,
+            CargoConfigMemberObservation::AbsentDuringEnumeration
+        );
+    }
+
+    #[test]
+    fn cargo_config_pair_rejects_ascii_case_aliases_and_symlinks() {
+        let alias_temp = tempfile::TempDir::new().unwrap();
+        let alias_root = alias_temp.path().join("root");
+        fs::create_dir_all(alias_root.join(".cargo")).unwrap();
+        fs::write(alias_root.join(".cargo/CONFIG"), b"alias").unwrap();
+        let alias_summary = scan(&alias_root, "cargo-pair-alias");
+        let alias = reader()
+            .observe_cargo_config_pair(&alias_summary.roots[0], &CancellationToken::new())
+            .unwrap();
+        assert!(matches!(
+            alias.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+        assert!(matches!(
+            alias.config_toml,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+
+        let link_temp = tempfile::TempDir::new().unwrap();
+        let link_root = link_temp.path().join("root");
+        fs::create_dir_all(link_root.join(".cargo")).unwrap();
+        fs::write(link_root.join("real-config"), b"real").unwrap();
+        std::os::unix::fs::symlink("../real-config", link_root.join(".cargo/config")).unwrap();
+        let link_summary = scan(&link_root, "cargo-pair-link");
+        let link = reader()
+            .observe_cargo_config_pair(&link_summary.roots[0], &CancellationToken::new())
+            .unwrap();
+        assert!(matches!(
+            link.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::SymlinkOrReparse)
+        ));
+        assert!(matches!(
+            link.config_toml,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::SymlinkOrReparse)
+        ));
+    }
+
+    #[test]
+    fn cargo_directory_alias_is_rejected_instead_of_treated_as_absent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".CARGO")).unwrap();
+        fs::write(root.join(".CARGO/config"), b"alias").unwrap();
+        let summary = scan(&root, "cargo-directory-alias");
+
+        let observed = reader()
+            .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new())
+            .unwrap();
+
+        assert!(matches!(
+            observed.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+        assert!(matches!(
+            observed.config_toml,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+    }
+
+    #[test]
+    fn cargo_config_pair_continues_to_eof_and_rejects_late_alias() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(root.join(".cargo/config"), b"exact").unwrap();
+        fs::write(root.join(".cargo/CONFIG"), b"alias").unwrap();
+        let summary = scan(&root, "cargo-pair-late-alias");
+        let paged = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_directory_batch_entries: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+
+        let observed = paged
+            .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new())
+            .unwrap();
+
+        assert!(matches!(
+            observed.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+        assert!(matches!(
+            observed.config_toml,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
+        ));
+    }
+
+    #[test]
+    fn cargo_config_pair_obeys_cancellation_and_directory_budget() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(root.join(".cargo/config"), b"config").unwrap();
+        let summary = scan(&root, "cargo-pair-bounds");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            reader().observe_cargo_config_pair(&summary.roots[0], &cancel),
+            Err(LocatorReadError::Cancelled)
+        );
+
+        let bounded = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_directory_entries: 1,
+                max_directory_batch_entries: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+        let observed = bounded
+            .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new())
+            .unwrap();
+        assert!(matches!(
+            observed.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+        ));
+    }
+
+    #[test]
+    fn cargo_config_pair_honors_request_and_component_budgets() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        let summary = scan(&root, "cargo-pair-component-budget");
+        for limits in [
+            LocatorReadLimits {
+                max_requests: 2,
+                ..LocatorReadLimits::default()
+            },
+            LocatorReadLimits {
+                max_components_per_request: 2,
+                ..LocatorReadLimits::default()
+            },
+            LocatorReadLimits {
+                max_total_components: 7,
+                ..LocatorReadLimits::default()
+            },
+        ] {
+            assert_eq!(
+                LocatorReader::new(HostPlatformScanner::new(), limits)
+                    .observe_cargo_config_pair(&summary.roots[0], &CancellationToken::new()),
+                Err(LocatorReadError::ResourceLimit)
+            );
+        }
     }
 }

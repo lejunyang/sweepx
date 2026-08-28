@@ -6,6 +6,7 @@ pub use detail_rescan::{
     DetailRescanResult, DetailRescanner,
 };
 pub use locator_reader::{
+    CargoConfigMemberObservation, CargoConfigPairConsistency, CargoConfigPairObservation,
     LocatorBatchReadRequest, LocatorBatchReadResult, LocatorFileRead, LocatorFileRequest,
     LocatorReadError, LocatorReadFailure, LocatorReadLimits, LocatorReader,
 };
