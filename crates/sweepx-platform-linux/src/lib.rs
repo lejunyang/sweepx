@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{self, MaybeUninit};
@@ -5,13 +7,16 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use sweepx_model::{NativeName, ReasonCode};
+use sweepx_model::{DecimalU128, NativeName, ReasonCode};
 use sweepx_platform::{
-    BoundaryKind, BoundaryRecord, CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord,
-    DirectoryHandleAdmission, DirectoryReadLimits, EntryIdentity, EntryKind, EntryMetadata,
-    ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity, OpenedDirectory, PlatformError,
-    PlatformScanner, RootAdmission, ScanRoot, WalkEntry, error_kind_for_io, fingerprint_for,
-    known_count, known_u128, reason_for_io,
+    BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
+    CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryHandleAdmission,
+    DirectoryReadLimits, EntryIdentity, EntryKind, EntryMetadata, ErrorRecord, FilesystemIdentity,
+    HardLinkKey, MountIdentity, OpenedDirectory, PlatformError, PlatformScanner,
+    PresentRegularFileRead, RegularFileChangeStamp, RegularFileIdentityMismatch,
+    RegularFileMountMismatch, RegularFileObservation, RegularFileReadExpectation, RootAdmission,
+    ScanRoot, WalkEntry, error_kind_for_io, fingerprint_for, known_count, known_u128,
+    reason_for_io,
 };
 
 // Native mutation remains a test-only qualification concern. In particular,
@@ -62,6 +67,8 @@ impl Drop for DirectoryStream {
 }
 
 impl LinuxPlatformScanner {
+    const REGULAR_FILE_READ_CHUNK_BYTES: usize = 8192;
+
     pub fn new() -> Self {
         Self
     }
@@ -69,6 +76,15 @@ impl LinuxPlatformScanner {
     fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), PlatformError> {
         if cancel.is_cancelled() {
             return Err(PlatformError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn ensure_regular_file_read_not_cancelled(
+        cancel: &CancellationToken,
+    ) -> Result<(), BoundedRegularFileReadError> {
+        if cancel.is_cancelled() {
+            return Err(BoundedRegularFileReadError::Cancelled);
         }
         Ok(())
     }
@@ -186,6 +202,31 @@ impl LinuxPlatformScanner {
         Self::owned_fd(raw)
     }
 
+    fn open_child_regular_file(parent: &OwnedFd, name: &CStr) -> Result<OwnedFd, io::Error> {
+        // SAFETY: `open_how` is a plain kernel ABI value initialized to zero,
+        // then populated with documented flags.
+        let mut how: libc::open_how = unsafe { mem::zeroed() };
+        how.flags =
+            u64::try_from(libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .expect("open flags fit u64");
+        how.resolve = libc::RESOLVE_BENEATH
+            | libc::RESOLVE_NO_SYMLINKS
+            | libc::RESOLVE_NO_MAGICLINKS
+            | libc::RESOLVE_NO_XDEV;
+        // SAFETY: the basename and open_how pointers remain valid for the
+        // syscall, and `parent` is a live directory descriptor.
+        let raw = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                &how,
+                mem::size_of::<libc::open_how>(),
+            ) as libc::c_int
+        };
+        Self::owned_fd(raw)
+    }
+
     fn open_matching_child_directory(
         parent: &OwnedFd,
         name: &CStr,
@@ -228,11 +269,10 @@ impl LinuxPlatformScanner {
         Ok(unsafe { output.assume_init() })
     }
 
-    fn mount_id_for_fd(fd: &OwnedFd) -> Result<u64, io::Error> {
+    fn statx_for_fd_with_mask(fd: &OwnedFd, mask: libc::c_uint) -> Result<libc::statx, io::Error> {
         let mut output = MaybeUninit::<libc::statx>::zeroed();
-        let mask = libc::STATX_BASIC_STATS | libc::STATX_MNT_ID;
         // SAFETY: output is writable, fd is live, and AT_EMPTY_PATH requests
-        // metadata for that already-pinned descriptor rather than performing a
+        // metadata for that already-opened descriptor rather than performing a
         // second pathname lookup.
         if unsafe {
             libc::statx(
@@ -248,13 +288,24 @@ impl LinuxPlatformScanner {
         }
         // SAFETY: successful statx initialized the output.
         let output = unsafe { output.assume_init() };
-        if output.stx_mask & libc::STATX_MNT_ID == 0 {
+        if output.stx_mask & mask != mask {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "statx did not return a mount identifier",
+                format!(
+                    "statx omitted required regular-file fields: mask=0x{:x}",
+                    output.stx_mask
+                ),
             ));
         }
-        Ok(output.stx_mnt_id)
+        Ok(output)
+    }
+
+    fn statx_for_fd(fd: &OwnedFd) -> Result<libc::statx, io::Error> {
+        Self::statx_for_fd_with_mask(fd, libc::STATX_BASIC_STATS | libc::STATX_MNT_ID)
+    }
+
+    fn mount_id_for_fd(fd: &OwnedFd) -> Result<u64, io::Error> {
+        Ok(Self::statx_for_fd_with_mask(fd, libc::STATX_MNT_ID)?.stx_mnt_id)
     }
 
     fn kind_from_mode(mode: libc::mode_t) -> EntryKind {
@@ -318,6 +369,203 @@ impl LinuxPlatformScanner {
         left.st_dev == right.st_dev
             && left.st_ino == right.st_ino
             && Self::kind_from_mode(left.st_mode) == Self::kind_from_mode(right.st_mode)
+    }
+
+    fn regular_file_change_stamp(statx: &libc::statx) -> RegularFileChangeStamp {
+        let mut bytes = Vec::with_capacity(
+            mem::size_of_val(&statx.stx_mtime.tv_sec)
+                + mem::size_of_val(&statx.stx_mtime.tv_nsec)
+                + mem::size_of_val(&statx.stx_ctime.tv_sec)
+                + mem::size_of_val(&statx.stx_ctime.tv_nsec),
+        );
+        bytes.extend_from_slice(&statx.stx_mtime.tv_sec.to_le_bytes());
+        bytes.extend_from_slice(&statx.stx_mtime.tv_nsec.to_le_bytes());
+        bytes.extend_from_slice(&statx.stx_ctime.tv_sec.to_le_bytes());
+        bytes.extend_from_slice(&statx.stx_ctime.tv_nsec.to_le_bytes());
+        RegularFileChangeStamp::new(bytes)
+    }
+
+    fn observe_regular_file_fd(fd: &OwnedFd) -> Result<RegularFileObservation, io::Error> {
+        let statx = Self::statx_for_fd(fd)?;
+        let device = libc::makedev(statx.stx_dev_major, statx.stx_dev_minor) as u64;
+        Ok(RegularFileObservation {
+            kind: Self::kind_from_mode(statx.stx_mode.into()),
+            identity: EntryIdentity::from_unix(device, statx.stx_ino),
+            filesystem_identity: FilesystemIdentity { device },
+            mount_identity: MountIdentity {
+                value: statx.stx_mnt_id,
+            },
+            logical_bytes: DecimalU128::new(u128::from(statx.stx_size)),
+            change_stamp: Self::regular_file_change_stamp(&statx),
+        })
+    }
+
+    fn classify_pinned_regular_file(
+        pinned: &OwnedFd,
+    ) -> Result<RegularFileObservation, BoundedRegularFileReadError> {
+        let observed = Self::observe_regular_file_fd(pinned).map_err(|error| {
+            if error.kind() == io::ErrorKind::Unsupported {
+                BoundedRegularFileReadError::Unsupported(error.to_string())
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        match observed.kind {
+            EntryKind::File => Ok(observed),
+            EntryKind::Symlink | EntryKind::ReparsePoint => {
+                Err(BoundedRegularFileReadError::SymlinkOrReparse {
+                    observed_kind: observed.kind,
+                })
+            }
+            _ => Err(BoundedRegularFileReadError::NotRegular {
+                observed_kind: observed.kind,
+            }),
+        }
+    }
+
+    fn map_regular_file_open_error(error: io::Error) -> BoundedRegularFileReadError {
+        match error.raw_os_error() {
+            Some(libc::ENOENT) => BoundedRegularFileReadError::NotFound,
+            Some(libc::ELOOP) => BoundedRegularFileReadError::SymlinkOrReparse {
+                observed_kind: EntryKind::Symlink,
+            },
+            Some(libc::ENOSYS) => BoundedRegularFileReadError::Unsupported(
+                "openat2 is required for safe Linux bounded regular-file reads".to_string(),
+            ),
+            _ => BoundedRegularFileReadError::io(error),
+        }
+    }
+
+    fn map_regular_file_read_error(error: io::Error) -> BoundedRegularFileReadError {
+        match error.raw_os_error() {
+            Some(libc::ENODEV) | Some(libc::ENXIO) => {
+                BoundedRegularFileReadError::ProviderOrOffline(error.to_string())
+            }
+            Some(libc::EOPNOTSUPP) => BoundedRegularFileReadError::Unsupported(error.to_string()),
+            _ => BoundedRegularFileReadError::io(error),
+        }
+    }
+
+    fn validate_regular_file_unchanged(
+        observed_before: &RegularFileObservation,
+        observed_after: &RegularFileObservation,
+    ) -> Result<(), BoundedRegularFileReadError> {
+        if observed_before.mount_identity != observed_after.mount_identity {
+            return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                RegularFileMountMismatch {
+                    expected: None,
+                    observed_mount_identity: observed_after.mount_identity.clone(),
+                },
+            )));
+        }
+        if observed_before.identity != observed_after.identity
+            || observed_before.filesystem_identity != observed_after.filesystem_identity
+        {
+            return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+                RegularFileIdentityMismatch {
+                    expected: None,
+                    observed_identity: observed_after.identity.clone(),
+                    observed_filesystem_identity: observed_after.filesystem_identity.clone(),
+                },
+            )));
+        }
+        if observed_before.logical_bytes != observed_after.logical_bytes
+            || observed_before.change_stamp != observed_after.change_stamp
+        {
+            return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
+                sweepx_platform::RegularFileObservationMismatch {
+                    observed_before: observed_before.clone(),
+                    observed_after: observed_after.clone(),
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    fn compare_expected_regular_file(
+        request: &BoundedRegularFileReadRequest,
+        observed_before: &RegularFileObservation,
+    ) -> Result<(), BoundedRegularFileReadError> {
+        let RegularFileReadExpectation::PreviouslyObserved(expected) = request.expectation() else {
+            return Ok(());
+        };
+        if expected.mount_identity() != &observed_before.mount_identity {
+            return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                RegularFileMountMismatch {
+                    expected: Some(expected.clone()),
+                    observed_mount_identity: observed_before.mount_identity.clone(),
+                },
+            )));
+        }
+        if expected.identity() != &observed_before.identity
+            || expected.filesystem_identity() != &observed_before.filesystem_identity
+        {
+            return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+                RegularFileIdentityMismatch {
+                    expected: Some(expected.clone()),
+                    observed_identity: observed_before.identity.clone(),
+                    observed_filesystem_identity: observed_before.filesystem_identity.clone(),
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    fn compare_pinned_and_opened_regular_file(
+        pinned: &RegularFileObservation,
+        observed_before: &RegularFileObservation,
+    ) -> Result<(), BoundedRegularFileReadError> {
+        if pinned.mount_identity != observed_before.mount_identity {
+            return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                RegularFileMountMismatch {
+                    expected: None,
+                    observed_mount_identity: observed_before.mount_identity.clone(),
+                },
+            )));
+        }
+        if pinned.identity != observed_before.identity
+            || pinned.filesystem_identity != observed_before.filesystem_identity
+        {
+            return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+                RegularFileIdentityMismatch {
+                    expected: None,
+                    observed_identity: observed_before.identity.clone(),
+                    observed_filesystem_identity: observed_before.filesystem_identity.clone(),
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    fn observed_limit_exceeded(
+        request: &BoundedRegularFileReadRequest,
+        observed_logical_bytes: DecimalU128,
+    ) -> BoundedRegularFileReadError {
+        BoundedRegularFileReadError::LimitExceeded {
+            max_bytes: request.max_bytes(),
+            observed_logical_bytes,
+        }
+    }
+
+    #[cfg(test)]
+    fn run_regular_file_read_test_hook(
+        event: RegularFileReadTestHookEvent,
+        cancel: &CancellationToken,
+    ) {
+        let hook = REGULAR_FILE_READ_TEST_HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_ref() {
+                Some(installed) if installed.event == event => slot.take(),
+                _ => None,
+            }
+        });
+        match hook.map(|hook| hook.action) {
+            Some(RegularFileReadTestHookAction::Cancel) => cancel.cancel(),
+            Some(RegularFileReadTestHookAction::RewriteBytes { path, bytes }) => {
+                std::fs::write(path, bytes).unwrap();
+            }
+            None => {}
+        }
     }
 }
 
@@ -619,14 +867,164 @@ impl PlatformScanner for LinuxPlatformScanner {
             )),
         }
     }
+
+    fn read_regular_file_relative(
+        &self,
+        parent: &Self::DirectoryHandle,
+        request: &BoundedRegularFileReadRequest,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        let name = Self::child_name_c_string(request.child_name()).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                BoundedRegularFileReadError::UnsafeName
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        let pinned =
+            Self::pin_child(&parent.fd, &name).map_err(Self::map_regular_file_open_error)?;
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        let pinned_observation = Self::classify_pinned_regular_file(&pinned)?;
+        let read_fd = Self::open_child_regular_file(&parent.fd, &name)
+            .map_err(Self::map_regular_file_open_error)?;
+        let observed_before = Self::observe_regular_file_fd(&read_fd).map_err(|error| {
+            if error.kind() == io::ErrorKind::Unsupported {
+                BoundedRegularFileReadError::Unsupported(error.to_string())
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        Self::compare_pinned_and_opened_regular_file(&pinned_observation, &observed_before)?;
+        Self::compare_expected_regular_file(request, &observed_before)?;
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+
+        let mut bytes = Vec::new();
+        let hard_cap = request.max_bytes().saturating_add(1);
+        let mut buffer = [0u8; Self::REGULAR_FILE_READ_CHUNK_BYTES];
+        let mut overflow_lower_bound = (observed_before.logical_bytes
+            > DecimalU128::new(request.max_bytes() as u128))
+        .then_some(observed_before.logical_bytes);
+        loop {
+            if overflow_lower_bound.is_some() {
+                break;
+            }
+            Self::ensure_regular_file_read_not_cancelled(cancel)?;
+            let remaining = hard_cap.saturating_sub(bytes.len());
+            if remaining == 0 {
+                overflow_lower_bound = Some(DecimalU128::new(
+                    (request.max_bytes() as u128).saturating_add(1),
+                ));
+                break;
+            }
+            let chunk_len = remaining.min(buffer.len());
+            // SAFETY: the fd is live, the buffer is writable for `chunk_len`
+            // bytes, and the kernel writes at most that much.
+            let read =
+                unsafe { libc::read(read_fd.as_raw_fd(), buffer.as_mut_ptr().cast(), chunk_len) };
+            if read < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    Self::ensure_regular_file_read_not_cancelled(cancel)?;
+                    continue;
+                }
+                return Err(Self::map_regular_file_read_error(error));
+            }
+            let read = read as usize;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            #[cfg(test)]
+            Self::run_regular_file_read_test_hook(
+                RegularFileReadTestHookEvent::AfterReadChunk,
+                cancel,
+            );
+            if bytes.len() > request.max_bytes() {
+                overflow_lower_bound = Some(
+                    overflow_lower_bound
+                        .unwrap_or(DecimalU128::ZERO)
+                        .max(DecimalU128::new(bytes.len() as u128)),
+                );
+                break;
+            }
+        }
+
+        #[cfg(test)]
+        Self::run_regular_file_read_test_hook(
+            RegularFileReadTestHookEvent::BeforeObservedAfter,
+            cancel,
+        );
+        let observed_after = Self::observe_regular_file_fd(&read_fd).map_err(|error| {
+            if error.kind() == io::ErrorKind::Unsupported {
+                BoundedRegularFileReadError::Unsupported(error.to_string())
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        #[cfg(test)]
+        Self::run_regular_file_read_test_hook(
+            RegularFileReadTestHookEvent::AfterObservedAfter,
+            cancel,
+        );
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        Self::validate_regular_file_unchanged(&observed_before, &observed_after)?;
+        if let Some(lower_bound) = overflow_lower_bound {
+            let observed_logical_bytes = if observed_after.logical_bytes > lower_bound {
+                observed_after.logical_bytes
+            } else {
+                lower_bound
+            };
+            return Err(Self::observed_limit_exceeded(
+                request,
+                observed_logical_bytes,
+            ));
+        }
+        Ok(PresentRegularFileRead {
+            bytes,
+            observed_before,
+            observed_after,
+        })
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegularFileReadTestHookEvent {
+    AfterReadChunk,
+    BeforeObservedAfter,
+    AfterObservedAfter,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+enum RegularFileReadTestHookAction {
+    Cancel,
+    RewriteBytes { path: PathBuf, bytes: Vec<u8> },
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct RegularFileReadTestHook {
+    event: RegularFileReadTestHookEvent,
+    action: RegularFileReadTestHookAction,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REGULAR_FILE_READ_TEST_HOOK: RefCell<Option<RegularFileReadTestHook>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
+    use sweepx_platform::{BoundedRegularFileReadError, read_bound_regular_file};
     use tempfile::TempDir;
 
     fn limits(max_entries: usize) -> DirectoryReadLimits {
@@ -651,6 +1049,31 @@ mod tests {
             .entries
             .into_iter()
             .find(|entry| entry.file_name == NativeName::unix(name.to_vec()))
+            .unwrap()
+    }
+
+    fn install_regular_file_read_test_hook(hook: RegularFileReadTestHook) -> impl Drop {
+        REGULAR_FILE_READ_TEST_HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "regular-file read test hook already installed"
+            );
+            *slot = Some(hook);
+        });
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                REGULAR_FILE_READ_TEST_HOOK.with(|slot| {
+                    *slot.borrow_mut() = None;
+                });
+            }
+        }
+        HookReset
+    }
+
+    fn live_read_request(name: &[u8], max_bytes: usize) -> BoundedRegularFileReadRequest {
+        BoundedRegularFileReadRequest::establish_live(NativeName::unix(name.to_vec()), max_bytes)
             .unwrap()
     }
 
@@ -1073,5 +1496,390 @@ mod tests {
             )
             .unwrap();
         assert!(admission.metadata.mount_identity.is_some());
+    }
+
+    #[test]
+    fn bounded_regular_file_read_succeeds_for_regular_file() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let read = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 7),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(read.bytes, b"payload");
+        assert_eq!(read.observed_before.kind, EntryKind::File);
+        assert_eq!(read.observed_before, read.observed_after);
+    }
+
+    #[test]
+    fn bounded_regular_file_read_enforces_exact_and_overflow_limits() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let exact = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 7),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(exact.bytes, b"payload");
+
+        let overflow = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 6),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            overflow,
+            BoundedRegularFileReadError::LimitExceeded {
+                max_bytes: 6,
+                observed_logical_bytes,
+            } if observed_logical_bytes == DecimalU128::new(7)
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_reports_missing_precisely() {
+        let temp = TempDir::new().unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"missing", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, BoundedRegularFileReadError::NotFound);
+        assert!(error.is_verified_absent());
+    }
+
+    #[test]
+    fn bounded_regular_file_read_rejects_symlink_without_following() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("target"), b"payload").unwrap();
+        std::os::unix::fs::symlink("target", temp.path().join("link")).unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"link", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::SymlinkOrReparse {
+                observed_kind: EntryKind::Symlink
+            }
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_rejects_directory_and_fifo_promptly() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("directory")).unwrap();
+        let fifo = temp.path().join("fifo");
+        let fifo_cstr = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: pathname is NUL terminated and points to a temp-dir target.
+        let result = unsafe { libc::mkfifo(fifo_cstr.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let directory_error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"directory", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            directory_error,
+            BoundedRegularFileReadError::NotRegular {
+                observed_kind: EntryKind::Directory
+            }
+        ));
+
+        let fifo_error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"fifo", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            fifo_error,
+            BoundedRegularFileReadError::NotRegular {
+                observed_kind: EntryKind::Other
+            }
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_supports_non_utf8_basenames() {
+        let temp = TempDir::new().unwrap();
+        let raw_name = b"bad-\xff-name";
+        let path = temp.path().join(OsStr::from_bytes(raw_name));
+        fs::write(&path, b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let read = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(raw_name, 16),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(read.bytes, b"payload");
+    }
+
+    #[test]
+    fn bounded_regular_file_read_checks_expected_binding_before_reading() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let live = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let request = BoundedRegularFileReadRequest::previously_observed(
+            NativeName::unix(b"file".to_vec()),
+            EntryIdentity::from_unix(
+                live.observed_before.identity.device(),
+                u64::try_from(live.observed_before.identity.inode()).unwrap() + 1,
+            ),
+            live.observed_before.filesystem_identity.clone(),
+            live.observed_before.mount_identity.clone(),
+            16,
+        )
+        .unwrap();
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &request,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::IdentityMismatch(mismatch)
+                if mismatch.expected.is_some()
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_uses_retained_parent_not_display_path() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let moved = temp.path().join("moved");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("safe"), b"safe").unwrap();
+
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(root.clone()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("safe"), b"evil").unwrap();
+
+        let read = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"safe", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(read.bytes, b"safe");
+    }
+
+    #[test]
+    fn bounded_regular_file_read_honors_cancellation_before_open() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 16),
+            &cancel,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, BoundedRegularFileReadError::Cancelled);
+    }
+
+    #[test]
+    fn bounded_regular_file_read_honors_cancellation_between_reads() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("file"),
+            vec![b'x'; LinuxPlatformScanner::REGULAR_FILE_READ_CHUNK_BYTES * 2],
+        )
+        .unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let _hook_reset = install_regular_file_read_test_hook(RegularFileReadTestHook {
+            event: RegularFileReadTestHookEvent::AfterReadChunk,
+            action: RegularFileReadTestHookAction::Cancel,
+        });
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(
+                b"file",
+                LinuxPlatformScanner::REGULAR_FILE_READ_CHUNK_BYTES * 3,
+            ),
+            &cancel,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, BoundedRegularFileReadError::Cancelled);
+    }
+
+    #[test]
+    fn bounded_regular_file_read_honors_cancellation_after_metadata() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let _hook_reset = install_regular_file_read_test_hook(RegularFileReadTestHook {
+            event: RegularFileReadTestHookEvent::AfterObservedAfter,
+            action: RegularFileReadTestHookAction::Cancel,
+        });
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 16),
+            &cancel,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, BoundedRegularFileReadError::Cancelled);
+    }
+
+    #[test]
+    fn bounded_regular_file_read_detects_changed_during_read_with_test_seam() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("file");
+        fs::write(&path, b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let _hook_reset = install_regular_file_read_test_hook(RegularFileReadTestHook {
+            event: RegularFileReadTestHookEvent::BeforeObservedAfter,
+            action: RegularFileReadTestHookAction::RewriteBytes {
+                path,
+                bytes: b"changed-size".to_vec(),
+            },
+        });
+
+        let error = read_bound_regular_file(
+            &scanner,
+            &admission.directory,
+            &live_read_request(b"file", 16),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::ChangedDuringRead(_)
+        ));
     }
 }

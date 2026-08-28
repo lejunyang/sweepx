@@ -551,6 +551,375 @@ impl DirectoryEntryBatch {
     }
 }
 
+/// A validated native basename for a handle-relative regular-file read.
+///
+/// This token carries no filesystem authority by itself. Callers must pair it with the exact
+/// retained parent directory handle that granted the read capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedRegularFileReadRequest {
+    child_name: NativeName,
+    expectation: RegularFileReadExpectation,
+    max_bytes: usize,
+}
+
+impl BoundedRegularFileReadRequest {
+    pub fn new(
+        child_name: NativeName,
+        expectation: RegularFileReadExpectation,
+        max_bytes: usize,
+    ) -> Result<Self, BoundedRegularFileReadError> {
+        validate_bounded_read_child_name(&child_name)?;
+        Ok(Self {
+            child_name,
+            expectation,
+            max_bytes,
+        })
+    }
+
+    pub fn establish_live(
+        child_name: NativeName,
+        max_bytes: usize,
+    ) -> Result<Self, BoundedRegularFileReadError> {
+        Self::new(
+            child_name,
+            RegularFileReadExpectation::EstablishLive,
+            max_bytes,
+        )
+    }
+
+    pub fn previously_observed(
+        child_name: NativeName,
+        identity: EntryIdentity,
+        filesystem_identity: FilesystemIdentity,
+        mount_identity: MountIdentity,
+        max_bytes: usize,
+    ) -> Result<Self, BoundedRegularFileReadError> {
+        Self::new(
+            child_name,
+            RegularFileReadExpectation::previously_observed(
+                identity,
+                filesystem_identity,
+                mount_identity,
+            ),
+            max_bytes,
+        )
+    }
+
+    pub fn child_name(&self) -> &NativeName {
+        &self.child_name
+    }
+
+    pub fn expectation(&self) -> &RegularFileReadExpectation {
+        &self.expectation
+    }
+
+    pub const fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviouslyObservedRegularFile {
+    identity: EntryIdentity,
+    filesystem_identity: FilesystemIdentity,
+    mount_identity: MountIdentity,
+}
+
+impl PreviouslyObservedRegularFile {
+    pub const fn new(
+        identity: EntryIdentity,
+        filesystem_identity: FilesystemIdentity,
+        mount_identity: MountIdentity,
+    ) -> Self {
+        Self {
+            identity,
+            filesystem_identity,
+            mount_identity,
+        }
+    }
+
+    pub const fn identity(&self) -> &EntryIdentity {
+        &self.identity
+    }
+
+    pub const fn filesystem_identity(&self) -> &FilesystemIdentity {
+        &self.filesystem_identity
+    }
+
+    pub const fn mount_identity(&self) -> &MountIdentity {
+        &self.mount_identity
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegularFileReadExpectation {
+    PreviouslyObserved(PreviouslyObservedRegularFile),
+    EstablishLive,
+}
+
+impl RegularFileReadExpectation {
+    pub fn previously_observed(
+        identity: EntryIdentity,
+        filesystem_identity: FilesystemIdentity,
+        mount_identity: MountIdentity,
+    ) -> Self {
+        Self::PreviouslyObserved(PreviouslyObservedRegularFile::new(
+            identity,
+            filesystem_identity,
+            mount_identity,
+        ))
+    }
+
+    pub const fn establish_live() -> Self {
+        Self::EstablishLive
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RegularFileChangeStamp {
+    bytes: Vec<u8>,
+}
+
+impl RegularFileChangeStamp {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            bytes: bytes.into(),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularFileObservation {
+    pub kind: EntryKind,
+    pub identity: EntryIdentity,
+    pub filesystem_identity: FilesystemIdentity,
+    pub mount_identity: MountIdentity,
+    pub logical_bytes: DecimalU128,
+    pub change_stamp: RegularFileChangeStamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentRegularFileRead {
+    pub bytes: Vec<u8>,
+    pub observed_before: RegularFileObservation,
+    pub observed_after: RegularFileObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularFileObservationMismatch {
+    pub observed_before: RegularFileObservation,
+    pub observed_after: RegularFileObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularFileIdentityMismatch {
+    pub expected: Option<PreviouslyObservedRegularFile>,
+    pub observed_identity: EntryIdentity,
+    pub observed_filesystem_identity: FilesystemIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularFileMountMismatch {
+    pub expected: Option<PreviouslyObservedRegularFile>,
+    pub observed_mount_identity: MountIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BoundedRegularFileReadError {
+    #[error("operation cancelled")]
+    Cancelled,
+    #[error("handle-relative child is verified absent")]
+    NotFound,
+    #[error("native child token is not a safe single component for the current platform")]
+    UnsafeName,
+    #[error("native child token encoding does not match the current platform")]
+    ForeignName,
+    #[error("resolved child is not a regular file: observed {observed_kind:?}")]
+    NotRegular { observed_kind: EntryKind },
+    #[error("resolved child is a symlink or reparse point: observed {observed_kind:?}")]
+    SymlinkOrReparse { observed_kind: EntryKind },
+    #[error("resolved child identity changed during read")]
+    IdentityMismatch(Box<RegularFileIdentityMismatch>),
+    #[error("resolved child mount changed during read")]
+    MountMismatch(Box<RegularFileMountMismatch>),
+    #[error(
+        "regular file exceeds bounded read limit: max_bytes={max_bytes}, observed_logical_bytes={observed_logical_bytes}"
+    )]
+    LimitExceeded {
+        max_bytes: usize,
+        observed_logical_bytes: DecimalU128,
+    },
+    #[error("resolved child changed during read")]
+    ChangedDuringRead(Box<RegularFileObservationMismatch>),
+    #[error("provider unavailable or offline: {0}")]
+    ProviderOrOffline(String),
+    #[error("io error during bounded regular-file read: {detail}")]
+    Io {
+        detail: String,
+        io_kind: Option<std::io::ErrorKind>,
+    },
+    #[error("unsupported platform operation: {0}")]
+    Unsupported(String),
+}
+
+impl BoundedRegularFileReadError {
+    /// Only the exact `NotFound` variant proves verified absence.
+    pub const fn is_verified_absent(&self) -> bool {
+        matches!(self, Self::NotFound)
+    }
+
+    pub fn io(error: std::io::Error) -> Self {
+        let detail = error.to_string();
+        let io_kind = Some(error.kind());
+        Self::Io { detail, io_kind }
+    }
+}
+
+fn validate_bounded_read_child_name(
+    child_name: &NativeName,
+) -> Result<(), BoundedRegularFileReadError> {
+    match child_name.validate_basename_for_current_platform() {
+        Ok(()) => Ok(()),
+        Err(sweepx_model::NativeNameError::ForeignPlatform) => {
+            Err(BoundedRegularFileReadError::ForeignName)
+        }
+        Err(
+            sweepx_model::NativeNameError::Empty
+            | sweepx_model::NativeNameError::ContainsNul
+            | sweepx_model::NativeNameError::ContainsSeparator
+            | sweepx_model::NativeNameError::DotComponent
+            | sweepx_model::NativeNameError::AmbiguousWindowsName,
+        ) => Err(BoundedRegularFileReadError::UnsafeName),
+        Err(sweepx_model::NativeNameError::UnsupportedCurrentPlatform) => {
+            Err(BoundedRegularFileReadError::Unsupported(
+                "the current platform has no supported native basename representation".to_string(),
+            ))
+        }
+    }
+}
+
+fn validate_regular_file_observation_kind(
+    observation: &RegularFileObservation,
+) -> Result<(), BoundedRegularFileReadError> {
+    match observation.kind {
+        EntryKind::File => Ok(()),
+        EntryKind::Symlink | EntryKind::ReparsePoint => {
+            Err(BoundedRegularFileReadError::SymlinkOrReparse {
+                observed_kind: observation.kind.clone(),
+            })
+        }
+        _ => Err(BoundedRegularFileReadError::NotRegular {
+            observed_kind: observation.kind.clone(),
+        }),
+    }
+}
+
+fn validate_regular_file_expectation(
+    request: &BoundedRegularFileReadRequest,
+    observed_before: &RegularFileObservation,
+) -> Result<(), BoundedRegularFileReadError> {
+    let RegularFileReadExpectation::PreviouslyObserved(expected) = request.expectation() else {
+        return Ok(());
+    };
+
+    if expected.mount_identity() != &observed_before.mount_identity {
+        return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+            RegularFileMountMismatch {
+                expected: Some(expected.clone()),
+                observed_mount_identity: observed_before.mount_identity.clone(),
+            },
+        )));
+    }
+    if expected.identity() != &observed_before.identity
+        || expected.filesystem_identity() != &observed_before.filesystem_identity
+    {
+        return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+            RegularFileIdentityMismatch {
+                expected: Some(expected.clone()),
+                observed_identity: observed_before.identity.clone(),
+                observed_filesystem_identity: observed_before.filesystem_identity.clone(),
+            },
+        )));
+    }
+    Ok(())
+}
+
+/// Contract-checking handle-relative bounded regular-file read entry point.
+///
+/// The request carries only a validated native basename plus `max_bytes`; the retained parent
+/// directory handle remains the sole filesystem authority. Successful reads are fail-closed unless
+/// the backend proves the same regular file identity, filesystem, mount, logical size, and change
+/// stamp before and after reading. When the request carries
+/// [`RegularFileReadExpectation::PreviouslyObserved`], the backend must check that expected
+/// identity/filesystem/mount binding against open metadata before reading any bytes; this wrapper
+/// also fail-closes if `observed_before` does not match the expectation.
+pub fn read_bound_regular_file<P: PlatformScanner + ?Sized>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    request: &BoundedRegularFileReadRequest,
+    cancel: &CancellationToken,
+) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+    if cancel.is_cancelled() {
+        return Err(BoundedRegularFileReadError::Cancelled);
+    }
+    validate_bounded_read_child_name(request.child_name())?;
+    let read = platform.read_regular_file_relative(parent, request, cancel)?;
+    if cancel.is_cancelled() {
+        return Err(BoundedRegularFileReadError::Cancelled);
+    }
+    validate_regular_file_observation_kind(&read.observed_before)?;
+    validate_regular_file_observation_kind(&read.observed_after)?;
+    validate_regular_file_expectation(request, &read.observed_before)?;
+    if read.observed_before.mount_identity != read.observed_after.mount_identity {
+        return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+            RegularFileMountMismatch {
+                expected: None,
+                observed_mount_identity: read.observed_after.mount_identity,
+            },
+        )));
+    }
+    if read.observed_before.identity != read.observed_after.identity {
+        return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+            RegularFileIdentityMismatch {
+                expected: None,
+                observed_identity: read.observed_after.identity,
+                observed_filesystem_identity: read.observed_after.filesystem_identity,
+            },
+        )));
+    }
+    if read.observed_before.filesystem_identity != read.observed_after.filesystem_identity
+        || read.observed_before.logical_bytes != read.observed_after.logical_bytes
+        || read.observed_before.change_stamp != read.observed_after.change_stamp
+    {
+        return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
+            RegularFileObservationMismatch {
+                observed_before: read.observed_before,
+                observed_after: read.observed_after,
+            },
+        )));
+    }
+    let observed_len = DecimalU128::new(read.bytes.len() as u128);
+    if read.bytes.len() > request.max_bytes() {
+        return Err(BoundedRegularFileReadError::LimitExceeded {
+            max_bytes: request.max_bytes(),
+            observed_logical_bytes: observed_len,
+        });
+    }
+    if observed_len != read.observed_after.logical_bytes {
+        return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
+            RegularFileObservationMismatch {
+                observed_before: read.observed_before,
+                observed_after: read.observed_after,
+            },
+        )));
+    }
+    Ok(read)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanResourceLimits {
     /// Maximum children consumed across all batches for one directory.
@@ -680,6 +1049,29 @@ pub trait PlatformScanner: Send + Sync {
         root: &EntryMetadata,
         entry: &EntryMetadata,
     ) -> Result<bool, PlatformError>;
+
+    /// Performs a bounded handle-relative regular-file read.
+    ///
+    /// Implementations must resolve only `request.child_name()` relative to the retained `parent`
+    /// handle, must never reopen by display path, and should return `LimitExceeded` instead of
+    /// truncating when the regular file does not fit within `request.max_bytes()`. Callers should
+    /// use [`read_bound_regular_file`], which adds non-overridable contract checks around this
+    /// backend operation. If `request.expectation()` is
+    /// [`RegularFileReadExpectation::PreviouslyObserved`], implementations must open the child
+    /// handle-relative, compare that open metadata against the expected identity/filesystem/mount,
+    /// and fail before reading any bytes on mismatch. The default implementation is fail-closed so
+    /// existing backends do not gain accidental pathname-based fallback behavior.
+    fn read_regular_file_relative(
+        &self,
+        _parent: &Self::DirectoryHandle,
+        _request: &BoundedRegularFileReadRequest,
+        _cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+        Err(BoundedRegularFileReadError::Unsupported(format!(
+            "{} does not implement handle-relative bounded regular-file reads",
+            self.platform_name()
+        )))
+    }
 }
 
 /// Contract-checking child inspection entry point used by traversal engines.
@@ -931,5 +1323,292 @@ mod tests {
         assert!(hard_links.insert(HardLinkKey::from(low_identity)));
         assert!(hard_links.insert(HardLinkKey::from(high_identity)));
         assert_eq!(hard_links.len(), 2);
+    }
+
+    struct UnsupportedReadScanner;
+
+    #[derive(Clone)]
+    struct FakeReadScanner {
+        read: PresentRegularFileRead,
+    }
+
+    impl PlatformScanner for UnsupportedReadScanner {
+        type DirectoryHandle = ();
+
+        fn platform_name(&self) -> &'static str {
+            "test-platform"
+        }
+
+        fn admit_root(
+            &self,
+            _root: &ScanRoot,
+            _cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn enumerate_children(
+            &self,
+            _directory: &mut Self::DirectoryHandle,
+            _cancel: &CancellationToken,
+            _limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn inspect_child(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+            _directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+    }
+
+    impl PlatformScanner for FakeReadScanner {
+        type DirectoryHandle = ();
+
+        fn platform_name(&self) -> &'static str {
+            "fake-read-platform"
+        }
+
+        fn admit_root(
+            &self,
+            _root: &ScanRoot,
+            _cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn enumerate_children(
+            &self,
+            _directory: &mut Self::DirectoryHandle,
+            _cancel: &CancellationToken,
+            _limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn inspect_child(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _child: &DirectoryEntryRecord,
+            _cancel: &CancellationToken,
+            _directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            unreachable!("not used by this contract test")
+        }
+
+        fn read_regular_file_relative(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _request: &BoundedRegularFileReadRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+            Ok(self.read.clone())
+        }
+    }
+
+    fn observation(
+        identity_device: u64,
+        identity_inode: u64,
+        filesystem_device: u64,
+        mount_value: u64,
+    ) -> RegularFileObservation {
+        RegularFileObservation {
+            kind: EntryKind::File,
+            identity: EntryIdentity::from_unix(identity_device, identity_inode),
+            filesystem_identity: FilesystemIdentity {
+                device: filesystem_device,
+            },
+            mount_identity: MountIdentity { value: mount_value },
+            logical_bytes: DecimalU128::new(4),
+            change_stamp: RegularFileChangeStamp::new([identity_inode as u8]),
+        }
+    }
+
+    #[test]
+    fn bounded_regular_file_read_request_rejects_unsafe_name() {
+        let error = BoundedRegularFileReadRequest::establish_live(native_name("../escape"), 4096)
+            .unwrap_err();
+        assert_eq!(error, BoundedRegularFileReadError::UnsafeName);
+        assert!(!error.is_verified_absent());
+    }
+
+    #[test]
+    fn bounded_regular_file_read_request_rejects_foreign_name() {
+        #[cfg(unix)]
+        let foreign = NativeName::windows_utf16("file".encode_utf16().collect::<Vec<_>>());
+        #[cfg(windows)]
+        let foreign = NativeName::unix(b"file".to_vec());
+        #[cfg(not(any(unix, windows)))]
+        let foreign = NativeName::unix(b"file".to_vec());
+
+        let error = BoundedRegularFileReadRequest::establish_live(foreign, 4096).unwrap_err();
+        #[cfg(any(unix, windows))]
+        assert_eq!(error, BoundedRegularFileReadError::ForeignName);
+        #[cfg(not(any(unix, windows)))]
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::Unsupported(_) | BoundedRegularFileReadError::ForeignName
+        ));
+    }
+
+    #[test]
+    fn only_exact_not_found_counts_as_verified_absent() {
+        assert!(BoundedRegularFileReadError::NotFound.is_verified_absent());
+        assert!(!BoundedRegularFileReadError::Cancelled.is_verified_absent());
+        assert!(
+            !BoundedRegularFileReadError::LimitExceeded {
+                max_bytes: 1,
+                observed_logical_bytes: DecimalU128::new(2),
+            }
+            .is_verified_absent()
+        );
+    }
+
+    #[test]
+    fn platform_scanner_default_regular_file_read_is_unsupported() {
+        let scanner = UnsupportedReadScanner;
+        let request =
+            BoundedRegularFileReadRequest::establish_live(native_name("file"), 4096).unwrap();
+
+        let error = scanner
+            .read_regular_file_relative(&(), &request, &CancellationToken::new())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::Unsupported(detail)
+                if detail.contains("test-platform")
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_request_carries_expectation() {
+        let identity = EntryIdentity::from_unix(1, 2);
+        let filesystem_identity = FilesystemIdentity { device: 3 };
+        let mount_identity = MountIdentity { value: 4 };
+        let request = BoundedRegularFileReadRequest::previously_observed(
+            native_name("file"),
+            identity.clone(),
+            filesystem_identity.clone(),
+            mount_identity.clone(),
+            4096,
+        )
+        .unwrap();
+
+        assert_eq!(request.child_name(), &native_name("file"));
+        assert_eq!(request.max_bytes(), 4096);
+        assert!(matches!(
+            request.expectation(),
+            RegularFileReadExpectation::PreviouslyObserved(expected)
+                if expected.identity() == &identity
+                    && expected.filesystem_identity() == &filesystem_identity
+                    && expected.mount_identity() == &mount_identity
+        ));
+        assert_eq!(
+            RegularFileReadExpectation::establish_live(),
+            RegularFileReadExpectation::EstablishLive
+        );
+    }
+
+    #[test]
+    fn bounded_regular_file_read_rejects_backend_substitution_before_accepting_bytes() {
+        let expected = observation(1, 10, 1, 100);
+        let substituted = observation(1, 11, 1, 100);
+        let scanner = FakeReadScanner {
+            read: PresentRegularFileRead {
+                bytes: b"evil".to_vec(),
+                observed_before: substituted.clone(),
+                observed_after: substituted,
+            },
+        };
+        let request = BoundedRegularFileReadRequest::previously_observed(
+            native_name("file"),
+            expected.identity.clone(),
+            expected.filesystem_identity.clone(),
+            expected.mount_identity.clone(),
+            4096,
+        )
+        .unwrap();
+
+        let error = read_bound_regular_file(&scanner, &(), &request, &CancellationToken::new())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoundedRegularFileReadError::IdentityMismatch(mismatch)
+                if mismatch.expected.as_ref().is_some_and(|expected| expected.identity() == &EntryIdentity::from_unix(1, 10))
+                    && mismatch.observed_identity == EntryIdentity::from_unix(1, 11)
+        ));
+    }
+
+    #[test]
+    fn bounded_regular_file_read_rejects_backend_over_limit_and_truncated_results() {
+        let stable = observation(1, 10, 1, 100);
+        let oversized = FakeReadScanner {
+            read: PresentRegularFileRead {
+                bytes: b"five!".to_vec(),
+                observed_before: stable.clone(),
+                observed_after: stable.clone(),
+            },
+        };
+        let request =
+            BoundedRegularFileReadRequest::establish_live(native_name("file"), 4).unwrap();
+        assert!(matches!(
+            read_bound_regular_file(&oversized, &(), &request, &CancellationToken::new()),
+            Err(BoundedRegularFileReadError::LimitExceeded { max_bytes: 4, .. })
+        ));
+
+        let truncated = FakeReadScanner {
+            read: PresentRegularFileRead {
+                bytes: b"abc".to_vec(),
+                observed_before: stable.clone(),
+                observed_after: stable,
+            },
+        };
+        let request =
+            BoundedRegularFileReadRequest::establish_live(native_name("file"), 16).unwrap();
+        assert!(matches!(
+            read_bound_regular_file(&truncated, &(), &request, &CancellationToken::new()),
+            Err(BoundedRegularFileReadError::ChangedDuringRead(_))
+        ));
     }
 }

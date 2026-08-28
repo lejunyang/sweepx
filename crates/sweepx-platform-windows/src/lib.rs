@@ -30,31 +30,38 @@ mod backend {
     use std::path::{Path, PathBuf};
     use std::ptr;
 
-    use sweepx_model::{NativeName, ReasonCode};
+    use sweepx_model::{DecimalU128, NativeName, ReasonCode};
     use sweepx_platform::{
-        BoundaryKind, BoundaryRecord, EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity,
-        HardLinkKey, MountIdentity, OpenedDirectory, error_kind_for_io, fingerprint_for,
-        known_count, known_u128, reason_for_io, unknown_u128,
+        BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
+        EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
+        OpenedDirectory, PresentRegularFileRead, RegularFileChangeStamp,
+        RegularFileIdentityMismatch, RegularFileMountMismatch, RegularFileObservation,
+        RegularFileReadExpectation, error_kind_for_io, fingerprint_for, known_count, known_u128,
+        reason_for_io, unknown_u128,
     };
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        FILE_DIRECTORY_FILE, FILE_ID_EXTD_DIR_INFORMATION, FILE_OPEN, FILE_OPEN_NO_RECALL,
-        FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileIdExtdDirectoryInformation,
-        NtCreateFile, NtQueryDirectoryFile, RtlIsDosDeviceName_U,
+        FILE_DIRECTORY_FILE, FILE_ID_EXTD_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+        FILE_OPEN_NO_RECALL, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        FileIdExtdDirectoryInformation, NtCreateFile, NtQueryDirectoryFile, RtlIsDosDeviceName_U,
     };
     use windows_sys::Win32::Foundation::{
+        ERROR_CLOUD_FILE_NETWORK_UNAVAILABLE, ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING,
+        ERROR_CLOUD_FILE_PROVIDER_TERMINATED, ERROR_CLOUD_FILE_REQUEST_ABORTED,
+        ERROR_CLOUD_FILE_REQUEST_CANCELED, ERROR_CLOUD_FILE_REQUEST_TIMEOUT, ERROR_FILE_OFFLINE,
         HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
         STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_FILE_IS_A_DIRECTORY,
-        STATUS_INFO_LENGTH_MISMATCH, STATUS_NO_MORE_FILES, STATUS_NOT_A_DIRECTORY,
-        STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS, UNICODE_STRING,
+        STATUS_INFO_LENGTH_MISMATCH, STATUS_NO_MORE_FILES, STATUS_NO_SUCH_FILE,
+        STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH,
+        STATUS_SUCCESS, UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
         FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, FileAttributeTagInfo,
-        FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-        GetVolumeNameForVolumeMountPointW, SYNCHRONIZE,
+        FILE_BASIC_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
+        FileAttributeTagInfo, FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
+        GetFileInformationByHandleEx, GetVolumeNameForVolumeMountPointW, ReadFile, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::WindowsProgramming::{
@@ -125,6 +132,11 @@ mod backend {
         file_id: FILE_ID_INFO,
     }
 
+    struct RegularFileMetadata {
+        observed: ObservedMetadata,
+        basic: FILE_BASIC_INFO,
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum DirectoryOpenRole {
         Ancestor,
@@ -142,6 +154,7 @@ mod backend {
     }
 
     const DIRECTORY_QUERY_BUFFER_BYTES: usize = 64 * 1024;
+    const FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum DirectoryQueryOutcome {
@@ -342,6 +355,28 @@ mod backend {
         // SAFETY: conversion accepts any NTSTATUS and returns the corresponding Win32 error code.
         let win32_error = unsafe { RtlNtStatusToDosError(status) };
         io::Error::from_raw_os_error(win32_error as i32)
+    }
+
+    fn is_provider_error_code(code: i32) -> bool {
+        [
+            ERROR_FILE_OFFLINE,
+            ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING,
+            ERROR_CLOUD_FILE_PROVIDER_TERMINATED,
+            ERROR_CLOUD_FILE_NETWORK_UNAVAILABLE,
+            ERROR_CLOUD_FILE_REQUEST_TIMEOUT,
+            ERROR_CLOUD_FILE_REQUEST_ABORTED,
+            ERROR_CLOUD_FILE_REQUEST_CANCELED,
+        ]
+        .into_iter()
+        .any(|candidate| i32::try_from(candidate).ok() == Some(code))
+    }
+
+    fn map_regular_file_io(error: io::Error) -> BoundedRegularFileReadError {
+        if error.raw_os_error().is_some_and(is_provider_error_code) {
+            BoundedRegularFileReadError::ProviderOrOffline(error.to_string())
+        } else {
+            BoundedRegularFileReadError::io(error)
+        }
     }
 
     fn get_file_information<T>(handle: &OwnedHandle, class: i32) -> Result<T, io::Error> {
@@ -639,6 +674,70 @@ mod backend {
             })
         }
 
+        fn open_regular_file_relative(
+            parent: &OwnedHandle,
+            name: &[u16],
+        ) -> Result<OwnedHandle, BoundedRegularFileReadError> {
+            let byte_length = name
+                .len()
+                .checked_mul(mem::size_of::<u16>())
+                .and_then(|length| u16::try_from(length).ok())
+                .ok_or(BoundedRegularFileReadError::UnsafeName)?;
+            let object_name = UNICODE_STRING {
+                Length: byte_length,
+                MaximumLength: byte_length,
+                Buffer: name.as_ptr().cast_mut(),
+            };
+            let object_attributes = OBJECT_ATTRIBUTES {
+                Length: u32::try_from(mem::size_of::<OBJECT_ATTRIBUTES>())
+                    .expect("OBJECT_ATTRIBUTES size fits u32"),
+                RootDirectory: parent.as_raw_handle() as HANDLE,
+                ObjectName: &object_name,
+                // Native names are capabilities, not display strings: preserve exact case.
+                Attributes: 0,
+                SecurityDescriptor: ptr::null(),
+                SecurityQualityOfService: ptr::null(),
+            };
+            let mut handle: HANDLE = INVALID_HANDLE_VALUE;
+            let mut io_status = IO_STATUS_BLOCK::default();
+            let status = unsafe {
+                NtCreateFile(
+                    &mut handle,
+                    FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                    &object_attributes,
+                    &mut io_status,
+                    ptr::null(),
+                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_OPEN,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_NO_RECALL
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    ptr::null(),
+                    0,
+                )
+            };
+            if status < 0 {
+                if matches!(status, STATUS_OBJECT_NAME_NOT_FOUND | STATUS_NO_SUCH_FILE) {
+                    return Err(BoundedRegularFileReadError::NotFound);
+                }
+                if status == STATUS_FILE_IS_A_DIRECTORY {
+                    return Err(BoundedRegularFileReadError::NotRegular {
+                        observed_kind: EntryKind::Directory,
+                    });
+                }
+                let error = io_error_from_ntstatus(status);
+                return Err(map_regular_file_io(error));
+            }
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(BoundedRegularFileReadError::io(io::Error::other(
+                    "NtCreateFile succeeded without returning a valid file handle",
+                )));
+            }
+            Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
+        }
+
         fn nt_open_relative(
             parent: HANDLE,
             name: &[u16],
@@ -773,6 +872,183 @@ mod backend {
                 standard,
                 file_id,
             })
+        }
+
+        fn query_regular_file_metadata(
+            handle: &OwnedHandle,
+        ) -> Result<RegularFileMetadata, BoundedRegularFileReadError> {
+            let observed = Self::query_metadata(handle).map_err(map_regular_file_io)?;
+            let basic = get_file_information(handle, FileBasicInfo).map_err(map_regular_file_io)?;
+            Ok(RegularFileMetadata { observed, basic })
+        }
+
+        fn regular_file_observation(
+            metadata: &RegularFileMetadata,
+        ) -> Result<RegularFileObservation, BoundedRegularFileReadError> {
+            let observed = &metadata.observed;
+            if Self::is_provider_boundary(observed.attributes) {
+                return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                    "file has an offline or recall-on-access attribute".to_string(),
+                ));
+            }
+            if observed.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(BoundedRegularFileReadError::SymlinkOrReparse {
+                    observed_kind: EntryKind::ReparsePoint,
+                });
+            }
+            if observed.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 || observed.standard.Directory {
+                return Err(BoundedRegularFileReadError::NotRegular {
+                    observed_kind: EntryKind::Directory,
+                });
+            }
+            if !Self::valid_identity(observed) || observed.standard.EndOfFile < 0 {
+                return Err(BoundedRegularFileReadError::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file metadata did not contain a valid identity and length",
+                )));
+            }
+            let volume = observed.file_id.VolumeSerialNumber;
+            let mut stamp = Vec::with_capacity(49);
+            stamp.extend_from_slice(&metadata.basic.CreationTime.to_le_bytes());
+            stamp.extend_from_slice(&metadata.basic.LastWriteTime.to_le_bytes());
+            stamp.extend_from_slice(&metadata.basic.ChangeTime.to_le_bytes());
+            stamp.extend_from_slice(&metadata.basic.FileAttributes.to_le_bytes());
+            stamp.extend_from_slice(&observed.reparse_tag.to_le_bytes());
+            stamp.extend_from_slice(&observed.standard.AllocationSize.to_le_bytes());
+            stamp.extend_from_slice(&observed.standard.NumberOfLinks.to_le_bytes());
+            stamp.push(u8::from(observed.standard.DeletePending));
+            Ok(RegularFileObservation {
+                kind: EntryKind::File,
+                identity: EntryIdentity::from_windows_file_id(
+                    volume,
+                    observed.file_id.FileId.Identifier,
+                ),
+                filesystem_identity: FilesystemIdentity { device: volume },
+                mount_identity: MountIdentity { value: volume },
+                logical_bytes: DecimalU128::new(observed.standard.EndOfFile as u128),
+                change_stamp: RegularFileChangeStamp::new(stamp),
+            })
+        }
+
+        fn validate_regular_file_expectation_before_read(
+            parent: &WindowsDirectoryHandle,
+            request: &BoundedRegularFileReadRequest,
+            observed: &RegularFileObservation,
+        ) -> Result<(), BoundedRegularFileReadError> {
+            if observed.mount_identity.value != parent.identity.volume {
+                return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                    RegularFileMountMismatch {
+                        expected: None,
+                        observed_mount_identity: observed.mount_identity.clone(),
+                    },
+                )));
+            }
+            let RegularFileReadExpectation::PreviouslyObserved(expected) = request.expectation()
+            else {
+                return Ok(());
+            };
+            if expected.mount_identity() != &observed.mount_identity {
+                return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                    RegularFileMountMismatch {
+                        expected: Some(expected.clone()),
+                        observed_mount_identity: observed.mount_identity.clone(),
+                    },
+                )));
+            }
+            if expected.identity() != &observed.identity
+                || expected.filesystem_identity() != &observed.filesystem_identity
+            {
+                return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+                    RegularFileIdentityMismatch {
+                        expected: Some(expected.clone()),
+                        observed_identity: observed.identity.clone(),
+                        observed_filesystem_identity: observed.filesystem_identity.clone(),
+                    },
+                )));
+            }
+            Ok(())
+        }
+
+        fn validate_regular_file_stable(
+            before: &RegularFileObservation,
+            after: &RegularFileObservation,
+        ) -> Result<(), BoundedRegularFileReadError> {
+            if before.mount_identity != after.mount_identity {
+                return Err(BoundedRegularFileReadError::MountMismatch(Box::new(
+                    RegularFileMountMismatch {
+                        expected: None,
+                        observed_mount_identity: after.mount_identity.clone(),
+                    },
+                )));
+            }
+            if before.identity != after.identity {
+                return Err(BoundedRegularFileReadError::IdentityMismatch(Box::new(
+                    RegularFileIdentityMismatch {
+                        expected: None,
+                        observed_identity: after.identity.clone(),
+                        observed_filesystem_identity: after.filesystem_identity.clone(),
+                    },
+                )));
+            }
+            if before.filesystem_identity != after.filesystem_identity
+                || before.logical_bytes != after.logical_bytes
+                || before.change_stamp != after.change_stamp
+            {
+                return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
+                    sweepx_platform::RegularFileObservationMismatch {
+                        observed_before: before.clone(),
+                        observed_after: after.clone(),
+                    },
+                )));
+            }
+            Ok(())
+        }
+
+        fn read_bounded_bytes(
+            handle: &OwnedHandle,
+            max_bytes: usize,
+            cancel: &CancellationToken,
+        ) -> Result<Vec<u8>, BoundedRegularFileReadError> {
+            let retained_limit = max_bytes.saturating_add(1);
+            let mut bytes = Vec::with_capacity(retained_limit.min(FILE_READ_CHUNK_BYTES));
+            let mut chunk = [0u8; FILE_READ_CHUNK_BYTES];
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(BoundedRegularFileReadError::Cancelled);
+                }
+                let remaining = retained_limit.saturating_sub(bytes.len());
+                if remaining == 0 {
+                    return Ok(bytes);
+                }
+                let requested = remaining.min(chunk.len());
+                let mut read = 0u32;
+                if unsafe {
+                    ReadFile(
+                        handle.as_raw_handle() as HANDLE,
+                        chunk.as_mut_ptr(),
+                        u32::try_from(requested).expect("read chunk fits u32"),
+                        &mut read,
+                        ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(map_regular_file_io(io::Error::last_os_error()));
+                }
+                if cancel.is_cancelled() {
+                    return Err(BoundedRegularFileReadError::Cancelled);
+                }
+                let read = usize::try_from(read).expect("Windows read count fits usize");
+                if read > requested {
+                    return Err(BoundedRegularFileReadError::io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "ReadFile returned more bytes than requested",
+                    )));
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+                if read == 0 {
+                    return Ok(bytes);
+                }
+            }
         }
 
         fn assert_directory_identity_current(
@@ -1376,11 +1652,94 @@ mod backend {
             })?;
             Ok(root_mount == entry_mount && root_filesystem == entry_filesystem)
         }
+
+        fn read_regular_file_relative(
+            &self,
+            parent: &Self::DirectoryHandle,
+            request: &BoundedRegularFileReadRequest,
+            cancel: &CancellationToken,
+        ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+            let NativeName::WindowsUtf16(name) = request.child_name() else {
+                return Err(BoundedRegularFileReadError::ForeignName);
+            };
+            request
+                .child_name()
+                .validate_basename()
+                .map_err(|_| BoundedRegularFileReadError::UnsafeName)?;
+            if Self::is_reserved_dos_device_name(name) {
+                return Err(BoundedRegularFileReadError::UnsafeName);
+            }
+
+            let parent_metadata =
+                Self::query_metadata(&parent.handle).map_err(map_regular_file_io)?;
+            if Self::is_provider_boundary(parent_metadata.attributes) {
+                return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                    "parent directory has an offline or recall-on-access attribute".to_string(),
+                ));
+            }
+            if parent_metadata.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || parent_metadata.attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || !parent_metadata.standard.Directory
+                || !Self::valid_identity(&parent_metadata)
+                || object_identity(&parent_metadata) != parent.identity
+            {
+                return Err(BoundedRegularFileReadError::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "parent directory identity or type changed before file read",
+                )));
+            }
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+
+            let handle = Self::open_regular_file_relative(&parent.handle, name)?;
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+            let before_metadata = Self::query_regular_file_metadata(&handle)?;
+            let observed_before = Self::regular_file_observation(&before_metadata)?;
+            Self::validate_regular_file_expectation_before_read(parent, request, &observed_before)?;
+            if observed_before.logical_bytes.0 > request.max_bytes() as u128 {
+                return Err(BoundedRegularFileReadError::LimitExceeded {
+                    max_bytes: request.max_bytes(),
+                    observed_logical_bytes: observed_before.logical_bytes,
+                });
+            }
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+
+            let bytes = Self::read_bounded_bytes(&handle, request.max_bytes(), cancel)?;
+            let after_metadata = Self::query_regular_file_metadata(&handle)?;
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+            let observed_after = Self::regular_file_observation(&after_metadata)?;
+            Self::validate_regular_file_stable(&observed_before, &observed_after)?;
+            if bytes.len() > request.max_bytes() {
+                return Err(BoundedRegularFileReadError::LimitExceeded {
+                    max_bytes: request.max_bytes(),
+                    observed_logical_bytes: DecimalU128::new(
+                        observed_after.logical_bytes.0.max(bytes.len() as u128),
+                    ),
+                });
+            }
+            Ok(PresentRegularFileRead {
+                bytes,
+                observed_before,
+                observed_after,
+            })
+        }
     }
 
     #[cfg(test)]
     mod tests {
+        use std::ffi::OsString;
         use std::fs;
+        use std::os::windows::ffi::OsStringExt;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         use sweepx_model::{EvidenceValue, NativeName};
@@ -1465,6 +1824,15 @@ mod backend {
                     matches!(&child.file_name, NativeName::WindowsUtf16(units) if units == &expected)
                 })
                 .unwrap_or_else(|| panic!("enumeration returned {name:?}"))
+        }
+
+        fn admitted_directory(path: &Path) -> RootAdmission<WindowsDirectoryHandle> {
+            scanner()
+                .admit_root(
+                    &ScanRoot::new(path.to_path_buf()).expect("test directory is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("test directory is admitted")
         }
 
         fn parse(path: &str) -> Result<ParsedDrivePath, RootOpenError> {
@@ -1960,6 +2328,153 @@ mod backend {
             assert!(!WindowsPlatformScanner::is_provider_boundary(
                 FILE_ATTRIBUTE_DIRECTORY
             ));
+        }
+
+        #[test]
+        fn bounded_regular_file_read_is_exact_case_and_detects_oversize() {
+            let root = TempDir::new("bounded-read");
+            fs::write(root.0.join("MiXeD.bin"), b"0123456789").expect("fixture file is written");
+            let admission = admitted_directory(&root.0);
+            let exact = BoundedRegularFileReadRequest::establish_live(
+                NativeName::windows_utf16("MiXeD.bin".encode_utf16().collect::<Vec<_>>()),
+                10,
+            )
+            .expect("exact request is valid");
+            let read = sweepx_platform::read_bound_regular_file(
+                &scanner(),
+                &admission.directory,
+                &exact,
+                &CancellationToken::new(),
+            )
+            .expect("exact bounded read succeeds");
+            assert_eq!(read.bytes, b"0123456789");
+            let mismatched = BoundedRegularFileReadRequest::previously_observed(
+                exact.child_name().clone(),
+                EntryIdentity::from_windows_file_id(
+                    read.observed_before.identity.device(),
+                    [0x5a; 16],
+                ),
+                read.observed_before.filesystem_identity.clone(),
+                read.observed_before.mount_identity.clone(),
+                10,
+            )
+            .expect("mismatched expectation request is valid");
+            assert!(matches!(
+                scanner().read_regular_file_relative(
+                    &admission.directory,
+                    &mismatched,
+                    &CancellationToken::new(),
+                ),
+                Err(BoundedRegularFileReadError::IdentityMismatch(_))
+            ));
+
+            let oversize =
+                BoundedRegularFileReadRequest::establish_live(exact.child_name().clone(), 9)
+                    .expect("oversize request is valid");
+            assert!(matches!(
+                scanner().read_regular_file_relative(
+                    &admission.directory,
+                    &oversize,
+                    &CancellationToken::new(),
+                ),
+                Err(BoundedRegularFileReadError::LimitExceeded { max_bytes: 9, .. })
+            ));
+
+            let wrong_case = BoundedRegularFileReadRequest::establish_live(
+                NativeName::windows_utf16("mixed.bin".encode_utf16().collect::<Vec<_>>()),
+                10,
+            )
+            .expect("case variant is syntactically valid");
+            assert!(matches!(
+                scanner().read_regular_file_relative(
+                    &admission.directory,
+                    &wrong_case,
+                    &CancellationToken::new(),
+                ),
+                Err(BoundedRegularFileReadError::NotFound)
+            ));
+
+            let raw_handle: OwnedHandle = fs::File::open(root.0.join("MiXeD.bin"))
+                .expect("fixture file opens")
+                .into();
+            let max_plus_one = WindowsPlatformScanner::read_bounded_bytes(
+                &raw_handle,
+                9,
+                &CancellationToken::new(),
+            )
+            .expect("bounded native loop reads its one-byte oversize witness");
+            assert_eq!(max_plus_one, b"0123456789");
+        }
+
+        #[test]
+        fn bounded_regular_file_read_preserves_unpaired_utf16_name() {
+            let root = TempDir::new("bounded-read-unpaired");
+            let name = vec![b'u' as u16, 0xd800, b'x' as u16];
+            let path = root.0.join(OsString::from_wide(&name));
+            fs::write(&path, b"native-name").expect("unpaired UTF-16 fixture is written");
+            let admission = admitted_directory(&root.0);
+            let request =
+                BoundedRegularFileReadRequest::establish_live(NativeName::windows_utf16(name), 64)
+                    .expect("unpaired UTF-16 basename remains a valid native token");
+            let read = sweepx_platform::read_bound_regular_file(
+                &scanner(),
+                &admission.directory,
+                &request,
+                &CancellationToken::new(),
+            )
+            .expect("native unpaired UTF-16 file is read without conversion");
+            assert_eq!(read.bytes, b"native-name");
+        }
+
+        #[test]
+        fn bounded_regular_file_read_rejects_reparse_and_honors_cancellation() {
+            let root = TempDir::new("bounded-read-reparse");
+            let target = root.0.join("target.bin");
+            let link = root.0.join("link.bin");
+            fs::write(&target, b"target").expect("target file is written");
+            if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("file symlink creation failed: {error}");
+            }
+            let admission = admitted_directory(&root.0);
+            let request = BoundedRegularFileReadRequest::establish_live(
+                NativeName::windows_utf16("link.bin".encode_utf16().collect::<Vec<_>>()),
+                64,
+            )
+            .expect("request is valid");
+            assert!(matches!(
+                scanner().read_regular_file_relative(
+                    &admission.directory,
+                    &request,
+                    &CancellationToken::new(),
+                ),
+                Err(BoundedRegularFileReadError::SymlinkOrReparse { .. })
+            ));
+
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            assert!(matches!(
+                scanner().read_regular_file_relative(&admission.directory, &request, &cancel),
+                Err(BoundedRegularFileReadError::Cancelled)
+            ));
+        }
+
+        #[test]
+        fn provider_error_codes_are_not_generic_io() {
+            for code in [
+                ERROR_FILE_OFFLINE,
+                ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING,
+                ERROR_CLOUD_FILE_NETWORK_UNAVAILABLE,
+                ERROR_CLOUD_FILE_REQUEST_TIMEOUT,
+            ] {
+                let code = i32::try_from(code).expect("provider error fits i32");
+                assert!(matches!(
+                    map_regular_file_io(io::Error::from_raw_os_error(code)),
+                    BoundedRegularFileReadError::ProviderOrOffline(_)
+                ));
+            }
         }
 
         #[test]
