@@ -452,6 +452,7 @@ fn snapshot_terminal_expectation(
         "capabilities" => sweepx_protocol::OutputKind::CapabilitiesResult,
         "cleaner" => sweepx_protocol::OutputKind::CleanerResult,
         "audit" => sweepx_protocol::OutputKind::AuditResult,
+        "cache.status" => sweepx_protocol::OutputKind::CacheStatusResult,
         _ => {
             return Err(JournalError::ProtocolValidation(
                 "snapshot command is unsupported".into(),
