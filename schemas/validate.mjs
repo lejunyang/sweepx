@@ -921,6 +921,21 @@ const resultSchemaCases = [
     }
   },
   {
+    name: "cache status degraded requires a degradation witness",
+    file: "sweepx.output.cache-status.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.disposition = "degraded";
+      output.data.exists = true;
+      output.data.currentGeneration = "gen-example";
+      output.data.storedSchema = "sweepx.preview.cache/v1";
+      output.data.currentHealth = "available";
+      output.data.schemaHealth = "available";
+      output.status = "partial";
+      output.exitCode = 4;
+    }
+  },
+  {
     name: "cache status absent requires zero complete aggregate state",
     file: "sweepx.output.cache-status.result.example.json",
     expected: false,

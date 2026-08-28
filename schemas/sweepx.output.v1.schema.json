@@ -250,7 +250,47 @@
           "status": { "const": "partial" },
           "exitCode": { "const": 4 },
           "data": { "properties": { "exists": { "const": true } } }
-        }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "data": {
+                "properties": { "quarantineCount": { "not": { "const": "0" } } }
+              }
+            }
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": { "approxBytesComplete": { "const": false } }
+              }
+            }
+          },
+          {
+            "properties": {
+              "data": { "properties": { "warnings": { "minItems": 1 } } }
+            }
+          },
+          {
+            "properties": {
+              "data": { "properties": { "errors": { "minItems": 1 } } }
+            }
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": { "currentHealth": { "not": { "const": "available" } } }
+              }
+            }
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": { "schemaHealth": { "not": { "const": "available" } } }
+              }
+            }
+          }
+        ]
       }
     },
     {

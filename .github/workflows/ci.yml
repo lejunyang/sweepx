@@ -176,6 +176,11 @@ jobs:
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
+      - name: Test macOS cache status natively
+        if: matrix.capability_os == 'macos'
+        run: |
+          cargo test --locked --target "${{ matrix.target }}" --package sweepx-cache
+          cargo test --locked --target "${{ matrix.target }}" --package sweepx-cli cache_status
       - name: Build native CLI
         run: cargo build --locked --package sweepx-cli --target ${{ matrix.target }}
       - name: Smoke-test Windows scan and fail-closed state

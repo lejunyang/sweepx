@@ -935,6 +935,32 @@ fn cache_status_human_output_includes_degraded_reason() {
     assert!(text.contains("Errors: cache.preview.inspect.malformed_current_pointer"));
 }
 
+#[cfg(unix)]
+#[test]
+fn cache_status_human_output_explains_empty_existing_cache() {
+    let fixture = TempDir::new().unwrap();
+    let state_dir = fixture.path().join("state");
+    let preview_root = state_dir.join("preview-cache");
+    fs::create_dir_all(&preview_root).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.current_dir(cli_crate_dir())
+        .arg("--locale")
+        .arg("en-US")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+    let output = cmd.assert().code(4).get_output().stdout.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("exists=true"));
+    assert!(text.contains("currentHealth=missing"));
+    assert!(text.contains("schemaHealth=unknown"));
+    assert!(text.contains("approxBytesComplete=true"));
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn cache_status_is_unsupported_before_state_creation() {

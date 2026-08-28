@@ -2632,12 +2632,37 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
             .get("quarantineCount")
             .and_then(json_decimal_to_usize)
             .unwrap_or(0);
+        let exists = output
+            .summary
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let approx_bytes = output
+            .summary
+            .get("approxBytes")
+            .and_then(Value::as_str)
+            .unwrap_or("0");
+        let approx_bytes_complete = output
+            .summary
+            .get("approxBytesComplete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let current_health = output
+            .summary
+            .get("currentHealth")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let schema_health = output
+            .summary
+            .get("schemaHealth")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         let detail = match context.locale() {
             Locale::ZhCn => format!(
-                "只读缓存诊断: {disposition}，generation={generation_count}，quarantine={quarantine_count}。"
+                "只读缓存诊断: {disposition}，exists={exists}，generation={generation_count}，quarantine={quarantine_count}，approxBytes={approx_bytes}，approxBytesComplete={approx_bytes_complete}，currentHealth={current_health}，schemaHealth={schema_health}。"
             ),
             Locale::EnUs => format!(
-                "Read-only cache diagnostics: {disposition}, generations={generation_count}, quarantine={quarantine_count}."
+                "Read-only cache diagnostics: {disposition}, exists={exists}, generations={generation_count}, quarantine={quarantine_count}, approxBytes={approx_bytes}, approxBytesComplete={approx_bytes_complete}, currentHealth={current_health}, schemaHealth={schema_health}."
             ),
         };
         let mut lines = vec![

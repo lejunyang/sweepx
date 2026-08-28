@@ -36,7 +36,7 @@ Run validation with:
 The validation script checks:
 
 - example output envelope
-- exact `status.result.data` and `cancel.result.data` branches, including positive examples and rejection of unknown or disposition-inconsistent fields
+- exact `status.result.data`, `cancel.result.data`, and `cache.status.result.data` branches, including positive examples and rejection of unknown or disposition-inconsistent fields
 - exact `plan.result.data` review-only branch, including rejection of unknown fields, authority-shaped fields, translated machine enums, and numeric/leading-zero counts
 - live `scan.result` entry identity, native locator lineage, and directory-aggregate identity structure
 - legacy imported scan entries without identity or native locator, which remain readable but untrusted
