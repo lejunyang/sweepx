@@ -22,11 +22,17 @@ absolute roots
 bounded scan.result JSON
   -> imported provenance downgrade
   -> report-only explanation
+
+preview-cache/current.json + current generation + flat generations/quarantine dirs
+  -> bounded read-only cache inspection
+  -> cache.status.result
 ```
 
 Linux、macOS 与 Windows 均连接实际的 development-grade/degraded 只读 scanner backend；macOS traversal 为 handle-bound，Windows 为 handle-relative，三者都通过 `sweepx scan` / `scan --tui` 暴露。
 
 Scanner 还新增了一个有界 locator batch reader，供只读上层在已 admission 的 locator 上执行固定文件读取。当前最直接的使用者是 Cargo detector：它读取 `Cargo.toml` 和 `.cargo/config*` 来产生 typed evidence，但这些读取不会把结果升级为 candidate 或执行权限。
+
+`sweepx-cache` 现在还提供 preview cache 的只读 inspection API，供 `cache status` 读取现有 `preview-cache` 结构。它只检查 `current.json`、pointer 指向的 current generation 文件，以及平铺的 `generations/` / `quarantine/` 目录，报告存在性、数量、近似字节数和健康状态；它不会创建、修复、quarantine、重建或暴露 preview entries/path 内容。
 
 ## Crate 职责
 
@@ -41,6 +47,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 ## 状态与取消
 
 CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 仍写 legacy operation snapshot。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。Windows durable state 禁用：默认 `state_dir=None`，显式 `--state-dir` 失败关闭。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
+
+与 scan/status 分离，`cache status` 只读取 preview cache 的现存状态。Linux/macOS 支持 human/JSON；Windows disabled；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录。`available` 只表示缓存结构和受限校验可读，不代表任何 live/current 文件事实；warning、error 或 quarantine presence 会把结果降为 `degraded`。
 
 ## 导入是明确的信任边界
 

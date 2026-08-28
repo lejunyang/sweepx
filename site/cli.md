@@ -4,7 +4,7 @@ title: CLI 与只读扫描
 
 # CLI 与只读扫描
 
-当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cleaner` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览，没有独立的 TUI 命令或二进制，也没有任何 mutation 子命令。
+当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cache`、`cleaner` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览，没有独立的 TUI 命令或二进制，也没有任何 mutation 子命令。
 
 > [!CAUTION]
 > `plan`、`approve`、`execute`、Trash、Permanent 和 `--dangerously-delete` 都不是当前 CLI。看到这些名称时，应将它们理解为路线图提案。
@@ -99,6 +99,23 @@ cargo run -p sweepx-cli -- \
 ```
 
 `status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+
+## Preview cache 只读诊断
+
+```bash
+cargo run -p sweepx-cli -- \
+  --format json \
+  --state-dir /absolute/path/to/sweepx-state \
+  cache status
+```
+
+- Linux 与 macOS 支持 `cache status`；Windows 当前返回 unsupported。
+- 只支持 `human` 与 `json`；`--format ndjson` 在创建或读取任何 state/cache 目录之前以 usage error 失败。
+- 若默认或显式 state/cache 缺失，结果返回 `disposition=absent`、exit 0，且不会创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。
+- 检查范围严格限制为 `preview-cache/current.json`、pointer 指向的 current generation 文件，以及平铺的 `generations/` 与 `quarantine/` 目录。
+- 输出 kind 是 `cache.status.result`，并报告 `exists`、`currentGeneration`、`generationCount`、`quarantineCount`、`approxBytes`、`approxBytesComplete`、`storedSchema`、`currentHealth`、`schemaHealth` 以及 typed `warnings[]` / `errors[]`。
+- 该命令不会触发 scan、repair、quarantine、rebuild，也不会暴露缓存条目、display path、预览内容或 live filesystem 事实。
+- `available` 只表示受限缓存结构与校验可读；任意 warning、error 或 quarantine presence 都会把结果降为 `degraded`，并返回 exit 4。
 
 ## 从 scan JSON 解释
 

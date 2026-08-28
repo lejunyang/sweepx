@@ -22,38 +22,37 @@ Branch: `main`
 - Linux bounded SQLite event journal with one-transaction complete-stream plus terminal-snapshot persistence.
 - CI, Pages, `[publish]`-gated binary/crates publication, install scripts, and bilingual VitePress site are present.
 
-## Current milestone: Linux completed-stream replay
+## Current milestone: read-only preview-cache diagnostics
 
-This milestone is committed in `1483246` (`feat(status): replay completed Linux journals`), with replay contract cleanup in `b2e93bd` (`fix(status): tighten replay contracts`) and the matching documentation record in `d4a90bb` (`docs: record completed journal replay milestone`). It adds:
+The implementation is committed in `933921b` (`feat(cache): expose read-only status diagnostics`). It adds:
 
 ```text
-sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1_CURSOR]
+sweepx cache status
+sweepx --format json cache status
 ```
 
 Exact boundaries:
 
-- Linux only. It replays an already-completed, persisted journal stream.
-- It is not a live scan stream, does not wait for new events, does not create a background operation, and does not enable cancellation.
-- `scan --format ndjson` remains disabled before scan/root/state admission.
-- Journal replay opens existing state without creating missing state roots or legacy directories.
-- A replay session performs one complete verification inside one SQLite read transaction, then freezes events, cursor index, integrity facts, and final snapshot.
-- Owned replay is emitted in pages of at most 1024 events without cloning event payloads.
-- Valid known cursor resumes strictly after that event. The terminal cursor yields empty output.
-- A malformed cursor is usage error/exit 2. A syntactically valid unknown cursor emits one separate non-durable `stream.reset_required` delivery-control event with `requestedCursor`, `availableFromSequence=1`, `snapshotRef.operationId`, and the journal high-water `resumeAfter`.
-- Missing operation is exit 8; legacy-snapshot-only replay is unsupported/exit 3; journal corruption is fail-closed with empty stdout/exit 11.
-- Normal replay exits with the frozen terminal exit code; reset delivery exits 0.
-- Capability `operation.event.completed_replay` is degraded on Linux and disabled on macOS/Windows. `scan.ndjson.stream` remains disabled with the live-sink-unqualified reason.
-- Replay admission has a conservative 192 MiB decoded-memory estimate aligned across append and replay; it is not an allocator-exact RSS measurement.
+- Linux and macOS support human and JSON output; Windows is disabled.
+- NDJSON is rejected as a usage error before state/cache access.
+- Missing state/cache returns `disposition=absent`, exit 0, and creates nothing.
+- Existing preview state is inspected through held directory FDs, per-component no-follow opens, bounded flat directory enumeration, and bounded no-follow file reads.
+- Generation IDs are bounded and validated before projection or path construction. Invalid cache payloads are represented by typed diagnostics without exposing stored paths, entry IDs, or malformed schema values.
+- `available` means only that bounded cache structure, checksum, schema, and provenance are readable; it does not make live filesystem claims. Warnings, errors, incomplete byte accounting, or quarantine presence produce `degraded`/exit 4.
+- Machine usage, unsupported-platform, and inspection-integrity failures use a `cache.status.result` envelope with generic redacted details.
+- All mutation capability cells remain disabled.
 
 ## Verification for the current milestone
 
 - `cargo test --workspace --all-targets --all-features --locked` passes.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` passes.
-- Windows GNU checks and Clippy pass for protocol, event-journal, Core, and CLI.
+- Windows GNU checks and Clippy pass for the native CI package set; macOS cache all-target cross-check and Clippy pass.
+- Cache inspection has 31 unit tests and cache-status CLI has 11 contract tests.
+- JSON Schema includes a cache-status example plus shape, status/exit, disposition, degradation-witness, and privacy-negative cases.
 - `cargo fmt --all -- --check`, docs lint, and `git diff --check` pass.
 - VitePress site build passes with `/data00/home/lejunyang/.bun/bin/bun run docs:build` from `site/`.
 - macOS cross-check remains blocked on this Linux host because the host C compiler rejects Apple `-arch` and `-mmacosx-version-min` flags while compiling bundled SQLite; this is a toolchain/environment limitation.
 
 ## Next work
 
-The replay implementation and documentation are committed through `b2e93bd`. The next active non-human-approval read-only milestone is an independent `sweepx cache status` preview-cache diagnostics surface. The cache crate now has an uncommitted inspection API that must be reviewed and wired into Core/CLI. It should inspect existing cache state without creating, repairing, quarantining, or scanning anything, and report bounded stable facts such as current generation, generation/quarantine counts, approximate state bytes, schema/current-pointer health, and warnings. A second candidate is Cargo config-scope closure; keep it behind typed evidence and report-only behavior until global/ancestor/env overrides can be proven absent. Keep all mutation capability cells disabled.
+The cache-status implementation is committed through `933921b`; the matching documentation/CI record follows in the next commit. The next active non-human-approval read-only milestone is Cargo config-scope closure. Keep it behind typed evidence and report-only behavior until global, ancestor, environment, and CLI/config override precedence can be proven without using display paths as authority. Add the remaining table-driven corrupt-cache diagnostic coverage opportunistically. Keep all mutation capability cells disabled.

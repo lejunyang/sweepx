@@ -22,11 +22,17 @@ absolute roots
 bounded scan.result JSON
   -> imported provenance downgrade
   -> report-only explanation
+
+preview-cache/current.json + current generation + flat generations/quarantine dirs
+  -> bounded read-only cache inspection
+  -> cache.status.result
 ```
 
 Linux, macOS, and Windows connect real development-grade/degraded read-only scanner backends. macOS traversal is handle-bound and Windows traversal is handle-relative; all three are exposed through `sweepx scan` / `scan --tui`.
 
 The Scanner also now exposes a bounded locator batch reader so read-only upper layers can perform fixed file reads along already-admitted locators. Its first direct consumer is the Cargo detector: it reads `Cargo.toml` and `.cargo/config*` to project typed evidence, but those reads do not promote the result into candidate or execution authority.
+
+`sweepx-cache` now also exposes a read-only inspection API for the preview cache, used by `cache status`. It reads only `current.json`, the pointer-selected current generation file, and the flat `generations/` / `quarantine/` directories, reporting existence, counts, approximate bytes, and health state. It does not create, repair, quarantine, rebuild, or reveal preview entries or path contents.
 
 ## Crate responsibilities
 
@@ -41,6 +47,8 @@ The Scanner also now exposes a bounded locator batch reader so read-only upper l
 ## State and cancellation
 
 CLI scan completes synchronously. On Linux, events are constructed as a batch after scanning, then the complete stream and terminal snapshot are committed to a bounded SQLite journal in one transaction; Core `status` is journal-first and supports degraded completed replay through `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`: it performs one same-snapshot full validation, then reads pages of at most 1024 events from a completed, persisted stream; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. Because events are still constructed after the scan, this surface is not a live sink, does not wait for new events, does not create a background operation, and does not support cancel. macOS still writes the legacy operation snapshot. `scan --no-state` skips the corresponding operation-state writes for read-only scans that do not need later status/operation state or whose state filesystem does not support the journal, and it conflicts with `--state-dir`. Windows durable state is disabled: `state_dir` defaults to `None`, and explicit `--state-dir` fails closed. Live cancellation remains disabled. `cancel` returns an honest disposition, which is why its capability is disabled.
+
+Separate from scan/status, `cache status` reads only existing preview-cache state. Linux and macOS support human/JSON output; Windows is disabled; NDJSON is a usage error. Missing state/cache returns `absent` without creating directories. `available` means only that bounded cache structure and validation are readable, not that any live/current filesystem fact is true; warnings, errors, or quarantine presence degrade the result.
 
 ## Import is an explicit trust boundary
 

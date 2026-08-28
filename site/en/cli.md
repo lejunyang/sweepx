@@ -4,7 +4,7 @@ title: CLI and read-only scanning
 
 # CLI and read-only scanning
 
-The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cleaner`, and `capabilities`; `scan --tui` enters the interactive browser after scanning. There is no separate TUI command or binary and no mutation subcommand.
+The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cache`, `cleaner`, and `capabilities`; `scan --tui` enters the interactive browser after scanning. There is no separate TUI command or binary and no mutation subcommand.
 
 > [!CAUTION]
 > `plan`, `approve`, `execute`, Trash, Permanent, and `--dangerously-delete` are not part of the current CLI. Treat those names as roadmap proposals wherever they appear.
@@ -99,6 +99,23 @@ cargo run -p sweepx-cli -- \
 ```
 
 `status` reads persisted terminal state journal-first on Linux and supports degraded completed replay through `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]`: it covers only completed, persisted streams, performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. It does not wait for new events, does not create a background operation, and does not support cancel, so it is not live progress. macOS reads from the legacy snapshot and still has no replay/watch surface. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+
+## Read-only preview-cache diagnostics
+
+```bash
+cargo run -p sweepx-cli -- \
+  --format json \
+  --state-dir /absolute/path/to/sweepx-state \
+  cache status
+```
+
+- Linux and macOS support `cache status`; Windows currently returns unsupported.
+- It supports `human` and `json` only; `--format ndjson` fails with a usage error before any state/cache directory is created or read.
+- If default or explicit state/cache is missing, the result returns `disposition=absent` with exit 0 and does not create `state_dir`, `preview-cache/`, `current.json`, or any generation/quarantine directory.
+- Inspection is strictly bounded to `preview-cache/current.json`, the pointer-selected current generation file, and the flat `generations/` and `quarantine/` directories.
+- The output kind is `cache.status.result`, reporting `exists`, `currentGeneration`, `generationCount`, `quarantineCount`, `approxBytes`, `approxBytesComplete`, `storedSchema`, `currentHealth`, `schemaHealth`, and typed `warnings[]` / `errors[]`.
+- The command does not trigger a scan, repair, quarantine, rebuild, or reveal cached entries, display paths, preview contents, or live filesystem facts.
+- `available` means only that bounded cache structure and validation are readable; any warning, error, or quarantine presence degrades the result to exit 4.
 
 ## Explain from scan JSON
 

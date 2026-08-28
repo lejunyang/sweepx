@@ -16,6 +16,7 @@
 | `sweepx status` | Linux journal-first 读取 terminal snapshot，并支持对已完成且已持久化的 journal stream 做 degraded 的 `--watch` completed replay；macOS 读取 legacy operation snapshot | Linux `--watch` 只支持 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 的 completed-stream replay：先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required`；malformed cursor/usage 返回 usage error；它不等待新事件、不创建后台 operation，也不支持 cancel。macOS 仍无 journal replay/watch；Windows durable state 禁用、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
+| `sweepx cache status` | Linux、macOS：preview cache 只读诊断；Windows：disabled | 只支持 `human`/`json`；`--format ndjson` 是 usage error。缺失 state/cache 返回 `absent` + exit 0，且不创建默认或显式 state/cache 目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、大小与校验健康；不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实；warning/error 或 quarantine presence 返回 `degraded` + exit 4 |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
 | `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Scanner 现有有界 locator batch reader，并在三平台 backend 上提供 handle-relative/handle-bound 的有界文件读取路径；Cargo 固定输入收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。当 workspace 证据成立时可投影为 `Known`，但 `targetDir` 仍因全局 override scope 未解而保持 `NotChecked`，`targetShape` 因依赖该前提而保持 `Unknown`；结果继续只产生 hint/report-only，不会产生 candidate、计划、授权或执行 |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；detail rescan 为 single-flight 后台任务，2 s deadline，导航与退出不等待非协作 worker，late result 会丢弃，且有 process-wide 32 stuck-worker cap |
@@ -77,6 +78,12 @@ cargo run -p sweepx-cli -- \
   --state-dir /absolute/path/to/sweepx-state \
   status --operation-id <OPERATION_ID>
 
+# 只读 preview cache 诊断；缺失缓存返回 absent 且不创建目录
+cargo run -p sweepx-cli -- \
+  --format json \
+  --state-dir /absolute/path/to/sweepx-state \
+  cache status
+
 # 从有界的导入 JSON 生成 report-only 解释
 cargo run -p sweepx-cli -- \
   --format json \
@@ -92,6 +99,8 @@ cargo run -p sweepx-cli -- --format json cleaner cargo-detect /absolute/path/to/
 ```
 
 `scan` 接受一个或多个绝对根路径。`scan --no-state` 跳过 operation snapshot/event journal，适合不需要后续 `status`/operation state 或 state filesystem 不支持 journal 的显式只读扫描；它不能与 `--state-dir` 同时使用。默认 `human` 输出最多显示 40 行，并对文件名中的终端控制字符做安全替换；`json` 是当前 scan 的机器格式。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。Linux 已接入 bounded SQLite journal，在单个事务中写入完整事件流与 terminal snapshot；Core 的 `status` 优先读取 journal。Linux 现支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 completed-stream replay：它只重放已完成且已持久化的 journal stream，先做一次同 snapshot 全量校验，再在单次请求中按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required` control event，malformed cursor/usage 返回 usage error。该 replay 不等待新事件，不创建后台 operation，也不支持 cancel。事件仍在 scan 完成后批量构造，因此这不是 live streaming，且尚未 runtime-qualified，所以 `scan --format ndjson` 继续 disabled。macOS 保留 legacy operation snapshot，没有 SQLite journal/replay；Windows durable state 继续 disabled。`--tui` 不能与机器格式组合，也不会要求或生成中间 JSON。当前 TUI 展示扫描结果中的虚拟根和直接子项，支持进入/返回目录、移动选择与退出；symlink/reparse 项不会被进入；目录 detail rescan 使用 single-flight 后台任务，deadline 为 2 s，导航或退出不会等待非协作 worker，超时后的 late result 会被丢弃，并由 process-wide 32 stuck-worker cap 防止无限泄漏。`explain` 默认最多读取 8 MiB 的导入 JSON，这个上限用于拒绝过大的报告，而不是放宽执行权限。
+
+`cache status` 是独立的只读 preview cache 诊断表面，输出 kind 为 `cache.status.result`。Linux 与 macOS 支持 `human`/`json`，Windows 当前 disabled；`--format ndjson` 在创建或读取任何 state 目录之前就以 usage error 拒绝。若默认或显式 state/cache 缺失，命令返回 `disposition=absent`、exit 0，且不创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。检查范围只限 `preview-cache/current.json`、当前 generation 文件、`generations/` 与 `quarantine/` 的浅层结构、近似字节数、当前指针健康和 stored-generation schema/checksum/provenance 健康；它不会触发 scan、repair、quarantine 或 cache rebuild，也不会暴露 cache entries、display path 或预览内容。`available` 只表示缓存结构和校验在当前读取范围内可用，不代表 live/current 文件事实。只要存在 warning、error 或 quarantine presence，结果就降为 `degraded` 并以 exit 4 返回。
 
 ### `status` 与 `cancel` 的诚实语义
 

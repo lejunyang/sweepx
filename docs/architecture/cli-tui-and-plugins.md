@@ -217,7 +217,7 @@ sweepx [global-options] <command>
   audit export --batch-id ID --output FILE
 ```
 
-主协议命令名固定为 `scan`、`explain`、`plan create/show`、`approve`、`execute`、`cancel`、`recover`、`status`、`capabilities`。脚本不得依赖本地化 human 文本；机器调用只依赖 schema、枚举和退出码。
+主协议命令名固定为 `scan`、`explain`、`plan create/show`、`approve`、`execute`、`cancel`、`recover`、`status`、`cache status`、`capabilities`。脚本不得依赖本地化 human 文本；机器调用只依赖 schema、枚举和退出码。
 
 ### 4.2 全局和关键 flags
 
@@ -244,6 +244,8 @@ flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失
 - `--detach` 在持久化 operation/stream ID 后返回；用 `status --operation-id ID --watch --after CURSOR` 继续消费。
 
 `explain` 只接受 scan/candidate ID，不接受任意 path。`plan create` 只接受同一本机、未过期、本次 live scan 的 candidate ID；`--mode` 默认 `trash`。选择 `permanent` 只创建 R4 计划，不是批准。`plan show` 必须显示 canonical digest、完整 action count、mode、风险、unknown、coverage、恢复预期和 expiry。
+
+`cache status` 是独立的只读 preview-cache 诊断命令。它输出 `cache.status.result`，只支持 `human`/`json`；`--format ndjson` 在创建或读取任何 state/cache 路径之前即以 `USAGE` 失败。Linux 与 macOS 支持该命令，Windows 返回 `UNSUPPORTED`。若默认或显式 `state_dir` 下的 preview cache 缺失，命令返回 `disposition=absent`、exit 0，且不得创建 `state_dir`、`preview-cache/`、`current.json` 或任何 generation/quarantine 目录。检查范围严格限制为 `preview-cache/current.json`、pointer 指向的 current generation 文件、以及平铺的 `generations/` 与 `quarantine/` 目录：它只报告存在性、数量、近似字节数、current/schema 健康和 typed warning/error，不执行 scan、repair、quarantine、rebuild，也不暴露缓存条目、display path、预览内容或 live filesystem 事实。`available` 只表示受限缓存结构与校验在当前读取范围内可读；任意 warning、error 或 quarantine presence 都使 disposition 变为 `degraded` 且 exit 4。
 
 `execute` 不能接受 mode、path、candidate、额外 item、retry 或 policy override；这些全部已绑定在 plan。`--approval-id` 产生 `HumanApproval` authorization。唯一例外 `--dangerously-delete` 产生独立的 `ExplicitDangerousDelete` authorization：它只接受已有、未过期的 Permanent R4 plan，允许非交互 CLI 使用，并由 Core 生成绑定精确 plan/mode/items/actions/risk/digests/user/host/session 的 sealed single-use `DangerousDeleteRecord`，在同一 admission 原子 claim，随后仍执行全部复验/intent/permit/audit。CLI 不声称能识别调用者是不是人或 Agent。它与 `--approval-id` 互斥，不能改 mode 或目标。`recover --resume-pending` 只可继续从未 reserve nonce 的 PENDING action，仍须 authorization 有效并重新完整 preflight；RESERVED、STALE、INDETERMINATE 一律先 reconcile，不能自动重发。
 
@@ -310,7 +312,9 @@ flags 使用严格 typed parser：UUID、duration、byte-size 和 enum 解析失
 }
 ```
 
-`kind` 的 v1 值为 `scan.result`、`explanation.result`、`plan.result`、`execution.result`、`recovery.result`、`cancel.result`、`status.result`、`capabilities.result`、`cleaner.result`、`audit.result`。`approval.result` 仅是 Broker 在可信前台已取得人类输入后返回 opaque `approvalId` 的内部 typed response，不属于 `approve` 的 JSON/NDJSON CLI 模式；CLI `approve` 始终只接受和输出 human mode。`status` 为 `ok|partial|blocked|authorization_required|stale|failed|needs_reconciliation|cancelled|unsupported`。
+`kind` 的 v1 值为 `scan.result`、`explanation.result`、`plan.result`、`execution.result`、`recovery.result`、`cancel.result`、`status.result`、`capabilities.result`、`cleaner.result`、`audit.result`、`cache.status.result`。`approval.result` 仅是 Broker 在可信前台已取得人类输入后返回 opaque `approvalId` 的内部 typed response，不属于 `approve` 的 JSON/NDJSON CLI 模式；CLI `approve` 始终只接受和输出 human mode。`status` 为 `ok|partial|blocked|authorization_required|stale|failed|needs_reconciliation|cancelled|unsupported`。
+
+`cache.status.result` 也是当前已发布的单结果 kind。其 `data` 固定包含：`command=cache.status`、`disposition=absent|available|degraded|unsupported`、`exists`、`currentGeneration`、`generationCount`、`quarantineCount`、`approxBytes`、`approxBytesComplete`、`storedSchema`、`currentHealth=available|missing|unknown|error`、`schemaHealth=available|missing|unknown|error`、以及 typed `warnings[]` / `errors[]`。`unsupported` 同时承载平台不支持、格式/路径 usage error 或 inspection integrity error 的失败关闭预检；此时顶层 `errors[]` 给出稳定错误码。`disposition=absent` 与 exit 0 只表示 preview cache 缺失且未被创建；`available` 只表示受限缓存结构与校验可读，不代表任何 live/current 文件事实；只要存在 warning、error 或 quarantine presence，就必须返回 `partial` / exit 4。
 
 当前发布 schema 还固定 `status.result.data` 与 `cancel.result.data` 的完整字段集。status data 是公开 operation snapshot view；cancel data 包含 `operationId`、disposition、恒为 false 的 `canCancel` 和 nullable operation。`not_found` / `unsupported` 要求 operation 为 null，`already_terminal` 要求完整 operation view；未知 data 字段拒绝。
 

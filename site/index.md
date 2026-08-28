@@ -23,7 +23,7 @@ features:
   - title: 可运行，但只读
     details: Linux、macOS 与 Windows 均已有 degraded 的开发版只读 scanner，并统一通过 `sweepx scan` / `scan --tui` 接入；macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal。
   - title: 证据不会变成授权
-    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。Cargo detector 现在能读取固定输入并投影 workspace evidence，但仍只输出 hint/report-only；查看报告或解释候选不会产生删除权限。
+    details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。`cache status` 也只是 preview cache 的只读诊断；`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实。
   - title: 破坏性路径仍封闭
     details: 当前没有 plan、approve、execute CLI，没有 native Trash/Permanent adapter，也没有任何删除目标文件的实现。
 ---
@@ -41,11 +41,12 @@ features:
 | `status` | Linux journal-first 读取 terminal snapshot，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay；macOS 读取 legacy snapshot；Windows durable state disabled、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `cancel` | 命令存在，但 live cancellation disabled |
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
+| `cache status` | Linux/macOS：preview cache 只读诊断；Windows：disabled |
 | Cleaner | 只读 list/show 元数据，带版本兼容门；`cargo-detect` 有固定输入读取和 typed evidence，但仍是 hint/report-only |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览；detail rescan 为 single-flight 后台任务，2 s deadline，导航/退出不中断 |
 | Trash / Permanent | 不存在 |
 
-CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。
+CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。`cache status` 只支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录；检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构和健康，不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；稳定 release 尚未发布。
 
 ## 按你的问题阅读

@@ -13,6 +13,7 @@ Agent 可以在用户提供明确范围后：
 - 运行 `capabilities` 并报告 degraded/report-only/unsupported/disabled 状态；
 - 在用户选择的绝对根上运行 Linux、macOS 或 Windows 的 development-grade/degraded 只读扫描；不需要后续 status/operation state 或 state filesystem 不支持 journal 时，可显式使用 `scan --no-state`，但不能同时传 `--state-dir`；
 - 读取现有 JSON，解释 error、boundary、coverage 和 tagged size；`scan --format ndjson` 当前禁用，但 Linux 可用 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 重放已完成且已持久化的 stream；
+- 运行 `cache status` 并读取 `cache.status.result`；只把 `absent/available/degraded`、数量、近似字节数和健康状态当作只读诊断，不把 `available` 写成 live/current 文件事实；
 - 对有界 scan JSON 运行 report-only `explain`；
 - 列出或展示 Cleaner 元数据；
 - 打开或摘要只读 TUI 输入。
@@ -32,7 +33,7 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 结构化输出与语言
 
-当前 scan 自动化应使用 bounded JSON。`scan --format ndjson` 仍 disabled；Linux 仅对 `status --watch --format ndjson` 提供 degraded completed-stream replay：它先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 replay 非 live，不等待新事件，不创建后台 operation，也不支持 cancel，且仍非 runtime-qualified。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
+当前 scan 自动化应使用 bounded JSON。`scan --format ndjson` 仍 disabled；Linux 仅对 `status --watch --format ndjson` 提供 degraded completed-stream replay：它先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。`cache status` 只支持 human/JSON；NDJSON 是 usage error。它只检查 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构与健康，不 scan、不 repair、不 quarantine，也不暴露 cache entries/path 内容；缺失 state/cache 返回 `absent` 且不创建目录。由于事件仍在 scan 后批量构造，completed replay 非 live，不等待新事件，不创建后台 operation，也不支持 cancel，且仍非 runtime-qualified。`--locale` 只影响人类文案，不改变 schema key、status、reason code 或 capability state。Agent 不应通过翻译或摘要丢失这些稳定字段。
 
 ## 未来边界仍然更窄
 

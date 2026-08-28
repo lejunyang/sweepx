@@ -23,6 +23,7 @@ Before scanning, and again before execution if the process, installation, policy
 ```sh
 sweepx status --format json
 sweepx capabilities --format json
+sweepx cache status --format json
 ```
 
 Proceed only when the binary exists, returns `schema=sweepx.output/v1`, and advertises the required command, adapter, mode, platform release qualification, policy, protected-anchor snapshot, and healthy approval/audit stores. If any requirement is absent, incompatible, unreadable, or unqualified, stop and report the capability as unavailable. Never emulate SweepX with `rm`, `unlink`, PowerShell removal, direct Trash APIs, package-manager commands, browser-internal edits, or another cleanup tool.
@@ -52,7 +53,7 @@ Read [Cleaner and domain rules](references/cleaner-and-domain-rules.md) before u
 ## Keep authority with the right actor
 
 - Run as the current ordinary user. Never request or use `sudo`, UAC, `runas`, polkit, setuid, backup/restore privilege, Linux capabilities, ownership takeover, ACL/TCC changes, immutable/read-only flag changes, process termination, or system-setting changes. Block mutation if execution is elevated or has effective, permitted, or ambient capabilities.
-- Let the Agent use `status`, `capabilities`, `scan`, `explain`, `plan create/show`, `execute`, `cancel`, `recover`, read-only cleaner inspection, and audit/status queries. These calls do not let the Agent grant approval.
+- Let the Agent use `status`, `capabilities`, `cache status`, `scan`, `explain`, `plan create/show`, `execute`, `cancel`, `recover`, read-only cleaner inspection, and audit/status queries. `cache status` is aggregate diagnostics only: `available` is not live filesystem freshness. These calls do not let the Agent grant approval.
 - Let only the trusted Human Approval Broker construct and privately validate `ApprovalRecord`. The authenticated record's binding to the full canonical plan digest is the security boundary; a displayed or typed short fingerprint is only an attention check. The Agent requires a structured Core attestation that the private record was validated for the exact plan; it must not request, inspect, copy, edit, import, fabricate, or validate that record itself.
 - Treat approval only as exact, short-lived, single-use proof of human intent. It is not evidence that an object is safe or unchanged. Core live revalidation decides whether an action may proceed.
 - Mutate only through `sweepx execute` using an internal immutable plan ID and opaque broker-issued approval ID. Never invoke an adapter, cleaner, manager mutation, browser cleanup, platform Trash operation, or filesystem deletion primitive directly.
