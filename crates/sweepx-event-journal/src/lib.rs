@@ -645,8 +645,6 @@ pub enum JournalError {
     JournalNotEmpty,
     #[error("terminal metadata does not match event terminal payload")]
     TerminalMetadataMismatch,
-    #[error("stream reset is required before replay can continue")]
-    ResetRequired,
     #[error("durable stream corruption detected: {0}")]
     Corruption(&'static str),
     #[error("durable stream tampering detected")]
