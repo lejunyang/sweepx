@@ -1,8 +1,13 @@
 mod detail_rescan;
+mod locator_reader;
 
 pub use detail_rescan::{
     DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest,
     DetailRescanResult, DetailRescanner,
+};
+pub use locator_reader::{
+    LocatorBatchReadRequest, LocatorBatchReadResult, LocatorFileRead, LocatorFileRequest,
+    LocatorReadError, LocatorReadFailure, LocatorReadLimits, LocatorReader,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

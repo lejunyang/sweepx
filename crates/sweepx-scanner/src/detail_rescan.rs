@@ -1264,7 +1264,7 @@ mod tests {
         assert_eq!(result.rows[0].native_basename, test_native_name("inside"));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     fn test_native_name(name: &str) -> sweepx_model::NativeName {
         sweepx_model::NativeName::unix(name.as_bytes().to_vec())
     }
