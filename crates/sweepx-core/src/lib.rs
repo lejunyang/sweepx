@@ -1,4 +1,6 @@
 mod cargo_cleaner_detect;
+#[allow(dead_code)]
+mod cargo_cleaner_evidence;
 mod catalog_trust;
 
 pub use catalog_trust::{

@@ -44,3 +44,4 @@ serde_jcs = "0.1.0"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 time = { version = "0.3.44", features = ["formatting", "parsing", "std"] }
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
