@@ -14,7 +14,11 @@ use sweepx_model::{
     ArithmeticState, CoverageState, FieldProvenance, IdentityEvidence, NativeName, ObjectType,
     ScanEntryId, ScannedEntry,
 };
-use sweepx_scanner::{ProgressEvent, ScanSummary};
+use sweepx_platform::{CancellationToken, PlatformScanner};
+use sweepx_scanner::{
+    LocatorBatchReadRequest, LocatorFileRead, LocatorFileRequest, LocatorReadError,
+    LocatorReadFailure, LocatorReadLimits, LocatorReader, ProgressEvent, ScanSummary,
+};
 
 const CARGO_WORKSPACE_EVIDENCE_SCHEMA: &str = "cargo.workspace.v1";
 const CARGO_TARGET_DIR_EVIDENCE_SCHEMA: &str = "cargo.config.target-dir.v1";
@@ -27,6 +31,20 @@ const MAX_TARGET_DIR_COMPONENTS: usize = 64;
 const MAX_TARGET_DIR_COMPONENT_BYTES: usize = 255;
 
 const DEFAULT_TARGET_COMPONENT: &str = "target";
+
+pub(crate) const fn cargo_fixed_input_locator_limits() -> LocatorReadLimits {
+    LocatorReadLimits {
+        max_requests: 3,
+        max_components_per_request: 3,
+        max_total_components: 8,
+        max_file_bytes: MAX_CARGO_INPUT_FILE_BYTES,
+        max_total_bytes: MAX_CARGO_INPUT_TOTAL_BYTES,
+        max_directory_entries: 4096,
+        max_directory_bytes: 4 * 1024 * 1024,
+        max_directory_batch_entries: 256,
+        max_directory_batch_bytes: 256 * 1024,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -51,6 +69,7 @@ enum CargoEvidenceReason {
     ActivityNotChecked,
     AmbiguousConfig,
     BoundaryPresent,
+    Cancelled,
     ConfigReadFailed,
     ConfigScopeNotChecked,
     DuplicateTomlKey,
@@ -60,6 +79,7 @@ enum CargoEvidenceReason {
     MalformedToml,
     MissingIdentity,
     MissingManifest,
+    ManifestReadFailed,
     MissingTargetAggregate,
     MultipleTargetEntries,
     ResourceLimit,
@@ -131,6 +151,13 @@ enum CargoConfigFile<'a> {
     VerifiedAbsent,
     NotChecked,
     ReadFailed,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CollectedCargoConfigFile<'a> {
+    Present(&'a [u8]),
+    VerifiedAbsent,
+    Failed(CargoEvidenceReason),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +276,235 @@ pub(crate) fn produce_cargo_typed_evidence(
         activity: CargoEvidence::NotChecked {
             reason: CargoEvidenceReason::ActivityNotChecked,
         },
+    }
+}
+
+pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
+    reader: &LocatorReader<P>,
+    summary: &ScanSummary,
+    root_entry_id: &ScanEntryId,
+    manifest_entry_id: &ScanEntryId,
+    target_entry_id: &ScanEntryId,
+    cancel: &CancellationToken,
+) -> CargoTypedEvidenceV1 {
+    if !summary_identity_graph_is_unique_and_complete(summary) {
+        return fail_closed_cargo_evidence(
+            CargoEvidenceReason::MissingIdentity,
+            CargoEvidenceReason::MissingIdentity,
+        );
+    }
+    let Some(root) = unique_root_entry(summary, root_entry_id) else {
+        return fail_closed_cargo_evidence(
+            CargoEvidenceReason::MissingIdentity,
+            CargoEvidenceReason::MissingIdentity,
+        );
+    };
+    let Some(manifest) = unique_summary_entry(summary, manifest_entry_id) else {
+        return fail_closed_cargo_evidence(
+            CargoEvidenceReason::MissingIdentity,
+            CargoEvidenceReason::MissingIdentity,
+        );
+    };
+    if unique_summary_entry(summary, target_entry_id).is_none() {
+        return fail_closed_cargo_evidence(
+            CargoEvidenceReason::MissingIdentity,
+            CargoEvidenceReason::MissingIdentity,
+        );
+    }
+
+    let config_components = [fixed_native_name(".cargo"), fixed_native_name("config")];
+    let config_toml_components = [
+        fixed_native_name(".cargo"),
+        fixed_native_name("config.toml"),
+    ];
+    let requests = [
+        LocatorFileRequest::ScannedFile { entry: manifest },
+        LocatorFileRequest::RelativeOptional {
+            components: &config_components,
+        },
+        LocatorFileRequest::RelativeOptional {
+            components: &config_toml_components,
+        },
+    ];
+    let batch = match reader.read_batch(
+        LocatorBatchReadRequest {
+            base_directory: root,
+            files: &requests,
+        },
+        cancel,
+    ) {
+        Ok(batch) => batch,
+        Err(error) => {
+            let reason = map_locator_batch_error(error);
+            return fail_closed_cargo_evidence(reason, reason);
+        }
+    };
+
+    let manifest_read = batch.files.first().expect("manifest request is present");
+    let manifest_bytes = match manifest_read {
+        LocatorFileRead::Present(read) => read.bytes.as_slice(),
+        LocatorFileRead::VerifiedAbsent => {
+            return fail_closed_cargo_evidence(
+                CargoEvidenceReason::MissingManifest,
+                CargoEvidenceReason::MissingManifest,
+            );
+        }
+        LocatorFileRead::Failed(failure) => {
+            let reason = map_manifest_read_failure(failure);
+            return fail_closed_cargo_evidence(reason, reason);
+        }
+    };
+    let collected_config = map_config_file_read(batch.files.get(1));
+    let collected_config_toml = map_config_file_read(batch.files.get(2));
+    let config_failure_reason = match (collected_config, collected_config_toml) {
+        (CollectedCargoConfigFile::Failed(reason), _)
+        | (_, CollectedCargoConfigFile::Failed(reason)) => Some(reason),
+        _ => None,
+    };
+    let input = HandleBoundCargoInputs {
+        root_entry_id,
+        manifest_entry_id,
+        manifest_bytes,
+        config_inputs: CargoConfigInputs {
+            config: collected_config.into_decode_input(),
+            config_toml: collected_config_toml.into_decode_input(),
+            override_sources_verified_absent: false,
+        },
+        target_entry_id,
+    };
+    let mut evidence = produce_cargo_typed_evidence(input, summary);
+    if let Some(reason) = config_failure_reason {
+        evidence.target_dir = unknown(reason);
+        evidence.target_shape = unknown(reason);
+    }
+    evidence
+}
+
+fn fail_closed_cargo_evidence(
+    workspace_reason: CargoEvidenceReason,
+    target_reason: CargoEvidenceReason,
+) -> CargoTypedEvidenceV1 {
+    CargoTypedEvidenceV1 {
+        workspace: unknown(workspace_reason),
+        target_dir: unknown(target_reason),
+        target_shape: unknown(match target_reason {
+            CargoEvidenceReason::ConfigScopeNotChecked => workspace_reason,
+            other => other,
+        }),
+        not_shared: CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::SharingNotChecked,
+        },
+        activity: CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ActivityNotChecked,
+        },
+    }
+}
+
+fn unique_root_entry<'a>(
+    summary: &'a ScanSummary,
+    entry_id: &ScanEntryId,
+) -> Option<&'a ScannedEntry> {
+    unique_entry(summary.roots.iter(), entry_id)
+}
+
+fn unique_summary_entry<'a>(
+    summary: &'a ScanSummary,
+    entry_id: &ScanEntryId,
+) -> Option<&'a ScannedEntry> {
+    unique_entry(summary.roots.iter().chain(summary.entries.iter()), entry_id)
+}
+
+fn unique_entry<'a>(
+    entries: impl IntoIterator<Item = &'a ScannedEntry>,
+    entry_id: &ScanEntryId,
+) -> Option<&'a ScannedEntry> {
+    let mut matches = entries.into_iter().filter(|entry| {
+        entry
+            .identity
+            .as_ref()
+            .is_some_and(|identity| &identity.entry_id == entry_id)
+    });
+    let entry = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
+fn map_locator_batch_error(error: LocatorReadError) -> CargoEvidenceReason {
+    match error {
+        LocatorReadError::ResourceLimit => CargoEvidenceReason::ResourceLimit,
+        LocatorReadError::Cancelled => CargoEvidenceReason::Cancelled,
+        LocatorReadError::InvalidRequest => CargoEvidenceReason::MissingIdentity,
+    }
+}
+
+fn map_manifest_read_failure(failure: &LocatorReadFailure) -> CargoEvidenceReason {
+    match failure {
+        LocatorReadFailure::Cancelled => CargoEvidenceReason::Cancelled,
+        LocatorReadFailure::ResourceLimit => CargoEvidenceReason::ResourceLimit,
+        LocatorReadFailure::IdentityMismatch
+        | LocatorReadFailure::MountChanged
+        | LocatorReadFailure::InvalidBinding
+        | LocatorReadFailure::SymlinkOrReparse
+        | LocatorReadFailure::NotRegular => CargoEvidenceReason::MissingManifest,
+        LocatorReadFailure::ReadFailed
+        | LocatorReadFailure::ProviderOrOffline
+        | LocatorReadFailure::Unavailable => CargoEvidenceReason::ManifestReadFailed,
+    }
+}
+
+impl<'a> CollectedCargoConfigFile<'a> {
+    fn into_decode_input(self) -> CargoConfigFile<'a> {
+        match self {
+            Self::Present(bytes) => CargoConfigFile::Present(bytes),
+            Self::VerifiedAbsent => CargoConfigFile::VerifiedAbsent,
+            Self::Failed(_) => CargoConfigFile::ReadFailed,
+        }
+    }
+}
+
+fn map_config_file_read(read: Option<&LocatorFileRead>) -> CollectedCargoConfigFile<'_> {
+    match read {
+        Some(LocatorFileRead::Present(result)) => {
+            CollectedCargoConfigFile::Present(result.bytes.as_slice())
+        }
+        Some(LocatorFileRead::VerifiedAbsent) => CollectedCargoConfigFile::VerifiedAbsent,
+        Some(LocatorFileRead::Failed(failure)) => match failure {
+            LocatorReadFailure::Cancelled => {
+                CollectedCargoConfigFile::Failed(CargoEvidenceReason::Cancelled)
+            }
+            LocatorReadFailure::ResourceLimit => {
+                CollectedCargoConfigFile::Failed(CargoEvidenceReason::ResourceLimit)
+            }
+            LocatorReadFailure::IdentityMismatch
+            | LocatorReadFailure::MountChanged
+            | LocatorReadFailure::InvalidBinding
+            | LocatorReadFailure::SymlinkOrReparse
+            | LocatorReadFailure::NotRegular
+            | LocatorReadFailure::ReadFailed
+            | LocatorReadFailure::ProviderOrOffline
+            | LocatorReadFailure::Unavailable => {
+                CollectedCargoConfigFile::Failed(CargoEvidenceReason::ConfigReadFailed)
+            }
+        },
+        None => CollectedCargoConfigFile::Failed(CargoEvidenceReason::ConfigReadFailed),
+    }
+}
+
+fn fixed_native_name(value: &str) -> NativeName {
+    #[cfg(unix)]
+    {
+        NativeName::unix(value.as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    {
+        NativeName::windows_utf16(value.encode_utf16().collect::<Vec<_>>())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        NativeName::unix(value.as_bytes().to_vec())
     }
 }
 
@@ -506,14 +762,12 @@ fn decode_workspace_manifest(
 fn decode_effective_target_dir(
     inputs: CargoConfigInputs<'_>,
 ) -> CargoEvidence<CargoTargetDirEvidenceV1> {
-    if !inputs.override_sources_verified_absent {
-        return CargoEvidence::NotChecked {
-            reason: CargoEvidenceReason::ConfigScopeNotChecked,
-        };
-    }
     match (inputs.config, inputs.config_toml) {
         (CargoConfigFile::Present(_), CargoConfigFile::Present(_)) => {
             return unknown(CargoEvidenceReason::AmbiguousConfig);
+        }
+        (CargoConfigFile::ReadFailed, _) | (_, CargoConfigFile::ReadFailed) => {
+            return unknown(CargoEvidenceReason::ConfigReadFailed);
         }
         // Relative Cargo config paths are resolved from the invocation/config location, not from
         // an arbitrary workspace root. Until a handle-bound resolver supplies that context, any
@@ -540,9 +794,11 @@ fn decode_effective_target_dir(
                 reason: CargoEvidenceReason::ConfigScopeNotChecked,
             };
         }
-        (CargoConfigFile::ReadFailed, _) | (_, CargoConfigFile::ReadFailed) => {
-            return unknown(CargoEvidenceReason::ConfigReadFailed);
-        }
+    }
+    if !inputs.override_sources_verified_absent {
+        return CargoEvidence::NotChecked {
+            reason: CargoEvidenceReason::ConfigScopeNotChecked,
+        };
     }
     known_target_dir(
         CargoTargetDirSource::WorkspaceDefault,
@@ -635,16 +891,43 @@ fn contains_unsupported_include(value: &toml::Value) -> bool {
 }
 
 fn contains_path_dependency(table: &toml::Table) -> bool {
-    table.values().any(table_contains_path_dependency)
+    const DIRECT_DEPENDENCY_TABLES: &[&str] =
+        &["dependencies", "dev-dependencies", "build-dependencies"];
+    if DIRECT_DEPENDENCY_TABLES
+        .iter()
+        .any(|key| table.get(*key).is_some_and(dependency_value_contains_path))
+        || table
+            .get("workspace")
+            .and_then(toml::Value::as_table)
+            .and_then(|workspace| workspace.get("dependencies"))
+            .is_some_and(dependency_value_contains_path)
+        || ["patch", "replace"]
+            .iter()
+            .any(|key| table.get(*key).is_some_and(dependency_value_contains_path))
+    {
+        return true;
+    }
+    table
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|targets| {
+            targets.values().any(|target| {
+                target.as_table().is_some_and(|target| {
+                    DIRECT_DEPENDENCY_TABLES
+                        .iter()
+                        .any(|key| target.get(*key).is_some_and(dependency_value_contains_path))
+                })
+            })
+        })
 }
 
-fn table_contains_path_dependency(value: &toml::Value) -> bool {
+fn dependency_value_contains_path(value: &toml::Value) -> bool {
     match value {
         toml::Value::Table(table) => table.iter().any(|(key, value)| {
             (key == "path" && matches!(value, toml::Value::String(_)))
-                || table_contains_path_dependency(value)
+                || dependency_value_contains_path(value)
         }),
-        toml::Value::Array(values) => values.iter().any(table_contains_path_dependency),
+        toml::Value::Array(values) => values.iter().any(dependency_value_contains_path),
         _ => false,
     }
 }
@@ -971,6 +1254,245 @@ fn unknown<T>(reason: CargoEvidenceReason) -> CargoEvidence<T> {
     CargoEvidence::Unknown { reason }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod linux_real_stack_tests {
+    use super::*;
+
+    use std::fs;
+
+    use crate::{HostPlatformScanner, Scanner, ScannerOptions};
+    use sweepx_model::ScanId;
+    use sweepx_platform::ScanRoot;
+
+    fn scan(root: &std::path::Path, scan_id: &str) -> crate::ScanSummary {
+        Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                scan_id: ScanId::new(scan_id),
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.to_path_buf()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap()
+    }
+
+    fn reader() -> LocatorReader<HostPlatformScanner> {
+        LocatorReader::new(
+            HostPlatformScanner::new(),
+            cargo_fixed_input_locator_limits(),
+        )
+    }
+
+    fn assert_unknown<T: std::fmt::Debug>(
+        evidence: CargoEvidence<T>,
+        expected: CargoEvidenceReason,
+    ) {
+        assert_eq!(evidence.reason(), Some(expected), "{evidence:?}");
+    }
+
+    fn workspace_layout(
+        scan_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::ScanSummary,
+        ScanEntryId,
+        ScanEntryId,
+    ) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::create_dir(root.join("target").join("debug")).unwrap();
+        let summary = scan(&root, scan_id);
+        let manifest_id = summary
+            .entries
+            .iter()
+            .find(|entry| native_name_equals(&entry.native_basename, "Cargo.toml"))
+            .and_then(|entry| entry.identity.as_ref())
+            .map(|identity| identity.entry_id.clone())
+            .expect("manifest entry");
+        let target_id = summary
+            .entries
+            .iter()
+            .find(|entry| native_name_equals(&entry.native_basename, "target"))
+            .and_then(|entry| entry.identity.as_ref())
+            .map(|identity| identity.entry_id.clone())
+            .expect("target entry");
+        (temp, summary, manifest_id, target_id)
+    }
+
+    #[test]
+    fn collected_valid_workspace_manifest_is_known_but_target_config_scope_stays_not_checked() {
+        let (_temp, mut summary, manifest_id, target_id) = workspace_layout("cargo-fixed-valid");
+        summary.roots[0].display_path = "/forged/root".into();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
+        assert!(matches!(
+            evidence.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            evidence.target_shape,
+            CargoEvidence::Unknown {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_optional_config_files_do_not_claim_global_scope() {
+        let (_temp, summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-optional-missing");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
+        assert!(matches!(
+            evidence.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+    }
+
+    #[test]
+    fn replaced_manifest_fails_closed() {
+        let (temp, summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-replaced-manifest");
+        let root = temp.path().join("workspace");
+        let manifest_path = root.join("Cargo.toml");
+        fs::rename(&manifest_path, root.join("Cargo.old.toml")).unwrap();
+        fs::write(&manifest_path, b"[workspace]\nresolver='2'\n").unwrap();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &CancellationToken::new(),
+        );
+
+        assert_unknown(evidence.workspace, CargoEvidenceReason::MissingManifest);
+        assert_unknown(evidence.target_dir, CargoEvidenceReason::MissingManifest);
+        assert_unknown(evidence.target_shape, CargoEvidenceReason::MissingManifest);
+    }
+
+    #[test]
+    fn symlink_config_fails_closed() {
+        let (temp, summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-symlink-config");
+        let root = temp.path().join("workspace");
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(root.join("real-config"), b"[build]\ntarget-dir='target'\n").unwrap();
+        std::os::unix::fs::symlink("../real-config", root.join(".cargo").join("config.toml"))
+            .unwrap();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
+        assert_unknown(evidence.target_dir, CargoEvidenceReason::ConfigReadFailed);
+        assert_unknown(evidence.target_shape, CargoEvidenceReason::ConfigReadFailed);
+    }
+
+    #[test]
+    fn oversized_optional_config_fails_closed() {
+        let (temp, summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-oversize-config");
+        let root = temp.path().join("workspace");
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo").join("config.toml"),
+            vec![b'x'; MAX_CARGO_INPUT_FILE_BYTES + 1],
+        )
+        .unwrap();
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &LocatorReader::new(
+                HostPlatformScanner::new(),
+                cargo_fixed_input_locator_limits(),
+            ),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(evidence.workspace, CargoEvidence::Known { .. }));
+        assert_unknown(evidence.target_dir, CargoEvidenceReason::ResourceLimit);
+        assert_unknown(evidence.target_shape, CargoEvidenceReason::ResourceLimit);
+    }
+
+    #[test]
+    fn cancellation_fails_closed() {
+        let (_temp, summary, manifest_id, target_id) = workspace_layout("cargo-fixed-cancelled");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader(),
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &cancel,
+        );
+
+        assert_unknown(evidence.workspace, CargoEvidenceReason::Cancelled);
+        assert_unknown(evidence.target_dir, CargoEvidenceReason::Cancelled);
+        assert_unknown(evidence.target_shape, CargoEvidenceReason::Cancelled);
+    }
+
+    #[test]
+    fn manifest_backend_failures_have_a_manifest_specific_reason() {
+        for failure in [
+            LocatorReadFailure::ReadFailed,
+            LocatorReadFailure::ProviderOrOffline,
+            LocatorReadFailure::Unavailable,
+        ] {
+            assert_eq!(
+                map_manifest_read_failure(&failure),
+                CargoEvidenceReason::ManifestReadFailed
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,6 +1534,25 @@ mod tests {
         ] {
             assert_unknown(
                 decode_workspace_manifest(&entry_id_for(1), &entry_id_for(2), overlapping),
+                CargoEvidenceReason::UnsupportedManifestShape,
+            );
+        }
+        assert!(matches!(
+            decode_workspace_manifest(
+                &entry_id_for(1),
+                &entry_id_for(2),
+                b"[workspace]\n[workspace.metadata.tool]\npath='reporting-only'",
+            ),
+            CargoEvidence::Known { .. }
+        ));
+        for dependency in [
+            b"[workspace]\n[replace]\n'old:1.0.0'={path='../local'}".as_slice(),
+            b"[workspace]\n[target.'cfg(unix)'.dev-dependencies.local]\npath='../local'".as_slice(),
+            b"[workspace]\n[target.'cfg(unix)'.build-dependencies.local]\npath='../local'"
+                .as_slice(),
+        ] {
+            assert_unknown(
+                decode_workspace_manifest(&entry_id_for(1), &entry_id_for(2), dependency),
                 CargoEvidenceReason::UnsupportedManifestShape,
             );
         }
