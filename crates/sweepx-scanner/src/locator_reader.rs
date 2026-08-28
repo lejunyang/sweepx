@@ -143,13 +143,23 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 ));
                 break;
             }
+            let remaining_total_bytes = self.limits.max_total_bytes.saturating_sub(total_bytes);
+            let read_limit = self.limits.max_file_bytes.min(remaining_total_bytes);
             let outcome = match file {
-                LocatorFileRequest::ScannedFile { entry } => {
-                    self.read_scanned_file(request.base_directory, entry, cancel, &mut budget)
-                }
-                LocatorFileRequest::RelativeOptional { components } => {
-                    self.read_optional(request.base_directory, components, cancel, &mut budget)
-                }
+                LocatorFileRequest::ScannedFile { entry } => self.read_scanned_file(
+                    request.base_directory,
+                    entry,
+                    read_limit,
+                    cancel,
+                    &mut budget,
+                ),
+                LocatorFileRequest::RelativeOptional { components } => self.read_optional(
+                    request.base_directory,
+                    components,
+                    read_limit,
+                    cancel,
+                    &mut budget,
+                ),
             };
             let outcome = match outcome {
                 Ok(read) => {
@@ -189,9 +199,19 @@ impl<P: PlatformScanner> LocatorReader<P> {
         {
             return Err(LocatorReadError::InvalidRequest);
         }
+        let base_locator = request
+            .base_directory
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let base_components = base_locator
+            .parent_reopen_recipe
+            .len()
+            .checked_add(1)
+            .ok_or(LocatorReadError::ResourceLimit)?;
         let mut total_components = 0usize;
         for file in request.files {
-            let components = match file {
+            let relative_components = match file {
                 LocatorFileRequest::ScannedFile { entry } => {
                     if entry.object_type != ObjectType::File {
                         return Err(LocatorReadError::InvalidRequest);
@@ -210,8 +230,14 @@ impl<P: PlatformScanner> LocatorReader<P> {
                     components.len()
                 }
             };
+            let operation_components = base_components
+                .checked_add(relative_components)
+                .ok_or(LocatorReadError::ResourceLimit)?;
+            if operation_components > self.limits.max_components_per_request {
+                return Err(LocatorReadError::ResourceLimit);
+            }
             total_components = total_components
-                .checked_add(components)
+                .checked_add(operation_components)
                 .ok_or(LocatorReadError::ResourceLimit)?;
         }
         if total_components > self.limits.max_total_components {
@@ -224,6 +250,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
         &self,
         base: &ScannedEntry,
         entry: &ScannedEntry,
+        max_bytes: usize,
         cancel: &CancellationToken,
         budget: &mut BatchBudget,
     ) -> Result<PresentRegularFileRead, ReadAttempt> {
@@ -266,7 +293,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
             expected.0,
             expected.1,
             expected.2,
-            self.limits.max_file_bytes,
+            max_bytes,
         )
         .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
         let read = read_bound_regular_file(&self.platform, &reopened.handle, &bounded, cancel)
@@ -294,6 +321,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
         &self,
         base: &ScannedEntry,
         components: &[NativeName],
+        max_bytes: usize,
         cancel: &CancellationToken,
         budget: &mut BatchBudget,
     ) -> Result<PresentRegularFileRead, ReadAttempt> {
@@ -333,12 +361,13 @@ impl<P: PlatformScanner> LocatorReader<P> {
         let mount = metadata
             .mount_identity
             .ok_or(ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
+        validate_same_scope(&reopened.metadata, &filesystem, &mount)?;
         let bounded = BoundedRegularFileReadRequest::previously_observed(
             final_name.clone(),
             identity,
             filesystem,
             mount,
-            self.limits.max_file_bytes,
+            max_bytes,
         )
         .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
         read_bound_regular_file(&self.platform, &reopened.handle, &bounded, cancel)
@@ -443,11 +472,24 @@ impl<P: PlatformScanner> LocatorReader<P> {
             inspect_bound_child(&self.platform, &parent.handle, &parent.path, &child, cancel)
                 .map_err(|error| ReadAttempt::Failed(map_platform_failure(error)))?;
         match walked {
-            WalkEntry::Directory(opened) => Ok(OpenedDirectory {
-                path: opened.metadata.path.clone(),
-                metadata: opened.metadata,
-                handle: opened.handle,
-            }),
+            WalkEntry::Directory(opened) => {
+                let filesystem = opened
+                    .metadata
+                    .filesystem_identity
+                    .as_ref()
+                    .ok_or(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch))?;
+                let mount = opened
+                    .metadata
+                    .mount_identity
+                    .as_ref()
+                    .ok_or(ReadAttempt::Failed(LocatorReadFailure::MountChanged))?;
+                validate_same_scope(&parent.metadata, filesystem, mount)?;
+                Ok(OpenedDirectory {
+                    path: opened.metadata.path.clone(),
+                    metadata: opened.metadata,
+                    handle: opened.handle,
+                })
+            }
             WalkEntry::Link(_) => Err(ReadAttempt::Failed(LocatorReadFailure::SymlinkOrReparse)),
             WalkEntry::Boundary(boundary) => {
                 Err(ReadAttempt::Failed(map_boundary_failure(boundary.kind)))
@@ -585,6 +627,20 @@ fn validate_component(
         || observed.0 != Some(&expected_values.0)
         || observed.1 != Some(&expected_values.1)
     {
+        return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
+    }
+    Ok(())
+}
+
+fn validate_same_scope(
+    parent: &sweepx_platform::EntryMetadata,
+    child_filesystem: &FilesystemIdentity,
+    child_mount: &MountIdentity,
+) -> Result<(), ReadAttempt> {
+    if parent.mount_identity.as_ref() != Some(child_mount) {
+        return Err(ReadAttempt::Failed(LocatorReadFailure::MountChanged));
+    }
+    if parent.filesystem_identity.as_ref() != Some(child_filesystem) {
         return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
     }
     Ok(())
