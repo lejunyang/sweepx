@@ -9,10 +9,16 @@ use sweepx_model::{
     EvidenceValue, FieldProvenance, NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId,
     ScanObjectIdentity, ScannedEntry,
 };
-use sweepx_platform::BoundaryKind;
-use sweepx_scanner::ScanSummary;
+use sweepx_platform::{BoundaryKind, CancellationToken, PlatformScanner};
+use sweepx_scanner::{LocatorReader, ScanSummary};
 
-use crate::{CORE_VERSION, CoreError, LoadedBuiltInCleaner};
+use crate::{
+    CORE_VERSION, CoreError, LoadedBuiltInCleaner,
+    cargo_cleaner_evidence::{
+        CargoEvidenceStateProjection, CargoTypedEvidenceV1,
+        collect_and_produce_cargo_typed_evidence,
+    },
+};
 
 pub const CARGO_CLEANER_ID: &str = "org.sweepx.cargo-target";
 const CARGO_RULE_ID: &str = "cargo-target-v1";
@@ -79,7 +85,49 @@ impl ExperimentalCargoRequiredEvidence {
             && self.final_complete_aggregate == ExperimentalEvidenceState::Known
             && self.no_boundary == ExperimentalEvidenceState::Known
             && self.not_shared == ExperimentalEvidenceState::Known
+            && self.activity == ExperimentalEvidenceState::Known
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoWorkspaceEvidence {
+    pub state: ExperimentalEvidenceState,
+    pub reason_code: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoTargetDirEvidence {
+    pub state: ExperimentalEvidenceState,
+    pub reason_code: Option<String>,
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoTargetShapeEvidence {
+    pub state: ExperimentalEvidenceState,
+    pub reason_code: Option<String>,
+    pub classification: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoStateEvidence {
+    pub state: ExperimentalEvidenceState,
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalCargoTypedEvidence {
+    pub workspace: ExperimentalCargoWorkspaceEvidence,
+    pub target_dir: ExperimentalCargoTargetDirEvidence,
+    pub target_shape: ExperimentalCargoTargetShapeEvidence,
+    pub not_shared: ExperimentalCargoStateEvidence,
+    pub activity: ExperimentalCargoStateEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +154,7 @@ pub struct ExperimentalCargoRuleEvaluation {
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentalCargoReadOnlyEvidence {
     pub identity: ExperimentalCargoIdentityEvidence,
+    pub cargo: ExperimentalCargoTypedEvidence,
     pub required: ExperimentalCargoRequiredEvidence,
     pub aggregate: ExperimentalCargoAggregateEvidence,
 }
@@ -146,12 +195,32 @@ pub struct ExperimentalCargoDetectResult {
 }
 
 impl ExperimentalCargoDetectResult {
+    pub fn collection_cancelled(&self) -> bool {
+        self.matches
+            .iter()
+            .chain(self.hints.iter())
+            .any(|observation| {
+                observation.evidence.cargo.workspace.reason_code.as_deref() == Some("cancelled")
+                    || observation.evidence.cargo.target_dir.reason_code.as_deref()
+                        == Some("cancelled")
+                    || observation
+                        .evidence
+                        .cargo
+                        .target_shape
+                        .reason_code
+                        .as_deref()
+                        == Some("cancelled")
+            })
+    }
+
     pub fn requires_partial_status(&self) -> bool {
         self.scan.incomplete || !self.hints.is_empty()
     }
 
     pub fn primary_reason_code(&self) -> &'static str {
-        if self.scan.incomplete {
+        if self.collection_cancelled() {
+            "cancelled"
+        } else if self.scan.incomplete {
             SOURCE_SCAN_INCOMPLETE
         } else if !self.hints.is_empty() {
             CARGO_REQUIRED_EVIDENCE_UNKNOWN
@@ -159,6 +228,25 @@ impl ExperimentalCargoDetectResult {
             CARGO_RULE_MATCH_REPORT_ONLY
         } else {
             NO_CARGO_TARGET_HINT
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentalCargoTerminalDisposition {
+    Complete,
+    Partial,
+    Cancelled,
+}
+
+impl ExperimentalCargoDetectResult {
+    pub fn terminal_disposition(&self) -> ExperimentalCargoTerminalDisposition {
+        if self.collection_cancelled() {
+            ExperimentalCargoTerminalDisposition::Cancelled
+        } else if self.requires_partial_status() {
+            ExperimentalCargoTerminalDisposition::Partial
+        } else {
+            ExperimentalCargoTerminalDisposition::Complete
         }
     }
 }
@@ -198,7 +286,37 @@ pub fn detect_live_cargo_cleaner_candidates(
     cleaner: &LoadedBuiltInCleaner,
     source_scan_incomplete: bool,
     source_scan_warning_count: usize,
+    reader: &LocatorReader<impl PlatformScanner>,
+    cancel: &CancellationToken,
 ) -> Result<ExperimentalCargoDetectResult, CoreError> {
+    detect_live_cargo_cleaner_candidates_with_collector(
+        summary,
+        cleaner,
+        source_scan_incomplete,
+        source_scan_warning_count,
+        |layout| {
+            project_collected_cargo_typed_evidence(&collect_and_produce_cargo_typed_evidence(
+                reader,
+                summary,
+                &layout.root.identity.entry_id,
+                &layout.manifest.identity.entry_id,
+                &layout.target.identity.entry_id,
+                cancel,
+            ))
+        },
+    )
+}
+
+fn detect_live_cargo_cleaner_candidates_with_collector<F>(
+    summary: &ScanSummary,
+    cleaner: &LoadedBuiltInCleaner,
+    source_scan_incomplete: bool,
+    source_scan_warning_count: usize,
+    collect_typed_evidence: F,
+) -> Result<ExperimentalCargoDetectResult, CoreError>
+where
+    F: Fn(&BoundCargoLayoutHint<'_>) -> ExperimentalCargoTypedEvidence,
+{
     if cleaner.package.manifest.id != CARGO_CLEANER_ID {
         return Err(CoreError::InvalidCleanerRef(
             cleaner.package.manifest.id.clone(),
@@ -227,15 +345,21 @@ pub fn detect_live_cargo_cleaner_candidates(
     let mut hints = Vec::new();
     let scan_evidence = scan_evidence(summary, source_scan_incomplete, source_scan_warning_count);
     for layout in bound_cargo_layout_hints(summary) {
+        let cargo = collect_typed_evidence(&layout);
         let aggregate_lookup = target_aggregate(summary, &layout.target);
         let aggregate = match aggregate_lookup {
             AggregateLookup::Valid(aggregate) => Some(aggregate),
             AggregateLookup::Missing | AggregateLookup::Invalid => None,
         };
-        let required = required_evidence(summary, aggregate);
-        let evaluation = evaluate_rule(rule, &build_rule_context(&layout, aggregate))?;
-        let mut reason_codes =
-            observation_reason_codes(&evaluation, &aggregate_lookup, aggregate, &scan_evidence);
+        let required = required_evidence(summary, aggregate, &cargo);
+        let evaluation = evaluate_rule(rule, &build_rule_context(&layout, aggregate, &cargo))?;
+        let mut reason_codes = observation_reason_codes(
+            &evaluation,
+            &aggregate_lookup,
+            aggregate,
+            &scan_evidence,
+            &cargo,
+        );
         reason_codes.sort();
         reason_codes.dedup();
         let observation = ExperimentalCargoRuleObservation {
@@ -259,6 +383,7 @@ pub fn detect_live_cargo_cleaner_candidates(
             },
             evidence: ExperimentalCargoReadOnlyEvidence {
                 identity: identity_evidence(&layout),
+                cargo,
                 aggregate: aggregate_evidence(&aggregate_lookup),
                 required: required.clone(),
             },
@@ -440,13 +565,12 @@ fn aggregate_is_final_complete(aggregate: &DirectoryAggregate) -> bool {
 fn required_evidence(
     summary: &ScanSummary,
     aggregate: Option<&DirectoryAggregate>,
+    cargo: &ExperimentalCargoTypedEvidence,
 ) -> ExperimentalCargoRequiredEvidence {
     ExperimentalCargoRequiredEvidence {
-        // A native-name Cargo.toml observation is only a layout hint. The versioned Cargo decoder
-        // and workspace/config evidence types described by the rule are not implemented yet.
-        workspace: ExperimentalEvidenceState::Unknown,
-        configured_target_dir: ExperimentalEvidenceState::Unknown,
-        target_shape: ExperimentalEvidenceState::Unknown,
+        workspace: cargo.workspace.state,
+        configured_target_dir: cargo.target_dir.state,
+        target_shape: cargo.target_shape.state,
         final_complete_aggregate: if aggregate.is_some_and(aggregate_is_final_complete) {
             ExperimentalEvidenceState::Known
         } else {
@@ -459,14 +583,15 @@ fn required_evidence(
         } else {
             ExperimentalEvidenceState::Unknown
         },
-        not_shared: ExperimentalEvidenceState::NotChecked,
-        activity: ExperimentalEvidenceState::NotChecked,
+        not_shared: cargo.not_shared.state,
+        activity: cargo.activity.state,
     }
 }
 
 fn build_rule_context(
     layout: &BoundCargoLayoutHint<'_>,
     aggregate: Option<&DirectoryAggregate>,
+    cargo: &ExperimentalCargoTypedEvidence,
 ) -> EvaluationContext {
     let mut context = EvaluationContext::new()
         .insert(
@@ -501,9 +626,16 @@ fn build_rule_context(
             );
         }
     }
-    // Do not insert cargo.targetDir, cargo.targetShape, cargo.workspaceId, sharing.state, or
-    // activity.state until their versioned evidence producers exist. A missing VM field evaluates
-    // as unknown (or false for `exists`) instead of fabricating a fact.
+    if let Some(workspace_id) = cargo.workspace.workspace_id.as_ref() {
+        context = context.insert("cargo.workspaceId", VmValue::String(workspace_id.clone()));
+    }
+    if let Some(target_dir) = cargo.target_dir.relative_path.as_ref() {
+        context = context.insert("cargo.targetDir", VmValue::String(target_dir.clone()));
+    }
+    if let Some(classification) = cargo.target_shape.classification.as_ref() {
+        context = context.insert("cargo.targetShape", VmValue::String(classification.clone()));
+    }
+    // Sharing/activity remain omitted until the corresponding evidence is stronger than not-checked.
     context
 }
 
@@ -555,12 +687,18 @@ fn observation_reason_codes(
     aggregate_lookup: &AggregateLookup<'_>,
     aggregate: Option<&DirectoryAggregate>,
     scan: &ExperimentalCargoScanEvidence,
+    cargo: &ExperimentalCargoTypedEvidence,
 ) -> Vec<String> {
-    let mut reasons = vec![
-        CARGO_WORKSPACE_EVIDENCE_UNKNOWN.to_string(),
-        CARGO_CONFIG_EVIDENCE_UNKNOWN.to_string(),
-        CARGO_TARGET_SHAPE_UNKNOWN.to_string(),
-    ];
+    let mut reasons = Vec::new();
+    if cargo.workspace.state != ExperimentalEvidenceState::Known {
+        reasons.push(CARGO_WORKSPACE_EVIDENCE_UNKNOWN.to_string());
+    }
+    if cargo.target_dir.state != ExperimentalEvidenceState::Known {
+        reasons.push(CARGO_CONFIG_EVIDENCE_UNKNOWN.to_string());
+    }
+    if cargo.target_shape.state != ExperimentalEvidenceState::Known {
+        reasons.push(CARGO_TARGET_SHAPE_UNKNOWN.to_string());
+    }
     match aggregate_lookup {
         AggregateLookup::Missing => reasons.push(TARGET_AGGREGATE_MISSING.to_string()),
         AggregateLookup::Invalid => reasons.push(TARGET_AGGREGATE_INVALID.to_string()),
@@ -603,6 +741,44 @@ fn observation_reason_codes(
         .to_string(),
     );
     reasons
+}
+
+fn project_collected_cargo_typed_evidence(
+    evidence: &CargoTypedEvidenceV1,
+) -> ExperimentalCargoTypedEvidence {
+    ExperimentalCargoTypedEvidence {
+        workspace: ExperimentalCargoWorkspaceEvidence {
+            state: project_state(evidence.workspace_state()),
+            reason_code: evidence.workspace_reason_code().map(str::to_string),
+            workspace_id: evidence.workspace_id().map(str::to_string),
+        },
+        target_dir: ExperimentalCargoTargetDirEvidence {
+            state: project_state(evidence.target_dir_state()),
+            reason_code: evidence.target_dir_reason_code().map(str::to_string),
+            relative_path: evidence.target_dir_relative_path().map(str::to_string),
+        },
+        target_shape: ExperimentalCargoTargetShapeEvidence {
+            state: project_state(evidence.target_shape_state()),
+            reason_code: evidence.target_shape_reason_code().map(str::to_string),
+            classification: evidence.target_shape_classification().map(str::to_string),
+        },
+        not_shared: ExperimentalCargoStateEvidence {
+            state: project_state(evidence.not_shared_state()),
+            reason_code: evidence.not_shared_reason_code().map(str::to_string),
+        },
+        activity: ExperimentalCargoStateEvidence {
+            state: project_state(evidence.activity_state()),
+            reason_code: evidence.activity_reason_code().map(str::to_string),
+        },
+    }
+}
+
+fn project_state(state: CargoEvidenceStateProjection) -> ExperimentalEvidenceState {
+    match state {
+        CargoEvidenceStateProjection::Known => ExperimentalEvidenceState::Known,
+        CargoEvidenceStateProjection::Unknown => ExperimentalEvidenceState::Unknown,
+        CargoEvidenceStateProjection::NotChecked => ExperimentalEvidenceState::NotChecked,
+    }
 }
 
 fn rule_is_a_match(
@@ -715,6 +891,8 @@ pub fn incompatible_cargo_detect_json() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    use crate::cargo_cleaner_evidence::cargo_fixed_input_locator_limits;
     use std::path::PathBuf;
     use sweepx_model::{
         Coverage, CoverageState, EvidenceValue, FilesystemObjectDomainIdentity, IdentityEvidence,
@@ -722,13 +900,17 @@ mod tests {
         PlatformFileIdentity, ReasonCode, ScanId, ScanObjectIdentity, VolumeOrMountIdentity,
     };
     use sweepx_platform::BoundaryRecord;
+    #[cfg(target_os = "linux")]
+    use sweepx_platform::CancellationToken;
     use sweepx_scanner::ProgressEvent;
+    #[cfg(target_os = "linux")]
+    use sweepx_scanner::{HostPlatformScanner, LocatorReader};
 
     #[test]
     fn experimental_json_is_read_only_and_uses_separate_hint_projection() {
         let summary = complete_layout_summary();
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, false, 0).unwrap();
         let payload = experimental_cargo_detect_json(&result);
 
         assert_eq!(payload["command"], "cleaner.cargo-detect");
@@ -765,7 +947,7 @@ mod tests {
     fn cargo_name_layout_is_a_hint_because_required_decoders_are_not_implemented() {
         let summary = complete_layout_summary();
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, false, 0).unwrap();
 
         assert!(result.matches.is_empty());
         assert_eq!(result.hints.len(), 1);
@@ -821,6 +1003,30 @@ mod tests {
     }
 
     #[test]
+    fn collector_cancellation_has_a_cancelled_terminal_disposition() {
+        let summary = complete_layout_summary();
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates_with_collector(
+            &summary,
+            &cleaner,
+            false,
+            0,
+            |_| {
+                let mut evidence = unknown_cargo_projection();
+                evidence.workspace.reason_code = Some("cancelled".to_string());
+                evidence
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.terminal_disposition(),
+            ExperimentalCargoTerminalDisposition::Cancelled
+        );
+        assert_eq!(result.primary_reason_code(), "cancelled");
+    }
+
+    #[test]
     fn incomplete_aggregate_drives_fact_false_and_scan_incomplete() {
         let mut summary = complete_layout_summary();
         let aggregate = summary.aggregates.first_mut().unwrap();
@@ -831,7 +1037,7 @@ mod tests {
             reason: ReasonCode::IncompleteStreamCoverage,
         };
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, true, 1).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, true, 1).unwrap();
 
         assert!(result.matches.is_empty());
         assert_eq!(result.hints.len(), 1);
@@ -863,7 +1069,7 @@ mod tests {
         summary.aggregates.clear();
         assert!(summary.entries[1].coverage.complete);
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, false, 0).unwrap();
 
         assert!(result.matches.is_empty());
         assert_eq!(result.hints.len(), 1);
@@ -892,7 +1098,7 @@ mod tests {
             reason: ReasonCode::IncompleteStreamCoverage,
         });
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, true, 3).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, true, 3).unwrap();
 
         assert!(result.matches.is_empty());
         assert_eq!(result.scan.warning_count, DecimalU128::new(3));
@@ -970,9 +1176,205 @@ mod tests {
 
     fn assert_no_layout_observation(summary: ScanSummary) {
         let cleaner = compatible_cleaner();
-        let result = detect_live_cargo_cleaner_candidates(&summary, &cleaner, false, 0).unwrap();
+        let result = detect_with_unknown_collector(&summary, &cleaner, false, 0).unwrap();
         assert!(result.matches.is_empty());
         assert!(result.hints.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_collector_projects_workspace_known_but_target_dir_and_shape_not_checked() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::create_dir(root.join("target").join("debug")).unwrap();
+        let summary = live_linux_summary(&root, "cargo-detect-linux-known");
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates(
+            &summary,
+            &cleaner,
+            false,
+            0,
+            &live_reader(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(result.matches.is_empty());
+        assert_eq!(result.hints.len(), 1);
+        let hint = &result.hints[0];
+        assert_eq!(
+            hint.evidence.cargo.workspace.state,
+            ExperimentalEvidenceState::Known
+        );
+        assert!(hint.evidence.cargo.workspace.workspace_id.is_some());
+        assert_eq!(
+            hint.evidence.cargo.target_dir.state,
+            ExperimentalEvidenceState::NotChecked
+        );
+        assert_eq!(
+            hint.evidence.cargo.target_dir.reason_code.as_deref(),
+            Some("config_scope_not_checked")
+        );
+        assert_eq!(
+            hint.evidence.cargo.target_shape.state,
+            ExperimentalEvidenceState::Unknown
+        );
+        assert_eq!(
+            hint.evidence.cargo.target_shape.reason_code.as_deref(),
+            Some("config_scope_not_checked")
+        );
+        assert_eq!(
+            hint.evidence.required.workspace,
+            ExperimentalEvidenceState::Known
+        );
+        assert_eq!(
+            hint.evidence.required.configured_target_dir,
+            ExperimentalEvidenceState::NotChecked
+        );
+        assert_eq!(
+            hint.evidence.required.target_shape,
+            ExperimentalEvidenceState::Unknown
+        );
+        assert_eq!(hint.rule_evaluation.fact_state, "unknown");
+        assert_eq!(hint.rule_evaluation.inference_state, "known_true");
+        assert!(!hint.executable);
+    }
+
+    #[test]
+    fn stable_json_schema_includes_cargo_projection_without_candidate_or_plan_fields() {
+        let summary = complete_layout_summary();
+        let cleaner = compatible_cleaner();
+        let result = detect_live_cargo_cleaner_candidates_with_collector(
+            &summary,
+            &cleaner,
+            false,
+            0,
+            |_| known_workspace_not_checked_target_cargo(),
+        )
+        .unwrap();
+        let payload = experimental_cargo_detect_json(&result);
+
+        let hint = &payload["hints"][0];
+        assert_eq!(hint["evidence"]["cargo"]["workspace"]["state"], "known");
+        assert_eq!(
+            hint["evidence"]["cargo"]["targetDir"]["state"],
+            "not_checked"
+        );
+        assert_eq!(hint["evidence"]["cargo"]["targetShape"]["state"], "unknown");
+        assert_eq!(
+            hint["evidence"]["cargo"]["notShared"]["reasonCode"],
+            "sharing_not_checked"
+        );
+        assert_eq!(
+            hint["evidence"]["cargo"]["activity"]["reasonCode"],
+            "activity_not_checked"
+        );
+        assert!(hint.get("candidate").is_none());
+        assert!(hint.get("plan").is_none());
+        assert_eq!(payload["planAllowed"], false);
+        assert_eq!(payload["approvalAllowed"], false);
+        assert_eq!(payload["executionAllowed"], false);
+    }
+
+    fn detect_with_unknown_collector(
+        summary: &ScanSummary,
+        cleaner: &LoadedBuiltInCleaner,
+        source_scan_incomplete: bool,
+        source_scan_warning_count: usize,
+    ) -> Result<ExperimentalCargoDetectResult, CoreError> {
+        detect_live_cargo_cleaner_candidates_with_collector(
+            summary,
+            cleaner,
+            source_scan_incomplete,
+            source_scan_warning_count,
+            |_| unknown_cargo_projection(),
+        )
+    }
+
+    fn unknown_cargo_projection() -> ExperimentalCargoTypedEvidence {
+        ExperimentalCargoTypedEvidence {
+            workspace: ExperimentalCargoWorkspaceEvidence {
+                state: ExperimentalEvidenceState::Unknown,
+                reason_code: Some("missing_identity".to_string()),
+                workspace_id: None,
+            },
+            target_dir: ExperimentalCargoTargetDirEvidence {
+                state: ExperimentalEvidenceState::Unknown,
+                reason_code: Some("missing_identity".to_string()),
+                relative_path: None,
+            },
+            target_shape: ExperimentalCargoTargetShapeEvidence {
+                state: ExperimentalEvidenceState::Unknown,
+                reason_code: Some("missing_identity".to_string()),
+                classification: None,
+            },
+            not_shared: ExperimentalCargoStateEvidence {
+                state: ExperimentalEvidenceState::NotChecked,
+                reason_code: Some("sharing_not_checked".to_string()),
+            },
+            activity: ExperimentalCargoStateEvidence {
+                state: ExperimentalEvidenceState::NotChecked,
+                reason_code: Some("activity_not_checked".to_string()),
+            },
+        }
+    }
+
+    fn known_workspace_not_checked_target_cargo() -> ExperimentalCargoTypedEvidence {
+        ExperimentalCargoTypedEvidence {
+            workspace: ExperimentalCargoWorkspaceEvidence {
+                state: ExperimentalEvidenceState::Known,
+                reason_code: None,
+                workspace_id: Some("scan-cargo-detect:1".to_string()),
+            },
+            target_dir: ExperimentalCargoTargetDirEvidence {
+                state: ExperimentalEvidenceState::NotChecked,
+                reason_code: Some("config_scope_not_checked".to_string()),
+                relative_path: None,
+            },
+            target_shape: ExperimentalCargoTargetShapeEvidence {
+                state: ExperimentalEvidenceState::Unknown,
+                reason_code: Some("config_scope_not_checked".to_string()),
+                classification: None,
+            },
+            not_shared: ExperimentalCargoStateEvidence {
+                state: ExperimentalEvidenceState::NotChecked,
+                reason_code: Some("sharing_not_checked".to_string()),
+            },
+            activity: ExperimentalCargoStateEvidence {
+                state: ExperimentalEvidenceState::NotChecked,
+                reason_code: Some("activity_not_checked".to_string()),
+            },
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn live_reader() -> LocatorReader<HostPlatformScanner> {
+        LocatorReader::new(
+            HostPlatformScanner::new(),
+            cargo_fixed_input_locator_limits(),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn live_linux_summary(root: &std::path::Path, scan_id: &str) -> ScanSummary {
+        use crate::{Scanner, ScannerOptions};
+        use sweepx_platform::ScanRoot;
+
+        Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                scan_id: ScanId::new(scan_id),
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.to_path_buf()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap()
     }
 
     fn compatible_cleaner() -> LoadedBuiltInCleaner {
@@ -993,7 +1395,7 @@ mod tests {
             final_complete_aggregate: ExperimentalEvidenceState::Known,
             no_boundary: ExperimentalEvidenceState::Known,
             not_shared: ExperimentalEvidenceState::Known,
-            activity: ExperimentalEvidenceState::NotChecked,
+            activity: ExperimentalEvidenceState::Known,
         }
     }
 

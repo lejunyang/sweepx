@@ -56,7 +56,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["summary"]["commandCount"], "7");
+    assert_eq!(json["summary"]["commandCount"], "8");
     assert_eq!(json["summary"]["capabilityCount"], "34");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert!(commands.iter().all(|command| command["mutating"] == false));
@@ -76,6 +76,15 @@ fn capabilities_json_uses_fixed_machine_keys() {
     );
     let cancel = commands.iter().find(|item| item["id"] == "cancel").unwrap();
     assert_eq!(cancel["state"], "disabled");
+    let cargo_detect = commands
+        .iter()
+        .find(|item| item["id"] == "cleaner.cargo-detect")
+        .unwrap();
+    assert_eq!(cargo_detect["state"], "degraded");
+    assert_eq!(
+        cargo_detect["reasonCode"],
+        "CARGO_TYPED_EVIDENCE_REPORT_ONLY"
+    );
     let explain = commands
         .iter()
         .find(|item| item["id"] == "explain")

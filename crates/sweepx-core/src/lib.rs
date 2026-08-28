@@ -1398,6 +1398,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
         command_record("cleaner.list", cleaner_state, cleaner_reason),
         command_record("cleaner.show", cleaner_state, cleaner_reason),
         command_record(
+            "cleaner.cargo-detect",
+            CapabilityState::Degraded,
+            "CARGO_TYPED_EVIDENCE_REPORT_ONLY",
+        ),
+        command_record(
             "capabilities",
             CapabilityState::Qualified,
             "CAPABILITIES_REPORT_SUPPORTED",
@@ -1934,16 +1939,27 @@ pub fn cleaner_cargo_detect(
     )?;
     let source_scan_incomplete = scan.output.status == OutputStatus::Partial;
     let source_scan_warning_count = scan.output.warnings.len();
+    let reader = sweepx_scanner::LocatorReader::new(
+        HostPlatformScanner::new(),
+        cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
+    );
+    let cancel = CancellationToken::new();
     let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
         &scan.summary,
         cleaner,
         source_scan_incomplete,
         source_scan_warning_count,
+        &reader,
+        &cancel,
     )?;
-    let status = if detected.requires_partial_status() {
-        OutputStatus::Partial
-    } else {
-        OutputStatus::Ok
+    let status = match detected.terminal_disposition() {
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Complete => OutputStatus::Ok,
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Partial => {
+            OutputStatus::Partial
+        }
+        cargo_cleaner_detect::ExperimentalCargoTerminalDisposition::Cancelled => {
+            OutputStatus::Cancelled
+        }
     };
     let exit_code = ExitCode::from(status);
     let reason_code = detected.primary_reason_code();
@@ -2101,7 +2117,19 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
             .get("cleanerCount")
             .or_else(|| output.summary.get("ruleCount"))
             .and_then(json_decimal_to_usize)
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                let matches = output
+                    .summary
+                    .get("matchCount")
+                    .and_then(json_decimal_to_usize)
+                    .unwrap_or(0);
+                let hints = output
+                    .summary
+                    .get("hintCount")
+                    .and_then(json_decimal_to_usize)
+                    .unwrap_or(0);
+                matches.saturating_add(hints)
+            });
         let command = output
             .summary
             .get("command")
@@ -5572,6 +5600,114 @@ mod tests {
 
         assert!(matches!(error, CoreError::CleanerCompat { .. }));
         assert_eq!(core_error_exit_code(&error), ExitCode::CleanerTrustOrCompat);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleaner_cargo_detect_live_linux_path_reports_typed_read_only_evidence() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::create_dir(root.join("target").join("debug")).unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let scan = scan_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+        let mut cleaner = load_builtin_cleaners()
+            .unwrap()
+            .into_iter()
+            .find(|cleaner| cleaner.package.manifest.id == cargo_cleaner_detect::CARGO_CLEANER_ID)
+            .unwrap();
+        cleaner.compatible = true;
+        let reader = sweepx_scanner::LocatorReader::new(
+            HostPlatformScanner::new(),
+            cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
+        );
+        let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
+            &scan.summary,
+            &cleaner,
+            scan.output.status == OutputStatus::Partial,
+            scan.output.warnings.len(),
+            &reader,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let payload = cargo_cleaner_detect::experimental_cargo_detect_json(&detected);
+
+        assert_eq!(payload["command"], "cleaner.cargo-detect");
+        assert_eq!(payload["experimental"], true);
+        assert_eq!(payload["liveOnly"], true);
+        assert_eq!(payload["readOnly"], true);
+        assert_eq!(payload["planAllowed"], false);
+        assert_eq!(payload["approvalAllowed"], false);
+        assert_eq!(payload["executionAllowed"], false);
+        assert_eq!(payload["matchCount"], "0");
+        assert_eq!(payload["hintCount"], "1");
+        let hint = &payload["hints"][0];
+        assert_eq!(hint["evidence"]["cargo"]["workspace"]["state"], "known");
+        assert!(hint["evidence"]["cargo"]["workspace"]["workspaceId"].is_string());
+        assert_eq!(
+            hint["evidence"]["cargo"]["targetDir"]["state"],
+            "not_checked"
+        );
+        assert_eq!(
+            hint["evidence"]["cargo"]["targetDir"]["reasonCode"],
+            "config_scope_not_checked"
+        );
+        assert_eq!(hint["evidence"]["cargo"]["targetShape"]["state"], "unknown");
+        assert_eq!(
+            hint["evidence"]["cargo"]["targetShape"]["reasonCode"],
+            "config_scope_not_checked"
+        );
+        assert_eq!(hint["evidence"]["required"]["workspace"], "known");
+        assert_eq!(
+            hint["evidence"]["required"]["configuredTargetDir"],
+            "not_checked"
+        );
+        assert_eq!(hint["evidence"]["required"]["targetShape"], "unknown");
+        assert_eq!(hint["evidence"]["required"]["notShared"], "not_checked");
+        assert_eq!(hint["evidence"]["required"]["activity"], "not_checked");
+        assert_eq!(hint["ruleEvaluation"]["factState"], "unknown");
+        assert_eq!(hint["ruleEvaluation"]["inferenceState"], "known_true");
+        assert_eq!(hint["executable"], false);
+        assert!(hint.get("candidate").is_none());
+        assert!(hint.get("plan").is_none());
+    }
+
+    #[test]
+    fn cargo_detect_human_output_uses_match_count() {
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let mut output = OutputEnvelope::new(
+            OutputKind::CleanerResult,
+            RequestId::new("req-human-cargo-detect"),
+            OperationId::new("op-human-cargo-detect"),
+            timestamp_now(),
+            OutputStatus::Partial,
+            ExitCode::Partial,
+            compat_snapshot("linux"),
+        );
+        output.summary = json!({
+            "command": "cleaner.cargo-detect",
+            "matchCount": DecimalU128::ZERO,
+            "hintCount": DecimalU128::new(3),
+        });
+
+        let rendered = render_human_output(&context, &output);
+        assert!(rendered.contains("cleaner.cargo-detect (3)"));
     }
 
     #[test]

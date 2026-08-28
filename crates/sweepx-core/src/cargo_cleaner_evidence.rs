@@ -55,12 +55,27 @@ enum CargoEvidence<T> {
 }
 
 impl<T> CargoEvidence<T> {
+    const fn state(&self) -> CargoEvidenceStateProjection {
+        match self {
+            Self::Known { .. } => CargoEvidenceStateProjection::Known,
+            Self::Unknown { .. } => CargoEvidenceStateProjection::Unknown,
+            Self::NotChecked { .. } => CargoEvidenceStateProjection::NotChecked,
+        }
+    }
+
     fn reason(&self) -> Option<CargoEvidenceReason> {
         match self {
             Self::Known { .. } => None,
             Self::Unknown { reason } | Self::NotChecked { reason } => Some(*reason),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CargoEvidenceStateProjection {
+    Known,
+    Unknown,
+    NotChecked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -88,6 +103,35 @@ enum CargoEvidenceReason {
     UnexpectedTargetComponent,
     UnknownObjectType,
     UnsupportedManifestShape,
+}
+
+impl CargoEvidenceReason {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::ActivityNotChecked => "activity_not_checked",
+            Self::AmbiguousConfig => "ambiguous_config",
+            Self::BoundaryPresent => "boundary_present",
+            Self::Cancelled => "cancelled",
+            Self::ConfigReadFailed => "config_read_failed",
+            Self::ConfigScopeNotChecked => "config_scope_not_checked",
+            Self::DuplicateTomlKey => "duplicate_toml_key",
+            Self::EnvironmentExpansionUnsupported => "environment_expansion_unsupported",
+            Self::IncompleteScan => "incomplete_scan",
+            Self::InvalidRelativeTargetDir => "invalid_relative_target_dir",
+            Self::MalformedToml => "malformed_toml",
+            Self::MissingIdentity => "missing_identity",
+            Self::MissingManifest => "missing_manifest",
+            Self::ManifestReadFailed => "manifest_read_failed",
+            Self::MissingTargetAggregate => "missing_target_aggregate",
+            Self::MultipleTargetEntries => "multiple_target_entries",
+            Self::ResourceLimit => "resource_limit",
+            Self::SharingNotChecked => "sharing_not_checked",
+            Self::TargetEntryMissing => "target_entry_missing",
+            Self::UnexpectedTargetComponent => "unexpected_target_component",
+            Self::UnknownObjectType => "unknown_object_type",
+            Self::UnsupportedManifestShape => "unsupported_manifest_shape",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -196,6 +240,69 @@ impl CargoTypedEvidenceV1 {
 
     pub(crate) const fn plan_allowed(&self) -> bool {
         false
+    }
+
+    pub(crate) const fn workspace_state(&self) -> CargoEvidenceStateProjection {
+        self.workspace.state()
+    }
+
+    pub(crate) fn workspace_reason_code(&self) -> Option<&'static str> {
+        self.workspace.reason().map(CargoEvidenceReason::code)
+    }
+
+    pub(crate) fn workspace_id(&self) -> Option<&str> {
+        match &self.workspace {
+            CargoEvidence::Known { value } => Some(value.workspace_id.as_str()),
+            CargoEvidence::Unknown { .. } | CargoEvidence::NotChecked { .. } => None,
+        }
+    }
+
+    pub(crate) const fn target_dir_state(&self) -> CargoEvidenceStateProjection {
+        self.target_dir.state()
+    }
+
+    pub(crate) fn target_dir_reason_code(&self) -> Option<&'static str> {
+        self.target_dir.reason().map(CargoEvidenceReason::code)
+    }
+
+    pub(crate) fn target_dir_relative_path(&self) -> Option<&str> {
+        match &self.target_dir {
+            CargoEvidence::Known { value } => Some(value.relative_path.as_str()),
+            CargoEvidence::Unknown { .. } | CargoEvidence::NotChecked { .. } => None,
+        }
+    }
+
+    pub(crate) const fn target_shape_state(&self) -> CargoEvidenceStateProjection {
+        self.target_shape.state()
+    }
+
+    pub(crate) fn target_shape_reason_code(&self) -> Option<&'static str> {
+        self.target_shape.reason().map(CargoEvidenceReason::code)
+    }
+
+    pub(crate) fn target_shape_classification(&self) -> Option<&'static str> {
+        match &self.target_shape {
+            CargoEvidence::Known { value } => Some(match value.classification {
+                CargoTargetShape::RecognizedGeneratedStructure => "recognized_generated_structure",
+            }),
+            CargoEvidence::Unknown { .. } | CargoEvidence::NotChecked { .. } => None,
+        }
+    }
+
+    pub(crate) const fn not_shared_state(&self) -> CargoEvidenceStateProjection {
+        self.not_shared.state()
+    }
+
+    pub(crate) fn not_shared_reason_code(&self) -> Option<&'static str> {
+        self.not_shared.reason().map(CargoEvidenceReason::code)
+    }
+
+    pub(crate) const fn activity_state(&self) -> CargoEvidenceStateProjection {
+        self.activity.state()
+    }
+
+    pub(crate) fn activity_reason_code(&self) -> Option<&'static str> {
+        self.activity.reason().map(CargoEvidenceReason::code)
     }
 }
 
