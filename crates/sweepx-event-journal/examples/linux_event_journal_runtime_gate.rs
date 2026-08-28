@@ -6,6 +6,8 @@
 //! runner records repeated release-profile samples and decides whether to enforce the target.
 
 #[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -387,11 +389,75 @@ fn storage_metrics(root: &Path) -> Result<StorageMetrics, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn validate_position_rewrite(
+    producer_events: &[EventEnvelope],
+    rewritten_events: &[EventEnvelope],
+    description: &str,
+) -> Result<(), String> {
+    if rewritten_events.len() != producer_events.len() {
+        return Err(format!(
+            "{description} event count changed: expected {}, got {}",
+            producer_events.len(),
+            rewritten_events.len()
+        ));
+    }
+
+    let mut durable_cursors = BTreeSet::new();
+    for (index, (producer, rewritten)) in producer_events
+        .iter()
+        .zip(rewritten_events.iter())
+        .enumerate()
+    {
+        let expected_sequence = u128::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| format!("{description} sequence overflow at index {index}"))?;
+        if u128::from(rewritten.sequence) != expected_sequence {
+            return Err(format!(
+                "{description} sequence mismatch at index {index}: expected {expected_sequence}, got {}",
+                rewritten.sequence
+            ));
+        }
+        if !rewritten.checkpoint.durable
+            || u128::from(rewritten.checkpoint.last_durable_sequence) != expected_sequence
+        {
+            return Err(format!(
+                "{description} checkpoint mismatch at index {index}: expected durable sequence {expected_sequence}"
+            ));
+        }
+        rewritten.validate_for_durable_stream().map_err(|error| {
+            format!("{description} durable event validation failed at index {index}: {error}")
+        })?;
+        if !durable_cursors.insert(rewritten.cursor.as_str()) {
+            return Err(format!(
+                "{description} durable cursor is duplicated at index {index}"
+            ));
+        }
+
+        // The journal API owns exactly these three fields. Normalize them back to the immutable
+        // producer values so PartialEq checks every other EventEnvelope field without duplicating
+        // that field list in this harness.
+        let mut normalized = rewritten.clone();
+        normalized.sequence = producer.sequence;
+        normalized.cursor.clone_from(&producer.cursor);
+        normalized.checkpoint = producer.checkpoint.clone();
+        if &normalized != producer {
+            return Err(format!(
+                "{description} changed a producer-owned event field at index {index}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn run(arguments: &Arguments) -> Result<Sample, String> {
     let total_started = Instant::now();
     let build_started = Instant::now();
     let snapshot = final_snapshot()?;
     let (mut events, mut workload) = build_workload(arguments.profile, &snapshot)?;
+    let producer_events = events.clone();
     let build_workload_ns = build_started.elapsed().as_nanos();
 
     let temporary = TempDir::new().map_err(|error| error.to_string())?;
@@ -411,6 +477,7 @@ fn run(arguments: &Arguments) -> Result<Sample, String> {
         .append_complete_stream(&mut events, &snapshot)
         .map_err(|error| error.to_string())?;
     let append_complete_stream_ns = append_started.elapsed().as_nanos();
+    validate_position_rewrite(&producer_events, &events, "assigned stream")?;
 
     let verify_started = Instant::now();
     let integrity = journal
@@ -439,8 +506,14 @@ fn run(arguments: &Arguments) -> Result<Sample, String> {
         .ok_or_else(|| "terminal snapshot was not persisted".to_string())?;
     let read_and_validate_ns = read_started.elapsed().as_nanos();
 
-    if persisted != events || stored_snapshot != snapshot {
-        return Err("persisted stream or terminal snapshot differs from input".to_string());
+    validate_position_rewrite(&producer_events, &persisted, "persisted stream")?;
+    if persisted != events {
+        return Err(
+            "persisted stream differs from independently checked assigned stream".to_string(),
+        );
+    }
+    if stored_snapshot != snapshot {
+        return Err("persisted terminal snapshot differs from producer snapshot".to_string());
     }
     workload.committed_json_bytes = persisted.iter().try_fold(0_u64, |total, item| {
         let bytes = serde_json::to_vec(item)
@@ -561,5 +634,46 @@ mod tests {
         assert_eq!(workload.terminal_events, 1);
         assert_eq!(workload.input_json_bytes, 988_218);
         assert_eq!(workload.workload_sha256, QUALIFICATION_WORKLOAD_SHA256);
+    }
+
+    #[test]
+    fn rewrite_oracle_rejects_immutable_and_position_changes() {
+        let snapshot = final_snapshot().unwrap();
+        let (producer, _) = build_workload(Profile::Smoke, &snapshot).unwrap();
+        let mut assigned = producer.clone();
+        for (index, event) in assigned.iter_mut().enumerate() {
+            let sequence = u128::try_from(index + 1).unwrap();
+            event.sequence = DecimalU128::new(sequence);
+            event.cursor = format!("sxcur1.regression-cursor-{sequence:08}");
+            event.checkpoint = EventCheckpoint {
+                durable: true,
+                last_durable_sequence: DecimalU128::new(sequence),
+            };
+        }
+        validate_position_rewrite(&producer, &assigned, "regression fixture").unwrap();
+
+        let mut immutable_tamper = assigned.clone();
+        immutable_tamper[1].payload = serde_json::json!({"tampered": true});
+        assert!(
+            validate_position_rewrite(&producer, &immutable_tamper, "immutable tamper")
+                .unwrap_err()
+                .contains("producer-owned event field")
+        );
+
+        let mut sequence_tamper = assigned.clone();
+        sequence_tamper[1].sequence = DecimalU128::new(99);
+        assert!(
+            validate_position_rewrite(&producer, &sequence_tamper, "sequence tamper")
+                .unwrap_err()
+                .contains("sequence mismatch")
+        );
+
+        let mut cursor_tamper = assigned;
+        cursor_tamper[1].cursor = cursor_tamper[0].cursor.clone();
+        assert!(
+            validate_position_rewrite(&producer, &cursor_tamper, "cursor tamper")
+                .unwrap_err()
+                .contains("duplicated")
+        );
     }
 }
