@@ -22,6 +22,9 @@ pub const TOP_HEAVY_CHILDREN: usize = 64;
 pub const HEAVY_LEAF_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 pub const STORED_PREVIEW_SCHEMA: &str = "sweepx.preview.cache/v1";
 const CHECKSUM_DOMAIN: &[u8] = b"SweepX sparse preview generation v1\0";
+const INSPECT_DIRECTORY_ENTRY_LIMIT: usize = 256;
+const INSPECT_CURRENT_POINTER_BYTE_LIMIT: u64 = 64 * 1024;
+const INSPECT_GENERATION_BYTE_LIMIT: u64 = PREVIEW_BYTE_CAP + (1024 * 1024);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,6 +216,51 @@ pub enum LoadResult {
     Miss,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheInspectionHealth {
+    Healthy,
+    Missing,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CacheInspectionWarning {
+    GenerationScanTruncated { limit: usize },
+    QuarantineScanTruncated { limit: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CacheInspectionError {
+    CurrentPointerTooLarge { bytes: u64 },
+    MalformedCurrentPointer,
+    InvalidCurrentGenerationName,
+    MissingCurrentGenerationData,
+    CurrentGenerationTooLarge { bytes: u64 },
+    MalformedGenerationEnvelope,
+    GenerationChecksumMismatch,
+    GenerationPointerMismatch,
+    InvalidStoredGenerationName,
+    InvalidStoredSchema { schema: String },
+    InvalidStoredProvenance { entry_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheInspection {
+    pub exists: bool,
+    pub current_generation: Option<String>,
+    pub generation_count: usize,
+    pub quarantine_count: usize,
+    pub approx_bytes: u64,
+    pub current_health: CacheInspectionHealth,
+    pub schema_health: CacheInspectionHealth,
+    pub warnings: Vec<CacheInspectionWarning>,
+    pub errors: Vec<CacheInspectionError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicGenerationStore {
     root: PathBuf,
@@ -305,6 +353,187 @@ impl AtomicGenerationStore {
         Ok(LoadResult::Hit(envelope.payload))
     }
 
+    pub fn inspect(&self) -> Result<CacheInspection, CacheError> {
+        let exists = self.validate_secure_root_readonly()?;
+        if !exists {
+            return Ok(CacheInspection {
+                exists: false,
+                current_generation: None,
+                generation_count: 0,
+                quarantine_count: 0,
+                approx_bytes: 0,
+                current_health: CacheInspectionHealth::Missing,
+                schema_health: CacheInspectionHealth::Unknown,
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            });
+        }
+
+        let mut warnings = Vec::new();
+        let errors = Vec::new();
+        let mut approx_bytes = 0u64;
+
+        let generations = self.inspect_optional_flat_dir(&self.generations_dir())?;
+        let generation_count = generations.as_ref().map_or(0, |scan| scan.count);
+        approx_bytes =
+            approx_bytes.saturating_add(generations.as_ref().map_or(0, |scan| scan.bytes));
+        if generations.as_ref().is_some_and(|scan| scan.truncated) {
+            warnings.push(CacheInspectionWarning::GenerationScanTruncated {
+                limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
+            });
+        }
+
+        let quarantine = self.inspect_optional_flat_dir(&self.quarantine_dir())?;
+        let quarantine_count = quarantine.as_ref().map_or(0, |scan| scan.count);
+        approx_bytes =
+            approx_bytes.saturating_add(quarantine.as_ref().map_or(0, |scan| scan.bytes));
+        if quarantine.as_ref().is_some_and(|scan| scan.truncated) {
+            warnings.push(CacheInspectionWarning::QuarantineScanTruncated {
+                limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
+            });
+        }
+
+        let mut inspection = CacheInspection {
+            exists: true,
+            current_generation: None,
+            generation_count,
+            quarantine_count,
+            approx_bytes,
+            current_health: CacheInspectionHealth::Missing,
+            schema_health: CacheInspectionHealth::Unknown,
+            warnings,
+            errors,
+        };
+
+        let current_file = match self.inspect_optional_file(
+            &self.current_pointer_path(),
+            INSPECT_CURRENT_POINTER_BYTE_LIMIT,
+        )? {
+            Some(file) => file,
+            None => return Ok(inspection),
+        };
+        inspection.approx_bytes = inspection.approx_bytes.saturating_add(current_file.bytes);
+
+        let current_bytes = match current_file.contents {
+            InspectFileContents::Bytes(bytes) => bytes,
+            InspectFileContents::TooLarge { bytes } => {
+                inspection.current_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::CurrentPointerTooLarge { bytes });
+                return Ok(inspection);
+            }
+        };
+
+        let pointer: CurrentPointer = match serde_json::from_slice(&current_bytes) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                inspection.current_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::MalformedCurrentPointer);
+                return Ok(inspection);
+            }
+        };
+        inspection.current_generation = Some(pointer.generation.clone());
+
+        if validate_generation_id(&pointer.generation).is_err() {
+            inspection.current_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::InvalidCurrentGenerationName);
+            return Ok(inspection);
+        }
+        inspection.current_health = CacheInspectionHealth::Healthy;
+
+        let generation_file = match self.inspect_optional_file(
+            &self.generation_path(&pointer.generation),
+            INSPECT_GENERATION_BYTE_LIMIT,
+        )? {
+            Some(file) => file,
+            None => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::MissingCurrentGenerationData);
+                return Ok(inspection);
+            }
+        };
+        inspection.approx_bytes = inspection
+            .approx_bytes
+            .saturating_add(generation_file.bytes);
+
+        let generation_bytes = match generation_file.contents {
+            InspectFileContents::Bytes(bytes) => bytes,
+            InspectFileContents::TooLarge { bytes } => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::CurrentGenerationTooLarge { bytes });
+                return Ok(inspection);
+            }
+        };
+
+        let envelope: StoredEnvelope = match serde_json::from_slice(&generation_bytes) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::MalformedGenerationEnvelope);
+                return Ok(inspection);
+            }
+        };
+
+        let checksum = checksum_hex(&envelope.payload)?;
+        if checksum != envelope.checksum_sha256 {
+            inspection.schema_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::GenerationChecksumMismatch);
+            return Ok(inspection);
+        }
+
+        if pointer.generation != envelope.generation
+            || envelope.generation != envelope.payload.generation
+        {
+            inspection.schema_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::GenerationPointerMismatch);
+            return Ok(inspection);
+        }
+
+        match validate_stored_generation(&envelope.payload) {
+            Ok(()) => {
+                inspection.schema_health = CacheInspectionHealth::Healthy;
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidGenerationName) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredGenerationName);
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidStoredSchema(schema)) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredSchema { schema });
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidStoredProvenance(entry_id)) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredProvenance { entry_id });
+                Ok(inspection)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     fn generations_dir(&self) -> PathBuf {
         self.root.join("generations")
     }
@@ -334,6 +563,21 @@ impl AtomicGenerationStore {
 
     fn quarantine_generation(&self, generation: &str, bytes: &[u8]) -> Result<(), CacheError> {
         self.quarantine(&format!("{generation}.corrupt.json"), bytes)
+    }
+
+    fn validate_secure_root_readonly(&self) -> Result<bool, CacheError> {
+        ensure_no_symlink_ancestors(&self.root)?;
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    Err(CacheError::InsecurePath(self.root.clone()))
+                } else {
+                    Ok(true)
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(CacheError::Io(error)),
+        }
     }
 
     fn prepare_secure_root(&self) -> Result<(), CacheError> {
@@ -390,6 +634,82 @@ impl AtomicGenerationStore {
         }
         fs::read(path)
     }
+
+    fn inspect_optional_flat_dir(&self, path: &Path) -> Result<Option<InspectedDir>, CacheError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(CacheError::InsecurePath(path.to_path_buf()));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CacheError::Io(error)),
+        }
+
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        let mut truncated = false;
+        for entry_result in fs::read_dir(path)? {
+            let entry = entry_result?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(CacheError::InsecurePath(entry_path));
+            }
+            if count == INSPECT_DIRECTORY_ENTRY_LIMIT {
+                truncated = true;
+                break;
+            }
+            count += 1;
+            bytes = bytes.saturating_add(metadata.len());
+        }
+        Ok(Some(InspectedDir {
+            count,
+            bytes,
+            truncated,
+        }))
+    }
+
+    fn inspect_optional_file(
+        &self,
+        path: &Path,
+        byte_limit: u64,
+    ) -> Result<Option<InspectedFile>, CacheError> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CacheError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CacheError::InsecurePath(path.to_path_buf()));
+        }
+        let bytes = metadata.len();
+        let contents = if bytes > byte_limit {
+            InspectFileContents::TooLarge { bytes }
+        } else {
+            InspectFileContents::Bytes(fs::read(path)?)
+        };
+        Ok(Some(InspectedFile { bytes, contents }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectedDir {
+    count: usize,
+    bytes: u64,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectedFile {
+    bytes: u64,
+    contents: InspectFileContents,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InspectFileContents {
+    Bytes(Vec<u8>),
+    TooLarge { bytes: u64 },
 }
 
 fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), CacheError> {
@@ -1219,6 +1539,166 @@ mod tests {
         };
         let error = store.write_generation(&generation).unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
+    }
+
+    #[test]
+    fn inspect_missing_store_is_noncreating_and_reports_absent() {
+        let temp = TestTempDir::new();
+        let store_root = temp.path().join("preview");
+        let store = AtomicGenerationStore::new(&store_root);
+
+        let inspection = store.inspect().unwrap();
+
+        assert_eq!(
+            inspection,
+            CacheInspection {
+                exists: false,
+                current_generation: None,
+                generation_count: 0,
+                quarantine_count: 0,
+                approx_bytes: 0,
+                current_health: CacheInspectionHealth::Missing,
+                schema_health: CacheInspectionHealth::Unknown,
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            }
+        );
+        assert!(!store_root.exists());
+    }
+
+    #[test]
+    fn inspect_reports_valid_store_health_and_counts() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let generation = StoredGeneration {
+            generation: "gen-42".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(
+                vec![summary(
+                    "parent",
+                    "dir",
+                    PreviewKind::Directory,
+                    123,
+                    stale_preview(),
+                )],
+                &PreviewBudgets::default(),
+            ),
+        };
+        store.write_generation(&generation).unwrap();
+        fs::create_dir_all(temp.path().join("quarantine")).unwrap();
+        fs::write(temp.path().join("quarantine/old.corrupt.json"), b"broken").unwrap();
+
+        let inspection = store.inspect().unwrap();
+
+        assert!(inspection.exists);
+        assert_eq!(inspection.current_generation.as_deref(), Some("gen-42"));
+        assert_eq!(inspection.generation_count, 1);
+        assert_eq!(inspection.quarantine_count, 1);
+        assert!(inspection.approx_bytes > 0);
+        assert_eq!(inspection.current_health, CacheInspectionHealth::Healthy);
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Healthy);
+        assert!(inspection.warnings.is_empty());
+        assert!(inspection.errors.is_empty());
+    }
+
+    #[test]
+    fn inspect_malformed_current_is_read_only_and_typed() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        fs::create_dir_all(temp.path()).unwrap();
+        let current_path = temp.path().join("current.json");
+        let original = b"{not-json".to_vec();
+        fs::write(&current_path, &original).unwrap();
+
+        let inspection = store.inspect().unwrap();
+
+        assert!(inspection.exists);
+        assert_eq!(inspection.current_generation, None);
+        assert_eq!(inspection.current_health, CacheInspectionHealth::Error);
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Unknown);
+        assert_eq!(
+            inspection.errors,
+            vec![CacheInspectionError::MalformedCurrentPointer]
+        );
+        assert_eq!(fs::read(&current_path).unwrap(), original);
+        assert!(!temp.path().join("quarantine").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_rejects_symlinked_generations_dir() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let real_generations = temp.path().join("real-generations");
+        fs::create_dir(&real_generations).unwrap();
+        symlink(&real_generations, temp.path().join("generations")).unwrap();
+
+        let error = store.inspect().unwrap_err();
+        assert!(matches!(error, CacheError::InsecurePath(_)));
+    }
+
+    #[test]
+    fn inspect_bounds_generation_scan_and_marks_warning() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let generations = temp.path().join("generations");
+        fs::create_dir_all(&generations).unwrap();
+        for index in 0..=INSPECT_DIRECTORY_ENTRY_LIMIT {
+            fs::write(generations.join(format!("gen-{index}.json")), b"{}").unwrap();
+        }
+
+        let inspection = store.inspect().unwrap();
+
+        assert_eq!(inspection.generation_count, INSPECT_DIRECTORY_ENTRY_LIMIT);
+        assert_eq!(
+            inspection.warnings,
+            vec![CacheInspectionWarning::GenerationScanTruncated {
+                limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
+            }]
+        );
+    }
+
+    #[test]
+    fn inspect_reports_invalid_schema_without_quarantine() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        fs::write(
+            temp.path().join("current.json"),
+            br#"{"generation":"gen-1"}"#,
+        )
+        .unwrap();
+        let generation = StoredGeneration {
+            generation: "gen-1".to_string(),
+            schema: "bad-schema".to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+        };
+        let envelope = StoredEnvelope {
+            generation: generation.generation.clone(),
+            checksum_sha256: checksum_hex(&generation).unwrap(),
+            payload: generation,
+        };
+        fs::write(
+            temp.path().join("generations/gen-1.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let inspection = store.inspect().unwrap();
+
+        assert_eq!(inspection.current_health, CacheInspectionHealth::Healthy);
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Error);
+        assert_eq!(
+            inspection.errors,
+            vec![CacheInspectionError::InvalidStoredSchema {
+                schema: "bad-schema".to_string(),
+            }]
+        );
+        assert!(!temp.path().join("quarantine").exists());
     }
 
     #[test]
