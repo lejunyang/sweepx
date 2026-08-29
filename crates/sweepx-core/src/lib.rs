@@ -44,8 +44,8 @@ use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
 #[cfg(unix)]
 use sweepx_model::EvidenceValue;
 use sweepx_model::{
-    CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, ObjectType,
-    OperationId, ReasonCode, RequestId, ScanId, ScannedEntry,
+    CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, HumanSizeUnit,
+    ObjectType, OperationId, ReasonCode, RequestId, ScanId, ScanSort, ScannedEntry,
 };
 pub use sweepx_platform::CancellationToken;
 use sweepx_platform::{BoundaryKind, BoundaryRecord};
@@ -61,7 +61,7 @@ use sweepx_protocol::{
 pub use sweepx_scanner::ScanSummary;
 use sweepx_scanner::{ProgressEvent, ScanError};
 use sweepx_tui::{
-    DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProvider,
+    DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProvider, DetailRescanReason,
     DetailRescanRequest as TuiDetailRescanRequest, DetailRescanResult as TuiDetailRescanResult,
     LoadLimits as TuiLoadLimits, RefreshedDetail, ViewModel, ViewModelError,
 };
@@ -515,18 +515,21 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                     failure: TuiDetailRescanFailure::Unavailable,
                 };
             };
-            let result = match live.scanner.rescan(
-                DetailRescanRequest {
-                    source_scan_id: &request.binding.source_scan_id,
-                    source_root_identity: &request.binding.source_root_identity,
-                    source_directory_identity: &request.binding.source_directory_identity,
-                    directory_locator: &request.directory_locator,
-                    revision: request.binding.revision,
-                    max_rows: request.max_rows,
-                },
-                &mut ids,
-                &cancel,
-            ) {
+            let scanner_request = DetailRescanRequest {
+                source_scan_id: &request.binding.source_scan_id,
+                source_root_identity: &request.binding.source_root_identity,
+                source_directory_identity: &request.binding.source_directory_identity,
+                directory_locator: &request.directory_locator,
+                revision: request.binding.revision,
+                max_rows: request.max_rows,
+            };
+            let scanned = if request.reason == DetailRescanReason::ProgressiveListing {
+                live.scanner
+                    .rescan_direct_children(scanner_request, &mut ids, &cancel)
+            } else {
+                live.scanner.rescan(scanner_request, &mut ids, &cancel)
+            };
+            let result = match scanned {
                 Ok(detail) => TuiDetailRescanResult::Refreshed(Box::new(RefreshedDetail {
                     binding,
                     observed_root: detail.observed_root,
@@ -1312,6 +1315,109 @@ pub fn scan_with_store<S: SnapshotStore>(
     request: &ScanRequest,
     store: Option<&S>,
 ) -> Result<ScanSuccess, CoreError> {
+    scan_with_store_options(context, request, store, ScannerOptions::default())
+}
+
+/// Builds the lightweight first TUI screen by admitting roots without enumerating descendants.
+/// The TUI enters immediately, then requests a direct-child listing and recursive aggregates from
+/// the existing identity-bound detail scanner.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn scan_for_tui_with_store<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+) -> Result<ScanSuccess, CoreError> {
+    scan_roots_only(context, request, store)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn scan_roots_only<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+) -> Result<ScanSuccess, CoreError> {
+    let normalized_roots = normalize_scan_roots(&request.roots)?;
+    if normalized_roots.is_empty() {
+        return Err(CoreError::MissingRoots);
+    }
+    let roots = normalized_roots
+        .iter()
+        .map(|path| {
+            ScanRoot::new(path.clone()).map_err(|_| CoreError::NonAbsoluteRoot(path.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids = fresh_operation_ids("scan", &normalized_roots);
+    let started_at = timestamp_now();
+    let monotonic = Instant::now();
+    let scan_id = ScanId::new(format!(
+        "scan-{}-{}",
+        unix_timestamp_nanos(),
+        &digest_hex(ids.operation_id_str())[..12]
+    ));
+    let scanner = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            scan_id: scan_id.clone(),
+            ..ScannerOptions::default()
+        },
+    );
+    let summary = scanner.scan_roots_only(&roots, &CancellationToken::new())?;
+    let status = scan_status(&summary);
+    let compat = compat_snapshot(host_scan_platform());
+    let mut output = OutputEnvelope::new(
+        OutputKind::ScanResult,
+        ids.request_id.clone(),
+        ids.operation_id.clone(),
+        timestamp_now(),
+        status,
+        ExitCode::from(status),
+        compat.clone(),
+    );
+    output.summary = json!({
+        "scanId": scan_id,
+        "rootCount": DecimalU128::new(summary.roots.len() as u128),
+        "entryCount": DecimalU128::ZERO,
+        "aggregateCount": DecimalU128::ZERO,
+        "boundaryCount": DecimalU128::ZERO,
+        "errorCount": DecimalU128::ZERO,
+        "platform": host_scan_platform(),
+        "mode": "progressive_tui",
+    });
+    output.data = camelize_json_keys(json!({
+        "scanId": scan_id,
+        "roots": &summary.roots,
+        "entries": &summary.entries,
+        "aggregates": &summary.aggregates,
+        "boundaries": [],
+    }));
+    let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
+    if let Some(store) = store {
+        store.save(&snapshot)?;
+    }
+    let events = build_scan_events(
+        &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
+        &ids.operation_id,
+        &compat,
+        &normalized_roots,
+        Some(&summary),
+        &output,
+        &started_at,
+        monotonic.elapsed(),
+    );
+    Ok(ScanSuccess {
+        output,
+        events,
+        snapshot,
+        summary,
+    })
+}
+
+fn scan_with_store_options<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    scanner_options: ScannerOptions,
+) -> Result<ScanSuccess, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
     }
@@ -1379,7 +1485,7 @@ pub fn scan_with_store<S: SnapshotStore>(
             HostPlatformScanner::new(),
             ScannerOptions {
                 scan_id: scan_id.clone(),
-                ..ScannerOptions::default()
+                ..scanner_options
             },
         );
         let cancel = CancellationToken::new();
@@ -1844,6 +1950,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "cleaner.cargo-detect",
             CapabilityState::Degraded,
             "CARGO_TYPED_EVIDENCE_REPORT_ONLY",
+        ),
+        command_record(
+            "junk",
+            CapabilityState::Degraded,
+            "PROJECT_JUNK_RULES_REPORT_ONLY",
         ),
         command_record(
             "capabilities",
@@ -2680,8 +2791,18 @@ pub fn tui_read_from_scan_json(
 }
 
 pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> String {
+    render_human_output_with_size_unit(context, output, HumanSizeUnit::Auto, ScanSort::Size)
+}
+
+/// Renders display-only byte units and ordering while leaving machine output unchanged.
+pub fn render_human_output_with_size_unit(
+    context: &CoreContext,
+    output: &OutputEnvelope,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
+) -> String {
     if output.kind == OutputKind::ScanResult {
-        return render_human_scan_output(context, output, DEFAULT_HUMAN_SCAN_ROWS);
+        return render_human_scan_output(context, output, DEFAULT_HUMAN_SCAN_ROWS, size_unit, sort);
     }
     let catalog = Catalog::new(context.locale());
     if output.kind == OutputKind::ExplanationResult {
@@ -2717,7 +2838,7 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
     }
     if output.kind == OutputKind::CleanerResult {
         if output.summary.get("command").and_then(Value::as_str) == Some("cleaner.cargo-detect") {
-            return render_human_cargo_detect_output(context, output);
+            return render_human_cargo_detect_output(context, output, size_unit);
         }
         let count = output
             .summary
@@ -2902,7 +3023,11 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
     .join("\n")
 }
 
-fn render_human_cargo_detect_output(context: &CoreContext, output: &OutputEnvelope) -> String {
+fn render_human_cargo_detect_output(
+    context: &CoreContext,
+    output: &OutputEnvelope,
+    size_unit: HumanSizeUnit,
+) -> String {
     let matches = output
         .data
         .get("matches")
@@ -2952,7 +3077,7 @@ fn render_human_cargo_detect_output(context: &CoreContext, output: &OutputEnvelo
             .pointer("/evidence/aggregate/potentiallyReclaimableBytes/value")
             .and_then(Value::as_str)
             .and_then(|value| value.parse::<u128>().ok())
-            .map(human_bytes)
+            .map(|bytes| size_unit.format(bytes))
             .unwrap_or_else(|| unknown_label.to_string());
         lines.push(format!("{status:<10} {bytes:<13} {path}"));
     }
@@ -3008,25 +3133,12 @@ fn render_human_cargo_detect_output(context: &CoreContext, output: &OutputEnvelo
     lines.join("\n")
 }
 
-fn human_bytes(bytes: u128) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 fn render_human_scan_output(
     context: &CoreContext,
     output: &OutputEnvelope,
     max_rows: usize,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
 ) -> String {
     let catalog = Catalog::new(context.locale());
     let mut lines = vec![
@@ -3095,7 +3207,7 @@ fn render_human_scan_output(
                 .map(|entry_id| (entry_id, aggregate))
         })
         .collect();
-    let items = output
+    let mut items = output
         .data
         .get("roots")
         .and_then(Value::as_array)
@@ -3117,6 +3229,18 @@ fn render_human_scan_output(
         })
         .into_values()
         .collect::<Vec<_>>();
+    match sort {
+        ScanSort::Path => {}
+        ScanSort::Size => items.sort_by(|left, right| {
+            human_scan_item_bytes(right, &aggregates)
+                .cmp(&human_scan_item_bytes(left, &aggregates))
+                .then_with(|| {
+                    left.get("displayPath")
+                        .and_then(Value::as_str)
+                        .cmp(&right.get("displayPath").and_then(Value::as_str))
+                })
+        }),
+    }
     let headings = match context.locale() {
         Locale::ZhCn => ("路径", "类型", "可回收", "覆盖"),
         Locale::EnUs => ("Path", "Type", "Reclaimable", "Coverage"),
@@ -3145,7 +3269,7 @@ fn render_human_scan_output(
             .and_then(|value| value.get("potentiallyReclaimableBytes"))
             .or_else(|| item.get("reclaimableEstimate"))
             .or_else(|| item.get("logicalBytes"))
-            .map(render_human_evidence_value)
+            .map(|value| render_human_evidence_value(value, size_unit))
             .unwrap_or_else(|| "unknown".to_string());
         let coverage = aggregate
             .and_then(|value| value.get("coverage"))
@@ -3173,8 +3297,28 @@ fn render_human_scan_output(
             ),
         });
     }
+    lines.push(match context.locale() {
+        Locale::ZhCn => "说明：>= 表示扫描不完整时已确认的下限，实际值只会更大；可回收是删除该对象后预计释放的独占磁盘占用，不是逻辑文件大小，也不承诺一定释放。".to_string(),
+        Locale::EnUs => ">= marks a lower bound from an incomplete scan. Reclaimable estimates exclusive allocated disk bytes that removal may release; it is not logical file size or a guarantee.".to_string(),
+    });
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
     lines.join("\n")
+}
+
+fn human_scan_item_bytes(item: &Value, aggregates: &BTreeMap<&str, &Value>) -> Option<u128> {
+    let aggregate = item
+        .get("identity")
+        .and_then(|identity| identity.get("entryId"))
+        .and_then(Value::as_str)
+        .and_then(|entry_id| aggregates.get(entry_id))
+        .copied();
+    aggregate
+        .and_then(|value| value.get("potentiallyReclaimableBytes"))
+        .or_else(|| item.get("reclaimableEstimate"))
+        .or_else(|| item.get("logicalBytes"))
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u128>().ok())
 }
 
 fn append_human_protocol_messages(
@@ -3213,7 +3357,7 @@ fn sanitize_terminal_text(value: &str) -> String {
         .collect()
 }
 
-fn render_human_evidence_value(value: &Value) -> String {
+fn render_human_evidence_value(value: &Value, size_unit: HumanSizeUnit) -> String {
     let state = value
         .get("state")
         .and_then(Value::as_str)
@@ -3222,14 +3366,17 @@ fn render_human_evidence_value(value: &Value) -> String {
         "known" => value
             .get("value")
             .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
+            .and_then(|value| value.parse::<u128>().ok())
+            .map(|value| size_unit.format(value))
+            .unwrap_or_else(|| "unknown".to_string()),
         "lower_bound" => format!(
             ">= {}",
             value
                 .get("value")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
+                .and_then(|value| value.parse::<u128>().ok())
+                .map(|value| size_unit.format(value))
+                .unwrap_or_else(|| "unknown".to_string())
         ),
         other => other.to_string(),
     }
@@ -5085,6 +5232,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         "BUILTIN_CLEANER_REPORTING_SUPPORTED" => {
             "Built-in cleaner list and show commands report catalog metadata only."
         }
+        "PROJECT_JUNK_RULES_REPORT_ONLY" => {
+            "Junk scan reports a narrow set of rebuildable project artifacts and never deletes automatically."
+        }
         "TUI_READ_PATH_SUPPORTED" => {
             "TUI validates a bounded scan.result input and stays read-only."
         }
@@ -6155,7 +6305,7 @@ mod tests {
         let rendered = render_human_output(&context, &output);
         assert_eq!(rendered.matches("/tmp/root").count(), 1);
         assert!(rendered.contains("Status: partial"));
-        assert!(rendered.contains("4096"));
+        assert!(rendered.contains("4.0 KiB"));
         assert!(rendered.contains("complete"));
         assert!(rendered.contains(
             "Summary: 1 roots, 1 entries, 1 directory aggregates, 2 boundaries, 3 errors"

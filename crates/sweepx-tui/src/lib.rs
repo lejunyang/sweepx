@@ -14,7 +14,9 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::rc::Rc;
 use sweepx_i18n::{Catalog, Locale, MessageArgs, MessageKey};
-use sweepx_model::{ArithmeticState, CoverageState, DirectoryAggregate, ObjectType, ScannedEntry};
+use sweepx_model::{
+    ArithmeticState, CoverageState, DirectoryAggregate, HumanSizeUnit, ObjectType, ScannedEntry,
+};
 use sweepx_protocol::{OutputKind, OutputStatus};
 use thiserror::Error;
 
@@ -996,9 +998,15 @@ fn coverage_label(state: &CoverageState) -> &'static str {
 }
 
 fn byte_value_label(value: &sweepx_model::ByteValue) -> String {
+    byte_value_label_with_unit(value, HumanSizeUnit::Auto)
+}
+
+fn byte_value_label_with_unit(value: &sweepx_model::ByteValue, unit: HumanSizeUnit) -> String {
     match value {
-        sweepx_model::EvidenceValue::Known { value } => value.to_string(),
-        sweepx_model::EvidenceValue::LowerBound { value, .. } => format!(">= {value}"),
+        sweepx_model::EvidenceValue::Known { value } => unit.format(value.0),
+        sweepx_model::EvidenceValue::LowerBound { value, .. } => {
+            format!(">= {}", unit.format(value.0))
+        }
         sweepx_model::EvidenceValue::Unknown { .. } => "unknown".to_string(),
         sweepx_model::EvidenceValue::Unsupported { .. } => "unsupported".to_string(),
         sweepx_model::EvidenceValue::NotChecked { .. } => "not_checked".to_string(),

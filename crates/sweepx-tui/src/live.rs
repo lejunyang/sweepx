@@ -25,19 +25,20 @@ use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table}
 use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
 use sweepx_model::{
-    Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance,
+    Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance, HumanSizeUnit,
     NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId, ScanEntryIdError, ScanId,
-    ScanObjectIdentity, ScannedEntry,
+    ScanObjectIdentity, ScanSort, ScannedEntry,
 };
 use sweepx_protocol::OutputStatus;
 use thiserror::Error;
 
 use crate::{
-    MAX_PAGE_ROWS, byte_value_label, coverage_label, object_type_label, output_status_label,
+    MAX_PAGE_ROWS, byte_value_label_with_unit, coverage_label, object_type_label,
+    output_status_label,
 };
 
 pub const BROWSER_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-pub const DETAIL_RESCAN_QUERY_DEADLINE: Duration = Duration::from_secs(2);
+pub const DETAIL_RESCAN_QUERY_DEADLINE: Duration = Duration::from_secs(30);
 pub const MAX_DETAIL_RESCAN_WORKERS: usize = 32;
 pub const DEFAULT_MAX_BROWSER_ENTRIES: usize = 16_384;
 pub const DEFAULT_MAX_BROWSER_INDEX_BYTES: usize = 48 * 1024 * 1024;
@@ -49,6 +50,10 @@ static DETAIL_RESCAN_WORKER_LIMITER: OnceLock<Arc<DetailRescanWorkerLimiter>> = 
 pub enum DetailRescanReason {
     Incomplete,
     Evicted,
+    /// Fast first phase: enumerate only direct children so navigation becomes available quickly.
+    ProgressiveListing,
+    /// Background second phase: aggregate descendants without retaining them as browser rows.
+    ProgressiveAggregate,
 }
 
 /// Correlation data which a detail result must echo exactly.
@@ -442,6 +447,9 @@ pub struct BrowserModel {
     levels: Vec<BrowserLevel>,
     selected: usize,
     loaded_level: LoadedLevel,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
+    progressive_navigation: bool,
 }
 
 impl BrowserModel {
@@ -502,6 +510,45 @@ impl BrowserModel {
             aggregates,
             BrowserLoadLimits::default(),
         )
+    }
+
+    /// Creates the first progressive browser frame from roots only. The root rows preserve
+    /// executable locator evidence, but their aggregates are intentionally incomplete until the
+    /// user enters a root and the background detail provider computes its direct rows and total.
+    pub fn from_progressive_roots(
+        locale: Locale,
+        status: OutputStatus,
+        scan_id: Option<String>,
+        mut roots: Vec<ScannedEntry>,
+        aggregates: Vec<DirectoryAggregate>,
+        size_unit: HumanSizeUnit,
+        sort: ScanSort,
+    ) -> Result<BrowserModel, BrowserModelError> {
+        for root in &mut roots {
+            mark_coverage_details_lost(&mut root.coverage);
+            root.logical_bytes = sweepx_model::EvidenceValue::NotChecked {
+                reason: sweepx_model::ReasonCode::NotRevalidated,
+            };
+            root.allocated_bytes = sweepx_model::EvidenceValue::NotChecked {
+                reason: sweepx_model::ReasonCode::NotRevalidated,
+            };
+            root.reclaimable_estimate = sweepx_model::EvidenceValue::NotChecked {
+                reason: sweepx_model::ReasonCode::NotRevalidated,
+            };
+        }
+        let mut model =
+            Self::from_owned_scan_parts(locale, status, scan_id, roots, Vec::new(), aggregates)?;
+        for index in &model.roots {
+            model.nodes[*index].detail_rescan_state = DetailRescanState::Snapshot {
+                revision: DecimalU128::ZERO,
+            };
+        }
+        model.size_unit = size_unit;
+        model.sort = sort;
+        model.progressive_navigation = true;
+        model.sort_rows();
+        model.reload_loaded_level();
+        Ok(model)
     }
 
     pub fn from_owned_scan_parts_with_limits(
@@ -699,7 +746,11 @@ impl BrowserModel {
             levels: Vec::new(),
             selected: 0,
             loaded_level: LoadedLevel::default(),
+            size_unit: HumanSizeUnit::Auto,
+            sort: ScanSort::Path,
+            progressive_navigation: false,
         };
+        model.sort_rows();
         model.reload_loaded_level();
         Ok(model)
     }
@@ -773,7 +824,14 @@ impl BrowserModel {
 
     fn begin_detail_rescan(&mut self) -> Option<PendingDetailRescan> {
         let node_index = self.selected_node_index()?;
-        let reason = self.nodes[node_index].to_row().detail_rescan_reason()?;
+        let reason = if self.progressive_navigation {
+            if !self.nodes[node_index].to_row().can_enter() {
+                return None;
+            }
+            DetailRescanReason::ProgressiveListing
+        } else {
+            self.nodes[node_index].to_row().detail_rescan_reason()?
+        };
 
         let base_revision = self.nodes[node_index].detail_rescan_state.revision();
         let Some(revision) = base_revision.checked_add(DecimalU128::new(1)) else {
@@ -806,6 +864,31 @@ impl BrowserModel {
         })
     }
 
+    fn begin_progressive_aggregate(&mut self) -> Option<PendingDetailRescan> {
+        if !self.progressive_navigation {
+            return None;
+        }
+        let node_index = self.levels.last()?.directory_index;
+        let base_revision = self.nodes[node_index].detail_rescan_state.revision();
+        let revision = base_revision.checked_add(DecimalU128::new(1))?;
+        let request = self.detail_rescan_request(
+            node_index,
+            DetailRescanReason::ProgressiveAggregate,
+            base_revision,
+            revision,
+        )?;
+        let previous_state = self.nodes[node_index].detail_rescan_state.clone();
+        self.nodes[node_index].detail_rescan_state = DetailRescanState::Pending { revision };
+        self.reload_loaded_level();
+        Some(PendingDetailRescan {
+            node_index,
+            request,
+            previous_state,
+            started_at: Instant::now(),
+            timed_out: false,
+        })
+    }
+
     fn finish_detail_rescan(
         &mut self,
         pending: PendingDetailRescan,
@@ -814,7 +897,14 @@ impl BrowserModel {
         if !self.detail_rescan_binding_matches(&pending) {
             return false;
         }
-        if self.selected_node_index() != Some(pending.node_index) {
+        let selection_still_bound = if self.progressive_navigation {
+            self.levels
+                .last()
+                .is_some_and(|level| level.directory_index == pending.node_index)
+        } else {
+            self.selected_node_index() == Some(pending.node_index)
+        };
+        if !selection_still_bound {
             self.restore_detail_rescan_state(&pending);
             return false;
         }
@@ -827,7 +917,7 @@ impl BrowserModel {
         {
             self.mark_detail_stale(pending.node_index, revision, failure);
         }
-        true
+        !self.progressive_navigation
     }
 
     fn expire_detail_rescan(&mut self, pending: &PendingDetailRescan) -> bool {
@@ -840,7 +930,8 @@ impl BrowserModel {
         failure: DetailRescanFailure,
     ) -> bool {
         if self.detail_rescan_binding_matches(pending) {
-            let should_enter = self.selected_node_index() == Some(pending.node_index);
+            let should_enter = !self.progressive_navigation
+                && self.selected_node_index() == Some(pending.node_index);
             self.mark_detail_stale(
                 pending.node_index,
                 pending.request.binding.revision,
@@ -916,7 +1007,13 @@ impl BrowserModel {
             },
             directory_locator: locator,
             reason,
-            max_rows: self.limits.max_level_rows,
+            // Progressive mode retains one whole directory level and pages it in the UI. Legacy
+            // snapshot mode preserves the older single-page request contract.
+            max_rows: if self.progressive_navigation {
+                self.limits.max_entries
+            } else {
+                self.limits.max_level_rows
+            },
         })
     }
 
@@ -1055,6 +1152,10 @@ impl BrowserModel {
             BrowserModelError::ResourceLimit { .. } => DetailRescanFailure::ResourceLimit,
             _ => DetailRescanFailure::InvalidResult,
         })?;
+        rebuilt.size_unit = self.size_unit;
+        rebuilt.sort = self.sort;
+        rebuilt.progressive_navigation = self.progressive_navigation;
+        rebuilt.sort_rows();
 
         for node in &mut rebuilt.nodes {
             let identity = node
@@ -1087,18 +1188,24 @@ impl BrowserModel {
                 parent_selection,
             });
         }
-        let target_id = request_entry_id(&observed_directory);
-        rebuilt.selected = rebuilt
-            .current_level_rows()
-            .iter()
-            .position(|index| {
-                rebuilt.nodes[*index]
-                    .entry
-                    .identity
-                    .as_ref()
-                    .is_some_and(|identity| identity.entry_id == target_id)
-            })
-            .ok_or(DetailRescanFailure::InvalidResult)?;
+        if self.progressive_navigation {
+            // The user is already inside the refreshed directory, so selection belongs to its
+            // newly arrived direct-child rows rather than to the directory row in its parent.
+            rebuilt.selected = 0;
+        } else {
+            let target_id = request_entry_id(&observed_directory);
+            rebuilt.selected = rebuilt
+                .current_level_rows()
+                .iter()
+                .position(|index| {
+                    rebuilt.nodes[*index]
+                        .entry
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.entry_id == target_id)
+                })
+                .ok_or(DetailRescanFailure::InvalidResult)?;
+        }
         rebuilt.reload_loaded_level();
         rebuilt.clamp_selection();
         Ok(rebuilt)
@@ -1200,6 +1307,54 @@ impl BrowserModel {
             row_indices,
             rows,
         };
+    }
+
+    fn sort_rows(&mut self) {
+        let sort = self.sort;
+        let nodes = &self.nodes;
+        for rows in &mut self.children_by_index {
+            rows.sort_by(|left, right| browser_node_order(nodes, *left, *right, sort));
+        }
+        self.roots
+            .sort_by(|left, right| browser_node_order(nodes, *left, *right, sort));
+    }
+}
+
+fn browser_node_order(
+    nodes: &[BrowserNode],
+    left: usize,
+    right: usize,
+    sort: ScanSort,
+) -> std::cmp::Ordering {
+    let left_node = &nodes[left];
+    let right_node = &nodes[right];
+    if sort == ScanSort::Size {
+        let left_bytes = browser_node_bytes(left_node);
+        let right_bytes = browser_node_bytes(right_node);
+        right_bytes.cmp(&left_bytes).then_with(|| {
+            left_node
+                .entry
+                .display_path
+                .cmp(&right_node.entry.display_path)
+        })
+    } else {
+        left_node
+            .entry
+            .display_path
+            .cmp(&right_node.entry.display_path)
+    }
+}
+
+fn browser_node_bytes(node: &BrowserNode) -> Option<u128> {
+    let value = node
+        .aggregate
+        .as_ref()
+        .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
+        .unwrap_or(&node.entry.reclaimable_estimate);
+    match value {
+        sweepx_model::EvidenceValue::Known { value }
+        | sweepx_model::EvidenceValue::LowerBound { value, .. } => Some(value.0),
+        _ => None,
     }
 }
 
@@ -1485,7 +1640,11 @@ fn validate_detail_rows(
         && aggregate.coverage.complete
         && !aggregate.coverage.details_lost
         && aggregate.coverage.incomplete_reasons.is_empty();
-    if !complete_result
+    if (!complete_result
+        && !matches!(
+            request.reason,
+            DetailRescanReason::ProgressiveListing | DetailRescanReason::ProgressiveAggregate
+        ))
         || aggregate.direct_child_count
             != (sweepx_model::EvidenceValue::Known {
                 value: DecimalU128::new(rows.len() as u128),
@@ -1850,6 +2009,8 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                 let Some(pending) = self.pending.borrow_mut().take() else {
                     return;
                 };
+                let progressive_listing =
+                    pending.request.reason == DetailRescanReason::ProgressiveListing;
                 if !pending.timed_out {
                     let completed_in_time = completed
                         .finished_at
@@ -1864,6 +2025,9 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                     };
                     if should_enter {
                         model.enter_selected();
+                    }
+                    if progressive_listing && let Some(next) = model.begin_progressive_aggregate() {
+                        let _ = self.submit(next);
                     }
                 }
             }
@@ -1927,6 +2091,11 @@ where
             if let Err(pending) = self.submit(pending)
                 && model.fail_detail_rescan(&pending, DetailRescanFailure::Unavailable)
             {
+                model.enter_selected();
+            }
+            if model.progressive_navigation {
+                // Product TUI navigation never waits for recursive aggregation. The entered
+                // directory renders immediately and its rows arrive from the background scan.
                 model.enter_selected();
             }
             return BrowserControl::Continue;
@@ -2147,6 +2316,12 @@ where
     let mapper = DefaultBrowserKeyMapper;
     let reducer =
         DetailRescanBrowserReducer::try_new_with_deadline(provider, DETAIL_RESCAN_QUERY_DEADLINE)?;
+    if model.progressive_navigation && model.roots.len() == 1 {
+        // A single explicit/default root is the user's intended starting directory. Enter it and
+        // launch the direct-child listing before the first paint instead of showing an extra
+        // virtual-root screen that requires a redundant key press.
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+    }
     let result = run_browser_loop_until(
         &mut terminal,
         &mut model,
@@ -2325,11 +2500,17 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
         let index = start + offset;
         let aggregate = row.aggregate();
         let logical = aggregate
-            .map(|value| byte_value_label(&value.apparent_logical_bytes))
-            .unwrap_or_else(|| byte_value_label(&row.entry().logical_bytes));
+            .map(|value| byte_value_label_with_unit(&value.apparent_logical_bytes, model.size_unit))
+            .unwrap_or_else(|| {
+                byte_value_label_with_unit(&row.entry().logical_bytes, model.size_unit)
+            });
         let reclaimable = aggregate
-            .map(|value| byte_value_label(&value.potentially_reclaimable_bytes))
-            .unwrap_or_else(|| byte_value_label(&row.entry().reclaimable_estimate));
+            .map(|value| {
+                byte_value_label_with_unit(&value.potentially_reclaimable_bytes, model.size_unit)
+            })
+            .unwrap_or_else(|| {
+                byte_value_label_with_unit(&row.entry().reclaimable_estimate, model.size_unit)
+            });
         let children = aggregate
             .map(|value| count_value_label(&value.direct_child_count))
             .unwrap_or_else(|| "-".to_string());
@@ -2352,7 +2533,14 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
     });
 
     let empty_title = if rows.is_empty() {
-        empty_label(model.locale()).to_string()
+        if matches!(
+            model.current_detail_rescan_state(),
+            Some(DetailRescanState::Pending { .. })
+        ) {
+            scanning_label(model.locale()).to_string()
+        } else {
+            empty_label(model.locale()).to_string()
+        }
     } else {
         contents_title(
             model.locale(),
@@ -2378,7 +2566,13 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
 }
 
 fn count_value_label(value: &sweepx_model::CountValue) -> String {
-    byte_value_label(value)
+    match value {
+        sweepx_model::EvidenceValue::Known { value } => value.to_string(),
+        sweepx_model::EvidenceValue::LowerBound { value, .. } => format!(">= {value}"),
+        sweepx_model::EvidenceValue::Unknown { .. } => "unknown".to_string(),
+        sweepx_model::EvidenceValue::Unsupported { .. } => "unsupported".to_string(),
+        sweepx_model::EvidenceValue::NotChecked { .. } => "not_checked".to_string(),
+    }
 }
 
 fn browser_row_coverage_label(row: &BrowserRow) -> String {
@@ -2551,6 +2745,13 @@ fn empty_label(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhCn => "无直接子项",
         Locale::EnUs => "No direct children",
+    }
+}
+
+fn scanning_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => "正在扫描当前目录…",
+        Locale::EnUs => "Scanning current directory…",
     }
 }
 
@@ -2881,6 +3082,52 @@ mod tests {
         }))
     }
 
+    fn progressive_listing_result(
+        request: &DetailRescanRequest,
+        mut rows: Vec<ScannedEntry>,
+    ) -> DetailRescanResult {
+        attach_child_locators(request, &mut rows);
+        let DetailRescanResult::Refreshed(mut refreshed) = refreshed_result(request, rows) else {
+            unreachable!()
+        };
+        refreshed.aggregate.coverage = incomplete_coverage();
+        refreshed.aggregate.arithmetic_state = ArithmeticState::LowerBound;
+        DetailRescanResult::Refreshed(refreshed)
+    }
+
+    fn progressive_aggregate_result(
+        request: &DetailRescanRequest,
+        mut rows: Vec<ScannedEntry>,
+    ) -> DetailRescanResult {
+        attach_child_locators(request, &mut rows);
+        refreshed_result(request, rows)
+    }
+
+    fn partial_progressive_aggregate_result(
+        request: &DetailRescanRequest,
+        rows: Vec<ScannedEntry>,
+    ) -> DetailRescanResult {
+        let DetailRescanResult::Refreshed(mut refreshed) =
+            progressive_aggregate_result(request, rows)
+        else {
+            unreachable!()
+        };
+        refreshed.aggregate.coverage = incomplete_coverage();
+        refreshed.aggregate.arithmetic_state = ArithmeticState::LowerBound;
+        DetailRescanResult::Refreshed(refreshed)
+    }
+
+    fn attach_child_locators(request: &DetailRescanRequest, rows: &mut [ScannedEntry]) {
+        for row in rows {
+            if row.object_type == ObjectType::Directory {
+                let mut locator = request.directory_locator.clone();
+                locator.parent_reopen_recipe.push(locator.entry.clone());
+                locator.entry = native_component(row);
+                row.native_locator = Some(locator);
+            }
+        }
+    }
+
     fn entry(
         path: &str,
         object_type: ObjectType,
@@ -3101,6 +3348,118 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(model.current_directory(), Some("/root"));
+    }
+
+    #[test]
+    fn progressive_navigation_paints_direct_rows_then_replaces_them_with_aggregates() {
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let callback_requests = Arc::clone(&requests);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_requests.lock().unwrap().push(request.clone());
+            let mut child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+            child.logical_bytes = EvidenceValue::Known {
+                value: DecimalU128::new(
+                    if request.reason == DetailRescanReason::ProgressiveListing {
+                        0
+                    } else {
+                        4096
+                    },
+                ),
+            };
+            child.reclaimable_estimate = child.logical_bytes.clone();
+            if request.reason == DetailRescanReason::ProgressiveListing {
+                progressive_listing_result(request, vec![child])
+            } else {
+                progressive_aggregate_result(request, vec![child])
+            }
+        })
+        .unwrap();
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        let mut model = BrowserModel::from_progressive_roots(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            vec![root],
+            Vec::new(),
+            HumanSizeUnit::Auto,
+            ScanSort::Size,
+        )
+        .unwrap();
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        assert_eq!(model.current_directory(), Some("/root"));
+        assert!(model.visible_rows().is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while requests.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(model.visible_rows().len(), 1);
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/sub");
+        assert!(matches!(
+            model.visible_rows()[0].entry().logical_bytes,
+            EvidenceValue::Known { value } if value == DecimalU128::ZERO
+        ));
+
+        finish_background(&reducer, &mut model);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].reason, DetailRescanReason::ProgressiveListing);
+        assert_eq!(requests[1].reason, DetailRescanReason::ProgressiveAggregate);
+        assert_eq!(model.visible_rows().len(), 1);
+        assert!(matches!(
+            model.visible_rows()[0].entry().logical_bytes,
+            EvidenceValue::Known { value } if value == DecimalU128::new(4096)
+        ));
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Refreshed {
+                revision: DecimalU128::new(2),
+            })
+        );
+    }
+
+    #[test]
+    fn progressive_aggregate_keeps_partial_rows_visible() {
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let callback_requests = Arc::clone(&requests);
+        let reducer = DetailRescanBrowserReducer::new(move |request: &DetailRescanRequest| {
+            callback_requests.lock().unwrap().push(request.clone());
+            let child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+            if request.reason == DetailRescanReason::ProgressiveListing {
+                progressive_listing_result(request, vec![child])
+            } else {
+                partial_progressive_aggregate_result(request, vec![child])
+            }
+        })
+        .unwrap();
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        let mut model = BrowserModel::from_progressive_roots(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            vec![root],
+            Vec::new(),
+            HumanSizeUnit::Auto,
+            ScanSort::Size,
+        )
+        .unwrap();
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        finish_background(&reducer, &mut model);
+
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(model.visible_rows().len(), 1);
+        assert_eq!(model.visible_rows()[0].display_path(), "/root/sub");
+        assert_eq!(
+            model.current_detail_rescan_state(),
+            Some(&DetailRescanState::Refreshed {
+                revision: DecimalU128::new(2),
+            })
+        );
     }
 
     #[test]
@@ -3540,7 +3899,7 @@ mod tests {
         let provider = BlockingProvider::new();
         let observer = provider.clone();
         let reducer =
-            DetailRescanBrowserReducer::try_new_with_deadline(provider, Duration::from_millis(1))
+            DetailRescanBrowserReducer::try_new_with_deadline(provider, Duration::from_millis(100))
                 .unwrap();
         let mut model = BrowserModel::from_owned_scan_parts(
             Locale::EnUs,
@@ -3571,7 +3930,7 @@ mod tests {
         reducer.reduce(&mut model, BrowserAction::EnterDirectory);
         assert!(model.is_virtual_roots());
         assert_eq!(observer.state.0.lock().unwrap().calls, 1);
-        thread::sleep(Duration::from_millis(2));
+        thread::sleep(Duration::from_millis(110));
         reducer.poll_background(&mut model);
         assert!(model.is_virtual_roots());
         assert_eq!(model.selected_row().unwrap().display_path(), "/second");

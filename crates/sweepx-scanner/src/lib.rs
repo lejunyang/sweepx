@@ -538,6 +538,57 @@ where
         Ok(sink.finish())
     }
 
+    /// Admits only the requested roots. This is the fast first frame for progressive TUI mode;
+    /// no child directory is traversed until the browser requests a bounded detail rescan.
+    pub fn scan_roots_only(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+    ) -> Result<ScanSummary, ScanError> {
+        let mut summary = ScanSummary {
+            roots: Vec::with_capacity(roots.len()),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+        };
+        let mut next_entry_ordinal = Some(1u128);
+        for root in roots {
+            let admission = self.platform.admit_root(root, cancel)?;
+            admission.validate_for_root(root).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: root.path().to_path_buf(),
+                    detail: error.to_string(),
+                }
+            })?;
+            let root_entry_id =
+                allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
+            let root_identity = scan_object_identity(
+                root_entry_id.clone(),
+                root_entry_id,
+                None,
+                &admission.metadata,
+            );
+            summary.roots.push(scanned_entry_from_metadata(
+                &self.options.scan_id,
+                &admission.metadata,
+                root_identity.clone(),
+                native_locator_evidence(
+                    &admission.root_locator,
+                    &native_path_component(&root_identity, &admission.metadata),
+                    &[],
+                    &native_path_component(&root_identity, &admission.metadata),
+                ),
+                complete_coverage(),
+            ));
+            summary.progress.push(ProgressEvent::RootAccepted {
+                path: root.path().to_path_buf(),
+            });
+        }
+        summary.progress.push(ProgressEvent::Finished);
+        Ok(summary)
+    }
+
     pub fn scan_with_sink<S: ScanSink>(
         &self,
         roots: &[ScanRoot],
@@ -2406,6 +2457,32 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProgressEvent::Cancelled { path } if path == &second))
         );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "platform-linux"))]
+    #[test]
+    fn roots_only_scan_admits_roots_without_retaining_children() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("child"), b"payload").unwrap();
+
+        let result = linux_scanner(ScannerOptions::default())
+            .scan_roots_only(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.roots.len(), 1);
+        assert_eq!(result.roots[0].display_path, root.display().to_string());
+        assert!(result.entries.is_empty());
+        assert!(result.aggregates.is_empty());
+        assert!(result.boundaries.is_empty());
+        assert!(matches!(
+            result.progress.last(),
+            Some(ProgressEvent::Finished)
+        ));
     }
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]

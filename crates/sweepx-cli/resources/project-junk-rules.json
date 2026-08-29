@@ -1,0 +1,42 @@
+[
+  {
+    "id": "rust.target",
+    "names": ["target"],
+    "risk": "R2",
+    "requiredParentMarkers": ["Cargo.toml"],
+    "evidence": "Cargo documents target-dir as the build output directory; the workspace manifest remains outside the selected directory.",
+    "references": ["https://doc.rust-lang.org/cargo/reference/build-cache.html"]
+  },
+  {
+    "id": "node.modules",
+    "names": ["node_modules"],
+    "risk": "R2",
+    "requiredParentMarkers": ["package.json"],
+    "evidence": "npm documents node_modules as the local package installation directory; package.json remains outside the selected directory.",
+    "references": ["https://docs.npmjs.com/cli/v11/configuring-npm/folders"]
+  },
+  {
+    "id": "python.cache",
+    "names": ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"],
+    "risk": "R1",
+    "requiredParentMarkers": [],
+    "evidence": "These names are tool-owned bytecode or analysis caches; source files remain outside the selected directory.",
+    "references": ["https://docs.python.org/3/tutorial/modules.html#compiled-python-files", "https://docs.pytest.org/en/stable/how-to/cache.html"]
+  },
+  {
+    "id": "project.build-output",
+    "names": ["dist", "build", "out", ".next", ".turbo"],
+    "risk": "R3",
+    "requiredParentMarkers": ["package.json", "pyproject.toml", "setup.py", "CMakeLists.txt", "build.gradle", "settings.gradle"],
+    "evidence": "A recognized project marker exists beside the output; generic names remain higher-risk and report-only.",
+    "references": ["https://nextjs.org/docs/app/api-reference/config/next-config-js/distDir", "https://cmake.org/cmake/help/latest/manual/cmake-buildsystem.7.html"]
+  },
+  {
+    "id": "maven.target",
+    "names": ["target"],
+    "risk": "R2",
+    "requiredParentMarkers": ["pom.xml"],
+    "evidence": "Maven documents target as the default build output directory; pom.xml remains outside the selected directory.",
+    "references": ["https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html"]
+  }
+]

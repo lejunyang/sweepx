@@ -43,7 +43,7 @@ features:
 | `explain` | 从有界 scan JSON 生成 report-only 解释 |
 | `cache status` | Linux/macOS：preview cache 只读诊断；Windows：disabled |
 | Cleaner | 只读 list/show 元数据，带版本兼容门；`cargo-detect` 有固定输入读取和 typed evidence，但仍是 hint/report-only |
-| CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 进入目录浏览；detail rescan 为 single-flight 后台任务，2 s deadline，导航/退出不中断 |
+| CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 先进入界面再渐进扫描；当前层行有界保留，递归大小由 30 s deadline 的 single-flight 后台任务聚合 |
 | Trash / Permanent | 当前主机可体验单对象 Trash preview；Permanent 不存在 |
 
 CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。`cache status` 只支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录；检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构和健康，不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。

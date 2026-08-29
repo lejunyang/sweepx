@@ -1393,6 +1393,7 @@ dependencies = [
  "clap",
  "libc",
  "predicates",
+ "serde",
  "serde_json",
  "sweepx-cache",
  "sweepx-core",

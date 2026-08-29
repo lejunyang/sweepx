@@ -44,6 +44,87 @@ impl From<DecimalU128> for u128 {
     }
 }
 
+/// Unit policy for human-facing byte counts. Machine formats always keep exact decimal bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HumanSizeUnit {
+    /// Select the largest binary unit that keeps the value at or above one.
+    #[default]
+    Auto,
+    /// Render the exact integer byte count.
+    Bytes,
+    /// Render in kibibytes (1024 bytes).
+    KiB,
+    /// Render in mebibytes (1024 squared bytes).
+    MiB,
+    /// Render in gibibytes (1024 cubed bytes).
+    GiB,
+    /// Render in tebibytes (1024 to the fourth power bytes).
+    TiB,
+}
+
+/// Stable ordering choices shared by the human CLI table and live TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScanSort {
+    /// Show the largest potentially reclaimable entries first. Unknown values sort last.
+    #[default]
+    Size,
+    /// Sort by the lossily rendered display path. Machine output is never reordered by this.
+    Path,
+}
+
+impl HumanSizeUnit {
+    /// Formats bytes for display without changing the exact values carried by JSON output.
+    pub fn format(self, bytes: u128) -> String {
+        const UNITS: [(u128, &str); 5] = [
+            (1, "B"),
+            (1024, "KiB"),
+            (1024 * 1024, "MiB"),
+            (1024 * 1024 * 1024, "GiB"),
+            (1024_u128.pow(4), "TiB"),
+        ];
+        let selected = match self {
+            Self::Auto => UNITS
+                .iter()
+                .rev()
+                .find(|(factor, _)| bytes >= *factor)
+                .copied()
+                .unwrap_or(UNITS[0]),
+            Self::Bytes => UNITS[0],
+            Self::KiB => UNITS[1],
+            Self::MiB => UNITS[2],
+            Self::GiB => UNITS[3],
+            Self::TiB => UNITS[4],
+        };
+        let (factor, label) = selected;
+        if factor == 1 {
+            format!("{bytes} {label}")
+        } else {
+            // Integer arithmetic keeps display stable for the full u128 evidence range.
+            let mut whole = bytes / factor;
+            let mut tenths = ((bytes % factor) * 10 + factor / 2) / factor;
+            if tenths == 10 {
+                whole += 1;
+                tenths = 0;
+            }
+            format!("{whole}.{tenths} {label}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod human_size_tests {
+    use super::HumanSizeUnit;
+
+    #[test]
+    fn automatic_and_fixed_units_are_stable() {
+        assert_eq!(HumanSizeUnit::Auto.format(999), "999 B");
+        assert_eq!(HumanSizeUnit::Auto.format(1536), "1.5 KiB");
+        assert_eq!(HumanSizeUnit::MiB.format(1_572_864), "1.5 MiB");
+        assert_eq!(HumanSizeUnit::Bytes.format(1536), "1536 B");
+        assert!(HumanSizeUnit::TiB.format(u128::MAX).ends_with(" TiB"));
+    }
+}
+
 impl FromStr for DecimalU128 {
     type Err = DecimalU128ParseError;
 

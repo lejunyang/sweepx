@@ -4,7 +4,7 @@ title: CLI and read-only scanning
 
 # CLI and read-only scanning
 
-The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cache`, `cleaner`, `trash`, and `capabilities`; `scan --tui` enters the interactive browser after scanning.
+The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `junk`, `explain`, `status`, `cancel`, `cache`, `cleaner`, `trash`, and `capabilities`; `scan --tui` enters after root admission and scans progressively in the background.
 
 > [!CAUTION]
 > `trash` is a development preview: it only moves an item to the operating-system Trash, confirms by default, and revalidates before submission. It never falls back to Permanent deletion. `plan`, `approve`, `execute`, Permanent, and `--dangerously-delete` remain roadmap proposals.
@@ -24,6 +24,8 @@ Global options:
 |---|---|
 | `--format human|json|ndjson` | Select display or machine output; default is `human`; scan currently rejects `ndjson` |
 | `--locale zh-CN|en-US` | Override the auto-detected display locale |
+| `--unit auto|b|kib|mib|gib|tib` | Human/TUI size unit; `kb/mb/gb/tb` are accepted aliases |
+| `--sort size|path` | Human/TUI ordering; size descending by default |
 | `--state-dir ABSOLUTE_DIR` | Select the SQLite journal directory on Linux or legacy snapshot directory on macOS; Windows durable state is disabled, `state_dir` defaults to `None`, and explicitly setting it fails closed |
 | `scan --no-state` | Skip Linux journal or macOS legacy-snapshot writes when later status/operation state is unnecessary or the state filesystem does not support the journal; conflicts with `--state-dir` |
 
@@ -60,7 +62,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
-- With no roots, `scan` selects the current platform filesystem root; you may instead provide one or more absolute roots.
+- With no roots, `scan` selects the current platform filesystem root; you may instead provide relative paths, `~`, or one or more absolute roots.
 - The default writes a bounded 40-row file table directly to the terminal; no JSON file is required.
 - The scan runs synchronously, is metadata-only and no-follow, and reports mount/link/resource boundaries and errors.
 - The current Linux capability is `degraded`, not release qualification.
@@ -145,6 +147,15 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` reports packages and compatibility. `show` exposes full manifest/rule metadata only when the Core version range matches; incompatibility uses a dedicated fail-closed exit. Neither command performs a file action described by a rule. See [Cleaner concepts](/en/cleaners).
 
+A unified junk-discovery entry point is available:
+
+```bash
+sweepx junk ~/Projects
+sweepx --format json junk .
+```
+
+The initial narrow catalog covers clearly rebuildable project artifacts: Rust `target`, Node `node_modules`, Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`, and common `dist/build/out/.next/.turbo` outputs. It reports candidates, rule IDs, risk, and reclaimable estimates; it never deletes automatically.
+
 ## File-manager-style TUI and Trash preview
 
 ```bash
@@ -153,9 +164,9 @@ cargo run -p sweepx-cli -- --locale en-US \
 cargo run -p sweepx-cli -- trash /absolute/path/to/item
 ```
 
-The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, `d` / `Delete` to select an item for Trash, and `q` or `Ctrl-C` to quit. Trash exits the full-screen view, asks for confirmation, and revalidates the live scan identity; symlinks and reparse points cannot be mutated.
+The TUI consumes the typed result of this live scan without an intermediate JSON file. It auto-enters a single root; multiple roots first appear in a virtual-root view. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, `d` / `Delete` to select an item for Trash, and `q` or `Ctrl-C` to quit. Trash exits the full-screen view, asks for confirmation, and revalidates the live scan identity; symlinks and reparse points cannot be mutated.
 
-`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Windows creates no default state and rejects explicit `--state-dir`. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences. Directory detail rescans run as a single-flight background task with a 2 s query deadline; navigation or quit does not wait for a non-cooperative worker, late results are discarded, and a process-wide cap of 32 bounds stuck workers.
+`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. The TUI enters after root admission and auto-opens a single root. Direct children appear first; recursive totals for those directories are filled in by background work, without retaining descendants as list rows. Detail rescans are single-flight with a 30 s deadline, and navigation or quit does not wait for a non-cooperative worker.
 
 ## Commands that do not exist today
 

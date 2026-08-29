@@ -156,8 +156,35 @@ where
         let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
-        let (rows, aggregate) = self.scan_target_directory(&request, reopened, ids, cancel)?;
+        let (rows, aggregate) =
+            self.scan_target_directory(&request, reopened, ids, cancel, true)?;
 
+        Ok(DetailRescanResult {
+            observed_root,
+            observed_directory,
+            rows,
+            aggregate,
+        })
+    }
+
+    /// Enumerates and retains only the target's direct children. This is intentionally separate
+    /// from [`Self::rescan`]: progressive TUI can paint a useful directory immediately, then run
+    /// the recursive aggregate pass in the background without retaining descendants.
+    pub fn rescan_direct_children(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+    ) -> Result<DetailRescanResult, DetailRescanError> {
+        self.validate_request(&request, ids)?;
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+        let reopened = self.reopen_target(&request, cancel)?;
+        let observed_root = reopened.observed_root.clone();
+        let observed_directory = reopened.observed_directory.clone();
+        let (rows, aggregate) =
+            self.scan_target_directory(&request, reopened, ids, cancel, false)?;
         Ok(DetailRescanResult {
             observed_root,
             observed_directory,
@@ -353,6 +380,7 @@ where
         reopened: ReopenedTarget<P::DirectoryHandle>,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
+        recursive: bool,
     ) -> Result<(Vec<ScannedEntry>, DirectoryAggregate), DetailRescanError> {
         let ReopenedTarget {
             root_metadata,
@@ -363,6 +391,11 @@ where
         } = reopened;
         let mut rows = Vec::new();
         let mut aggregate = TargetAggregateState::new();
+        // Keep one accumulator per direct child directory. Descendants are never retained as
+        // rows, but their bytes roll up into the visible child so the TUI can show useful sizes
+        // without keeping every file in memory.
+        let mut direct_directory_aggregates =
+            std::collections::BTreeMap::<ScanEntryId, TargetAggregateState>::new();
         let mut current = TargetDirectory {
             path: target_metadata.path,
             handle: target_handle,
@@ -433,20 +466,16 @@ where
                         cancel,
                     )
                     .map_err(map_platform_error)?;
-                    let entry_id = ids.allocate()?;
-                    aggregate.note_entry()?;
-                    if aggregate.recursive_entry_count > self.limits.max_visited_entries as u128 {
-                        return Err(DetailRescanError::ResourceLimit);
-                    }
-                    aggregate.note_direct_child()?;
-                    if rows.len() >= request.max_rows
-                        || rows.len() >= self.limits.max_retained_entries
-                    {
-                        return Err(DetailRescanError::ResourceLimit);
-                    }
 
                     match walked {
                         WalkEntry::Directory(opened) => {
+                            note_retained_direct_child(
+                                &mut aggregate,
+                                &rows,
+                                request.max_rows,
+                                &self.limits,
+                            )?;
+                            let entry_id = ids.allocate()?;
                             require_same_mount(&self.platform, &root_metadata, &opened.metadata)?;
                             let identity = scan_object_identity(
                                 entry_id,
@@ -460,6 +489,7 @@ where
                             let native_component =
                                 native_path_component(&identity, &opened.metadata);
                             let parent_reopen_recipe = current.parent_recipe_with_self();
+                            let direct_child_id = identity.entry_id.clone();
                             rows.push(scanned_entry_from_metadata(
                                 request.source_scan_id,
                                 &opened.metadata,
@@ -476,16 +506,30 @@ where
                                 ),
                                 complete_coverage(),
                             ));
-                            if nested_directories.len() >= self.limits.max_frontier_entries {
-                                return Err(DetailRescanError::ResourceLimit);
+                            direct_directory_aggregates
+                                .insert(direct_child_id.clone(), TargetAggregateState::new());
+                            if recursive {
+                                // The listing phase must not retain one open directory handle per
+                                // visible row. Only the aggregate phase needs these handles.
+                                if nested_directories.len() >= self.limits.max_frontier_entries {
+                                    return Err(DetailRescanError::ResourceLimit);
+                                }
+                                nested_directories.push(NestedDirectory {
+                                    path: opened.metadata.path,
+                                    handle: opened.handle,
+                                    identity,
+                                    direct_child_id,
+                                });
                             }
-                            nested_directories.push(NestedDirectory {
-                                path: opened.metadata.path,
-                                handle: opened.handle,
-                                identity,
-                            });
                         }
                         WalkEntry::File(metadata) => {
+                            note_retained_direct_child(
+                                &mut aggregate,
+                                &rows,
+                                request.max_rows,
+                                &self.limits,
+                            )?;
+                            let entry_id = ids.allocate()?;
                             require_same_mount(&self.platform, &root_metadata, &metadata)?;
                             aggregate.note_file(&metadata);
                             let identity = scan_object_identity(
@@ -516,6 +560,13 @@ where
                             ));
                         }
                         WalkEntry::Link(metadata) => {
+                            note_retained_direct_child(
+                                &mut aggregate,
+                                &rows,
+                                request.max_rows,
+                                &self.limits,
+                            )?;
+                            let entry_id = ids.allocate()?;
                             require_same_mount(&self.platform, &root_metadata, &metadata)?;
                             let identity = scan_object_identity(
                                 entry_id,
@@ -545,10 +596,24 @@ where
                             ));
                         }
                         WalkEntry::Boundary(boundary) => {
-                            return Err(map_boundary(&boundary.kind));
+                            if matches!(
+                                boundary.kind,
+                                BoundaryKind::ResourceLimit | BoundaryKind::Cancelled
+                            ) {
+                                return Err(map_boundary(&boundary.kind));
+                            }
+                            // A mount/reparse boundary makes totals incomplete, but it must not
+                            // erase safe siblings that are already available for browsing.
+                            aggregate.mark_incomplete(boundary.reason);
                         }
                         WalkEntry::Error(error) => {
-                            return Err(map_walk_error(error.kind));
+                            if matches!(
+                                error.kind,
+                                ErrorKind::Interrupted | ErrorKind::ResourceLimit
+                            ) {
+                                return Err(map_walk_error(error.kind));
+                            }
+                            aggregate.mark_incomplete(error.reason);
                         }
                     }
                 }
@@ -560,13 +625,40 @@ where
 
         // Descendants are consumed only to prove and compute the target's complete recursive
         // aggregate. They never become detail rows.
-        self.scan_nested_directories(
-            &root_metadata,
-            &mut nested_directories,
-            &mut aggregate,
-            ids,
-            cancel,
-        )?;
+        if recursive {
+            self.scan_nested_directories(
+                &root_metadata,
+                &mut nested_directories,
+                &mut aggregate,
+                &mut direct_directory_aggregates,
+                ids,
+                cancel,
+            )?;
+        }
+
+        // Project each completed subtree total onto its visible direct-directory row. The child
+        // list remains bounded while users still get the value they need for size-first browsing.
+        for row in &mut rows {
+            if row.object_type != ObjectType::Directory {
+                continue;
+            }
+            let Some(identity) = row.identity.as_ref() else {
+                continue;
+            };
+            let Some(state) = direct_directory_aggregates.remove(&identity.entry_id) else {
+                continue;
+            };
+            let child = state.finish(
+                request.source_scan_id,
+                &identity.entry_id,
+                request.revision,
+                recursive,
+            );
+            row.logical_bytes = child.apparent_logical_bytes;
+            row.allocated_bytes = child.filesystem_reported_allocated_bytes;
+            row.reclaimable_estimate = child.potentially_reclaimable_bytes;
+            row.coverage = child.coverage;
+        }
 
         Ok((
             rows,
@@ -574,6 +666,7 @@ where
                 request.source_scan_id,
                 &request.source_directory_identity.entry_id,
                 request.revision,
+                recursive,
             ),
         ))
     }
@@ -583,6 +676,10 @@ where
         root_metadata: &EntryMetadata,
         initial: &mut Vec<NestedDirectory<P::DirectoryHandle>>,
         aggregate: &mut TargetAggregateState,
+        direct_directory_aggregates: &mut std::collections::BTreeMap<
+            ScanEntryId,
+            TargetAggregateState,
+        >,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
     ) -> Result<(), DetailRescanError> {
@@ -651,6 +748,13 @@ where
                     .map_err(map_platform_error)?;
                     let entry_id = ids.allocate()?;
                     aggregate.note_entry()?;
+                    let direct = direct_directory_aggregates
+                        .get_mut(&current.direct_child_id)
+                        .ok_or(DetailRescanError::InvalidRequest)?;
+                    direct.note_entry()?;
+                    if current.identity.entry_id == current.direct_child_id {
+                        direct.note_direct_child()?;
+                    }
                     if aggregate.recursive_entry_count > self.limits.max_visited_entries as u128 {
                         return Err(DetailRescanError::ResourceLimit);
                     }
@@ -673,19 +777,37 @@ where
                                 path: opened.metadata.path,
                                 handle: opened.handle,
                                 identity,
+                                direct_child_id: current.direct_child_id.clone(),
                             });
                         }
                         WalkEntry::File(metadata) => {
                             require_same_mount(&self.platform, root_metadata, &metadata)?;
                             aggregate.note_file(&metadata);
+                            direct.note_file(&metadata);
                         }
                         WalkEntry::Link(metadata) => {
                             require_same_mount(&self.platform, root_metadata, &metadata)?;
                         }
                         WalkEntry::Boundary(boundary) => {
-                            return Err(map_boundary(&boundary.kind));
+                            if matches!(
+                                boundary.kind,
+                                BoundaryKind::ResourceLimit | BoundaryKind::Cancelled
+                            ) {
+                                return Err(map_boundary(&boundary.kind));
+                            }
+                            aggregate.mark_incomplete(boundary.reason.clone());
+                            direct.mark_incomplete(boundary.reason);
                         }
-                        WalkEntry::Error(error) => return Err(map_walk_error(error.kind)),
+                        WalkEntry::Error(error) => {
+                            if matches!(
+                                error.kind,
+                                ErrorKind::Interrupted | ErrorKind::ResourceLimit
+                            ) {
+                                return Err(map_walk_error(error.kind));
+                            }
+                            aggregate.mark_incomplete(error.reason.clone());
+                            direct.mark_incomplete(error.reason);
+                        }
                     }
                 }
                 if batch.end_of_directory {
@@ -709,6 +831,8 @@ struct NestedDirectory<D> {
     path: PathBuf,
     handle: D,
     identity: ScanObjectIdentity,
+    /// Identity of the visible direct child whose subtree this work contributes to.
+    direct_child_id: ScanEntryId,
 }
 
 impl<D> TargetDirectory<D> {
@@ -727,6 +851,24 @@ struct TargetAggregateState {
     allocated_bytes: EvidenceAccumulator,
     reclaimable_bytes: EvidenceAccumulator,
     counted_hard_links: BTreeSet<HardLinkKey>,
+    incomplete_reasons: BTreeSet<ReasonCode>,
+}
+
+fn note_retained_direct_child(
+    aggregate: &mut TargetAggregateState,
+    rows: &[ScannedEntry],
+    request_max_rows: usize,
+    limits: &ScanResourceLimits,
+) -> Result<(), DetailRescanError> {
+    if rows.len() >= request_max_rows || rows.len() >= limits.max_retained_entries {
+        return Err(DetailRescanError::ResourceLimit);
+    }
+    aggregate.note_entry()?;
+    aggregate.note_direct_child()?;
+    if aggregate.recursive_entry_count > limits.max_visited_entries as u128 {
+        return Err(DetailRescanError::ResourceLimit);
+    }
+    Ok(())
 }
 
 impl TargetAggregateState {
@@ -739,6 +881,7 @@ impl TargetAggregateState {
             allocated_bytes: EvidenceAccumulator::known_zero(),
             reclaimable_bytes: EvidenceAccumulator::known_zero(),
             counted_hard_links: BTreeSet::new(),
+            incomplete_reasons: BTreeSet::new(),
         }
     }
 
@@ -793,30 +936,48 @@ impl TargetAggregateState {
         }
     }
 
+    fn mark_incomplete(&mut self, reason: ReasonCode) {
+        self.incomplete_reasons.insert(reason);
+    }
+
     fn finish(
         self,
         scan_id: &ScanId,
         directory_id: &ScanEntryId,
         revision: DecimalU128,
+        requested_complete: bool,
     ) -> DirectoryAggregate {
+        let complete = requested_complete && self.incomplete_reasons.is_empty();
+        let mut incomplete_reasons = self.incomplete_reasons.into_iter().collect::<Vec<_>>();
+        if !requested_complete && incomplete_reasons.is_empty() {
+            incomplete_reasons.push(ReasonCode::IncompleteStreamCoverage);
+        }
         DirectoryAggregate {
             scan_id: scan_id.clone(),
             directory_identity: directory_id.to_string(),
             revision,
-            apparent_logical_bytes: self.apparent_logical_bytes.into_value(true),
-            unique_logical_bytes: self.unique_logical_bytes.into_value(true),
-            filesystem_reported_allocated_bytes: self.allocated_bytes.into_value(true),
-            potentially_reclaimable_bytes: self.reclaimable_bytes.into_value(true),
+            apparent_logical_bytes: self.apparent_logical_bytes.into_value(complete),
+            unique_logical_bytes: self.unique_logical_bytes.into_value(complete),
+            filesystem_reported_allocated_bytes: self.allocated_bytes.into_value(complete),
+            potentially_reclaimable_bytes: self.reclaimable_bytes.into_value(complete),
             direct_child_count: known_count(self.direct_child_count),
             recursive_entry_count: known_count(self.recursive_entry_count),
             coverage: Coverage {
-                state: CoverageState::Complete,
-                complete: true,
-                incomplete_reasons: Vec::new(),
+                state: if complete {
+                    CoverageState::Complete
+                } else {
+                    CoverageState::Incomplete
+                },
+                complete,
+                incomplete_reasons,
                 details_lost: false,
                 provenance: super::live_provenance(),
             },
-            arithmetic_state: ArithmeticState::Exact,
+            arithmetic_state: if complete {
+                ArithmeticState::Exact
+            } else {
+                ArithmeticState::LowerBound
+            },
         }
     }
 }
@@ -1110,6 +1271,65 @@ mod tests {
         assert_eq!(result.aggregate.apparent_logical_bytes, known_u128(10));
         assert!(result.aggregate.coverage.complete);
         assert_eq!(result.aggregate.arithmetic_state, ArithmeticState::Exact);
+        let nested_row = result
+            .rows
+            .iter()
+            .find(|entry| entry.native_basename == test_native_name("nested"))
+            .unwrap();
+        assert_eq!(nested_row.logical_bytes, known_u128(6));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "platform-linux"))]
+    #[test]
+    fn progressive_listing_returns_direct_rows_without_descending() {
+        use std::fs;
+
+        use crate::{HostPlatformScanner, Scanner, ScannerOptions};
+        use sweepx_platform::{CancellationToken, ScanResourceLimits, ScanRoot};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("nested/deep")).unwrap();
+        fs::write(root.join("direct.txt"), b"1234").unwrap();
+        fs::write(root.join("nested/deep/hidden.txt"), b"123456").unwrap();
+        let scan_id = ScanId::new("detail-progressive-listing");
+        let summary = Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                scan_id: scan_id.clone(),
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_roots_only(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+        .unwrap();
+        let root_entry = &summary.roots[0];
+        let mut ids = DetailEntryIdAllocator::new(scan_id.clone()).unwrap();
+        let result =
+            DetailRescanner::new(HostPlatformScanner::new(), ScanResourceLimits::default())
+                .rescan_direct_children(
+                    DetailRescanRequest {
+                        source_scan_id: &scan_id,
+                        source_root_identity: root_entry.identity.as_ref().unwrap(),
+                        source_directory_identity: root_entry.identity.as_ref().unwrap(),
+                        directory_locator: root_entry.executable_native_locator().unwrap().unwrap(),
+                        revision: DecimalU128::new(2),
+                        max_rows: 8,
+                    },
+                    &mut ids,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.rows.iter().all(|entry| {
+            entry.native_basename != test_native_name("deep")
+                && entry.native_basename != test_native_name("hidden.txt")
+        }));
+        assert!(!result.aggregate.coverage.complete);
+        assert_eq!(
+            result.aggregate.arithmetic_state,
+            ArithmeticState::LowerBound
+        );
     }
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]

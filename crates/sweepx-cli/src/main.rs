@@ -1,13 +1,19 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::IsTerminal;
 #[cfg(target_os = "linux")]
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode as ProcessExitCode;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod trash_command;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
+use serde_json::json;
 #[cfg(target_os = "windows")]
 use sweepx_core::cache_status_unsupported;
 #[cfg(unix)]
@@ -18,13 +24,16 @@ use sweepx_core::{
     ScanRequest, StateError, StatusRequest, cache_status_usage_error, cancel_with_store,
     capabilities, cleaner_cargo_detect_with_invocation_and_cancel, cleaner_list, cleaner_show,
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
-    render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
-    state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
-    usage_error_output, validate_absolute_root,
+    scan_for_tui_with_store, scan_ndjson_supported, scan_with_store, serialize_json,
+    serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
+    tui_detail_rescan_provider, usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
+use sweepx_model::{
+    ByteValue, EvidenceValue, HumanSizeUnit, ObjectType, ReasonCode, ScanEntryId, ScanSort,
+};
 use sweepx_protocol::OutputEnvelope;
 use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser_with_detail_rescan};
 
@@ -33,6 +42,48 @@ enum FormatArg {
     Human,
     Json,
     Ndjson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum UnitArg {
+    Auto,
+    B,
+    #[value(name = "kib", alias = "kb")]
+    Kib,
+    #[value(name = "mib", alias = "mb")]
+    Mib,
+    #[value(name = "gib", alias = "gb")]
+    Gib,
+    #[value(name = "tib", alias = "tb")]
+    Tib,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SortArg {
+    Size,
+    Path,
+}
+
+impl From<SortArg> for ScanSort {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Size => Self::Size,
+            SortArg::Path => Self::Path,
+        }
+    }
+}
+
+impl From<UnitArg> for HumanSizeUnit {
+    fn from(value: UnitArg) -> Self {
+        match value {
+            UnitArg::Auto => Self::Auto,
+            UnitArg::B => Self::Bytes,
+            UnitArg::Kib => Self::KiB,
+            UnitArg::Mib => Self::MiB,
+            UnitArg::Gib => Self::GiB,
+            UnitArg::Tib => Self::TiB,
+        }
+    }
 }
 
 impl From<FormatArg> for OutputFormat {
@@ -58,6 +109,12 @@ struct Cli {
     locale: Option<String>,
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
+    /// Unit used by human-readable byte columns. JSON always keeps exact bytes.
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    unit: UnitArg,
+    /// Sort human scan and TUI rows. Machine output keeps scanner order.
+    #[arg(long, global = true, value_enum, default_value = "size")]
+    sort: SortArg,
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,7 +126,8 @@ enum Commands {
         tui: bool,
         #[arg(long)]
         no_state: bool,
-        #[arg(value_name = "ABSOLUTE_ROOT")]
+        /// Root paths; accepts absolute paths, paths relative to the current directory, and `~`.
+        #[arg(value_name = "ROOT")]
         roots: Vec<OsString>,
     },
     Explain {
@@ -95,6 +153,11 @@ enum Commands {
     Cleaner {
         #[command(subcommand)]
         command: CleanerCommands,
+    },
+    /// Discover known rebuildable or disposable artifacts under the selected roots.
+    Junk {
+        #[arg(value_name = "ROOT")]
+        roots: Vec<OsString>,
     },
     Cache {
         #[command(subcommand)]
@@ -140,6 +203,8 @@ fn main() -> ProcessExitCode {
     let locale_resolution = detect_locale(explicit_locale);
     let context = CoreContext::new(locale_resolution);
     let format: OutputFormat = cli.format.into();
+    let size_unit: HumanSizeUnit = cli.unit.into();
+    let sort: ScanSort = cli.sort.into();
 
     let result = match cli.command {
         Commands::Scan {
@@ -189,7 +254,21 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
+            let progress = ScanProgress::start(
+                context.locale(),
+                roots.len(),
+                tui,
+                format == OutputFormat::Human,
+            );
             let scan = match store.as_ref() {
+                Some(store) if tui => scan_for_tui_with_store(
+                    &context,
+                    &ScanRequest {
+                        roots,
+                        state_dir: state_dir.clone(),
+                    },
+                    Some(store),
+                ),
                 Some(store) => scan_with_store(
                     &context,
                     &ScanRequest {
@@ -197,6 +276,14 @@ fn main() -> ProcessExitCode {
                         state_dir: state_dir.clone(),
                     },
                     Some(store),
+                ),
+                None if tui => scan_for_tui_with_store(
+                    &context,
+                    &ScanRequest {
+                        roots,
+                        state_dir: None,
+                    },
+                    Option::<&sweepx_core::MemorySnapshotStore>::None,
                 ),
                 None => scan_with_store(
                     &context,
@@ -207,8 +294,9 @@ fn main() -> ProcessExitCode {
                     Option::<&sweepx_core::MemorySnapshotStore>::None,
                 ),
             };
+            progress.finish();
             if tui {
-                return finish_tui_scan(&context, scan);
+                return finish_tui_scan(&context, scan, size_unit, sort);
             }
             scan.map(RenderedResult::Scan)
         }
@@ -265,7 +353,13 @@ fn main() -> ProcessExitCode {
                     match result {
                         Ok(result) => {
                             let exit_code = replay_exit_code(&result);
-                            print_output(&context, format, &RenderedResult::Replay(result));
+                            print_output(
+                                &context,
+                                format,
+                                size_unit,
+                                sort,
+                                &RenderedResult::Replay(result),
+                            );
                             return ProcessExitCode::from(exit_code);
                         }
                         Err(error) => {
@@ -350,6 +444,16 @@ fn main() -> ProcessExitCode {
                 .map(RenderedResult::Cleaner)
             }
         },
+        Commands::Junk { roots } => {
+            let roots = match normalize_scan_roots(&roots) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ProcessExitCode::from(2);
+                }
+            };
+            return run_junk_scan(&context, format, size_unit, roots);
+        }
         Commands::Cache { command } => match command {
             CacheCommands::Status => {
                 if format == OutputFormat::Ndjson {
@@ -357,14 +461,14 @@ fn main() -> ProcessExitCode {
                         &context,
                         "cache status does not support --format ndjson",
                     ));
-                    print_output(&context, OutputFormat::Json, &result);
+                    print_output(&context, OutputFormat::Json, size_unit, sort, &result);
                     return ProcessExitCode::from(result.exit_code());
                 }
                 #[cfg(target_os = "windows")]
                 {
                     let result = RenderedResult::CacheStatus(cache_status_unsupported(&context));
                     let code = result.exit_code();
-                    print_output(&context, format, &result);
+                    print_output(&context, format, size_unit, sort, &result);
                     return ProcessExitCode::from(code);
                 }
                 #[cfg(unix)]
@@ -377,7 +481,7 @@ fn main() -> ProcessExitCode {
                                     &context, &error,
                                 ));
                                 let code = result.exit_code();
-                                print_output(&context, format, &result);
+                                print_output(&context, format, size_unit, sort, &result);
                                 return ProcessExitCode::from(code);
                             }
                         };
@@ -405,7 +509,7 @@ fn main() -> ProcessExitCode {
     match result {
         Ok(result) => {
             let code = result.exit_code();
-            print_output(&context, format, &result);
+            print_output(&context, format, size_unit, sort, &result);
             ProcessExitCode::from(code)
         }
         Err(error) => {
@@ -413,6 +517,329 @@ fn main() -> ProcessExitCode {
             ProcessExitCode::from(core_error_exit_code(&error) as u8)
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JunkRule {
+    id: String,
+    names: Vec<String>,
+    risk: String,
+    required_parent_markers: Vec<String>,
+    evidence: String,
+    references: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JunkCandidate {
+    path: String,
+    rule_id: String,
+    risk: String,
+    reclaimable: ByteValue,
+    evidence: String,
+    references: Vec<String>,
+    entry_id: ScanEntryId,
+    ancestor_ids: BTreeSet<ScanEntryId>,
+}
+
+// The first catalog is intentionally narrow: project outputs with deterministic names and a
+// rebuild contract. MangoDisk's broader inventory is research input, not license-compatible code
+// or automatic authority. Each future rule must carry its own source and safety review.
+const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
+
+fn run_junk_scan(
+    context: &CoreContext,
+    format: OutputFormat,
+    size_unit: HumanSizeUnit,
+    roots: Vec<PathBuf>,
+) -> ProcessExitCode {
+    let rules = match load_project_junk_rules() {
+        Ok(rules) => rules,
+        Err(error) => {
+            eprintln!("invalid built-in project junk rules: {error}");
+            return ProcessExitCode::from(12);
+        }
+    };
+    let progress = ScanProgress::start(
+        context.locale(),
+        roots.len(),
+        false,
+        format == OutputFormat::Human,
+    );
+    let scan = scan_with_store(
+        context,
+        &ScanRequest {
+            roots,
+            state_dir: None,
+        },
+        Option::<&sweepx_core::MemorySnapshotStore>::None,
+    );
+    progress.finish();
+    let scan = match scan {
+        Ok(scan) => scan,
+        Err(error) => {
+            eprintln!("{error}");
+            return ProcessExitCode::from(core_error_exit_code(&error) as u8);
+        }
+    };
+    // Applicability is joined through scan identities and lossless native names. Display paths
+    // remain presentation-only and are never reused to probe the filesystem.
+    let markers_by_parent = scan
+        .summary
+        .entries
+        .iter()
+        .filter(|entry| entry.object_type == ObjectType::File)
+        .filter_map(|entry| {
+            let identity = entry.identity.as_ref()?;
+            let parent_id = identity.parent_id.clone()?;
+            let name = native_name_for_rule(&entry.native_basename)?;
+            Some((parent_id, name))
+        })
+        .fold(
+            BTreeMap::<ScanEntryId, BTreeSet<String>>::new(),
+            |mut index, (parent_id, name)| {
+                index.entry(parent_id).or_default().insert(name);
+                index
+            },
+        );
+    let aggregates = scan
+        .summary
+        .aggregates
+        .iter()
+        .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = scan
+        .summary
+        .entries
+        .iter()
+        .filter(|entry| entry.object_type == ObjectType::Directory)
+        .filter_map(|entry| {
+            let identity = entry.identity.as_ref()?;
+            let locator = entry.native_locator.as_ref()?;
+            let name = native_name_for_rule(&entry.native_basename)?;
+            rules.iter().find_map(|rule| {
+                (rule
+                    .names
+                    .iter()
+                    .any(|candidate| normalized_rule_name(candidate) == name)
+                    && junk_rule_applies(rule, identity, &markers_by_parent))
+                .then(|| JunkCandidate {
+                    path: entry.display_path.clone(),
+                    rule_id: rule.id.clone(),
+                    risk: rule.risk.clone(),
+                    reclaimable: aggregates
+                        .get(identity.entry_id.as_str())
+                        .map(|aggregate| aggregate.potentially_reclaimable_bytes.clone())
+                        .unwrap_or(EvidenceValue::NotChecked {
+                            reason: ReasonCode::ResourceLimit,
+                        }),
+                    evidence: rule.evidence.clone(),
+                    references: rule.references.clone(),
+                    entry_id: identity.entry_id.clone(),
+                    ancestor_ids: locator
+                        .parent_reopen_recipe
+                        .iter()
+                        .map(|component| component.entry_id.clone())
+                        .collect(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.ancestor_ids
+            .len()
+            .cmp(&right.ancestor_ids.len())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let mut top_level = Vec::with_capacity(candidates.len());
+    let mut selected_ids = BTreeSet::new();
+    for candidate in candidates {
+        if candidate
+            .ancestor_ids
+            .iter()
+            .any(|ancestor| selected_ids.contains(ancestor))
+        {
+            continue;
+        }
+        selected_ids.insert(candidate.entry_id.clone());
+        top_level.push(candidate);
+    }
+    let mut candidates = top_level;
+    candidates.sort_by(|left, right| {
+        junk_evidence_bytes(&right.reclaimable)
+            .cmp(&junk_evidence_bytes(&left.reclaimable))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
+    if format == OutputFormat::Human {
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn => "垃圾扫描报告（项目可重建产物；仅报告）",
+                sweepx_i18n::Locale::EnUs =>
+                    "Junk scan report (rebuildable project artifacts; report-only)",
+            }
+        );
+        for candidate in &candidates {
+            println!(
+                "{risk:<4} {:>12}  {rule:<18} {path}",
+                junk_size_label(&candidate.reclaimable, size_unit),
+                risk = candidate.risk,
+                rule = candidate.rule_id,
+                path = candidate.path,
+            );
+        }
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn => format!(
+                    "汇总：{} 个候选，已统计可回收 {}{}；{} 项为下限或未知；没有执行删除。",
+                    candidates.len(),
+                    if incomplete_size_count > 0 { ">= " } else { "" },
+                    known_reclaimable
+                        .map(|bytes| size_unit.format(bytes))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    incomplete_size_count,
+                ),
+                sweepx_i18n::Locale::EnUs => format!(
+                    "Summary: {} candidates, {}{} accounted reclaimable; {} lower-bound or unknown sizes; nothing was deleted.",
+                    candidates.len(),
+                    if incomplete_size_count > 0 { ">= " } else { "" },
+                    known_reclaimable
+                        .map(|bytes| size_unit.format(bytes))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    incomplete_size_count,
+                ),
+            }
+        );
+    } else {
+        println!(
+            "{}",
+            json!({
+                "schema": "sweepx.junk.result/v1",
+                "status": if scan.output.status == sweepx_protocol::OutputStatus::Ok { "ok" } else { "partial" },
+                "readOnly": true,
+                "candidateCount": candidates.len(),
+                "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
+                "incompleteSizeCount": incomplete_size_count,
+                "candidates": candidates.iter().map(|candidate| json!({
+                    "path": candidate.path, "ruleId": candidate.rule_id, "risk": candidate.risk,
+                    "reclaimable": candidate.reclaimable,
+                    "evidence": candidate.evidence, "references": candidate.references,
+                })).collect::<Vec<_>>(),
+            })
+        );
+    }
+    ProcessExitCode::from(scan.output.conservative_exit_code() as u8)
+}
+
+fn load_project_junk_rules() -> Result<Vec<JunkRule>, String> {
+    let rules: Vec<JunkRule> =
+        serde_json::from_str(PROJECT_JUNK_RULES_JSON).map_err(|error| error.to_string())?;
+    let mut ids = BTreeSet::new();
+    for rule in &rules {
+        if !ids.insert(rule.id.as_str())
+            || rule.id.trim().is_empty()
+            || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
+            || rule.names.is_empty()
+            || rule.evidence.trim().is_empty()
+            || rule.references.is_empty()
+            || !rule
+                .references
+                .iter()
+                .all(|reference| reference.starts_with("https://"))
+            || !rule
+                .names
+                .iter()
+                .chain(rule.required_parent_markers.iter())
+                .all(|name| safe_rule_component(name))
+        {
+            return Err(format!("invalid project junk rule: {}", rule.id));
+        }
+    }
+    Ok(rules)
+}
+
+fn safe_rule_component(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(value, "." | "..")
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
+}
+
+fn junk_rule_applies(
+    rule: &JunkRule,
+    identity: &sweepx_model::ScanObjectIdentity,
+    markers_by_parent: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+) -> bool {
+    if rule.required_parent_markers.is_empty() {
+        return true;
+    }
+    // Marker checks are applicability filters only. They reduce obvious false positives such as
+    // dependency-internal `dist` directories and never grant mutation authority. The join is
+    // identity-based so a lossy display path cannot redirect even this read-only classification.
+    identity.parent_id.as_ref().is_some_and(|parent_id| {
+        markers_by_parent.get(parent_id).is_some_and(|markers| {
+            rule.required_parent_markers
+                .iter()
+                .any(|marker| markers.contains(&normalized_rule_name(marker)))
+        })
+    })
+}
+
+fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
+    match name {
+        sweepx_model::NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+        sweepx_model::NativeName::WindowsUtf16(units) => String::from_utf16(units)
+            .ok()
+            .map(|name| name.to_ascii_lowercase()),
+    }
+}
+
+fn normalized_rule_name(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+
+fn junk_evidence_bytes(value: &ByteValue) -> Option<u128> {
+    match value {
+        EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => Some(value.0),
+        _ => None,
+    }
+}
+
+fn junk_size_label(value: &ByteValue, unit: HumanSizeUnit) -> String {
+    match value {
+        EvidenceValue::Known { value } => unit.format(value.0),
+        EvidenceValue::LowerBound { value, .. } => format!(">= {}", unit.format(value.0)),
+        EvidenceValue::Unknown { .. }
+        | EvidenceValue::Unsupported { .. }
+        | EvidenceValue::NotChecked { .. } => "unknown".to_string(),
+    }
+}
+
+fn junk_size_summary(candidates: &[JunkCandidate]) -> (Option<u128>, usize) {
+    let mut total = Some(0u128);
+    let mut incomplete = 0usize;
+    for candidate in candidates {
+        match &candidate.reclaimable {
+            EvidenceValue::Known { value } => {
+                total = total.and_then(|sum| sum.checked_add(value.0));
+            }
+            EvidenceValue::LowerBound { value, .. } => {
+                total = total.and_then(|sum| sum.checked_add(value.0));
+                incomplete += 1;
+            }
+            EvidenceValue::Unknown { .. }
+            | EvidenceValue::Unsupported { .. }
+            | EvidenceValue::NotChecked { .. } => incomplete += 1,
+        }
+    }
+    (total, incomplete)
 }
 
 fn validate_tui_environment(
@@ -432,6 +859,8 @@ fn validate_tui_environment(
 fn finish_tui_scan(
     context: &CoreContext,
     scan: Result<sweepx_core::ScanSuccess, sweepx_core::CoreError>,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
 ) -> ProcessExitCode {
     let scan = match scan {
         Ok(scan) => scan,
@@ -440,48 +869,40 @@ fn finish_tui_scan(
             return ProcessExitCode::from(core_error_exit_code(&error) as u8);
         }
     };
-    // Keep only the bounded terminal report and move the typed rows into the
-    // browser. The large JSON/event/snapshot copies are dropped here, before
-    // entering the alternate screen.
-    let human_output = render_human_output(context, &scan.output);
+    // Progressive TUI owns the visible result. Avoid printing the roots-only bootstrap snapshot
+    // on exit because it would look like a completed zero-byte scan.
     let unsupported = scan.output.status == sweepx_protocol::OutputStatus::Unsupported;
+    if unsupported {
+        println!(
+            "{}",
+            sweepx_core::render_human_output_with_size_unit(context, &scan.output, size_unit, sort,)
+        );
+        return ProcessExitCode::from(scan.output.conservative_exit_code() as u8);
+    }
     let sweepx_core::TuiScanParts {
         status,
         exit_code,
         scan_id,
         summary,
     } = scan.into_tui_parts();
-    if unsupported {
-        println!("{human_output}");
-        return ProcessExitCode::from(exit_code);
-    }
     let provider = tui_detail_rescan_provider(&summary);
-    let sweepx_core::ScanSummary {
-        roots,
-        entries,
-        aggregates,
-        ..
-    } = summary;
-    let model = match BrowserModel::from_owned_scan_parts(
+    let sweepx_core::ScanSummary { roots, .. } = summary;
+    let model = match BrowserModel::from_progressive_roots(
         context.locale(),
         status,
         scan_id,
         roots,
-        entries,
-        aggregates,
+        Vec::new(),
+        size_unit,
+        sort,
     ) {
         Ok(model) => model,
         Err(error) => {
-            println!("{human_output}");
             eprintln!("interactive browser setup failed: {error}");
             return ProcessExitCode::from(8);
         }
     };
     let browser_result = run_live_browser_with_detail_rescan(model, provider);
-    // The browser restores the terminal before returning, so this report
-    // remains visible even though the interactive view used the alternate
-    // screen.
-    println!("{human_output}");
     match browser_result {
         Ok(BrowserExit::TrashSelected { entry }) => {
             trash_command::run_tui_trash(&entry, context.locale())
@@ -538,8 +959,102 @@ fn state_error_exit_code(error: &StateError) -> u8 {
 fn normalize_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {
     raw_roots
         .iter()
-        .map(|raw| validate_absolute_root(raw.as_os_str()))
+        .map(|raw| expand_scan_root(raw.as_os_str()))
+        .map(|path| validate_absolute_root(path.as_os_str()))
         .collect()
+}
+
+/// Expands only the CLI conveniences users expect. It deliberately does not canonicalize or
+/// resolve symlinks; the platform scanner still performs the authoritative no-follow admission.
+fn expand_scan_root(raw: &std::ffi::OsStr) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return path;
+    }
+    if path == Path::new("~") {
+        return user_home_dir().unwrap_or(path);
+    }
+    if let Ok(suffix) = path.strip_prefix("~")
+        && !suffix.as_os_str().is_empty()
+        && let Some(home) = user_home_dir()
+    {
+        return home.join(suffix);
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .unwrap_or(path)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// Terminal-only heartbeat. It reports elapsed work rather than inventing a percentage, because
+/// filesystem traversal cannot know the final item count before it has discovered the tree.
+struct ScanProgress {
+    stop: Option<mpsc::Sender<()>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ScanProgress {
+    fn start(locale: sweepx_i18n::Locale, root_count: usize, tui: bool, enabled: bool) -> Self {
+        if !enabled || !std::io::stderr().is_terminal() {
+            return Self {
+                stop: None,
+                worker: None,
+            };
+        }
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let started = Instant::now();
+            eprintln!(
+                "{}",
+                match (locale, tui) {
+                    (sweepx_i18n::Locale::ZhCn, true) => {
+                        format!("正在准备 TUI：先扫描 {root_count} 个根目录的当前层…")
+                    }
+                    (sweepx_i18n::Locale::ZhCn, false) => {
+                        format!("正在扫描 {root_count} 个根目录…")
+                    }
+                    (sweepx_i18n::Locale::EnUs, true) => {
+                        format!(
+                            "Preparing TUI by scanning the current level of {root_count} root(s)…"
+                        )
+                    }
+                    (sweepx_i18n::Locale::EnUs, false) => {
+                        format!("Scanning {root_count} root(s)…")
+                    }
+                }
+            );
+            loop {
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => eprintln!(
+                        "{}",
+                        match locale {
+                            sweepx_i18n::Locale::ZhCn => {
+                                format!("仍在扫描… {:.1}s", started.elapsed().as_secs_f64())
+                            }
+                            sweepx_i18n::Locale::EnUs => {
+                                format!("Still scanning… {:.1}s", started.elapsed().as_secs_f64())
+                            }
+                        }
+                    ),
+                }
+            }
+        });
+        Self {
+            stop: Some(tx),
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) {
+        self.stop.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {
@@ -568,10 +1083,24 @@ fn default_full_scan_roots() -> Vec<PathBuf> {
     }
 }
 
-fn print_output(context: &CoreContext, format: OutputFormat, result: &RenderedResult) {
+fn print_output(
+    context: &CoreContext,
+    format: OutputFormat,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
+    result: &RenderedResult,
+) {
     match format {
         OutputFormat::Human => {
-            println!("{}", render_human_output(context, result.output()));
+            println!(
+                "{}",
+                sweepx_core::render_human_output_with_size_unit(
+                    context,
+                    result.output(),
+                    size_unit,
+                    sort,
+                )
+            );
         }
         OutputFormat::Json => {
             println!("{}", serialize_json(result.output()));
@@ -663,9 +1192,20 @@ mod tests {
     }
 
     #[test]
-    fn absolute_root_validation_is_enforced() {
-        let relative = OsString::from("relative");
-        assert!(normalize_roots(&[relative]).is_err());
+    fn relative_scan_root_resolves_against_current_directory() {
+        let resolved = normalize_roots(&[OsString::from("relative")]).unwrap();
+        assert_eq!(
+            resolved,
+            vec![std::env::current_dir().unwrap().join("relative")]
+        );
+    }
+
+    #[test]
+    fn tilde_scan_root_expands_to_home() {
+        let Some(home) = user_home_dir() else {
+            return;
+        };
+        assert_eq!(normalize_roots(&[OsString::from("~")]).unwrap(), vec![home]);
     }
 
     #[test]
@@ -753,6 +1293,19 @@ mod tests {
         let resolved = normalize_scan_roots(&roots).unwrap();
         assert!(!resolved.is_empty());
         assert!(resolved.iter().all(|root| root.is_absolute()));
+    }
+
+    #[test]
+    fn human_size_unit_aliases_parse() {
+        let cli = Cli::try_parse_from(["sweepx", "--unit", "mb", "scan", "."]).unwrap();
+        assert_eq!(cli.unit, UnitArg::Mib);
+    }
+
+    #[test]
+    fn embedded_project_junk_rules_are_bounded_and_validated() {
+        let rules = load_project_junk_rules().unwrap();
+        assert!(rules.len() >= 5);
+        assert!(rules.iter().all(|rule| !rule.references.is_empty()));
     }
 
     #[test]

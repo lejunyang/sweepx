@@ -58,7 +58,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["summary"]["commandCount"], "10");
+    assert_eq!(json["summary"]["commandCount"], "11");
     assert_eq!(json["summary"]["capabilityCount"], "40");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert_eq!(
@@ -109,6 +109,9 @@ fn capabilities_json_uses_fixed_machine_keys() {
         "degraded"
     };
     assert_eq!(cache_status["state"], expected_cache_status_state);
+    let junk = commands.iter().find(|item| item["id"] == "junk").unwrap();
+    assert_eq!(junk["state"], "degraded");
+    assert_eq!(junk["mutating"], false);
     let linux_scan = json["data"]["capabilities"]
         .as_array()
         .unwrap()
@@ -676,6 +679,47 @@ fn trash_rejects_relative_paths_without_changing_them() {
     let mut cmd = cli_command();
     cmd.arg("trash").arg("relative.txt");
     cmd.assert().code(8);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn junk_scan_reports_only_marker_bound_project_artifacts() {
+    let fixture = TempDir::new().unwrap();
+    fs::write(
+        fixture.path().join("Cargo.toml"),
+        b"[workspace]\nmembers=[]\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.path().join("target")).unwrap();
+    fs::create_dir_all(fixture.path().join("vendor/package/dist")).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg(fixture.path());
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidates = json["candidates"].as_array().unwrap();
+    assert!(candidates.iter().any(|candidate| {
+        candidate["ruleId"] == "rust.target"
+            && candidate["path"] == fixture.path().join("target").display().to_string()
+    }));
+    assert!(candidates.iter().all(|candidate| {
+        candidate["path"]
+            != fixture
+                .path()
+                .join("vendor/package/dist")
+                .display()
+                .to_string()
+    }));
+    let target = candidates
+        .iter()
+        .find(|candidate| candidate["ruleId"] == "rust.target")
+        .unwrap();
+    assert_eq!(target["reclaimable"]["state"], "known");
+    assert!(target["reclaimable"].get("value").is_some());
+    assert_eq!(json["incompleteSizeCount"], 0);
 }
 
 #[test]

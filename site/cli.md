@@ -4,7 +4,7 @@ title: CLI 与只读扫描
 
 # CLI 与只读扫描
 
-当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cache`、`cleaner`、`trash` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览。
+当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`junk`、`explain`、`status`、`cancel`、`cache`、`cleaner`、`trash` 和 `capabilities`；`scan --tui` 在根目录准入后立即进入交互浏览，并在后台渐进扫描。
 
 > [!CAUTION]
 > `trash` 是 development preview：只移到系统回收站，默认确认并在提交前重验；没有 Permanent fallback。`plan`、`approve`、`execute`、Permanent 和 `--dangerously-delete` 仍只是路线图提案。
@@ -24,6 +24,8 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 |---|---|
 | `--format human|json|ndjson` | 选择展示或机器输出；默认 `human`；当前 scan 拒绝 `ndjson` |
 | `--locale zh-CN|en-US` | 覆盖自动检测的语言 |
+| `--unit auto|b|kib|mib|gib|tib` | human/TUI 大小单位；`kb/mb/gb/tb` 可作别名 |
+| `--sort size|path` | human/TUI 排序；默认大小降序 |
 | `--state-dir ABSOLUTE_DIR` | Linux 上指定 SQLite journal 目录，macOS 上指定 legacy snapshot 目录；Windows durable state 禁用、默认 `state_dir=None`，且显式指定失败关闭 |
 | `scan --no-state` | 跳过 Linux journal 或 macOS legacy snapshot 写入；适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描；不能与 `--state-dir` 同时使用 |
 
@@ -60,7 +62,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
-- 不传根路径时扫描当前平台文件系统根；也可以传入一个或多个绝对根。
+- 不传根路径时扫描当前平台文件系统根；也可以传入相对路径、`~` 或一个或多个绝对根。
 - 默认直接向终端输出有界的 40 行文件表；不要求 JSON 文件。
 - 扫描同步运行，metadata-only、no-follow，并把挂载/链接/资源边界与错误写进结果。
 - 当前 Linux capability 是 `degraded`，不是发布资格。
@@ -145,6 +147,15 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` 展示 package 与兼容性。`show` 只有在 Core 版本范围匹配时才展示完整 manifest/rules；不兼容时使用专门的兼容性错误退出。两者都不执行规则指向的文件动作。详见 [Cleaner 概念](/cleaners)。
 
+统一垃圾识别入口已经可用：
+
+```bash
+sweepx junk ~/Projects
+sweepx --format json junk .
+```
+
+当前首批规则只覆盖明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。它只报告候选、规则 ID、风险和可回收估算，不自动删除。
+
 ## 文件管理器式 TUI 与回收站预览
 
 ```bash
@@ -153,9 +164,9 @@ cargo run -p sweepx-cli -- --locale zh-CN \
 cargo run -p sweepx-cli -- trash /absolute/path/to/item
 ```
 
-TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`d` / `Delete` 选择移到系统回收站，`q` 或 `Ctrl-C` 退出。回收站动作会先退出全屏，再要求确认并重验扫描身份；symlink 和 reparse point 不可操作。
+TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。单根会自动进入；多根先展示虚拟根。`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`d` / `Delete` 选择移到系统回收站，`q` 或 `Ctrl-C` 退出。回收站动作会先退出全屏，再要求确认并重验扫描身份；symlink 和 reparse point 不可操作。
 
-`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。Windows 不创建默认 state，显式 `--state-dir` 失败关闭。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。目录 detail rescan 以 single-flight 后台任务运行：query deadline 为 2 秒，导航或退出不会等待非协作 worker，超时后的 late result 会丢弃，并由 process-wide 32 stuck-worker cap 限制脱落线程。
+`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录的递归大小随后在后台回填，后代不作为列表行长期保存。目录 detail rescan 以 single-flight 后台任务运行：query deadline 为 30 秒，导航或退出不会等待非协作 worker。
 
 ## 当前不存在的命令
 
