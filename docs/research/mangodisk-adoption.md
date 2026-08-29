@@ -107,6 +107,10 @@ their reference domains without copying upstream path or execution definitions. 
 reachability check on 2026-08-30 found
 144 of 152 unique URLs returning HTTP 200/206; six returned 403, one returned 451 after redirect,
 and one Electron Builder URL returned 404. Reachability does not establish cleanup safety.
+The snapshot also distinguishes exact named-rule adoption from incidental coverage by SweepX's
+coarse platform cache roots: 35 upstream rules are wholly inside those report roots, 31 are only
+partly inside, and 139 are not covered. None is marked as an exact adopted rule merely because a
+broader read-only report contains the same directory.
 
 The 135/55 split is a deterministic URL-path triage heuristic, not a content review result. The
 implementation-versus-native-test boundary for NTFS layout, USN, macOS bulk enumeration, and

@@ -176,6 +176,26 @@ jobs:
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
+      - name: Probe Windows NTFS acceleration read-only path
+        if: matrix.capability_os == 'windows'
+        shell: pwsh
+        run: |
+          $env:SWEEPX_RUN_NATIVE_NTFS_PROBE = "1"
+          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows native_ntfs_probe -- --ignored --nocapture
+      - name: Exercise macOS bulk directory enumeration
+        if: matrix.capability_os == 'macos'
+        run: >-
+          cargo test --locked --target ${{ matrix.target }}
+          --package sweepx-platform-macos
+          enumerate_children_uses_opened_dir_and_enforces_limits
+      - name: Benchmark macOS bulk directory enumeration smoke
+        if: matrix.capability_os == 'macos'
+        env:
+          SWEEPX_RUN_NATIVE_MACOS_BULK_BENCH: "1"
+        run: >-
+          cargo test --locked --target ${{ matrix.target }}
+          --package sweepx-platform-macos
+          native_bulk_enumeration_benchmark_smoke -- --ignored --nocapture
       - name: Test macOS cache status natively
         if: matrix.capability_os == 'macos'
         run: |

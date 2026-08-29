@@ -5,6 +5,15 @@ use sweepx_platform::{
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
 
+mod ntfs_acceleration;
+pub use ntfs_acceleration::{
+    FILE_LAYOUT_PAGE_BYTES, FileLayoutDataStream, FileLayoutName, FileLayoutRecord,
+    MAX_FILE_LAYOUT_RECORDS, MAX_NATIVE_PAGES, MAX_USN_RECORDS, NtfsAccelerationFallback,
+    NtfsAccelerationProbe, USN_V2_FIXED_BYTES, UsnCacheMissReason, UsnCursorDecision,
+    UsnJournalBounds, UsnV2Record, parse_file_layout_page, parse_usn_v2_page,
+    probe_ntfs_acceleration, validate_usn_cursor,
+};
+
 #[derive(Debug, Default, Clone)]
 pub struct WindowsPlatformScanner;
 

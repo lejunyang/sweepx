@@ -3,6 +3,8 @@ use sweepx_platform::{
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
 #[cfg(target_os = "macos")]
+mod bulk_directory;
+#[cfg(target_os = "macos")]
 use sweepx_platform::{DirectoryHandleAdmission, OpenedDirectory};
 
 #[derive(Debug)]
@@ -37,6 +39,7 @@ mod backend {
         RegularFileReadExpectation, fingerprint_for, known_count, known_u128, unknown_u128,
     };
 
+    use super::bulk_directory::{BulkDirectoryCursor, unsupported as bulk_unsupported};
     use super::*;
 
     const REGULAR_FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
@@ -86,6 +89,14 @@ mod backend {
         identity: ObjectIdentity,
         mount_identity: MountIdentity,
         pending: Option<DirectoryEntryRecord>,
+        enumeration: DirectoryEnumeration,
+    }
+
+    #[derive(Debug)]
+    enum DirectoryEnumeration {
+        Bulk(BulkDirectoryCursor),
+        Readdir,
+        Exhausted,
     }
 
     // SAFETY: the handle is moved, never shared concurrently, and all directory operations take
@@ -255,6 +266,81 @@ mod backend {
             Ok(fd)
         }
 
+        fn next_directory_record(
+            directory: &mut OpenDirectory,
+            cancel: &CancellationToken,
+        ) -> Result<Option<DirectoryEntryRecord>, PlatformError> {
+            loop {
+                Self::ensure_not_cancelled(cancel)?;
+                let parent = directory.path.clone();
+                let fd = Self::dirfd(directory)
+                    .map_err(|error| PlatformError::io(parent.clone(), error))?;
+                match &mut directory.enumeration {
+                    DirectoryEnumeration::Bulk(cursor) => {
+                        if let Some(name) = cursor.pop() {
+                            return DirectoryEntryRecord::from_parent_and_name(&parent, name)
+                                .map(Some)
+                                .map_err(|error| PlatformError::InvalidDirectoryEntry {
+                                    parent,
+                                    detail: error.to_string(),
+                                });
+                        }
+                        match cursor.read_page(fd) {
+                            Ok(true) => continue,
+                            Ok(false) => {
+                                directory.enumeration = DirectoryEnumeration::Exhausted;
+                                return Ok(None);
+                            }
+                            Err(error) if cursor.can_fallback() && bulk_unsupported(&error) => {
+                                // Unsupported filesystems may reject getattrlistbulk. Rewind before
+                                // falling back so an implementation that touched the cursor cannot
+                                // silently omit entries. A failure after any accepted bulk page is
+                                // not restartable without duplicate/absence ambiguity and fails.
+                                unsafe { libc::rewinddir(directory.stream) };
+                                directory.enumeration = DirectoryEnumeration::Readdir;
+                            }
+                            Err(error) => return Err(PlatformError::io(parent, error)),
+                        }
+                    }
+                    DirectoryEnumeration::Readdir => loop {
+                        // SAFETY: `__error` returns a valid thread-local errno pointer on macOS.
+                        unsafe { *libc::__error() = 0 };
+                        // SAFETY: `directory.stream` is valid and exclusively owned here.
+                        let entry = unsafe { libc::readdir(directory.stream) };
+                        if entry.is_null() {
+                            // SAFETY: `__error` returns a valid thread-local errno pointer.
+                            let errno = unsafe { *libc::__error() };
+                            if errno == 0 {
+                                directory.enumeration = DirectoryEnumeration::Exhausted;
+                                return Ok(None);
+                            }
+                            return Err(PlatformError::io(
+                                parent,
+                                io::Error::from_raw_os_error(errno),
+                            ));
+                        }
+                        // SAFETY: the returned dirent remains valid until the next readdir call.
+                        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+                        if name == b"." || name == b".." {
+                            continue;
+                        }
+                        return DirectoryEntryRecord::from_parent_and_name(
+                            &parent,
+                            NativeName::unix(name.to_vec()),
+                        )
+                        .map(Some)
+                        .map_err(|error| {
+                            PlatformError::InvalidDirectoryEntry {
+                                parent,
+                                detail: error.to_string(),
+                            }
+                        });
+                    },
+                    DirectoryEnumeration::Exhausted => return Ok(None),
+                }
+            }
+        }
+
         fn open_directory_from_fd(fd: OwnedFd, path: PathBuf) -> Result<OpenDirectory, io::Error> {
             let observed = Self::fstat(&fd)?;
             let identity = observed.identity();
@@ -280,6 +366,7 @@ mod backend {
                 identity,
                 mount_identity,
                 pending: None,
+                enumeration: DirectoryEnumeration::Bulk(BulkDirectoryCursor::new()),
             })
         }
 
@@ -780,38 +867,10 @@ mod backend {
                 let child = if let Some(child) = directory.pending.take() {
                     child
                 } else {
-                    loop {
-                        // SAFETY: `__error` returns a valid thread-local errno pointer on macOS.
-                        unsafe { *libc::__error() = 0 };
-                        // SAFETY: `directory.stream` is valid and owned for the loop duration.
-                        let entry = unsafe { libc::readdir(directory.stream) };
-                        if entry.is_null() {
-                            // SAFETY: `__error` returns a valid thread-local errno pointer.
-                            let errno = unsafe { *libc::__error() };
-                            if errno == 0 {
-                                return Ok(DirectoryEntryBatch::complete(entries));
-                            }
-                            return Err(PlatformError::io(
-                                directory.path.clone(),
-                                io::Error::from_raw_os_error(errno),
-                            ));
-                        }
-                        // SAFETY: the returned dirent remains valid until the next call.
-                        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-                        if name == b"." || name == b".." {
-                            continue;
-                        }
-                        break DirectoryEntryRecord::from_parent_and_name(
-                            &directory.path,
-                            NativeName::unix(name.to_vec()),
-                        )
-                        .map_err(|error| {
-                            PlatformError::InvalidDirectoryEntry {
-                                parent: directory.path.clone(),
-                                detail: error.to_string(),
-                            }
-                        })?;
-                    }
+                    let Some(child) = Self::next_directory_record(directory, cancel)? else {
+                        return Ok(DirectoryEntryBatch::complete(entries));
+                    };
+                    child
                 };
                 let entry_cost = child.estimated_retained_bytes().ok_or_else(|| {
                     PlatformError::ResourceLimit(format!(
@@ -1278,6 +1337,48 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, PlatformError::ResourceLimit(_)));
+    }
+
+    #[test]
+    #[ignore = "requires an explicit native macOS benchmark run"]
+    fn native_bulk_enumeration_benchmark_smoke() {
+        if std::env::var_os("SWEEPX_RUN_NATIVE_MACOS_BULK_BENCH").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        let temp = TempDir::new("bulk-benchmark");
+        for index in 0..4096 {
+            fs::write(temp.path().join(format!("entry-{index:04}")), b"x").unwrap();
+        }
+        let scanner = MacosPlatformScanner::new();
+        let mut admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path().to_path_buf()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut count = 0usize;
+        loop {
+            let page = scanner
+                .enumerate_children(
+                    &mut admission.directory,
+                    &CancellationToken::new(),
+                    DirectoryReadLimits {
+                        max_batch_entries: 512,
+                        max_batch_bytes: 1024 * 1024,
+                    },
+                )
+                .unwrap();
+            count += page.entries.len();
+            if page.end_of_directory {
+                break;
+            }
+        }
+        assert_eq!(count, 4096);
+        eprintln!(
+            "sweepx_macos_bulk_smoke entries={count} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
     }
 
     #[test]

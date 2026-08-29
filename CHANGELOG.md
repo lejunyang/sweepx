@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS, and Windows user-cache roots.
 - A reproducible, non-copying MangoDisk rule-reference audit and a native qualification matrix for
   NTFS layout, USN change tokens, macOS bulk enumeration, and device-aware concurrency.
+- A macOS `getattrlistbulk` directory-name fast path with first-page-only `readdir` fallback, plus
+  bounded NTFS layout/USN parsers and a read-only Windows native qualification probe.
 - Chinese and English human-facing output with stable machine-readable output.
 - Built-in Cleaner schema, deterministic rule VM, catalog, compatibility
   checks, and initial Cargo-target and Chromium cache metadata.

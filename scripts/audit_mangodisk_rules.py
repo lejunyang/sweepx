@@ -61,6 +61,31 @@ def source_tier(references: list[str]) -> str:
     return "identity_or_lead_only"
 
 
+def sweepx_coverage(platform: str, roots: list[object]) -> str:
+    templates = [
+        root.get("template", "")
+        for root in roots
+        if isinstance(root, dict) and isinstance(root.get("template", ""), str)
+    ]
+    if not templates:
+        return "not_covered"
+    if platform == "macos":
+        matched = [template.startswith("${user_library}/Caches/") for template in templates]
+    elif platform == "windows":
+        matched = []
+        for template in templates:
+            prefix = "${local_app_data}/Packages/"
+            parts = template.removeprefix(prefix).split("/") if template.startswith(prefix) else []
+            matched.append(len(parts) == 2 and parts[-1] in {"LocalCache", "TempState"})
+    else:
+        matched = [False for _ in templates]
+    if all(matched):
+        return "covered_by_coarse_platform_rule"
+    if any(matched):
+        return "partially_covered_by_coarse_platform_rule"
+    return "not_covered"
+
+
 def load_rows(root: Path, redact_urls: bool) -> list[dict[str, str | int]]:
     if not root.is_dir():
         raise ValueError(f"rules root is not a directory: {root}")
@@ -94,6 +119,7 @@ def load_rows(root: Path, redact_urls: bool) -> list[dict[str, str | int]]:
                 "reference_domains": ";".join(domains),
                 "reference_urls": "" if redact_urls else ";".join(references),
                 "source_tier": source_tier(references),
+                "sweepx_coverage": sweepx_coverage(platform, document.get("roots", [])),
             }
         )
     return rows

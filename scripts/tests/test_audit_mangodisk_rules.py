@@ -51,6 +51,9 @@ references = []
                 [row["source_tier"] for row in rows],
                 ["documentation_candidate", "missing_reference"],
             )
+            self.assertTrue(
+                all(row["sweepx_coverage"] == "not_covered" for row in rows)
+            )
             serialized = output.read_text(encoding="utf-8")
             self.assertNotIn("SecretCache", serialized)
             self.assertNotIn("cache-folder", serialized)

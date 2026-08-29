@@ -10,6 +10,22 @@ on any development host from claims that require the target operating system and
 | macOS bulk directory reader | Buffer parser, attribute validation, page limits, fallback contract | Real APFS/HFS+ `getattrlistbulk`; permission denial, package/dataless files, symlinks, mount boundaries, cancellation, malformed/truncated attributes | Intel and Apple Silicon; local SSD plus removable/network volumes; compare syscall count and wall time against current handle-bound path | Existing `readdir` plus no-follow handle-relative inspection; unsupported attributes never become invented metadata |
 | Device-aware concurrency | Stable enum and scheduling policy, conservative unknown behavior, deterministic scheduler tests | Windows Storage property/drive classification and macOS IOKit media classification on native hosts | At least SSD/HDD/removable/network samples; retain a benchmark only when it beats the conservative baseline without tail-latency regression | Unknown, remote, removable, or probe failure uses one worker; no inference from a path label |
 
+## Current implementation state
+
+- macOS `sweepx-platform-macos` now uses a 64 KiB aligned `getattrlistbulk` name page for directory
+  enumeration. It accepts only checked, NUL-terminated native names, keeps the existing no-follow
+  handle-relative metadata inspection as authority, and falls back to `readdir` only when the first
+  bulk call reports a documented unsupported condition. Failure after an accepted page fails closed
+  instead of restarting and risking duplicates or omissions. Native macOS CI exercises the path.
+- Windows `sweepx-platform-windows` now has independent bounded parsers for
+  `QUERY_FILE_LAYOUT_OUTPUT` and USN v2 pages, a fail-closed USN cursor validator, and a read-only
+  native probe that opens an NTFS volume, queries the journal, and consumes bounded layout pages.
+  The ordinary scanner remains authoritative while path reconstruction and complete semantic parity
+  are unfinished. Native Windows CI runs the ignored probe explicitly and accepts only an available
+  result or one of the enumerated safe fallbacks.
+- Device classification and adaptive scheduling are not yet implemented. SweepX retains its
+  existing bounded four-worker default until the native probes and physical-device benchmarks exist.
+
 ## Gate meanings
 
 - Cross-compilation proves that conditional code type-checks; it does not prove kernel ABI behavior.
