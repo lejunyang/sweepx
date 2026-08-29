@@ -200,6 +200,8 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - [文档站点](site/index.md)：中文默认入口与英文镜像内容。
 - [总体设计](DESIGN.md)：端到端架构、信任边界与关键决策。
 - [Cleaner Catalog](docs/CLEANER-CATALOG.md)：生态证据、风险与 report-only 边界。
+- [MangoDisk 采用决策](docs/research/mangodisk-adoption.md)：规则来源审计、许可证边界与 Linux 策略。
+- [原生扫描加速验收矩阵](docs/research/native-scan-qualification.md)：可先实现项与 Windows/macOS 真机门槛。
 - [路线图](docs/ROADMAP.md)：当前实现快照、阶段目标、测试矩阵与发布门槛。
 - [发布指南](RELEASING.md)：版本、提交消息门禁、token、产物与失败恢复。
 - [扫描/缓存架构](docs/architecture/scanner-and-cache.md)、[安全删除架构](docs/architecture/safety-and-deletion.md)与[CLI/TUI/Cleaner 架构](docs/architecture/cli-tui-and-plugins.md)。

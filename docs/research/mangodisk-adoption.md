@@ -91,3 +91,23 @@ rebuild evidence, explicit preserved-data boundary, platform/version scope, cont
 no-follow identity-safe scanner fixture, real-system verification date, and a conservative risk and
 default-selection decision. Execution remains separately gated by immutable planning, approval,
 live revalidation, and platform qualification.
+
+## Reproducible upstream reference audit
+
+`scripts/audit_mangodisk_rules.py <MangoDisk rules/filesystem> --csv <output.csv> --redact-urls` reads only rule
+IDs, platform/category labels, and reference URLs. It intentionally does not export roots, matchers,
+execution policy, or evidence prose. Against the pinned 2026-08-29 snapshot it found 205 rules and
+318 references: 135 rules have at least one URL whose target looks like cache/storage/cleanup
+documentation, 55 have references that are only identity or research leads pending manual review,
+and 15 have no reference at all. These are triage buckets, not safety verdicts. Every candidate still
+requires manual reading of the source and native verification under the intake gate above.
+The checked-in [triage snapshot](mangodisk-rule-source-audit.csv) preserves those 205 rule IDs and
+their reference domains without copying upstream path or execution definitions. Omitting
+`--redact-urls` from a local audit retains complete public reference URLs for reviewers. A
+reachability check on 2026-08-30 found
+144 of 152 unique URLs returning HTTP 200/206; six returned 403, one returned 451 after redirect,
+and one Electron Builder URL returned 404. Reachability does not establish cleanup safety.
+
+The 135/55 split is a deterministic URL-path triage heuristic, not a content review result. The
+implementation-versus-native-test boundary for NTFS layout, USN, macOS bulk enumeration, and
+device-aware concurrency is tracked in [the native qualification matrix](native-scan-qualification.md).
