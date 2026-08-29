@@ -1151,6 +1151,161 @@ const resultSchemaCases = [
     }
   },
   {
+    name: "cargo detect unmodeled CLI target-dir requires its blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cli.targetDir = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+    }
+  },
+  {
+    name: "cargo detect failed CLI config overrides require their blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cli.configOverrides = {
+        state: "failed",
+        reasonCode: "config_read_failed"
+      };
+    }
+  },
+  {
+    name: "cargo detect rejects raw CLI target-dir values",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cli.targetDir.value =
+        "/private/target";
+    }
+  },
+  {
+    name: "cargo detect rejects raw CLI config override values",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cli.configOverrides.values = [
+        "build.target-dir='/private/target'"
+      ];
+    }
+  },
+  {
+    name: "cargo detect rejects stale CLI blockers for absent CLI sources",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers.push(
+        "cli_target_dir_not_checked"
+      );
+    }
+  },
+  {
+    name: "cargo detect unmodeled CLI sources remain report only",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cli.targetDir = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+      scope.cli.configOverrides = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+      scope.blockers.push("cli_config_overrides_not_checked");
+      scope.blockers.push("cli_target_dir_not_checked");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect path-matched cwd requires identity blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const blockers = output.data.hints[0].evidence.cargo.configScope.blockers;
+      blockers.splice(blockers.indexOf("invocation_cwd_identity_not_bound"), 1);
+    }
+  },
+  {
+    name: "cargo detect path-matched cwd rejects stale cwd blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers.push(
+        "invocation_cwd_not_bound"
+      );
+    }
+  },
+  {
+    name: "cargo detect rejects an object-bound cwd claim",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.invocationCwd = {
+        state: "bound_to_workspace_root"
+      };
+    }
+  },
+  {
+    name: "cargo detect unbound cwd requires its blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.invocationCwd = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+    }
+  },
+  {
+    name: "cargo detect unbound cwd remains report only",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.invocationCwd = {
+        state: "not_checked",
+        reasonCode: "config_scope_not_checked"
+      };
+      scope.blockers.splice(
+        scope.blockers.indexOf("invocation_cwd_identity_not_bound"),
+        1
+      );
+      scope.blockers.push("invocation_cwd_not_bound");
+    }
+  },
+  {
+    name: "cargo detect failed cwd requires its blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.invocationCwd = {
+        state: "failed",
+        reasonCode: "missing_identity"
+      };
+    }
+  },
+  {
+    name: "cargo detect failed cwd remains report only",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.invocationCwd = {
+        state: "failed",
+        reasonCode: "missing_identity"
+      };
+      scope.blockers.splice(
+        scope.blockers.indexOf("invocation_cwd_identity_not_bound"),
+        1
+      );
+      scope.blockers.push("invocation_cwd_binding_failed");
+    }
+  },
+  {
     name: "cargo detect rejects unknown config-scope blockers",
     file: "sweepx.output.cargo-detect.result.example.json",
     expected: false,
@@ -1173,7 +1328,7 @@ const resultSchemaCases = [
     expected: false,
     mutate(output) {
       output.data.hints[0].evidence.cargo.configScope.blockers = Array.from(
-        { length: 24 },
+        { length: 25 },
         (_, index) => `blocker_${index}`
       );
     }
@@ -1346,9 +1501,7 @@ const resultSchemaCases = [
         "ancestor_configs_not_checked",
         "cargo_home_config_not_checked",
         "cargo_target_dir_present_redacted",
-        "cli_config_overrides_not_checked",
-        "cli_target_dir_not_checked",
-        "invocation_cwd_not_bound",
+        "invocation_cwd_identity_not_bound",
         "workspace_config_not_checked",
         "workspace_config_pair_failed"
       ];

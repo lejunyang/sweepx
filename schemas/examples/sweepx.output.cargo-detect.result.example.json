@@ -132,26 +132,21 @@
               },
               "cli": {
                 "targetDir": {
-                  "state": "not_checked",
-                  "reasonCode": "config_scope_not_checked"
+                  "state": "verified_absent"
                 },
                 "configOverrides": {
-                  "state": "not_checked",
-                  "reasonCode": "config_scope_not_checked"
+                  "state": "verified_absent"
                 }
               },
               "invocationCwd": {
-                "state": "not_checked",
-                "reasonCode": "config_scope_not_checked"
+                "state": "path_matches_revalidated_workspace_root"
               },
               "precedenceComplete": false,
               "blockers": [
                 "ancestor_configs_not_checked",
                 "cargo_home_config_not_checked",
                 "cargo_target_dir_present_redacted",
-                "cli_config_overrides_not_checked",
-                "cli_target_dir_not_checked",
-                "invocation_cwd_not_bound",
+                "invocation_cwd_identity_not_bound",
                 "workspace_config_pair_not_stable"
               ]
             },

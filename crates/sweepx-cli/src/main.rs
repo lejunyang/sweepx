@@ -11,12 +11,12 @@ use sweepx_core::cache_status_unsupported;
 #[cfg(unix)]
 use sweepx_core::{CacheStatusRequest, cache_status, cache_status_state_error};
 use sweepx_core::{
-    CancelRequest, CancellationToken, CleanerCargoDetectRequest, CleanerShowRequest, CoreContext,
-    ExplainRequest, OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError,
-    StatusRequest, cache_status_usage_error, cancel_with_store, capabilities,
-    cleaner_cargo_detect_with_cancel, cleaner_list, cleaner_show, core_error_exit_code,
-    durable_store, explain_from_scan_json, parse_locale_override, render_human_output,
-    scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
+    CancelRequest, CancellationToken, CleanerCargoDetectInvocation, CleanerCargoDetectRequest,
+    CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE,
+    ScanRequest, StateError, StatusRequest, cache_status_usage_error, cancel_with_store,
+    capabilities, cleaner_cargo_detect_with_invocation_and_cancel, cleaner_list, cleaner_show,
+    core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
+    render_human_output, scan_ndjson_supported, scan_with_store, serialize_json, serialize_ndjson,
     state_dir_from_explicit_or_default, status_with_store, tui_detail_rescan_provider,
     usage_error_output, validate_absolute_root,
 };
@@ -334,9 +334,10 @@ fn main() -> ProcessExitCode {
                     }
                 };
                 let cancel = CancellationToken::new();
-                cleaner_cargo_detect_with_cancel(
+                cleaner_cargo_detect_with_invocation_and_cancel(
                     &context,
-                    &CleanerCargoDetectRequest { roots },
+                    &CleanerCargoDetectRequest::new(roots),
+                    &CleanerCargoDetectInvocation::without_cargo_cli_overrides(),
                     &cancel,
                 )
                 .map(RenderedResult::Cleaner)
@@ -650,6 +651,28 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["sweepx", "delete"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "sweepx",
+                "cleaner",
+                "cargo-detect",
+                "--target-dir",
+                "/tmp/target",
+                "/tmp/workspace",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "sweepx",
+                "cleaner",
+                "cargo-detect",
+                "--config",
+                "build.target-dir='/tmp/target'",
+                "/tmp/workspace",
+            ])
+            .is_err()
+        );
         assert!(matches!(
             Cli::try_parse_from(["sweepx", "scan", "--tui", "/tmp"]),
             Ok(Cli {

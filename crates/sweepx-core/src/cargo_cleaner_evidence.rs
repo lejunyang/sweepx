@@ -17,7 +17,8 @@ use sweepx_model::{
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::{
     CargoConfigMemberObservation, CargoConfigPairConsistency, CargoConfigPairObservation,
-    LocatorBatchReadRequest, LocatorFileRead, LocatorFileRequest, LocatorReadError,
+    LocatorBatchReadRequest, LocatorDirectoryComparison, LocatorDirectoryComparisonFailure,
+    LocatorDirectoryIdentity, LocatorFileRead, LocatorFileRequest, LocatorReadError,
     LocatorReadFailure, LocatorReadLimits, LocatorReader, ProgressEvent, ScanSummary,
 };
 
@@ -234,6 +235,94 @@ impl CargoConfigScopeRuntime {
     }
 }
 
+/// Process invocation facts that are common to every layout considered by one detector call.
+/// The SweepX CLI `cargo-detect` surface has no Cargo `--target-dir` or `--config` options, so that
+/// frontend can attest those sources are structurally absent. The cwd path and object identity
+/// are captured privately and never serialized. Because SweepX does not retain the process cwd
+/// object itself, a successful comparison remains a path-match observation rather than an
+/// authority binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CargoInvocationContext {
+    runtime: CargoConfigScopeRuntime,
+    cwd: Result<LocatorDirectoryIdentity, CargoEvidenceReason>,
+    cli_overrides_absent: bool,
+}
+
+impl CargoInvocationContext {
+    pub(crate) fn capture_for_sweepx_cli<P: PlatformScanner>(
+        runtime: CargoConfigScopeRuntime,
+        reader: &LocatorReader<P>,
+        cancel: &CancellationToken,
+    ) -> Self {
+        Self::capture(runtime, true, reader, cancel)
+    }
+
+    pub(crate) fn capture_for_unmodeled_caller<P: PlatformScanner>(
+        runtime: CargoConfigScopeRuntime,
+        reader: &LocatorReader<P>,
+        cancel: &CancellationToken,
+    ) -> Self {
+        Self::capture(runtime, false, reader, cancel)
+    }
+
+    fn capture<P: PlatformScanner>(
+        runtime: CargoConfigScopeRuntime,
+        cli_overrides_absent: bool,
+        reader: &LocatorReader<P>,
+        cancel: &CancellationToken,
+    ) -> Self {
+        let cwd = std::env::current_dir()
+            .map_err(|_| CargoEvidenceReason::MissingIdentity)
+            .and_then(|path| capture_directory_identity(reader, &path, cancel));
+        Self {
+            runtime,
+            cwd,
+            cli_overrides_absent,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cwd_path<P: PlatformScanner>(
+        runtime: CargoConfigScopeRuntime,
+        cwd: &std::path::Path,
+        cli_overrides_absent: bool,
+        reader: &LocatorReader<P>,
+    ) -> Self {
+        Self {
+            runtime,
+            cwd: capture_directory_identity(reader, cwd, &CancellationToken::new()),
+            cli_overrides_absent,
+        }
+    }
+
+    fn unavailable(runtime: CargoConfigScopeRuntime) -> Self {
+        Self {
+            runtime,
+            cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cli_overrides_absent: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_sweepx_cli(runtime: CargoConfigScopeRuntime) -> Self {
+        Self {
+            runtime,
+            cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cli_overrides_absent: true,
+        }
+    }
+}
+
+fn capture_directory_identity<P: PlatformScanner>(
+    reader: &LocatorReader<P>,
+    path: &std::path::Path,
+    cancel: &CancellationToken,
+) -> Result<LocatorDirectoryIdentity, CargoEvidenceReason> {
+    reader
+        .capture_directory_identity(path, cancel)
+        .map_err(map_locator_batch_error)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CargoEnvironmentPresence {
@@ -263,6 +352,7 @@ enum CargoConfigExternalSourceInput {
 #[cfg_attr(not(test), allow(dead_code))]
 enum CargoInvocationCwdInput {
     BoundToWorkspaceRoot,
+    PathMatchesRevalidatedWorkspaceRoot,
     NotChecked,
     Failed(CargoEvidenceReason),
 }
@@ -286,14 +376,19 @@ struct CargoConfigScopeInputs {
 }
 
 impl CargoConfigScopeInputs {
-    const fn production(runtime: CargoConfigScopeRuntime) -> Self {
+    fn production(invocation: &CargoInvocationContext) -> Self {
+        let cli_source = if invocation.cli_overrides_absent {
+            CargoConfigExternalSourceInput::VerifiedAbsent
+        } else {
+            CargoConfigExternalSourceInput::NotChecked
+        };
         Self {
-            runtime,
+            runtime: invocation.runtime,
             workspace_pair: CargoWorkspacePairInput::NotChecked,
             ancestor_configs: CargoConfigExternalSourceInput::NotChecked,
             cargo_home_config: CargoConfigExternalSourceInput::NotChecked,
-            cli_target_dir: CargoConfigExternalSourceInput::NotChecked,
-            cli_config_overrides: CargoConfigExternalSourceInput::NotChecked,
+            cli_target_dir: cli_source,
+            cli_config_overrides: cli_source,
             invocation_cwd: CargoInvocationCwdInput::NotChecked,
         }
     }
@@ -311,8 +406,8 @@ impl Default for CargoConfigInputs<'_> {
         Self {
             config: CargoConfigFile::NotChecked,
             config_toml: CargoConfigFile::NotChecked,
-            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
-                false, false, false,
+            scope: CargoConfigScopeInputs::production(&CargoInvocationContext::unavailable(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
             )),
         }
     }
@@ -464,6 +559,7 @@ struct CargoConfigCliEvidence {
 )]
 enum CargoInvocationCwdBinding {
     BoundToWorkspaceRoot,
+    PathMatchesRevalidatedWorkspaceRoot,
     NotChecked { reason_code: CargoEvidenceReason },
     Failed { reason_code: CargoEvidenceReason },
 }
@@ -483,6 +579,7 @@ enum CargoConfigScopeBlocker {
     CliTargetDirFailed,
     CliTargetDirNotChecked,
     InvocationCwdBindingFailed,
+    InvocationCwdIdentityNotBound,
     InvocationCwdNotBound,
     WorkspaceConfigDuplicateKey,
     WorkspaceConfigIncludeUnsupported,
@@ -511,6 +608,7 @@ impl CargoConfigScopeBlocker {
             Self::CliTargetDirFailed => "cli_target_dir_failed",
             Self::CliTargetDirNotChecked => "cli_target_dir_not_checked",
             Self::InvocationCwdBindingFailed => "invocation_cwd_binding_failed",
+            Self::InvocationCwdIdentityNotBound => "invocation_cwd_identity_not_bound",
             Self::InvocationCwdNotBound => "invocation_cwd_not_bound",
             Self::WorkspaceConfigDuplicateKey => "workspace_config_duplicate_key",
             Self::WorkspaceConfigIncludeUnsupported => "workspace_config_include_unsupported",
@@ -831,35 +929,35 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
     root_entry_id: &ScanEntryId,
     manifest_entry_id: &ScanEntryId,
     target_entry_id: &ScanEntryId,
-    config_scope_runtime: CargoConfigScopeRuntime,
+    invocation: &CargoInvocationContext,
     cancel: &CancellationToken,
 ) -> CargoTypedEvidenceV1 {
     if !summary_identity_graph_is_unique_and_complete(summary) {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
-            config_scope_runtime,
+            invocation,
         );
     }
     let Some(root) = unique_root_entry(summary, root_entry_id) else {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
-            config_scope_runtime,
+            invocation,
         );
     };
     let Some(manifest) = unique_summary_entry(summary, manifest_entry_id) else {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
-            config_scope_runtime,
+            invocation,
         );
     };
     if unique_summary_entry(summary, target_entry_id).is_none() {
         return fail_closed_cargo_evidence(
             CargoEvidenceReason::MissingIdentity,
             CargoEvidenceReason::MissingIdentity,
-            config_scope_runtime,
+            invocation,
         );
     }
 
@@ -874,7 +972,7 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
         Ok(batch) => batch,
         Err(error) => {
             let reason = map_locator_batch_error(error);
-            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
+            return fail_closed_cargo_evidence(reason, reason, invocation);
         }
     };
 
@@ -885,19 +983,48 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
             return fail_closed_cargo_evidence(
                 CargoEvidenceReason::MissingManifest,
                 CargoEvidenceReason::MissingManifest,
-                config_scope_runtime,
+                invocation,
             );
         }
         LocatorFileRead::Failed(failure) => {
             let reason = map_manifest_read_failure(failure);
-            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
+            return fail_closed_cargo_evidence(reason, reason, invocation);
         }
+    };
+    let invocation_cwd = match &invocation.cwd {
+        Ok(cwd) => match reader.compare_base_directory_snapshot(root, cwd, cancel) {
+            Ok(LocatorDirectoryComparison::PathAndIdentityMatch) => {
+                CargoInvocationCwdInput::PathMatchesRevalidatedWorkspaceRoot
+            }
+            Ok(LocatorDirectoryComparison::DifferentNativePath) => {
+                CargoInvocationCwdInput::NotChecked
+            }
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::Cancelled,
+            ))
+            | Err(LocatorReadError::Cancelled) => {
+                CargoInvocationCwdInput::Failed(CargoEvidenceReason::Cancelled)
+            }
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::ResourceLimit,
+            ))
+            | Err(LocatorReadError::ResourceLimit) => {
+                CargoInvocationCwdInput::Failed(CargoEvidenceReason::ResourceLimit)
+            }
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::RevalidationFailed,
+            ))
+            | Err(LocatorReadError::InvalidRequest) => {
+                CargoInvocationCwdInput::Failed(CargoEvidenceReason::MissingIdentity)
+            }
+        },
+        Err(reason) => CargoInvocationCwdInput::Failed(*reason),
     };
     let config_pair = match reader.observe_cargo_config_pair(root, cancel) {
         Ok(observed) => observed,
         Err(error) => {
             let reason = map_locator_batch_error(error);
-            return fail_closed_cargo_evidence(reason, reason, config_scope_runtime);
+            return fail_closed_cargo_evidence_with_cwd(reason, reason, invocation, invocation_cwd);
         }
     };
     let collected_config = map_config_pair_member_read(&config_pair.config);
@@ -927,8 +1054,9 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
             config: collected_config.into_decode_input(),
             config_toml: collected_config_toml.into_decode_input(),
             scope: cargo_config_scope_inputs(
-                config_scope_runtime,
+                invocation,
                 cargo_workspace_pair_input(&config_pair, pair_failure_reason),
+                invocation_cwd,
             ),
         },
         target_entry_id,
@@ -944,11 +1072,24 @@ pub(crate) fn collect_and_produce_cargo_typed_evidence<P: PlatformScanner>(
 fn fail_closed_cargo_evidence(
     workspace_reason: CargoEvidenceReason,
     target_reason: CargoEvidenceReason,
-    config_scope_runtime: CargoConfigScopeRuntime,
+    invocation: &CargoInvocationContext,
+) -> CargoTypedEvidenceV1 {
+    let invocation_cwd = match invocation.cwd {
+        Ok(_) => CargoInvocationCwdInput::NotChecked,
+        Err(reason) => CargoInvocationCwdInput::Failed(reason),
+    };
+    fail_closed_cargo_evidence_with_cwd(workspace_reason, target_reason, invocation, invocation_cwd)
+}
+
+fn fail_closed_cargo_evidence_with_cwd(
+    workspace_reason: CargoEvidenceReason,
+    target_reason: CargoEvidenceReason,
+    invocation: &CargoInvocationContext,
+    invocation_cwd: CargoInvocationCwdInput,
 ) -> CargoTypedEvidenceV1 {
     CargoTypedEvidenceV1 {
         workspace: unknown(workspace_reason),
-        config_scope: config_scope_for_failure(target_reason, config_scope_runtime),
+        config_scope: config_scope_for_failure(target_reason, invocation, invocation_cwd),
         target_dir: unknown(target_reason),
         target_shape: unknown(match target_reason {
             CargoEvidenceReason::ConfigScopeNotChecked => workspace_reason,
@@ -1040,13 +1181,15 @@ fn cargo_workspace_pair_input(
 }
 
 fn cargo_config_scope_inputs(
-    runtime: CargoConfigScopeRuntime,
+    invocation: &CargoInvocationContext,
     workspace_pair: CargoWorkspacePairInput,
+    invocation_cwd: CargoInvocationCwdInput,
 ) -> CargoConfigScopeInputs {
     CargoConfigScopeInputs {
-        runtime,
+        runtime: invocation.runtime,
         workspace_pair,
-        ..CargoConfigScopeInputs::production(runtime)
+        invocation_cwd,
+        ..CargoConfigScopeInputs::production(invocation)
     }
 }
 
@@ -1573,6 +1716,9 @@ fn project_invocation_cwd(input: CargoInvocationCwdInput) -> CargoInvocationCwdB
         CargoInvocationCwdInput::BoundToWorkspaceRoot => {
             CargoInvocationCwdBinding::BoundToWorkspaceRoot
         }
+        CargoInvocationCwdInput::PathMatchesRevalidatedWorkspaceRoot => {
+            CargoInvocationCwdBinding::PathMatchesRevalidatedWorkspaceRoot
+        }
         CargoInvocationCwdInput::NotChecked => CargoInvocationCwdBinding::NotChecked {
             reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
         },
@@ -1646,6 +1792,9 @@ fn config_scope_blockers(evidence: &CargoConfigScopeEvidenceV1) -> Vec<CargoConf
     );
     match evidence.invocation_cwd {
         CargoInvocationCwdBinding::BoundToWorkspaceRoot => {}
+        CargoInvocationCwdBinding::PathMatchesRevalidatedWorkspaceRoot => {
+            blockers.push(CargoConfigScopeBlocker::InvocationCwdIdentityNotBound);
+        }
         CargoInvocationCwdBinding::NotChecked { .. } => {
             blockers.push(CargoConfigScopeBlocker::InvocationCwdNotBound);
         }
@@ -1744,11 +1893,15 @@ fn config_scope_for_input_failure(
 
 fn config_scope_for_failure(
     reason: CargoEvidenceReason,
-    runtime: CargoConfigScopeRuntime,
+    invocation: &CargoInvocationContext,
+    invocation_cwd: CargoInvocationCwdInput,
 ) -> CargoConfigScopeEvidenceV1 {
     config_scope_for_input_failure(
         CargoConfigInputs {
-            scope: CargoConfigScopeInputs::production(runtime),
+            scope: CargoConfigScopeInputs {
+                invocation_cwd,
+                ..CargoConfigScopeInputs::production(invocation)
+            },
             ..CargoConfigInputs::default()
         },
         reason,
@@ -2203,10 +2356,15 @@ fn unknown<T>(reason: CargoEvidenceReason) -> CargoEvidence<T> {
 pub(crate) fn test_config_scope_projection(
     runtime: CargoConfigScopeRuntime,
 ) -> CargoConfigScopeProjectionV1 {
+    let invocation = CargoInvocationContext {
+        runtime,
+        cwd: Err(CargoEvidenceReason::MissingIdentity),
+        cli_overrides_absent: true,
+    };
     decode_config_scope(CargoConfigInputs {
         config: CargoConfigFile::VerifiedAbsent,
         config_toml: CargoConfigFile::VerifiedAbsent,
-        scope: CargoConfigScopeInputs::production(runtime),
+        scope: CargoConfigScopeInputs::production(&invocation),
     })
     .projected()
 }
@@ -2293,7 +2451,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2329,6 +2489,112 @@ mod linux_real_stack_tests {
     }
 
     #[test]
+    fn invocation_cwd_records_only_an_exact_revalidated_workspace_path_match() {
+        let (temp, summary, manifest_id, target_id) = workspace_layout("cargo-cwd-bound");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        let reader = reader();
+        let invocation = CargoInvocationContext::with_cwd_path(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &temp.path().join("workspace"),
+            true,
+            &reader,
+        );
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader,
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &invocation,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            evidence.config_scope.invocation_cwd,
+            CargoInvocationCwdBinding::PathMatchesRevalidatedWorkspaceRoot
+        ));
+        assert!(matches!(
+            evidence.config_scope.cli.target_dir,
+            CargoConfigExternalSourceState::VerifiedAbsent
+        ));
+        assert!(matches!(
+            evidence.config_scope.cli.config_overrides,
+            CargoConfigExternalSourceState::VerifiedAbsent
+        ));
+        assert!(
+            !evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdNotBound)
+        );
+        assert!(
+            !evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdBindingFailed)
+        );
+        assert!(
+            evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdIdentityNotBound)
+        );
+        assert!(!evidence.config_scope.precedence_complete);
+        assert!(matches!(
+            evidence.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        let serialized = serde_json::to_string(&evidence.config_scope.projected()).unwrap();
+        assert!(!serialized.contains(&temp.path().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn invocation_cwd_mismatch_remains_unbound_without_changing_authority() {
+        let (temp, summary, manifest_id, target_id) = workspace_layout("cargo-cwd-mismatch");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        let reader = reader();
+        let invocation = CargoInvocationContext::with_cwd_path(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            temp.path(),
+            true,
+            &reader,
+        );
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader,
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &invocation,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            evidence.config_scope.invocation_cwd,
+            CargoInvocationCwdBinding::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(
+            evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdNotBound)
+        );
+        assert!(!evidence.config_scope.precedence_complete);
+        assert!(matches!(
+            evidence.target_shape,
+            CargoEvidence::Unknown {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+    }
+
+    #[test]
     fn missing_optional_config_files_do_not_claim_global_scope() {
         let (_temp, summary, manifest_id, target_id) =
             workspace_layout("cargo-fixed-optional-missing");
@@ -2340,7 +2606,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2388,7 +2656,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(true, true, true),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(true, true, true),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2433,7 +2703,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2459,7 +2731,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2486,7 +2760,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2541,7 +2817,9 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         );
 
@@ -2563,13 +2841,61 @@ mod linux_real_stack_tests {
             &root_id,
             &manifest_id,
             &target_id,
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &cancel,
         );
 
         assert_unknown(evidence.workspace, CargoEvidenceReason::Cancelled);
         assert_unknown(evidence.target_dir, CargoEvidenceReason::Cancelled);
         assert_unknown(evidence.target_shape, CargoEvidenceReason::Cancelled);
+    }
+
+    #[test]
+    fn early_collection_failure_does_not_claim_cwd_binding_failure() {
+        let (temp, mut summary, manifest_id, target_id) =
+            workspace_layout("cargo-fixed-early-failure-cwd");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        summary.entries.retain(|entry| {
+            entry.identity.as_ref().map(|identity| &identity.entry_id) != Some(&manifest_id)
+        });
+        let reader = reader();
+        let invocation = CargoInvocationContext::with_cwd_path(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &temp.path().join("workspace"),
+            true,
+            &reader,
+        );
+
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader,
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &invocation,
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            evidence.config_scope.invocation_cwd,
+            CargoInvocationCwdBinding::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(
+            evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdNotBound)
+        );
+        assert!(
+            !evidence
+                .config_scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::InvocationCwdBindingFailed)
+        );
     }
 
     #[test]
@@ -2708,8 +3034,8 @@ mod tests {
         let production = CargoConfigInputs {
             config: CargoConfigFile::VerifiedAbsent,
             config_toml: CargoConfigFile::VerifiedAbsent,
-            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
-                false, false, false,
+            scope: CargoConfigScopeInputs::production(&CargoInvocationContext::unavailable(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
             )),
         };
         let scope = decode_config_scope(production);
@@ -2835,21 +3161,23 @@ mod tests {
         let inputs = CargoConfigInputs {
             config: CargoConfigFile::VerifiedAbsent,
             config_toml: CargoConfigFile::VerifiedAbsent,
-            scope: CargoConfigScopeInputs::production(CargoConfigScopeRuntime::from_presence(
-                true, true, true,
+            scope: CargoConfigScopeInputs::production(&CargoInvocationContext::unavailable(
+                CargoConfigScopeRuntime::from_presence(true, true, true),
             )),
         };
         let mut scope = decode_config_scope(inputs);
         scope
             .blockers
-            .push(CargoConfigScopeBlocker::CliTargetDirNotChecked);
+            .push(CargoConfigScopeBlocker::CargoTargetDirPresentRedacted);
         normalize_config_scope(&mut scope);
         assert!(scope.blockers.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             scope
                 .blockers
                 .iter()
-                .filter(|blocker| { **blocker == CargoConfigScopeBlocker::CliTargetDirNotChecked })
+                .filter(|blocker| {
+                    **blocker == CargoConfigScopeBlocker::CargoTargetDirPresentRedacted
+                })
                 .count(),
             1
         );
@@ -2862,6 +3190,42 @@ mod tests {
         for secret in ["/secret/target", "/secret/cargo-home", "non-unicode"] {
             assert!(!serialized.contains(secret));
         }
+    }
+
+    #[test]
+    fn unmodeled_library_invocation_keeps_cli_sources_not_checked() {
+        let invocation = CargoInvocationContext::unavailable(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+        );
+        let scope = decode_config_scope(CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(&invocation),
+        });
+
+        assert!(matches!(
+            scope.cli.target_dir,
+            CargoConfigExternalSourceState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            scope.cli.config_overrides,
+            CargoConfigExternalSourceState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CliTargetDirNotChecked)
+        );
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CliConfigOverridesNotChecked)
+        );
+        assert!(!scope.precedence_complete);
     }
 
     #[test]

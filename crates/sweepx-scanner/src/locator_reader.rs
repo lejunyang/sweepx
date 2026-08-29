@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
@@ -146,6 +146,33 @@ pub enum LocatorReadError {
     ResourceLimit,
     #[error("batch cancelled")]
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatorDirectoryIdentity {
+    native_absolute_path: NativeAbsolutePath,
+    kind: EntryKind,
+    identity: EntryIdentity,
+    filesystem_identity: FilesystemIdentity,
+    mount_identity: MountIdentity,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocatorDirectoryComparison {
+    PathAndIdentityMatch,
+    DifferentNativePath,
+    Failed(LocatorDirectoryComparisonFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LocatorDirectoryComparisonFailure {
+    #[error("operation cancelled")]
+    Cancelled,
+    #[error("resource limit exceeded")]
+    ResourceLimit,
+    #[error("base directory could not be revalidated")]
+    RevalidationFailed,
 }
 
 pub struct LocatorReader<P> {
@@ -349,6 +376,121 @@ impl<P: PlatformScanner> LocatorReader<P> {
         })
     }
 
+    /// Captures one admitted directory identity snapshot from the current platform without
+    /// exposing the path or any forgeable public fields.
+    pub fn capture_directory_identity(
+        &self,
+        path: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryIdentity, LocatorReadError> {
+        if cancel.is_cancelled() {
+            return Err(LocatorReadError::Cancelled);
+        }
+        let root =
+            ScanRoot::new(path.to_path_buf()).map_err(|_| LocatorReadError::InvalidRequest)?;
+        let admission = self
+            .platform
+            .admit_root(&root, cancel)
+            .map_err(map_capture_platform_error)?;
+        admission
+            .validate_for_root(&root)
+            .map_err(|_| LocatorReadError::InvalidRequest)?;
+        let RootAdmission {
+            root_locator,
+            metadata,
+            ..
+        } = admission;
+        if metadata.kind != EntryKind::Directory {
+            return Err(LocatorReadError::InvalidRequest);
+        }
+        let (Some(identity), Some(filesystem_identity), Some(mount_identity)) = (
+            metadata.identity,
+            metadata.filesystem_identity,
+            metadata.mount_identity,
+        ) else {
+            return Err(LocatorReadError::InvalidRequest);
+        };
+        Ok(LocatorDirectoryIdentity {
+            native_absolute_path: root_locator,
+            kind: metadata.kind,
+            identity,
+            filesystem_identity,
+            mount_identity,
+            fingerprint: metadata.fingerprint,
+        })
+    }
+
+    /// Compares one invocation-time directory snapshot with one admitted base directory. A match
+    /// proves exact native path equality and equal captured/revalidated identity metadata, but it
+    /// does not retain the process cwd handle across the interval.
+    ///
+    /// This performs no pathname fallback and never uses `display_path` as authority.
+    pub fn compare_base_directory_snapshot(
+        &self,
+        base_directory: &ScannedEntry,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryComparison, LocatorReadError> {
+        self.validate_base_directory(base_directory)?;
+        if cancel.is_cancelled() {
+            return Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::Cancelled,
+            ));
+        }
+
+        let locator = base_directory
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let Some(expected_root) = locator.scan_root_absolute_path.as_ref() else {
+            return Err(LocatorReadError::InvalidRequest);
+        };
+        if !native_absolute_paths_equal_exact(&captured.native_absolute_path, expected_root)
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+        {
+            return Ok(LocatorDirectoryComparison::DifferentNativePath);
+        }
+        if let Err(error) = self.validate_directory_binding_budget(base_directory) {
+            return Ok(match error {
+                LocatorReadError::ResourceLimit => LocatorDirectoryComparison::Failed(
+                    LocatorDirectoryComparisonFailure::ResourceLimit,
+                ),
+                LocatorReadError::Cancelled => {
+                    LocatorDirectoryComparison::Failed(LocatorDirectoryComparisonFailure::Cancelled)
+                }
+                LocatorReadError::InvalidRequest => {
+                    return Err(LocatorReadError::InvalidRequest);
+                }
+            });
+        }
+
+        let mut budget = BatchBudget::default();
+        match self.reopen_base(base_directory, cancel, &mut budget) {
+            Ok(reopened) => {
+                if directory_identity_matches_capture(&reopened.metadata, captured) {
+                    Ok(LocatorDirectoryComparison::PathAndIdentityMatch)
+                } else {
+                    Ok(LocatorDirectoryComparison::Failed(
+                        LocatorDirectoryComparisonFailure::RevalidationFailed,
+                    ))
+                }
+            }
+            Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => Ok(
+                LocatorDirectoryComparison::Failed(LocatorDirectoryComparisonFailure::Cancelled),
+            ),
+            Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                Ok(LocatorDirectoryComparison::Failed(
+                    LocatorDirectoryComparisonFailure::ResourceLimit,
+                ))
+            }
+            Err(ReadAttempt::Failed(_)) | Err(ReadAttempt::Absent) => {
+                Ok(LocatorDirectoryComparison::Failed(
+                    LocatorDirectoryComparisonFailure::RevalidationFailed,
+                ))
+            }
+        }
+    }
+
     fn validate_batch(
         &self,
         request: &LocatorBatchReadRequest<'_>,
@@ -406,6 +548,28 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 .ok_or(LocatorReadError::ResourceLimit)?;
         }
         if total_components > self.limits.max_total_components {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        Ok(())
+    }
+
+    fn validate_directory_binding_budget(
+        &self,
+        base: &ScannedEntry,
+    ) -> Result<(), LocatorReadError> {
+        let locator = base
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let base_components = locator
+            .parent_reopen_recipe
+            .len()
+            .checked_add(1)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        if self.limits.max_requests == 0
+            || base_components > self.limits.max_components_per_request
+            || base_components > self.limits.max_total_components
+        {
             return Err(LocatorReadError::ResourceLimit);
         }
         Ok(())
@@ -1169,6 +1333,47 @@ fn native_absolute_path_buf(path: &NativeAbsolutePath) -> Result<PathBuf, ReadAt
     Err(ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))
 }
 
+fn native_absolute_paths_equal_exact(
+    left: &NativeAbsolutePath,
+    right: &NativeAbsolutePath,
+) -> Result<bool, ()> {
+    left.validate_for_current_platform().map_err(|_| ())?;
+    right.validate_for_current_platform().map_err(|_| ())?;
+    Ok(match (left, right) {
+        #[cfg(unix)]
+        (NativeAbsolutePath::UnixBytes(left), NativeAbsolutePath::UnixBytes(right)) => {
+            left == right
+        }
+        #[cfg(windows)]
+        (NativeAbsolutePath::WindowsUtf16(left), NativeAbsolutePath::WindowsUtf16(right)) => {
+            left == right
+        }
+        _ => false,
+    })
+}
+
+fn directory_identity_matches_capture(
+    metadata: &sweepx_platform::EntryMetadata,
+    captured: &LocatorDirectoryIdentity,
+) -> bool {
+    metadata.kind == captured.kind
+        && metadata.identity.as_ref() == Some(&captured.identity)
+        && metadata.filesystem_identity.as_ref() == Some(&captured.filesystem_identity)
+        && metadata.mount_identity.as_ref() == Some(&captured.mount_identity)
+        && metadata.fingerprint == captured.fingerprint
+}
+
+fn map_capture_platform_error(error: PlatformError) -> LocatorReadError {
+    match error {
+        PlatformError::Cancelled => LocatorReadError::Cancelled,
+        PlatformError::ResourceLimit(_) => LocatorReadError::ResourceLimit,
+        PlatformError::RootRejected(_)
+        | PlatformError::InvalidDirectoryEntry { .. }
+        | PlatformError::Unsupported(_)
+        | PlatformError::Io { .. } => LocatorReadError::InvalidRequest,
+    }
+}
+
 fn map_platform_failure(error: PlatformError) -> LocatorReadFailure {
     match error {
         PlatformError::Cancelled => LocatorReadFailure::Cancelled,
@@ -1238,6 +1443,7 @@ mod tests {
     use super::*;
     use crate::{HostPlatformScanner, Scanner, ScannerOptions};
     use sweepx_model::ScanId;
+    use sweepx_platform::CancellationToken;
 
     fn scan(root: &std::path::Path, scan_id: &str) -> crate::ScanSummary {
         Scanner::new(
@@ -1307,6 +1513,208 @@ mod tests {
             LocatorFileRead::Present(read) if read.bytes == b"[build]\n"
         ));
         assert_eq!(result.files[2], LocatorFileRead::VerifiedAbsent);
+    }
+
+    #[test]
+    fn directory_snapshot_matches_exact_native_root_and_ignores_display_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let mut summary = scan(&root, "cwd-bind-exact");
+        summary.roots[0].display_path = "/forged/path".to_string();
+        let captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+
+        let binding = reader()
+            .compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(binding, LocatorDirectoryComparison::PathAndIdentityMatch);
+    }
+
+    #[test]
+    fn directory_snapshot_reports_a_different_exact_native_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let other = temp.path().join("other");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        let summary = scan(&root, "cwd-bind-different");
+        let captured = reader()
+            .capture_directory_identity(&other, &CancellationToken::new())
+            .unwrap();
+
+        let binding = reader()
+            .compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(binding, LocatorDirectoryComparison::DifferentNativePath);
+    }
+
+    #[test]
+    fn directory_snapshot_comparison_fails_closed_when_root_is_replaced() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cwd-bind-replaced");
+        let captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+        fs::rename(&root, temp.path().join("root-old")).unwrap();
+        fs::create_dir(&root).unwrap();
+
+        let binding = reader()
+            .compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            binding,
+            LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::RevalidationFailed
+            )
+        );
+    }
+
+    #[test]
+    fn directory_snapshot_comparison_reports_cancelled_before_reopen() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cwd-bind-cancel");
+        let captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        assert_eq!(
+            reader().compare_base_directory_snapshot(&summary.roots[0], &captured, &cancel,),
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::Cancelled,
+            ))
+        );
+    }
+
+    #[test]
+    fn directory_snapshot_comparison_reports_too_small_component_limits() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cwd-bind-budget");
+        let captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+        let reader = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_requests: 0,
+                ..LocatorReadLimits::default()
+            },
+        );
+
+        assert_eq!(
+            reader.compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::ResourceLimit,
+            ))
+        );
+    }
+
+    #[test]
+    fn different_directory_snapshot_needs_no_reopen_budget() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let other = temp.path().join("other");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        let summary = scan(&root, "cwd-bind-mismatch-no-budget");
+        let captured = reader()
+            .capture_directory_identity(&other, &CancellationToken::new())
+            .unwrap();
+        let reader = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_requests: 0,
+                ..LocatorReadLimits::default()
+            },
+        );
+
+        assert_eq!(
+            reader.compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Ok(LocatorDirectoryComparison::DifferentNativePath)
+        );
+    }
+
+    #[test]
+    fn captured_directory_identity_does_not_match_after_path_rebind_to_new_root() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+        fs::rename(&root, temp.path().join("root-old")).unwrap();
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cwd-bind-path-rebind");
+
+        let binding = reader()
+            .compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            binding,
+            LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::RevalidationFailed
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_snapshot_rejects_a_foreign_platform_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = scan(&root, "cwd-bind-foreign-path");
+        let mut captured = reader()
+            .capture_directory_identity(&root, &CancellationToken::new())
+            .unwrap();
+        captured.native_absolute_path =
+            NativeAbsolutePath::windows_utf16(r"C:\foreign".encode_utf16().collect::<Vec<_>>());
+
+        assert_eq!(
+            reader().compare_base_directory_snapshot(
+                &summary.roots[0],
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Err(LocatorReadError::InvalidRequest)
+        );
     }
 
     #[test]

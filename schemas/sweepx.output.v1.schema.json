@@ -1841,7 +1841,7 @@
           "additionalProperties": false,
           "required": ["state"],
           "properties": {
-            "state": { "const": "bound_to_workspace_root" }
+            "state": { "const": "path_matches_revalidated_workspace_root" }
           }
         },
         {
@@ -1949,6 +1949,7 @@
         "cli_target_dir_failed",
         "cli_target_dir_not_checked",
         "invocation_cwd_binding_failed",
+        "invocation_cwd_identity_not_bound",
         "invocation_cwd_not_bound",
         "workspace_config_duplicate_key",
         "workspace_config_include_unsupported",
@@ -2060,6 +2061,14 @@
                     "properties": { "state": { "const": "stable_snapshot" } },
                     "required": ["state"]
                   },
+                  "config": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  },
+                  "configToml": {
+                    "properties": { "state": { "const": "present" } },
+                    "required": ["state"]
+                  },
                   "targetDirDeclaration": {
                     "properties": {
                       "state": { "const": "known" },
@@ -2068,7 +2077,12 @@
                     "required": ["state", "source"]
                   }
                 },
-                "required": ["pairSnapshot", "targetDirDeclaration"]
+                "required": [
+                  "pairSnapshot",
+                  "config",
+                  "configToml",
+                  "targetDirDeclaration"
+                ]
               },
               "then": {
                 "properties": {
@@ -2262,7 +2276,7 @@
         "blockers": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 23,
+          "maxItems": 24,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/cargoConfigScopeBlocker" }
         }
@@ -2302,6 +2316,259 @@
                     }
                   },
                   "selected": { "const": "not_checked" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "invocationCwd": {
+                "properties": {
+                  "state": { "const": "path_matches_revalidated_workspace_root" }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["invocationCwd"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "invocation_cwd_identity_not_bound" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "invocation_cwd_binding_failed",
+                          "invocation_cwd_not_bound"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "invocationCwd": {
+                "properties": { "state": { "const": "not_checked" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["invocationCwd"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "invocation_cwd_not_bound" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "invocation_cwd_binding_failed",
+                          "invocation_cwd_identity_not_bound"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "invocationCwd": {
+                "properties": { "state": { "const": "failed" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["invocationCwd"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "invocation_cwd_binding_failed" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "invocation_cwd_identity_not_bound",
+                          "invocation_cwd_not_bound"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "targetDir": {
+                    "properties": { "state": { "const": "not_checked" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["targetDir"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cli_target_dir_not_checked" } },
+                  { "not": { "contains": { "const": "cli_target_dir_failed" } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "targetDir": {
+                    "properties": { "state": { "const": "failed" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["targetDir"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cli_target_dir_failed" } },
+                  { "not": { "contains": { "const": "cli_target_dir_not_checked" } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "configOverrides": {
+                    "properties": { "state": { "const": "not_checked" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["configOverrides"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cli_config_overrides_not_checked" } },
+                  { "not": { "contains": { "const": "cli_config_overrides_failed" } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "configOverrides": {
+                    "properties": { "state": { "const": "failed" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["configOverrides"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cli_config_overrides_failed" } },
+                  { "not": { "contains": { "const": "cli_config_overrides_not_checked" } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "targetDir": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["targetDir"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "not": {
+                  "contains": {
+                    "enum": ["cli_target_dir_failed", "cli_target_dir_not_checked"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cli": {
+                "properties": {
+                  "configOverrides": {
+                    "properties": { "state": { "const": "verified_absent" } },
+                    "required": ["state"]
+                  }
+                },
+                "required": ["configOverrides"]
+              }
+            },
+            "required": ["cli"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "cli_config_overrides_failed",
+                      "cli_config_overrides_not_checked"
+                    ]
+                  }
                 }
               }
             }

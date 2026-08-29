@@ -330,6 +330,35 @@ pub struct CleanerCargoDetectRequest {
     pub roots: Vec<PathBuf>,
 }
 
+impl CleanerCargoDetectRequest {
+    pub fn new(roots: Vec<PathBuf>) -> Self {
+        Self { roots }
+    }
+}
+
+/// Invocation facts supplied by a frontend to the read-only Cargo detector.
+///
+/// The default is conservative for library callers. A frontend may explicitly attest that its
+/// command surface exposes no Cargo `--target-dir` or `--config` passthrough options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CleanerCargoDetectInvocation {
+    cargo_cli_overrides_absent: bool,
+}
+
+impl CleanerCargoDetectInvocation {
+    pub const fn unmodeled() -> Self {
+        Self {
+            cargo_cli_overrides_absent: false,
+        }
+    }
+
+    pub const fn without_cargo_cli_overrides() -> Self {
+        Self {
+            cargo_cli_overrides_absent: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiReadRequest {
     pub scan_json_path: PathBuf,
@@ -2351,12 +2380,41 @@ pub fn cleaner_cargo_detect_with_cancel(
     request: &CleanerCargoDetectRequest,
     cancel: &CancellationToken,
 ) -> Result<CleanerSuccess, CoreError> {
+    cleaner_cargo_detect_with_invocation_and_cancel(
+        context,
+        request,
+        &CleanerCargoDetectInvocation::unmodeled(),
+        cancel,
+    )
+}
+
+/// Runs Cargo detection with explicit frontend invocation facts and caller-owned post-scan
+/// cancellation. No invocation path or override value is serialized.
+pub fn cleaner_cargo_detect_with_invocation_and_cancel(
+    context: &CoreContext,
+    request: &CleanerCargoDetectRequest,
+    invocation: &CleanerCargoDetectInvocation,
+    cancel: &CancellationToken,
+) -> Result<CleanerSuccess, CoreError> {
     cleaner_cargo_detect_with_scope_runtime(context, request, cancel, || {
-        cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
+        let runtime = cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
             std::env::var_os("CARGO_TARGET_DIR").is_some(),
             std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some(),
             std::env::var_os("CARGO_HOME").is_some(),
-        )
+        );
+        let reader = sweepx_scanner::LocatorReader::new(
+            HostPlatformScanner::new(),
+            cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
+        );
+        if invocation.cargo_cli_overrides_absent {
+            cargo_cleaner_evidence::CargoInvocationContext::capture_for_sweepx_cli(
+                runtime, &reader, cancel,
+            )
+        } else {
+            cargo_cleaner_evidence::CargoInvocationContext::capture_for_unmodeled_caller(
+                runtime, &reader, cancel,
+            )
+        }
     })
 }
 
@@ -2364,10 +2422,10 @@ fn cleaner_cargo_detect_with_scope_runtime<F>(
     context: &CoreContext,
     request: &CleanerCargoDetectRequest,
     cancel: &CancellationToken,
-    config_scope_runtime: F,
+    invocation: F,
 ) -> Result<CleanerSuccess, CoreError>
 where
-    F: FnOnce() -> cargo_cleaner_evidence::CargoConfigScopeRuntime,
+    F: FnOnce() -> cargo_cleaner_evidence::CargoInvocationContext,
 {
     // Compatibility and trust are admission gates, not annotations on a best-effort result.
     // Resolve them before touching any caller-selected scan root or evaluating package rules.
@@ -2422,7 +2480,7 @@ where
         ));
         return Ok(CleanerSuccess { output });
     }
-    let config_scope_runtime = config_scope_runtime();
+    let invocation = invocation();
     let scan = scan_with_store(
         context,
         &ScanRequest {
@@ -2443,7 +2501,7 @@ where
         source_scan_incomplete,
         source_scan_warning_count,
         &reader,
-        config_scope_runtime,
+        &invocation,
         cancel,
     )?;
     let (status, exit_code, reason_code) = cargo_detect_terminal_projection(&detected);
@@ -6543,13 +6601,15 @@ mod tests {
         cancel.cancel();
         let result = cleaner_cargo_detect_with_scope_runtime(
             &context,
-            &CleanerCargoDetectRequest {
-                roots: vec![PathBuf::from("/path-that-must-not-be-scanned")],
-            },
+            &CleanerCargoDetectRequest::new(vec![PathBuf::from("/path-that-must-not-be-scanned")]),
             &cancel,
             || {
                 invoked.store(true, Ordering::SeqCst);
-                cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true)
+                cargo_cleaner_evidence::CargoInvocationContext::unavailable_for_sweepx_cli(
+                    cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
+                        true, true, true,
+                    ),
+                )
             },
         )
         .expect("incompatible cleaner should return a structured envelope");
@@ -6578,9 +6638,8 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Default,
         ));
-        let request = CleanerCargoDetectRequest {
-            roots: vec![PathBuf::from("/path-that-must-not-be-scanned")],
-        };
+        let request =
+            CleanerCargoDetectRequest::new(vec![PathBuf::from("/path-that-must-not-be-scanned")]);
         let legacy = cleaner_cargo_detect(&context, &request)
             .expect("legacy wrapper should return the compatibility envelope");
         let caller_cancel = CancellationToken::new();
@@ -6604,6 +6663,18 @@ mod tests {
                     .any(|error| error.code == "cleaner.compatibility")
             );
         }
+    }
+
+    #[test]
+    fn cargo_detect_invocation_defaults_conservatively_for_library_callers() {
+        assert_eq!(
+            CleanerCargoDetectInvocation::default(),
+            CleanerCargoDetectInvocation::unmodeled()
+        );
+        assert_ne!(
+            CleanerCargoDetectInvocation::unmodeled(),
+            CleanerCargoDetectInvocation::without_cargo_cli_overrides()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -6644,7 +6715,9 @@ mod tests {
             scan.output.status == OutputStatus::Partial,
             scan.output.warnings.len(),
             &reader,
-            cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(false, false, false),
+            &cargo_cleaner_evidence::CargoInvocationContext::unavailable_for_sweepx_cli(
+                cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -6703,7 +6776,7 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Default,
         ));
-        let request = CleanerCargoDetectRequest { roots: vec![root] };
+        let request = CleanerCargoDetectRequest::new(vec![root]);
 
         // The public built-in is intentionally incompatible with this development Core. This
         // helper exercises the same live scan/collector/output path with a deterministic,
@@ -6732,7 +6805,9 @@ mod tests {
             scan.output.status == OutputStatus::Partial,
             scan.output.warnings.len(),
             &reader,
-            cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true),
+            &cargo_cleaner_evidence::CargoInvocationContext::unavailable_for_sweepx_cli(
+                cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(true, true, true),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();

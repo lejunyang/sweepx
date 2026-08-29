@@ -15,7 +15,7 @@ use sweepx_scanner::{LocatorReader, ScanSummary};
 use crate::{
     CORE_VERSION, CoreError, LoadedBuiltInCleaner,
     cargo_cleaner_evidence::{
-        CargoConfigScopeProjectionV1, CargoConfigScopeRuntime, CargoEvidenceStateProjection,
+        CargoConfigScopeProjectionV1, CargoEvidenceStateProjection, CargoInvocationContext,
         CargoTypedEvidenceV1, collect_and_produce_cargo_typed_evidence,
     },
 };
@@ -290,7 +290,7 @@ pub fn detect_live_cargo_cleaner_candidates(
     source_scan_incomplete: bool,
     source_scan_warning_count: usize,
     reader: &LocatorReader<impl PlatformScanner>,
-    config_scope_runtime: CargoConfigScopeRuntime,
+    invocation: &CargoInvocationContext,
     cancel: &CancellationToken,
 ) -> Result<ExperimentalCargoDetectResult, CoreError> {
     detect_live_cargo_cleaner_candidates_with_collector(
@@ -305,7 +305,7 @@ pub fn detect_live_cargo_cleaner_candidates(
                 &layout.root.identity.entry_id,
                 &layout.manifest.identity.entry_id,
                 &layout.target.identity.entry_id,
-                config_scope_runtime,
+                invocation,
                 cancel,
             ))
         },
@@ -907,6 +907,7 @@ pub fn incompatible_cargo_detect_json() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cargo_cleaner_evidence::CargoConfigScopeRuntime;
 
     #[cfg(target_os = "linux")]
     use crate::cargo_cleaner_evidence::cargo_fixed_input_locator_limits;
@@ -1213,8 +1214,8 @@ mod tests {
         }
         assert_eq!(wire["ancestorConfigs"]["state"], "not_checked");
         assert_eq!(wire["cargoHomeConfig"]["state"], "not_checked");
-        assert_eq!(wire["cli"]["targetDir"]["state"], "not_checked");
-        assert_eq!(wire["cli"]["configOverrides"]["state"], "not_checked");
+        assert_eq!(wire["cli"]["targetDir"]["state"], "verified_absent");
+        assert_eq!(wire["cli"]["configOverrides"]["state"], "verified_absent");
         assert_eq!(wire["invocationCwd"]["state"], "not_checked");
         let blockers = wire["blockers"].as_array().unwrap();
         assert!(
@@ -1323,7 +1324,9 @@ mod tests {
             false,
             0,
             &live_reader(),
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -1399,7 +1402,9 @@ mod tests {
             false,
             0,
             &live_reader(),
-            CargoConfigScopeRuntime::from_presence(false, false, false),
+            &CargoInvocationContext::unavailable_for_sweepx_cli(
+                CargoConfigScopeRuntime::from_presence(false, false, false),
+            ),
             &cancel,
         )
         .unwrap();
