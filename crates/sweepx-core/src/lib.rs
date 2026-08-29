@@ -2406,13 +2406,20 @@ pub fn cleaner_cargo_detect_with_invocation_and_cancel(
             HostPlatformScanner::new(),
             cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
         );
+        // Caller cancellation is intentionally scoped to post-scan evidence collection. Cwd
+        // capture precedes the synchronous scan and therefore uses an independent token.
+        let capture_cancel = CancellationToken::new();
         if invocation.cargo_cli_overrides_absent {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_sweepx_cli(
-                runtime, &reader, cancel,
+                runtime,
+                &reader,
+                &capture_cancel,
             )
         } else {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_unmodeled_caller(
-                runtime, &reader, cancel,
+                runtime,
+                &reader,
+                &capture_cancel,
             )
         }
     })

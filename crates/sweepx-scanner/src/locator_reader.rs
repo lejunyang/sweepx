@@ -400,6 +400,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
             metadata,
             ..
         } = admission;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadError::Cancelled);
+        }
         if metadata.kind != EntryKind::Directory {
             return Err(LocatorReadError::InvalidRequest);
         }
