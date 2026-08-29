@@ -4,10 +4,10 @@ title: CLI 与只读扫描
 
 # CLI 与只读扫描
 
-当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cache`、`cleaner` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览，没有独立的 TUI 命令或二进制，也没有任何 mutation 子命令。
+当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`explain`、`status`、`cancel`、`cache`、`cleaner`、`trash` 和 `capabilities`；`scan --tui` 在扫描完成后进入交互浏览。
 
 > [!CAUTION]
-> `plan`、`approve`、`execute`、Trash、Permanent 和 `--dangerously-delete` 都不是当前 CLI。看到这些名称时，应将它们理解为路线图提案。
+> `trash` 是 development preview：只移到系统回收站，默认确认并在提交前重验；没有 Permanent fallback。`plan`、`approve`、`execute`、Permanent 和 `--dangerously-delete` 仍只是路线图提案。
 
 ## 构建与查看能力
 
@@ -31,9 +31,9 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 ### P4a.2 资格记录不是新命令
 
-协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。这五个单元在 Linux、macOS、Windows 上当前全部为 `disabled`。
+协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前主机的两个 Trash cell 为 `degraded` preview；其余平台和全部 Permanent cell 仍为 `disabled`。
 
-这些记录只是失败关闭的 qualification registry substrate；`sweepx capabilities` 没有因此获得 mutation 权限，也没有新增运行时 registry 服务。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前不存在这样的记录，也没有 native adapter、mutation command 或 approval UI。
+这些记录仍是失败关闭的 qualification registry substrate；`degraded` preview 不等于 `qualified`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前没有 `plan`/approval UI，也没有 Permanent adapter。
 
 ## 安装
 
@@ -60,7 +60,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
-- 可以传入多个根，但每个根都必须是绝对路径。
+- 不传根路径时扫描当前平台文件系统根；也可以传入一个或多个绝对根。
 - 默认直接向终端输出有界的 40 行文件表；不要求 JSON 文件。
 - 扫描同步运行，metadata-only、no-follow，并把挂载/链接/资源边界与错误写进结果。
 - 当前 Linux capability 是 `degraded`，不是发布资格。
@@ -145,14 +145,15 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` 展示 package 与兼容性。`show` 只有在 Core 版本范围匹配时才展示完整 manifest/rules；不兼容时使用专门的兼容性错误退出。两者都不执行规则指向的文件动作。详见 [Cleaner 概念](/cleaners)。
 
-## 文件管理器式只读 TUI
+## 文件管理器式 TUI 与回收站预览
 
 ```bash
 cargo run -p sweepx-cli -- --locale zh-CN \
   scan --tui /absolute/path/to/root [/another/absolute/root]
+cargo run -p sweepx-cli -- trash /absolute/path/to/item
 ```
 
-TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`q` 或 `Ctrl-C` 退出。symlink 和 reparse point 只显示而不可进入。
+TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。初始层展示一个或多个虚拟根；`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`d` / `Delete` 选择移到系统回收站，`q` 或 `Ctrl-C` 退出。回收站动作会先退出全屏，再要求确认并重验扫描身份；symlink 和 reparse point 不可操作。
 
 `--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。这些条件会在创建 state 或开始扫描之前校验。Windows 不创建默认 state，显式 `--state-dir` 失败关闭。终端输出中的不可信控制字符会被替换，不会原样解释为 ANSI 序列。目录 detail rescan 以 single-flight 后台任务运行：query deadline 为 2 秒，导航或退出不会等待非协作 worker，超时后的 late result 会丢弃，并由 process-wide 32 stuck-worker cap 限制脱落线程。
 
@@ -167,4 +168,4 @@ sweepx execute ...
 sweepx execute ... --dangerously-delete
 ```
 
-P3 中有对应概念的 library model 与 fake execution tests，但没有 CLI wiring，也没有 native filesystem mutation。
+P3 中有对应概念的 library model 与 fake execution tests，但仍没有 plan/approve/execute CLI 或 Permanent mutation。

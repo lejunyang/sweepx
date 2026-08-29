@@ -1,9 +1,9 @@
 # SweepX
 
-**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库已经包含可运行的开发版只读 CLI/TUI，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；它还不是已发布产品，也没有任何真实清理、回收站或永久删除能力。
+**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库包含可运行的开发版 CLI/TUI、显式确认的系统回收站预览，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；它还不是已发布产品，也没有永久删除能力。
 
 > [!CAUTION]
-> 当前可运行能力全部是只读或模拟能力。仓库没有 `plan`、`approve`、`execute` CLI，没有 native Trash/Permanent adapter，也没有会移动或删除目标文件的路径。P3 模拟执行器不接收 native path，并且只允许 sealed deterministic fake adapter。请勿把设计文档中的未来命令当成现有接口。
+> `trash` 是当前唯一真实文件变更能力：只接受绝对路径，默认交互确认，提交前重验类型和身份，并且只移到操作系统回收站。它没有 Permanent fallback。仓库仍没有 `plan`、`approve`、`execute` 或永久删除 CLI。
 
 ## 当前实现状态
 
@@ -12,18 +12,19 @@
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
 | Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
-| `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal；三者均通过 `sweepx scan` / `sweepx scan --tui` 暴露，但都不代表发布资格 |
+| `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | 不传路径时扫描当前平台的文件系统根；也可显式给一个或多个绝对根。macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal |
 | `sweepx status` | Linux journal-first 读取 terminal snapshot，并支持对已完成且已持久化的 journal stream 做 degraded 的 `--watch` completed replay；macOS 读取 legacy operation snapshot | Linux `--watch` 只支持 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 的 completed-stream replay：先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required`；malformed cursor/usage 返回 usage error；它不等待新事件、不创建后台 operation，也不支持 cancel。macOS 仍无 journal replay/watch；Windows durable state 禁用、默认 `state_dir=None`，且显式 `--state-dir` fail-closed |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
 | `sweepx cache status` | Linux、macOS：preview cache 只读诊断；Windows：disabled | 只支持 `human`/`json`；`--format ndjson` 是 usage error。缺失 state/cache 返回 `absent` + exit 0，且不创建默认或显式 state/cache 目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、大小与校验健康；不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实；warning/error 或 quarantine presence 返回 `degraded` + exit 4 |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
 | `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Scanner 现有有界 locator batch reader，并在三平台 backend 上提供 handle-relative/handle-bound 的有界文件读取路径；workspace 固定输入收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。两份 workspace config 现在通过同一个 retained `.cargo` handle、单个有界枚举 cursor 观察，并拒绝 ASCII 大小写 alias/重复项；由于尚无抗 ABA 的目录 generation 证明，该观察仍明确为 non-atomic。`data.hints[].evidence.cargo.configScope` 只记录 workspace pair/config 状态、外部来源状态、环境变量存在性和 redacted declaration metadata，不记录环境变量值，也不公开 workspace config `target-dir` 原文。只有显式设置且为绝对路径的 `CARGO_HOME` 会在 Cleaner compatibility gate 通过后被私下捕获，并在 scan 后重验；随后只观察该 home 根下直属 `config` / `config.toml` 的存在性。命中只投影 `cargoHomeConfig.state=present_redacted`，且该观察仍是 non-atomic；未命中以及未显式设置、使用默认 home 的情况都保持 `not_checked`，不会提升为 `verified_absent`。为验证 presence integrity，scanner 只做有界、no-follow、handle-bound 的 metadata inspection；配置内容不会被读取、解析、使用或序列化，`target-dir` 值也不会被提取，wire evidence 不包含 `CARGO_HOME` 值或 home/config 路径。SweepX 的 `cargo-detect` surface 没有 Cargo passthrough `--target-dir` 或 `--config`，所以该 CLI 入口把 `cli.targetDir` 与 `cli.configOverrides` 记为 `verified_absent`；普通 Core 调用默认保持 `not_checked`，只有显式使用 no-overrides invocation contract 才可作同样声明。process cwd 也仅在 compatibility gate 通过后私下捕获，并记录 capture-time identity；随后只在精确 native path 与重验后的 workspace root identity 都匹配时投影 `path_matches_revalidated_workspace_root`。由于未跨阶段持有 cwd handle，该状态仍保留 `invocation_cwd_identity_not_bound` blocker；cwd path 本身不序列化到 wire contract。Cargo-home ledger 不读取、解析、使用或序列化配置内容来闭合 precedence，ancestor configs 与 workspace pair 也仍未解决；因此 `precedenceComplete=false`，`targetDir` 继续保持 `NotChecked(config_scope_not_checked)`，`targetShape` 继续保持 `Unknown(config_scope_not_checked)`，且 `candidateAllowed`、`planAllowed`、`approvalAllowed`、`executionAllowed` 全部为 `false`。Core 的 `cleaner_cargo_detect_with_cancel(..., &CancellationToken)` 只让调用方协作取消 scan 之后的 fixed-input/evidence collection；同步 scan 使用另一个内部 token。当前 CLI 没有 Ctrl-C、`sweepx cancel` 或 live registry 接线来触发该 token |
-| `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 仅查看与导航，不产生计划、授权或文件变更；detail rescan 为 single-flight 后台任务，2 s deadline，导航与退出不等待非协作 worker，late result 会丢弃，且有 process-wide 32 stuck-worker cap |
+| `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 可导航和查看；`d`/`Delete` 选择移到回收站，退出全屏后再次确认并重验 live identity；不支持 symlink/reparse/root，且没有永久删除降级 |
+| `sweepx trash` | **development preview** 的系统回收站入口 | `sweepx trash /absolute/path` 强制交互终端确认，不提供跳过。仅文件/真实目录，保护系统/home/state/Trash 根，提交前重验，失败绝不转永久删除 |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
-| P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 这是失败关闭的 registry substrate，不是运行时 registry 服务；所有 mutation cell 在 Linux、macOS、Windows 上仍为 `disabled` |
+| P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 当前主机的 Trash file/directory cell 为 `degraded` preview；其余平台和全部 Permanent cell 仍为 `disabled`，不代表发布资格 |
 | P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；Linux 已接入 bounded SQLite event journal，在单个事务中写入完整流与 terminal snapshot，并以 degraded 形式公开 completed-stream `status --watch` replay；events 仍在 scan 完成后批量构造，因此它不是 live sink，也尚未 runtime-qualified。`scan --format ndjson` 继续 disabled；macOS 仍是 legacy snapshot；Windows durable state 仍 disabled；没有 native target mutation |
-| 真实清理 | **不可用** | Trash、Permanent、管理器 mutation 与 destructive Agent workflow 均未实现 |
+| 真实清理 | **仅 Trash preview 可用** | 显式单路径、确认、重验后移到系统回收站；Permanent、批量计划执行、管理器 mutation 与 destructive Agent workflow 未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
 
@@ -62,11 +63,17 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 # Linux 可选择 SQLite journal 目录，macOS 可选择 legacy snapshot 目录；Windows 不要传 --state-dir
 cargo run -p sweepx-cli -- scan /absolute/path/to/root
 
+# 不传路径时扫描当前平台文件系统根（可能较慢，并受资源上限约束）
+cargo run -p sweepx-cli -- scan
+
 # 不需要后续 status/operation state 时关闭状态写入；也适用于 journal 不支持的文件系统
 cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 
-# 扫描后进入文件管理器式 TUI（Enter/Right 进入，Esc/Backspace/Left 返回）
+# 扫描后进入文件管理器式 TUI（Enter/Right 进入，d/Delete 移到回收站）
 cargo run -p sweepx-cli -- scan --tui /absolute/path/to/root
+
+# 显式将一个绝对路径移到系统回收站；默认询问确认
+cargo run -p sweepx-cli -- trash /absolute/path/to/item
 
 # 仅在脚本或集成需要时显式请求 JSON
 cargo run -p sweepx-cli -- \
@@ -93,8 +100,8 @@ cargo run -p sweepx-cli -- \
 cargo run -p sweepx-cli -- --format json cleaner list
 cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 
-# 实验性 live-only Cargo target 检测；当前内置 manifest 与 Core 不兼容，会在扫描前以 exit 12 失败关闭
-cargo run -p sweepx-cli -- --format json cleaner cargo-detect /absolute/path/to/workspace
+# 实验性 live-only Cargo target 检测；默认 human 输出列出 target、大小与 report-only 原因
+cargo run -p sweepx-cli -- cleaner cargo-detect /absolute/path/to/workspace
 
 ```
 
@@ -122,7 +129,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 - Core 另提供 `cleaner_cargo_detect_with_cancel`，由库调用方持有 cancellation token。该 token 只覆盖 scan 之后的 fixed-input/evidence collection；同步 scan 仍独立拥有自己的 token。收集阶段一旦观察到取消便返回 fail-closed 的 cancelled/report-only 结果，而不是继续补全证据或扩大权限；
 - 对不兼容、未知版本或证据不足的内容保持 partial、report-only 或失败关闭。
 
-当前 `0.1.0` Core 与仓库内要求 `>=1.0.0, <2.0.0` 的内置 Cleaner 不兼容，这是刻意可见的兼容性门，而不是可绕过的错误。没有 Cleaner 执行接口，也不会调用包管理器、浏览器或其他外部清理命令。
+Cargo Cleaner 现在声明 `>=0.1.0, <0.2.0` 并与当前 Core 兼容；Chromium Cleaner 仍要求 `>=1.0.0, <2.0.0`，因此 catalog 仍会诚实报告 partial。Cargo detector 只扫描并输出 report-only 观察，不会调用 `cargo clean` 或获得删除权限。
 
 ## 安全模型
 
@@ -139,7 +146,7 @@ Cleaner 不是任意脚本或“目录名匹配后删除”的别名。一个 Cl
 
 P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只携带 ID，identity/revalidation digest 由 canonical plan 派生，不携带 native path；唯一 adapter 是 fake adapter；所谓 simulated Trash/Permanent 只生成可验证 receipt 和审计状态，不调用操作系统删除接口，也不改变扫描目标。当前 audit/recovery 仍仅支持 Unix；Linux durable event journal 已在单个事务中持久化完整流与 terminal snapshot，并提供 journal-first status 与 degraded completed-stream `status --watch` replay。该 replay 只重放已完成且已持久化的 stream，先做一次同 snapshot 全量校验，单次请求按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live sink，也不等待新事件、不会创建后台 operation，且尚未 runtime-qualified；`scan --format ndjson` 因此继续 disabled。macOS 仍使用 legacy snapshot，Windows durable state 仍禁用。因此它既不是 future native mutation 的发布级存储，也不能被写成跨平台或真实执行资格。
 
-P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前它们在 Linux、macOS、Windows 上全部为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。当前没有这样的合格记录，也没有 native adapter、mutation command 或 approval UI。
+P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前运行平台的两个 Trash cell 以 `degraded` preview 报告，其余平台与全部 Permanent cell 保持 `disabled`；preview 不等于发布资格。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。
 
 ## Agent 权限边界
 
@@ -173,7 +180,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-当前只走到只读 CLI/TUI，以及 library-only 的模拟状态；不存在 `scan -> execute` 或 `path -> delete` 路径。
+当前已走通只读扫描、TUI 浏览与单对象 `path -> Trash` preview；`scan -> plan -> execute` 和 Permanent 路径仍不存在。
 
 ## 平台与发布边界
 
@@ -195,9 +202,9 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 ## 已知缺口
 
 - Linux scan 的性能预算、复杂文件系统语义和故障注入仍需更完整、可复现的验证。
-- macOS handle-bound 与 Windows handle-relative 的 degraded live scanner 均已存在，但其资格、覆盖与跨平台一致性仍未完成；三平台 native Trash、可信本地审批 broker 与真实 preflight revalidation 尚未实现。
+- macOS handle-bound 与 Windows handle-relative 的 degraded live scanner 均已存在，但其资格、覆盖与跨平台一致性仍未完成；Trash preview 的逐平台发布资格、可信本地审批 broker 与完整 preflight/reconciliation 尚未实现。
 - Cleaner 签名、更新、撤销、沙箱和外部 query/mutation adapter 尚未达到发布状态。
 - P3 plan/simulation authorization、audit/recovery 和 executor 已在 library 层实现；仍没有公共 CLI 合同、可信 HumanApproval broker 或 native adapter。
 - 对 sparse、compressed、hard link、clone/reflink、snapshot、dedup、overlay、quota 和共享存储的空间归因不能被概括成“将释放多少空间”。
 
-最重要的当前结论是：**SweepX 已有可运行的只读开发能力，但没有可运行的清理能力。**
+最重要的当前结论是：**SweepX 已有可运行的扫描/TUI 和单对象 Trash preview，但还没有完整计划执行或 Permanent 清理能力。**

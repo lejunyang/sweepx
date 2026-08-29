@@ -211,8 +211,9 @@ enum CollectedCargoConfigFile<'a> {
     Failed(CargoEvidenceReason),
 }
 
-/// Redacted process-context observations captured by the caller. The decoder deliberately accepts
-/// presence only: it cannot inspect, retain, or serialize an environment value.
+/// Redacted process-context observations captured by the caller. Only `CARGO_TARGET_DIR` has a
+/// private capture companion in `CargoInvocationContext`; the runtime ledger itself never retains
+/// or serializes an environment value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CargoConfigScopeRuntime {
     cargo_target_dir: CargoEnvironmentPresence,
@@ -246,6 +247,7 @@ impl CargoConfigScopeRuntime {
 pub(crate) struct CargoInvocationContext {
     runtime: CargoConfigScopeRuntime,
     cwd: Result<LocatorDirectoryIdentity, CargoEvidenceReason>,
+    cargo_target_dir: CargoTargetDirCapture,
     cargo_home_config: CargoHomeConfigCapture,
     cli_overrides_absent: bool,
 }
@@ -253,24 +255,41 @@ pub(crate) struct CargoInvocationContext {
 impl CargoInvocationContext {
     pub(crate) fn capture_for_sweepx_cli<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_target_dir: Option<&std::ffi::OsStr>,
         explicit_cargo_home: Option<&std::ffi::OsStr>,
         reader: &LocatorReader<P>,
         cancel: &CancellationToken,
     ) -> Self {
-        Self::capture(runtime, explicit_cargo_home, true, reader, cancel)
+        Self::capture(
+            runtime,
+            explicit_cargo_target_dir,
+            explicit_cargo_home,
+            true,
+            reader,
+            cancel,
+        )
     }
 
     pub(crate) fn capture_for_unmodeled_caller<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_target_dir: Option<&std::ffi::OsStr>,
         explicit_cargo_home: Option<&std::ffi::OsStr>,
         reader: &LocatorReader<P>,
         cancel: &CancellationToken,
     ) -> Self {
-        Self::capture(runtime, explicit_cargo_home, false, reader, cancel)
+        Self::capture(
+            runtime,
+            explicit_cargo_target_dir,
+            explicit_cargo_home,
+            false,
+            reader,
+            cancel,
+        )
     }
 
     fn capture<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_target_dir: Option<&std::ffi::OsStr>,
         explicit_cargo_home: Option<&std::ffi::OsStr>,
         cli_overrides_absent: bool,
         reader: &LocatorReader<P>,
@@ -279,6 +298,12 @@ impl CargoInvocationContext {
         let cwd = std::env::current_dir()
             .map_err(|_| CargoEvidenceReason::MissingIdentity)
             .and_then(|path| capture_directory_identity(reader, &path, cancel));
+        let cargo_target_dir = capture_explicit_cargo_target_dir(
+            runtime.cargo_target_dir,
+            explicit_cargo_target_dir,
+            reader,
+            cancel,
+        );
         let cargo_home_config = match explicit_cargo_home {
             None => CargoHomeConfigCapture::NotChecked,
             Some(raw_path) => {
@@ -296,6 +321,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd,
+            cargo_target_dir,
             cargo_home_config,
             cli_overrides_absent,
         }
@@ -311,6 +337,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: capture_directory_identity(reader, cwd, &CancellationToken::new()),
+            cargo_target_dir: CargoTargetDirCapture::from_presence(runtime.cargo_target_dir),
             cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent,
         }
@@ -320,6 +347,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cargo_target_dir: CargoTargetDirCapture::from_presence(runtime.cargo_target_dir),
             cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent: false,
         }
@@ -330,6 +358,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cargo_target_dir: CargoTargetDirCapture::from_presence(runtime.cargo_target_dir),
             cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent: true,
         }
@@ -353,6 +382,56 @@ impl CargoInvocationContext {
                 Ok(pair) => cargo_config_pair_presence(&pair),
                 Err(error) => CargoHomeConfigCapture::Failed(map_locator_batch_error(error)),
             };
+    }
+}
+
+/// Private invocation-time capture for one explicit `CARGO_TARGET_DIR`. The raw value is consumed
+/// exactly once by `CargoInvocationContext::capture` and is never exposed by this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CargoTargetDirCapture {
+    VerifiedAbsent,
+    Captured(LocatorDirectoryIdentity),
+    NotChecked,
+    Failed(CargoEvidenceReason),
+}
+
+impl CargoTargetDirCapture {
+    const fn from_presence(presence: CargoEnvironmentPresence) -> Self {
+        match presence {
+            CargoEnvironmentPresence::VerifiedAbsent => Self::VerifiedAbsent,
+            CargoEnvironmentPresence::PresentRedacted => Self::NotChecked,
+        }
+    }
+
+    const fn binding_input(&self) -> CargoTargetDirBindingInput {
+        match self {
+            Self::VerifiedAbsent | Self::Captured(_) | Self::NotChecked => {
+                CargoTargetDirBindingInput::NotChecked
+            }
+            Self::Failed(reason) => CargoTargetDirBindingInput::Failed(*reason),
+        }
+    }
+}
+
+fn capture_explicit_cargo_target_dir<P: PlatformScanner>(
+    presence: CargoEnvironmentPresence,
+    raw_value: Option<&std::ffi::OsStr>,
+    reader: &LocatorReader<P>,
+    cancel: &CancellationToken,
+) -> CargoTargetDirCapture {
+    if presence == CargoEnvironmentPresence::VerifiedAbsent {
+        return CargoTargetDirCapture::VerifiedAbsent;
+    }
+    let Some(raw_value) = raw_value else {
+        return CargoTargetDirCapture::NotChecked;
+    };
+    let path = std::path::Path::new(raw_value);
+    if !path.is_absolute() {
+        return CargoTargetDirCapture::NotChecked;
+    }
+    match capture_directory_identity(reader, path, cancel) {
+        Ok(identity) => CargoTargetDirCapture::Captured(identity),
+        Err(reason) => CargoTargetDirCapture::Failed(reason),
     }
 }
 
@@ -433,6 +512,7 @@ enum CargoWorkspacePairInput {
 #[derive(Debug, Clone, Copy)]
 struct CargoConfigScopeInputs {
     runtime: CargoConfigScopeRuntime,
+    cargo_target_dir_binding: CargoTargetDirBindingInput,
     workspace_pair: CargoWorkspacePairInput,
     ancestor_configs: CargoConfigExternalSourceInput,
     cargo_home_config: CargoConfigExternalSourceInput,
@@ -450,6 +530,7 @@ impl CargoConfigScopeInputs {
         };
         Self {
             runtime: invocation.runtime,
+            cargo_target_dir_binding: invocation.cargo_target_dir.binding_input(),
             workspace_pair: CargoWorkspacePairInput::NotChecked,
             ancestor_configs: CargoConfigExternalSourceInput::NotChecked,
             cargo_home_config: invocation.cargo_home_config.external_source_input(),
@@ -458,6 +539,13 @@ impl CargoConfigScopeInputs {
             invocation_cwd: CargoInvocationCwdInput::NotChecked,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoTargetDirBindingInput {
+    Matched,
+    NotChecked,
+    Failed(CargoEvidenceReason),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -604,9 +692,30 @@ struct CargoEnvironmentVariableEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CargoTargetDirBinding {
+    PathMatchesRevalidatedTarget,
+    NotChecked { reason_code: CargoEvidenceReason },
+    Failed { reason_code: CargoEvidenceReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoTargetDirEnvironmentEvidence {
+    name: &'static str,
+    state: CargoEnvironmentPresence,
+    value_redacted: bool,
+    binding: CargoTargetDirBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CargoConfigEnvironmentEvidence {
-    cargo_target_dir: CargoEnvironmentVariableEvidence,
+    cargo_target_dir: CargoTargetDirEnvironmentEvidence,
     cargo_build_target_dir: CargoEnvironmentVariableEvidence,
     cargo_home: CargoEnvironmentVariableEvidence,
 }
@@ -642,6 +751,9 @@ enum CargoConfigScopeBlocker {
     CargoHomeConfigNotChecked,
     CargoHomeConfigPresentRedacted,
     CargoHomePresentRedacted,
+    CargoTargetDirBindingFailed,
+    CargoTargetDirBindingIdentityNotBound,
+    CargoTargetDirBindingNotChecked,
     CargoTargetDirPresentRedacted,
     CliConfigOverridesFailed,
     CliConfigOverridesNotChecked,
@@ -673,6 +785,11 @@ impl CargoConfigScopeBlocker {
             Self::CargoHomeConfigNotChecked => "cargo_home_config_not_checked",
             Self::CargoHomeConfigPresentRedacted => "cargo_home_config_present_redacted",
             Self::CargoHomePresentRedacted => "cargo_home_present_redacted",
+            Self::CargoTargetDirBindingFailed => "cargo_target_dir_binding_failed",
+            Self::CargoTargetDirBindingIdentityNotBound => {
+                "cargo_target_dir_binding_identity_not_bound"
+            }
+            Self::CargoTargetDirBindingNotChecked => "cargo_target_dir_binding_not_checked",
             Self::CargoTargetDirPresentRedacted => "cargo_target_dir_present_redacted",
             Self::CliConfigOverridesFailed => "cli_config_overrides_failed",
             Self::CliConfigOverridesNotChecked => "cli_config_overrides_not_checked",
@@ -1605,7 +1722,10 @@ fn decode_config_scope(inputs: CargoConfigInputs<'_>) -> CargoConfigScopeEvidenc
     );
     let scope = inputs.scope;
     let environment = CargoConfigEnvironmentEvidence {
-        cargo_target_dir: environment_evidence("CARGO_TARGET_DIR", scope.runtime.cargo_target_dir),
+        cargo_target_dir: cargo_target_dir_environment_evidence(
+            scope.runtime.cargo_target_dir,
+            scope.cargo_target_dir_binding,
+        ),
         cargo_build_target_dir: environment_evidence(
             "CARGO_BUILD_TARGET_DIR",
             scope.runtime.cargo_build_target_dir,
@@ -1813,6 +1933,27 @@ fn environment_evidence(
     }
 }
 
+fn cargo_target_dir_environment_evidence(
+    state: CargoEnvironmentPresence,
+    binding: CargoTargetDirBindingInput,
+) -> CargoTargetDirEnvironmentEvidence {
+    let binding = match binding {
+        CargoTargetDirBindingInput::Matched => CargoTargetDirBinding::PathMatchesRevalidatedTarget,
+        CargoTargetDirBindingInput::NotChecked => CargoTargetDirBinding::NotChecked {
+            reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
+        },
+        CargoTargetDirBindingInput::Failed(reason_code) => {
+            CargoTargetDirBinding::Failed { reason_code }
+        }
+    };
+    CargoTargetDirEnvironmentEvidence {
+        name: "CARGO_TARGET_DIR",
+        state,
+        value_redacted: matches!(state, CargoEnvironmentPresence::PresentRedacted),
+        binding,
+    }
+}
+
 fn project_external_source(
     input: CargoConfigExternalSourceInput,
 ) -> CargoConfigExternalSourceState {
@@ -1929,6 +2070,17 @@ fn config_scope_blockers(evidence: &CargoConfigScopeEvidenceV1) -> Vec<CargoConf
     }
     if evidence.environment.cargo_target_dir.state == CargoEnvironmentPresence::PresentRedacted {
         blockers.push(CargoConfigScopeBlocker::CargoTargetDirPresentRedacted);
+        blockers.push(match evidence.environment.cargo_target_dir.binding {
+            CargoTargetDirBinding::PathMatchesRevalidatedTarget => {
+                CargoConfigScopeBlocker::CargoTargetDirBindingIdentityNotBound
+            }
+            CargoTargetDirBinding::NotChecked { .. } => {
+                CargoConfigScopeBlocker::CargoTargetDirBindingNotChecked
+            }
+            CargoTargetDirBinding::Failed { .. } => {
+                CargoConfigScopeBlocker::CargoTargetDirBindingFailed
+            }
+        });
     }
     if evidence.environment.cargo_build_target_dir.state
         == CargoEnvironmentPresence::PresentRedacted
@@ -2486,6 +2638,7 @@ pub(crate) fn test_config_scope_projection(
     let invocation = CargoInvocationContext {
         runtime,
         cwd: Err(CargoEvidenceReason::MissingIdentity),
+        cargo_target_dir: CargoTargetDirCapture::from_presence(runtime.cargo_target_dir),
         cargo_home_config: CargoHomeConfigCapture::NotChecked,
         cli_overrides_absent: true,
     };
@@ -2583,6 +2736,7 @@ mod linux_real_stack_tests {
         let reader = reader();
         let mut invocation = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(cargo_home.as_os_str()),
             &reader,
             &CancellationToken::new(),
@@ -2666,6 +2820,7 @@ mod linux_real_stack_tests {
         let mut absent = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, false),
             None,
+            None,
             &reader,
             &CancellationToken::new(),
         );
@@ -2676,6 +2831,7 @@ mod linux_real_stack_tests {
         ));
         let mut invocation = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(cargo_home.as_os_str()),
             &reader,
             &CancellationToken::new(),
@@ -2712,6 +2868,7 @@ mod linux_real_stack_tests {
         let reader = reader();
         let invalid = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(std::ffi::OsStr::new("relative-cargo-home-must-not-resolve")),
             &reader,
             &CancellationToken::new(),
@@ -2726,6 +2883,7 @@ mod linux_real_stack_tests {
             .join("missing-cargo-home");
         let capture_failed = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(missing_absolute.as_os_str()),
             &reader,
             &CancellationToken::new(),
@@ -2741,6 +2899,7 @@ mod linux_real_stack_tests {
         fs::write(cargo_home.join("config"), b"[build]\ntarget-dir='secret'\n").unwrap();
         let mut cancelled = CargoInvocationContext::capture_for_sweepx_cli(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(cargo_home.as_os_str()),
             &reader,
             &CancellationToken::new(),
@@ -2778,6 +2937,7 @@ mod linux_real_stack_tests {
         let reader = reader();
         let mut invocation = CargoInvocationContext::capture_for_unmodeled_caller(
             CargoConfigScopeRuntime::from_presence(false, false, true),
+            None,
             Some(cargo_home.as_os_str()),
             &reader,
             &CancellationToken::new(),
@@ -3573,6 +3733,7 @@ mod tests {
             config_toml: CargoConfigFile::VerifiedAbsent,
             scope: CargoConfigScopeInputs {
                 runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+                cargo_target_dir_binding: CargoTargetDirBindingInput::NotChecked,
                 workspace_pair: CargoWorkspacePairInput::StableSnapshot,
                 ancestor_configs: CargoConfigExternalSourceInput::PresentRedacted,
                 cargo_home_config: CargoConfigExternalSourceInput::PresentRedacted,
@@ -3691,6 +3852,7 @@ mod tests {
             config_toml: CargoConfigFile::VerifiedAbsent,
             scope: CargoConfigScopeInputs {
                 runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+                cargo_target_dir_binding: CargoTargetDirBindingInput::NotChecked,
                 workspace_pair: CargoWorkspacePairInput::Failed(
                     CargoEvidenceReason::ConfigReadFailed,
                 ),
@@ -4060,6 +4222,7 @@ mod tests {
     fn fully_closed_scope() -> CargoConfigScopeInputs {
         CargoConfigScopeInputs {
             runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+            cargo_target_dir_binding: CargoTargetDirBindingInput::NotChecked,
             workspace_pair: CargoWorkspacePairInput::StableSnapshot,
             ancestor_configs: CargoConfigExternalSourceInput::VerifiedAbsent,
             cargo_home_config: CargoConfigExternalSourceInput::VerifiedAbsent,

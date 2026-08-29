@@ -1850,6 +1850,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             CapabilityState::Qualified,
             "CAPABILITIES_REPORT_SUPPORTED",
         ),
+        mutating_command_record(
+            "trash",
+            CapabilityState::Degraded,
+            "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION",
+        ),
     ];
     let capabilities = vec![
         capability_record(
@@ -2057,7 +2062,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Linux,
             CapabilityCell::TRASH_LOCAL_FILE,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "linux" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::FixtureConformanceOnly,
         ),
         mutation_capability_record(
@@ -2065,7 +2074,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Linux,
             CapabilityCell::TRASH_LOCAL_DIRECTORY,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "linux" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -2097,7 +2110,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Macos,
             CapabilityCell::TRASH_LOCAL_FILE,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "macos" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -2105,7 +2122,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Macos,
             CapabilityCell::TRASH_LOCAL_DIRECTORY,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "macos" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -2137,7 +2158,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             CapabilityCell::TRASH_LOCAL_FILE,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "windows" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -2145,7 +2170,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             CapabilityCell::TRASH_LOCAL_DIRECTORY,
-            "NATIVE_TRASH_QUALIFICATION_ABSENT",
+            if current_os == "windows" {
+                "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
+            } else {
+                "NATIVE_TRASH_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -2397,9 +2426,10 @@ pub fn cleaner_cargo_detect_with_invocation_and_cancel(
     cancel: &CancellationToken,
 ) -> Result<CleanerSuccess, CoreError> {
     cleaner_cargo_detect_with_scope_runtime(context, request, cancel, || {
+        let explicit_cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
         let explicit_cargo_home = std::env::var_os("CARGO_HOME");
         let runtime = cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
-            std::env::var_os("CARGO_TARGET_DIR").is_some(),
+            explicit_cargo_target_dir.is_some(),
             std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some(),
             explicit_cargo_home.is_some(),
         );
@@ -2413,6 +2443,7 @@ pub fn cleaner_cargo_detect_with_invocation_and_cancel(
         if invocation.cargo_cli_overrides_absent {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_sweepx_cli(
                 runtime,
+                explicit_cargo_target_dir.as_deref(),
                 explicit_cargo_home.as_deref(),
                 &reader,
                 &capture_cancel,
@@ -2420,6 +2451,7 @@ pub fn cleaner_cargo_detect_with_invocation_and_cancel(
         } else {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_unmodeled_caller(
                 runtime,
+                explicit_cargo_target_dir.as_deref(),
                 explicit_cargo_home.as_deref(),
                 &reader,
                 &capture_cancel,
@@ -2684,6 +2716,9 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
         .join("\n");
     }
     if output.kind == OutputKind::CleanerResult {
+        if output.summary.get("command").and_then(Value::as_str) == Some("cleaner.cargo-detect") {
+            return render_human_cargo_detect_output(context, output);
+        }
         let count = output
             .summary
             .get("cleanerCount")
@@ -2865,6 +2900,127 @@ pub fn render_human_output(context: &CoreContext, output: &OutputEnvelope) -> St
         catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()),
     ]
     .join("\n")
+}
+
+fn render_human_cargo_detect_output(context: &CoreContext, output: &OutputEnvelope) -> String {
+    let matches = output
+        .data
+        .get("matches")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let hints = output
+        .data
+        .get("hints")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let match_count = output
+        .summary
+        .get("matchCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(matches.len());
+    let hint_count = output
+        .summary
+        .get("hintCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(hints.len());
+    let mut lines = match context.locale() {
+        Locale::ZhCn => vec![
+            "Cargo target 扫描报告（仅报告，不会删除）".to_string(),
+            "状态       大小          路径".to_string(),
+        ],
+        Locale::EnUs => vec![
+            "Cargo target scan report (report-only; nothing was deleted)".to_string(),
+            "STATUS     SIZE          PATH".to_string(),
+        ],
+    };
+    let (match_label, hint_label, unknown_label) = match context.locale() {
+        Locale::ZhCn => ("确定", "待确认", "未知"),
+        Locale::EnUs => ("match", "hint", "unknown"),
+    };
+    for (status, observation) in matches
+        .iter()
+        .map(|item| (match_label, item))
+        .chain(hints.iter().map(|item| (hint_label, item)))
+    {
+        let path = observation
+            .get("displayPath")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let bytes = observation
+            .pointer("/evidence/aggregate/potentiallyReclaimableBytes/value")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u128>().ok())
+            .map(human_bytes)
+            .unwrap_or_else(|| unknown_label.to_string());
+        lines.push(format!("{status:<10} {bytes:<13} {path}"));
+    }
+    if matches.is_empty() && hints.is_empty() {
+        lines.push(match context.locale() {
+            Locale::ZhCn => "未发现 Cargo target 目录。".to_string(),
+            Locale::EnUs => "No Cargo target directories found.".to_string(),
+        });
+    }
+    let source_incomplete = output
+        .summary
+        .get("sourceScanIncomplete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let boundary_count = output
+        .summary
+        .get("sourceScanBoundaryCount")
+        .and_then(json_decimal_to_usize)
+        .unwrap_or(0);
+    lines.push(match context.locale() {
+        Locale::ZhCn => format!(
+            "汇总：{} 个确定命中，{} 个待确认；扫描{}（{} 个边界）。",
+            match_count,
+            hint_count,
+            if source_incomplete {
+                "不完整"
+            } else {
+                "完整"
+            },
+            boundary_count
+        ),
+        Locale::EnUs => format!(
+            "Summary: {} matches, {} hints; scan {} ({} boundaries).",
+            match_count,
+            hint_count,
+            if source_incomplete {
+                "incomplete"
+            } else {
+                "complete"
+            },
+            boundary_count
+        ),
+    });
+    lines.push(match context.locale() {
+        Locale::ZhCn => {
+            "hint 表示发现 Cargo.toml + target，但安全证据尚不足，不能直接清理。".to_string()
+        }
+        Locale::EnUs => {
+            "A hint is Cargo.toml + target with insufficient safety evidence for cleanup."
+                .to_string()
+        }
+    });
+    lines.join("\n")
+}
+
+fn human_bytes(bytes: u128) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn render_human_scan_output(
@@ -4691,6 +4847,15 @@ fn command_record(id: &str, state: CapabilityState, reason_code: &str) -> Value 
     })
 }
 
+fn mutating_command_record(id: &str, state: CapabilityState, reason_code: &str) -> Value {
+    json!({
+        "id": id,
+        "state": capability_state_name(state),
+        "reasonCode": reason_code,
+        "mutating": true
+    })
+}
+
 fn capability_record(
     recorded_at: &str,
     qualification_expires_at: &str,
@@ -4775,27 +4940,40 @@ fn mutation_capability_record(
     reason_code: &str,
     evidence_class: EvidenceClass,
 ) -> CapabilityRecordV1 {
+    let preview_trash = reason_code == "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION";
     let mut record = capability_record(
         recorded_at,
         qualification_expires_at,
         os_family,
         capability,
-        CapabilityState::Disabled,
+        if preview_trash {
+            CapabilityState::Degraded
+        } else {
+            CapabilityState::Disabled
+        },
         reason_code,
     );
     record.evidence.evidence_class = evidence_class;
     record.evidence.reviewed_by = vec!["p4a-capability-integration".to_string()];
-    record.evidence.limitations = match evidence_class {
-        EvidenceClass::FixtureConformanceOnly => vec![
-            "fixture-only fake-adapter evidence is not product qualification".to_string(),
-            "no native Trash adapter is exposed".to_string(),
-            "no destructive commands are exposed".to_string(),
-        ],
-        _ => vec![
-            "real-OS qualification evidence is incomplete".to_string(),
-            "no native mutation adapter is exposed".to_string(),
-            "no destructive commands are exposed".to_string(),
-        ],
+    record.evidence.limitations = if preview_trash {
+        vec![
+            "preview command only; not release-qualified".to_string(),
+            "explicit confirmation and immediate identity revalidation required".to_string(),
+            "no Permanent fallback".to_string(),
+        ]
+    } else {
+        match evidence_class {
+            EvidenceClass::FixtureConformanceOnly => vec![
+                "fixture-only fake-adapter evidence is not product qualification".to_string(),
+                "no native Trash adapter is exposed".to_string(),
+                "no destructive commands are exposed".to_string(),
+            ],
+            _ => vec![
+                "real-OS qualification evidence is incomplete".to_string(),
+                "no native mutation adapter is exposed".to_string(),
+                "no destructive commands are exposed".to_string(),
+            ],
+        }
     };
     record.evidence.invalidates_on = vec![
         "real-os-qualification-added".to_string(),
@@ -4865,6 +5043,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "NATIVE_TRASH_QUALIFICATION_ABSENT" => {
             "Native Trash is disabled because real-OS qualification is absent for this exact capability cell."
+        }
+        "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION" => {
+            "Trash preview is available with explicit confirmation and immediate identity revalidation; it is not release-qualified and never falls back to Permanent deletion."
         }
         "PERMANENT_QUALIFICATION_ABSENT" => {
             "Permanent deletion is disabled because independent qualification is absent for this exact capability cell."
@@ -6582,25 +6763,27 @@ mod tests {
     }
 
     #[test]
-    fn cleaner_show_rejects_incompatible_builtin_with_compat_exit_code() {
+    fn cleaner_show_accepts_compatible_cargo_builtin() {
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Default,
         ));
-        let error = cleaner_show(
+        let result = cleaner_show(
             &context,
             &CleanerShowRequest {
                 cleaner_ref: "org.sweepx.cargo-target".to_string(),
             },
         )
-        .expect_err("incompatible cleaner should fail");
-
-        assert!(matches!(error, CoreError::CleanerCompat { .. }));
-        assert_eq!(core_error_exit_code(&error), ExitCode::CleanerTrustOrCompat);
+        .expect("Cargo cleaner should be compatible with Core 0.1");
+        assert_eq!(result.output.status, OutputStatus::Ok);
+        assert_eq!(
+            result.output.data["cleaner"]["compatibility"]["state"],
+            "compatible"
+        );
     }
 
     #[test]
-    fn cargo_detect_compatibility_gate_precedes_runtime_scope_collection() {
+    fn cargo_detect_compatible_builtin_reaches_runtime_scope_collection() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let context = CoreContext::new(LocaleResolution::new(
@@ -6608,11 +6791,15 @@ mod tests {
             sweepx_i18n::LocaleSource::Default,
         ));
         let invoked = AtomicBool::new(false);
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
         let cancel = CancellationToken::new();
-        cancel.cancel();
         let result = cleaner_cargo_detect_with_scope_runtime(
             &context,
-            &CleanerCargoDetectRequest::new(vec![PathBuf::from("/path-that-must-not-be-scanned")]),
+            &CleanerCargoDetectRequest::new(vec![root]),
             &cancel,
             || {
                 invoked.store(true, Ordering::SeqCst);
@@ -6623,56 +6810,33 @@ mod tests {
                 )
             },
         )
-        .expect("incompatible cleaner should return a structured envelope");
+        .expect("compatible cleaner should scan");
 
-        assert_eq!(result.output.status, OutputStatus::Failed);
-        assert_eq!(result.output.exit_code, ExitCode::CleanerTrustOrCompat);
-        assert_eq!(result.output.summary["scanPerformed"], false);
-        assert_eq!(
-            result.output.summary["reasonCode"],
-            cargo_cleaner_detect::BUILTIN_MANIFEST_INCOMPATIBLE
-        );
-        assert_eq!(result.output.data["builtinManifestCompatible"], false);
-        assert!(
-            result
-                .output
-                .errors
-                .iter()
-                .any(|error| error.code == "cleaner.compatibility")
-        );
-        assert!(!invoked.load(Ordering::SeqCst));
+        assert_eq!(result.output.data["builtinManifestCompatible"], true);
+        assert_eq!(result.output.summary["hintCount"], "1");
+        assert!(invoked.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn legacy_cargo_detect_wrapper_preserves_compatibility_gate_semantics() {
+    fn legacy_cargo_detect_wrappers_scan_with_compatible_builtin() {
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Default,
         ));
-        let request =
-            CleanerCargoDetectRequest::new(vec![PathBuf::from("/path-that-must-not-be-scanned")]);
-        let legacy = cleaner_cargo_detect(&context, &request)
-            .expect("legacy wrapper should return the compatibility envelope");
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        let request = CleanerCargoDetectRequest::new(vec![root]);
+        let legacy = cleaner_cargo_detect(&context, &request).expect("legacy wrapper should scan");
         let caller_cancel = CancellationToken::new();
         let caller_owned = cleaner_cargo_detect_with_cancel(&context, &request, &caller_cancel)
-            .expect("fresh caller token should return the compatibility envelope");
+            .expect("fresh caller token should scan");
 
         for result in [&legacy, &caller_owned] {
-            assert_eq!(result.output.status, OutputStatus::Failed);
-            assert_eq!(result.output.exit_code, ExitCode::CleanerTrustOrCompat);
-            assert_eq!(result.output.summary["scanPerformed"], false);
-            assert_eq!(
-                result.output.summary["reasonCode"],
-                cargo_cleaner_detect::BUILTIN_MANIFEST_INCOMPATIBLE
-            );
-            assert_eq!(result.output.data["builtinManifestCompatible"], false);
-            assert!(
-                result
-                    .output
-                    .errors
-                    .iter()
-                    .any(|error| error.code == "cleaner.compatibility")
-            );
+            assert_eq!(result.output.data["builtinManifestCompatible"], true);
+            assert_eq!(result.output.summary["hintCount"], "1");
         }
     }
 
@@ -6868,7 +7032,7 @@ mod tests {
         });
 
         let rendered = render_human_output(&context, &output);
-        assert!(rendered.contains("cleaner.cargo-detect (3)"));
+        assert!(rendered.contains("0 matches, 3 hints"));
     }
 
     #[test]

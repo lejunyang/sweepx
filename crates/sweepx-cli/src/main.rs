@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
+mod trash_command;
+
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(target_os = "windows")]
 use sweepx_core::cache_status_unsupported;
@@ -47,7 +49,7 @@ impl From<FormatArg> for OutputFormat {
 #[command(
     name = "sweepx",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Read-only disk usage scanner and interactive browser"
+    about = "Disk usage scanner, interactive browser, and Trash-first cleanup"
 )]
 struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
@@ -67,7 +69,7 @@ enum Commands {
         tui: bool,
         #[arg(long)]
         no_state: bool,
-        #[arg(required = true, value_name = "ABSOLUTE_ROOT")]
+        #[arg(value_name = "ABSOLUTE_ROOT")]
         roots: Vec<OsString>,
     },
     Explain {
@@ -97,6 +99,11 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    /// Move one file or directory to the operating system Trash/Recycle Bin.
+    Trash {
+        #[arg(required = true, value_name = "ABSOLUTE_PATH")]
+        path: OsString,
     },
     Capabilities,
 }
@@ -175,7 +182,7 @@ fn main() -> ProcessExitCode {
                 Ok(value) => value,
                 Err(code) => return code,
             };
-            let roots = match normalize_roots(&roots) {
+            let roots = match normalize_scan_roots(&roots) {
                 Ok(roots) => roots,
                 Err(error) => {
                     eprintln!("{error}");
@@ -384,6 +391,14 @@ fn main() -> ProcessExitCode {
                 }
             }
         },
+        Commands::Trash { path } => {
+            return trash_command::run_cli_trash(
+                &path,
+                format,
+                context.locale(),
+                std::io::stdin().is_terminal(),
+            );
+        }
         Commands::Capabilities => capabilities(&context).map(RenderedResult::Capabilities),
     };
 
@@ -468,6 +483,9 @@ fn finish_tui_scan(
     // screen.
     println!("{human_output}");
     match browser_result {
+        Ok(BrowserExit::TrashSelected { entry }) => {
+            trash_command::run_tui_trash(&entry, context.locale())
+        }
         Ok(browser_exit) => ProcessExitCode::from(tui_exit_code(exit_code, browser_exit)),
         Err(error) => {
             eprintln!("interactive browser failed: {error}");
@@ -479,6 +497,7 @@ fn finish_tui_scan(
 fn tui_exit_code(scan_exit_code: u8, browser_exit: BrowserExit) -> u8 {
     match browser_exit {
         BrowserExit::Quit => scan_exit_code,
+        BrowserExit::TrashSelected { .. } => 1,
         BrowserExit::Terminated { signal } => {
             signal.map_or(1, |signal| 128u8.saturating_add(signal))
         }
@@ -521,6 +540,32 @@ fn normalize_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::
         .iter()
         .map(|raw| validate_absolute_root(raw.as_os_str()))
         .collect()
+}
+
+fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {
+    if raw_roots.is_empty() {
+        Ok(default_full_scan_roots())
+    } else {
+        normalize_roots(raw_roots)
+    }
+}
+
+fn default_full_scan_roots() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        vec![PathBuf::from("/")]
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("SystemDrive")
+            .map(|drive| PathBuf::from(format!("{}\\", drive.to_string_lossy())))
+            .into_iter()
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 fn print_output(context: &CoreContext, format: OutputFormat, result: &RenderedResult) {
@@ -696,6 +741,18 @@ mod tests {
     fn default_scan_format_remains_human() {
         let cli = Cli::try_parse_from(["sweepx", "scan", "/tmp"]).unwrap();
         assert_eq!(cli.format, FormatArg::Human);
+    }
+
+    #[test]
+    fn scan_without_roots_selects_platform_filesystem_roots() {
+        let cli = Cli::try_parse_from(["sweepx", "scan"]).unwrap();
+        let Commands::Scan { roots, .. } = cli.command else {
+            panic!("expected scan command");
+        };
+        assert!(roots.is_empty());
+        let resolved = normalize_scan_roots(&roots).unwrap();
+        assert!(!resolved.is_empty());
+        assert!(resolved.iter().all(|root| root.is_absolute()));
     }
 
     #[test]

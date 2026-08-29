@@ -4,10 +4,10 @@ title: Safety model
 
 # Safety model
 
-SweepX safety currently starts with absent capabilities and explicit type boundaries: runnable surfaces are read-only, the simulated execution surface is sealed, and a real mutation surface does not exist. Future safety goals must not be written as deletion guarantees that exist today.
+SweepX safety starts with explicit capability and type boundaries. Scanning remains read-only, the simulated execution surface remains sealed, and the only real mutation is a single-item operating-system Trash preview. Future safety goals must not be written as guarantees that exist today.
 
 > [!CAUTION]
-> There is no native Trash or Permanent implementation, platform mutation adapter, or destructive CLI. P3 tests cover deterministic simulation only and prove nothing about real file operations.
+> Trash preview requires terminal confirmation and immediate revalidation, accepts only files and real directories, blocks protected roots, and never falls back to Permanent deletion. There is no Permanent implementation or plan/approve/execute CLI.
 
 ## Implemented read-only boundaries
 
@@ -18,7 +18,7 @@ SweepX safety currently starts with absent capabilities and explicit type bounda
 | Errors and incompleteness | Permission, mount, link, and resource limits do not masquerade as empty or complete |
 | Imported input | `scan.result` JSON must use an absolute path and stay within byte/row bounds |
 | Imported trust | Provenance becomes stale preview and coverage is forced incomplete/not revalidated |
-| TUI | Actions contain navigation only; there is no select-and-execute mutation |
+| TUI | `d` / `Delete` selects one item for Trash; full-screen mode exits before confirmation and live identity revalidation |
 | `cache status` | Reads existing preview-cache structure and health only; missing state/cache returns `absent` and creates nothing |
 | Cleaner | Metadata only, with fail-closed compatibility checks |
 | Capability language | unsupported, degraded, report_only, and disabled remain distinct |
@@ -66,15 +66,15 @@ P4a.2 adds a typed, validated capability-qualification record contract, not a mu
 
 | Capability cell | Linux | macOS | Windows |
 |---|---|---|---|
-| `trash.local.file` | disabled | disabled | disabled |
-| `trash.local.directory` | disabled | disabled | disabled |
+| `trash.local.file` | degraded on current host | degraded on current host | degraded on current host |
+| `trash.local.directory` | degraded on current host | degraded on current host | degraded on current host |
 | `permanent.local.file` | disabled | disabled | disabled |
 | `permanent.local.directory` | disabled | disabled | disabled |
 | `permanent.local.link` | disabled | disabled | disabled |
 
 Validation rejects `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence as mutation qualification. A single cell could qualify later only when the evidence class is `real_os_qualification`, validity is `current`, and the complete tuple exactly matches Core/version, policy and adapter digests, OS build, architecture, filesystem/version, volume, provider/backend, ordinary-user profile, and capability.
 
-This is only a fail-closed registry substrate, not a live registry service. There is no qualified mutation record, native adapter, mutation command, or approval UI today.
+This remains a fail-closed registry substrate, not a live registry service. Trash is a `degraded` preview, not a qualified mutation record. There is no Permanent adapter or approval UI today.
 
 ## Non-negotiable gates for future mutation
 

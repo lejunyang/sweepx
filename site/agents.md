@@ -22,7 +22,7 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 当前禁止范围
 
-当前 CLI 本身没有 mutation 命令；Agent 也不得绕过这一事实：
+当前 CLI 只有需要人在终端交互确认的单对象 `trash` preview；Agent 不得绕过这条边界：
 
 - 不得把聊天确认当作 HumanApproval；
 - 不得直接调用 safety/audit/executor library 拼出伪工作流；

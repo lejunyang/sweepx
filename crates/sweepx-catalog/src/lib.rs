@@ -39,14 +39,24 @@ struct TrustedKey {
     revoked: bool,
 }
 
-const BUILTIN_TRUST_STORE: &[TrustedKey] = &[TrustedKey {
-    key_id: "builtin-cleaner-key-2026",
-    publisher_id: "org.sweepx",
-    public_key_b64u: "bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w",
-    valid_from: "2026-08-27T00:00:00Z",
-    valid_until: "2027-08-27T00:00:00Z",
-    revoked: false,
-}];
+const BUILTIN_TRUST_STORE: &[TrustedKey] = &[
+    TrustedKey {
+        key_id: "builtin-cleaner-key-2026",
+        publisher_id: "org.sweepx",
+        public_key_b64u: "bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w",
+        valid_from: "2026-08-27T00:00:00Z",
+        valid_until: "2027-08-27T00:00:00Z",
+        revoked: false,
+    },
+    TrustedKey {
+        key_id: "builtin-cargo-cleaner-key-2026-08",
+        publisher_id: "org.sweepx",
+        public_key_b64u: "4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk",
+        valid_from: "2026-08-29T00:00:00Z",
+        valid_until: "2027-08-26T00:00:00Z",
+        revoked: false,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltInCleaner {
@@ -1353,7 +1363,6 @@ mod tests {
         revocations: Vec<CleanerRevocation>,
     ) -> (Vec<u8>, TrustRootAnchor) {
         let root = SigningKey::from_bytes(&TEST_ROOT_SEED);
-        let package_key = BUILTIN_TRUST_STORE[0];
         let mut snapshot = CleanerTrustSnapshot {
             schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
             epoch,
@@ -1361,14 +1370,17 @@ mod tests {
             expires_at: expires_at.into(),
             root_key_id: "test-root".into(),
             algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
-            keys: vec![TrustedPublisherKey {
-                key_id: package_key.key_id.into(),
-                publisher_id: package_key.publisher_id.into(),
-                public_key_b64u: package_key.public_key_b64u.into(),
-                usages: vec![TrustKeyUsage::DeclarativePackage],
-                valid_from: package_key.valid_from.into(),
-                valid_until: package_key.valid_until.into(),
-            }],
+            keys: BUILTIN_TRUST_STORE
+                .iter()
+                .map(|package_key| TrustedPublisherKey {
+                    key_id: package_key.key_id.into(),
+                    publisher_id: package_key.publisher_id.into(),
+                    public_key_b64u: package_key.public_key_b64u.into(),
+                    usages: vec![TrustKeyUsage::DeclarativePackage],
+                    valid_from: package_key.valid_from.into(),
+                    valid_until: package_key.valid_until.into(),
+                })
+                .collect(),
             revocations,
             signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
         };
@@ -1384,12 +1396,12 @@ mod tests {
     #[test]
     fn trust_snapshot_signature_and_freshness_are_verified() {
         let (bytes, root) =
-            signed_trust_snapshot(1, "2026-08-20T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
+            signed_trust_snapshot(1, "2026-08-22T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
         let mut history = TrustHistory::default();
         let current = verify_trust_snapshot(
             &bytes,
             std::slice::from_ref(&root),
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1401,7 +1413,7 @@ mod tests {
         let stale = verify_trust_snapshot(
             &stale_bytes,
             &[root],
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1413,12 +1425,12 @@ mod tests {
         let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
         let signature: CleanerSignatureEnvelope = from_slice(CARGO_TARGET.signature_bytes).unwrap();
         let (bytes, root) =
-            signed_trust_snapshot(1, "2026-08-20T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
+            signed_trust_snapshot(1, "2026-08-22T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
         let mut history = TrustHistory::default();
         let trust = verify_trust_snapshot(
             &bytes,
             &[root],
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1427,7 +1439,7 @@ mod tests {
             &signature,
             &file_table,
             &trust,
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1438,7 +1450,7 @@ mod tests {
         let stale = verify_trust_snapshot(
             &stale_bytes,
             &[stale_root],
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1447,7 +1459,7 @@ mod tests {
             &signature,
             &file_table,
             &stale,
-            trust_time("2026-08-27T00:00:00Z"),
+            trust_time("2026-08-29T00:00:00Z"),
             &mut history,
         )
         .unwrap();
@@ -1809,11 +1821,11 @@ mod tests {
         let signature: CleanerSignatureEnvelope =
             from_slice(CARGO_TARGET.signature_bytes).expect("signature json");
         let revoked_store = [TrustedKey {
-            key_id: "builtin-cleaner-key-2026",
+            key_id: "builtin-cargo-cleaner-key-2026-08",
             publisher_id: "org.sweepx",
-            public_key_b64u: "bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w",
-            valid_from: "2026-08-27T00:00:00Z",
-            valid_until: "2027-08-27T00:00:00Z",
+            public_key_b64u: "4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk",
+            valid_from: "2026-08-29T00:00:00Z",
+            valid_until: "2027-08-26T00:00:00Z",
             revoked: true,
         }];
         let err = verify_signature_with_store(
@@ -1821,7 +1833,7 @@ mod tests {
             &signature,
             &file_table,
             &revoked_store,
-            OffsetDateTime::parse("2026-08-27T12:00:00Z", &Rfc3339).expect("time"),
+            OffsetDateTime::parse("2026-08-29T12:00:00Z", &Rfc3339).expect("time"),
         )
         .expect_err("revoked key must fail");
         assert!(matches!(err, CatalogError::RevokedKey { .. }));
@@ -1968,7 +1980,7 @@ mod tests {
 
         let mut invalid_order = signature;
         invalid_order.expires_at = Some(invalid_order.signed_at.clone());
-        let now = OffsetDateTime::parse("2026-08-27T00:00:00Z", &Rfc3339).expect("time");
+        let now = OffsetDateTime::parse("2026-08-29T00:00:00Z", &Rfc3339).expect("time");
         assert!(matches!(
             verify_signature_with_store(
                 &manifest,

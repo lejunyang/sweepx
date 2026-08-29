@@ -4,10 +4,10 @@ title: 介绍
 
 # 介绍
 
-SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有可运行的开发版只读 CLI/TUI，而不是只有设计文档；与此同时，它没有任何真实清理能力。
+SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可运行的开发版扫描 CLI/TUI，以及需要显式确认和实时重验的系统回收站 preview；Permanent 删除仍不存在。
 
 > [!WARNING]
-> “可运行”只适用于只读或模拟表面。没有 native Trash、Permanent、`plan`、`approve` 或 `execute` CLI，也没有删除或移动目标文件的 adapter。
+> 当前唯一真实 mutation 是单对象 Trash preview：交互确认并实时重验后移到系统回收站。没有 Permanent、`plan`、`approve` 或 `execute` CLI，Trash 失败也不会降级为永久删除。
 
 ## 当前状态
 
@@ -19,7 +19,7 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已经有�
 - `explain` 从有界 `scan.result` JSON 生成解释，但导入数据被降级为 stale/incomplete，候选只能 report-only。
 - `cache status` 在 Linux/macOS 上提供 preview cache 的只读诊断，输出 `cache.status.result`；Windows 当前 disabled。它只支持 human/JSON，NDJSON 是 usage error；缺失 state/cache 返回 `absent` 且不创建目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、近似字节数和健康状态；它不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
-- `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式只读浏览器，可进入和返回目录，不需要 JSON 中间文件；目录 detail rescan 现在是 single-flight 后台任务，2 秒 deadline 下导航和退出不会被非协作 worker 卡住，late result 会被丢弃，且有 process-wide 32 stuck-worker cap。
+- `sweepx scan --tui` 在扫描后直接打开同一二进制内的文件管理器式浏览器，可进入和返回目录，并用 `d`/`Delete` 选择单项移到回收站；确认发生在退出全屏之后，并再次验证 live scan identity。目录 detail rescan 是 single-flight 后台任务，2 秒 deadline 下导航和退出不会被非协作 worker 卡住。
 - P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；Linux journal 路径虽已公开 degraded 的 completed-stream replay，仍不具备 live、runtime 或跨平台资格，且仍没有可信 HumanApproval broker。
 
 这些是代码和测试覆盖到的开发能力。仓库已有跨平台归档、安装器和发布自动化，但尚未发布稳定版本，也不是生产支持或三平台扫描资格声明。

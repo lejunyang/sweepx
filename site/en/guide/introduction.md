@@ -4,10 +4,10 @@ title: Introduction
 
 # Introduction
 
-SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade read-only CLI/TUI; it is no longer documentation-only. At the same time, it has no real cleanup capability.
+SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade scanner/TUI plus an explicitly confirmed, live-revalidated operating-system Trash preview. Permanent deletion still does not exist.
 
 > [!WARNING]
-> “Runnable” applies only to read-only or simulated surfaces. There is no native Trash or Permanent adapter, no `plan`, `approve`, or `execute` CLI, and no adapter that deletes or moves target files.
+> The only real mutation is the single-item Trash preview. There is no Permanent adapter and no `plan`, `approve`, or `execute` CLI. Trash failure never falls back to permanent deletion.
 
 ## Current status
 
@@ -19,7 +19,7 @@ SweepX is a safety-first Rust disk-analysis project. The current repository has 
 - `explain` analyzes bounded `scan.result` JSON, but imported data is downgraded to stale/incomplete provenance and candidates remain report-only.
 - `cache status` provides read-only preview-cache diagnostics on Linux and macOS, with output kind `cache.status.result`; Windows is currently disabled. It supports human/JSON only, treats NDJSON as a usage error, and returns `absent` without creating directories when state/cache is missing. Inspection is bounded to `preview-cache/current.json`, the current generation file, and the flat `generations/` / `quarantine/` directories, reporting approximate bytes and health only; it does not scan, repair, quarantine, or reveal cached entries or path contents. `available` means only that bounded cache structure and validation are readable, not that any live/current filesystem fact is true.
 - Built-in Cleaners support metadata-only list/show and fail closed on Core-version incompatibility.
-- `sweepx scan --tui` opens a file-manager-style, read-only browser in the same binary after scanning. It enters and leaves directories without an intermediate JSON file. Directory detail rescans now run as a single-flight background task with a 2 s deadline; navigation and quit do not wait for a non-cooperative worker, late completions are discarded, and a process-wide cap of 32 bounds stuck workers.
+- `sweepx scan --tui` opens a file-manager-style browser in the same binary after scanning. It enters and leaves directories without an intermediate JSON file, and `d`/`Delete` selects one item for Trash. Confirmation happens after leaving the full-screen view, followed by live scan-identity revalidation. Directory detail rescans remain single-flight and deadline-bounded.
 - P3 implements immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed deterministic simulated executor as library APIs. Even with degraded Linux completed-stream replay, the overall journal path is neither live, runtime-qualified, nor cross-platform, and there is still no trusted HumanApproval broker.
 
 Those are code- and test-backed development capabilities. The repository now has cross-platform archives, installers, and release automation, but no stable release, production support, or three-platform scan qualification.

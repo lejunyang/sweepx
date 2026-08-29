@@ -5,11 +5,11 @@
   "description": "Cargo workspace target build outputs",
   "publisher": {
     "id": "org.sweepx",
-    "keyId": "builtin-cleaner-key-2026"
+    "keyId": "builtin-cargo-cleaner-key-2026-08"
   },
-  "packageDigest": "sha256:28c58ddcc3dff4fe953ab0c326f2bdc4fd71d51c072737451f8766646db328a7",
+  "packageDigest": "sha256:a724c4fbca0c7c2f6a5a9a5977a6790db9a1bb50c7aaa5e76e65d8680b684bfb",
   "requires": {
-    "core": ">=1.0.0, <2.0.0",
+    "core": ">=0.1.0, <0.2.0",
     "scannerSemantics": [
       1
     ],

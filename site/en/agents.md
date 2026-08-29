@@ -22,7 +22,7 @@ The Agent must preserve uncertainty from machine output. It may not rewrite part
 
 ## Currently forbidden
 
-The current CLI has no mutation command, and an Agent must not route around that fact:
+The current CLI has only a single-item `trash` preview that requires human confirmation in a terminal. An Agent must not route around that boundary:
 
 - do not treat chat confirmation as HumanApproval;
 - do not call safety/audit/executor libraries directly to fabricate a workflow;

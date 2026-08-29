@@ -308,11 +308,11 @@ mod tests {
     use super::*;
 
     const ROOT_PUBLIC_KEY: &str = "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw";
-    const CURRENT: &[u8] = br#"{"algorithm":"ed25519","epoch":5,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"13b9DZIxk3nOtPodDM1RfUIkOXOkbOHIp8PNCT-n2cl65AHsSOG0H9flyQRL_3pf1DlvkSqJAyBa47IAFONkAQ"}"#;
-    const STALE: &[u8] = br#"{"algorithm":"ed25519","epoch":6,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-19T23:59:59Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"ASehOihB1CDsMqWiqATQP_D6UO-rvIjAt0Wimtb6F90dm3hX73lSBsgCC6EKbnA9DhEkDz-rwq0EUT3tkyhTDA"}"#;
-    const ROLLBACK: &[u8] = br#"{"algorithm":"ed25519","epoch":4,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"vgpSFmvDWy3YLtaqMioxp-HgGXCIt8q1fTYLmPthqAe9WsZgLTIGOVsgUMoYEiloHLO48XRlJ0x1oYdvpVZyDw"}"#;
-    const COLLISION: &[u8] = br#"{"algorithm":"ed25519","epoch":5,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-26T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"37yQ6-xF3PnKspgv31_O90YUdy89Xg-21sq4Sk5iyB6-2nc9ZTBsTSnLx6NE_d7INvYNNzmdYavy9yM5bbPbDw"}"#;
-    const REVOKED: &[u8] = br#"{"algorithm":"ed25519","epoch":6,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"}],"revocations":[{"reason":"fixture revocation","revokedAt":"2026-08-27T00:00:00Z","target":{"kind":"package_digest","packageDigest":"sha256:28c58ddcc3dff4fe953ab0c326f2bdc4fd71d51c072737451f8766646db328a7"}}],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"8n9pjroIvHCNy_TMIi9MO6_dewECrl22rDApA747LkSQDkDb5TGRb_9CEFk7L4XOkoq0v1PfKo-RM9zqUb7BDw"}"#;
+    const CURRENT: &[u8] = br#"{"algorithm":"ed25519","epoch":5,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"},{"keyId":"builtin-cargo-cleaner-key-2026-08","publicKeyB64u":"4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-08-29T00:00:00Z","validUntil":"2027-08-26T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"b1CQJ3IRbTlVPRdZZGO2YVYJJheKfrxkur1n48Dqt4whJVfAhib0M6mJYvHGgLvaL31h7MbEHsbZ3Nf2nfzVAw"}"#;
+    const STALE: &[u8] = br#"{"algorithm":"ed25519","epoch":6,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-19T23:59:59Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"},{"keyId":"builtin-cargo-cleaner-key-2026-08","publicKeyB64u":"4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-08-29T00:00:00Z","validUntil":"2027-08-26T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"6yR9K05X5nZl8iyVoPK0vNOJPyhs19fQuZWxUYFMc2nLq1lwUM9nz8n64J-nDHMCkBNWrkOGoWsAxgaX1kKfAg"}"#;
+    const ROLLBACK: &[u8] = br#"{"algorithm":"ed25519","epoch":4,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"},{"keyId":"builtin-cargo-cleaner-key-2026-08","publicKeyB64u":"4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-08-29T00:00:00Z","validUntil":"2027-08-26T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"G5wVf1zoqvOsnd-OwmdOh8mp-fOjtCtmcB1QiIX4ZCuj-TfENrnynSwXYCXg3eYPN05A0IhJwLWeMpWhbaOBAw"}"#;
+    const COLLISION: &[u8] = br#"{"algorithm":"ed25519","epoch":5,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-26T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"},{"keyId":"builtin-cargo-cleaner-key-2026-08","publicKeyB64u":"4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-08-29T00:00:00Z","validUntil":"2027-08-26T00:00:00Z"}],"revocations":[],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"ehsHh6Xc8l0dWtv9ZiiNGXtYR0akkELEsTeqqZzBxzS37X7yVqbREm7AMovnV9URvhR4HePdDhowJZn2beV8Ag"}"#;
+    const REVOKED: &[u8] = br#"{"algorithm":"ed25519","epoch":6,"expiresAt":"2026-09-27T00:00:00Z","generatedAt":"2026-08-27T00:00:00Z","keys":[{"keyId":"builtin-cleaner-key-2026","publicKeyB64u":"bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-12-31T00:00:00Z"},{"keyId":"builtin-cargo-cleaner-key-2026-08","publicKeyB64u":"4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk","publisherId":"org.sweepx","usages":["declarative_package"],"validFrom":"2026-08-29T00:00:00Z","validUntil":"2027-08-26T00:00:00Z"}],"revocations":[{"reason":"fixture revocation","revokedAt":"2026-08-27T00:00:00Z","target":{"kind":"package_digest","packageDigest":"sha256:a724c4fbca0c7c2f6a5a9a5977a6790db9a1bb50c7aaa5e76e65d8680b684bfb"}}],"rootKeyId":"test-root","schema":"sweepx.cleaner-trust-snapshot/v1","signature":"mZdt94draByq40en-WSJKhjuXXqLjByXVEyPqDz9aNYF1Ew32LwhAOgcmyrsmdapE548UpPPB8oG8OJ7ohz7DQ"}"#;
 
     fn root() -> TrustRootAnchor {
         TrustRootAnchor {
@@ -323,7 +323,7 @@ mod tests {
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::parse(
-            "2026-08-27T12:00:00Z",
+            "2026-08-29T12:00:00Z",
             &time::format_description::well_known::Rfc3339,
         )
         .unwrap()
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn current_snapshot_verifies_every_builtin_but_core_incompatibility_is_report_only() {
+    fn current_snapshot_verifies_every_builtin_and_reports_mixed_compatibility() {
         let mut history = TrustHistory::default();
         let resolved =
             resolve_production_catalog_trust(CURRENT, &[root()], now(), &mut history).unwrap();
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(
             resolved.catalog_disposition,
             ProductionCatalogDisposition::ReportOnly,
-            "all shipped manifests currently require Core >=1.0.0 while CORE_VERSION is 0.1.0"
+            "the Chromium cleaner remains ahead of Core 0.1"
         );
         assert_eq!(
             BUILT_INS
@@ -364,8 +364,8 @@ mod tests {
                         .matches(&Version::parse(CORE_VERSION).unwrap())
                 })
                 .count(),
-            BUILT_INS.len(),
-            "the report-only result must be explained by every shipped manifest"
+            1,
+            "only the Cargo cleaner is compatible with Core 0.1"
         );
         assert_eq!(history.highest_epoch(), Some(5));
         assert!(resolved.snapshot_digest.starts_with("sha256:"));

@@ -4,10 +4,10 @@ title: CLI and read-only scanning
 
 # CLI and read-only scanning
 
-The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cache`, `cleaner`, and `capabilities`; `scan --tui` enters the interactive browser after scanning. There is no separate TUI command or binary and no mutation subcommand.
+The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `explain`, `status`, `cancel`, `cache`, `cleaner`, `trash`, and `capabilities`; `scan --tui` enters the interactive browser after scanning.
 
 > [!CAUTION]
-> `plan`, `approve`, `execute`, Trash, Permanent, and `--dangerously-delete` are not part of the current CLI. Treat those names as roadmap proposals wherever they appear.
+> `trash` is a development preview: it only moves an item to the operating-system Trash, confirms by default, and revalidates before submission. It never falls back to Permanent deletion. `plan`, `approve`, `execute`, Permanent, and `--dangerously-delete` remain roadmap proposals.
 
 ## Build and inspect capabilities
 
@@ -31,9 +31,9 @@ Locale resolution considers the explicit override, locale environment, and syste
 
 ### P4a.2 qualification records are not a new command
 
-The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. All five cells are currently `disabled` on Linux, macOS, and Windows.
+The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. The current host's two Trash cells are reported as a `degraded` preview; other platforms and every Permanent cell remain `disabled`.
 
-These records are only a fail-closed qualification-registry substrate; they give `sweepx capabilities` no mutation authority and add no live registry service. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. No such record, native adapter, mutation command, or approval UI exists today.
+These records remain a fail-closed qualification-registry substrate; a `degraded` preview is not `qualified`. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. There is still no plan/approval UI or Permanent adapter.
 
 ## Install
 
@@ -60,7 +60,7 @@ cargo run -p sweepx-cli -- scan /absolute/path/to/root
 cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 ```
 
-- You may provide multiple roots, but every root must be absolute.
+- With no roots, `scan` selects the current platform filesystem root; you may instead provide one or more absolute roots.
 - The default writes a bounded 40-row file table directly to the terminal; no JSON file is required.
 - The scan runs synchronously, is metadata-only and no-follow, and reports mount/link/resource boundaries and errors.
 - The current Linux capability is `degraded`, not release qualification.
@@ -145,14 +145,15 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 
 `list` reports packages and compatibility. `show` exposes full manifest/rule metadata only when the Core version range matches; incompatibility uses a dedicated fail-closed exit. Neither command performs a file action described by a rule. See [Cleaner concepts](/en/cleaners).
 
-## File-manager-style read-only TUI
+## File-manager-style TUI and Trash preview
 
 ```bash
 cargo run -p sweepx-cli -- --locale en-US \
   scan --tui /absolute/path/to/root [/another/absolute/root]
+cargo run -p sweepx-cli -- trash /absolute/path/to/item
 ```
 
-The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, and `q` or `Ctrl-C` to quit. Symlinks and reparse points are visible but cannot be entered.
+The TUI consumes the typed result of this live scan without an intermediate JSON file. It starts with one or more virtual roots. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, `d` / `Delete` to select an item for Trash, and `q` or `Ctrl-C` to quit. Trash exits the full-screen view, asks for confirmation, and revalidates the live scan identity; symlinks and reparse points cannot be mutated.
 
 `--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. Those conditions are checked before state creation or scanning. Windows creates no default state and rejects explicit `--state-dir`. Untrusted terminal control characters are replaced instead of being emitted as raw ANSI sequences. Directory detail rescans run as a single-flight background task with a 2 s query deadline; navigation or quit does not wait for a non-cooperative worker, late results are discarded, and a process-wide cap of 32 bounds stuck workers.
 
@@ -167,4 +168,4 @@ sweepx execute ...
 sweepx execute ... --dangerously-delete
 ```
 
-P3 has library models and fake-execution tests for related concepts, but no CLI wiring and no native filesystem mutation.
+P3 has library models and fake-execution tests for related concepts, but there is still no plan/approve/execute CLI or Permanent mutation.

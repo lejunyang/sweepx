@@ -1590,24 +1590,27 @@ pub enum BrowserAction {
     MoveDown,
     EnterDirectory,
     ReturnToParent,
+    TrashSelected,
     Quit,
 }
 
 impl BrowserAction {
     pub const fn is_destructive(self) -> bool {
-        false
+        matches!(self, Self::TrashSelected)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserControl {
     Continue,
+    TrashSelected,
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserExit {
     Quit,
+    TrashSelected { entry: Box<ScannedEntry> },
     Terminated { signal: Option<u8> },
 }
 
@@ -1639,6 +1642,7 @@ impl BrowserKeyMapper for DefaultBrowserKeyMapper {
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
                 Some(BrowserAction::ReturnToParent)
             }
+            KeyCode::Delete | KeyCode::Char('d') => Some(BrowserAction::TrashSelected),
             KeyCode::Char('q') => Some(BrowserAction::Quit),
             _ => None,
         }
@@ -1663,6 +1667,7 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
             BrowserAction::MoveDown => model.move_down(),
             BrowserAction::EnterDirectory => model.enter_selected(),
             BrowserAction::ReturnToParent => model.return_to_parent(),
+            BrowserAction::TrashSelected => return BrowserControl::TrashSelected,
             BrowserAction::Quit => return BrowserControl::Quit,
         }
         BrowserControl::Continue
@@ -1899,9 +1904,13 @@ where
 {
     fn reduce(&self, model: &mut BrowserModel, action: BrowserAction) -> BrowserControl {
         self.complete_or_expire(model);
-        if action == BrowserAction::Quit {
+        if matches!(action, BrowserAction::Quit | BrowserAction::TrashSelected) {
             self.cancel_background();
-            return BrowserControl::Quit;
+            return if action == BrowserAction::Quit {
+                BrowserControl::Quit
+            } else {
+                BrowserControl::TrashSelected
+            };
         }
 
         if self.pending.borrow().is_some() {
@@ -2224,9 +2233,18 @@ where
 
         if let Some(Event::Key(key)) = event
             && let Some(action) = key_mapper.map_key(&key)
-            && reducer.reduce(model, action) == BrowserControl::Quit
         {
-            return Ok(BrowserExit::Quit);
+            match reducer.reduce(model, action) {
+                BrowserControl::Continue => {}
+                BrowserControl::Quit => return Ok(BrowserExit::Quit),
+                BrowserControl::TrashSelected => {
+                    if let Some(row) = model.selected_row() {
+                        return Ok(BrowserExit::TrashSelected {
+                            entry: Box::new(row.entry().clone()),
+                        });
+                    }
+                }
+            }
         }
     }
 }
@@ -2464,15 +2482,19 @@ fn status_label(locale: Locale) -> &'static str {
 
 fn read_only_label(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhCn => "只读",
-        Locale::EnUs => "Read-only",
+        Locale::ZhCn => "扫描 + 回收站预览",
+        Locale::EnUs => "Scan + Trash preview",
     }
 }
 
 fn help_text(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhCn => "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  q/Ctrl-C 退出",
-        Locale::EnUs => "↑/↓ select  Enter/→ open directory  Esc/Backspace/← back  q/Ctrl-C quit",
+        Locale::ZhCn => {
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  d/Delete 移到回收站  q/Ctrl-C 退出"
+        }
+        Locale::EnUs => {
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  d/Delete move to Trash  q/Ctrl-C quit"
+        }
     }
 }
 
@@ -3145,7 +3167,7 @@ mod tests {
         );
         assert_eq!(
             browser_footer_text(&model),
-            "↑/↓ select  Enter/→ open directory  Esc/Backspace/← back  q/Ctrl-C quit | detail: incomplete/stale (cancelled, revision 2)"
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  d/Delete move to Trash  q/Ctrl-C quit | detail: incomplete/stale (cancelled, revision 2)"
         );
     }
 
@@ -3886,7 +3908,7 @@ mod tests {
     }
 
     #[test]
-    fn default_key_mapping_is_navigation_only_and_ignores_release() {
+    fn default_key_mapping_includes_explicit_trash_and_ignores_release() {
         let mapper = DefaultBrowserKeyMapper;
         assert_eq!(
             mapper.map_key(&key(KeyCode::Up)),
@@ -3923,7 +3945,15 @@ mod tests {
         let mut release = key(KeyCode::Down);
         release.kind = KeyEventKind::Release;
         assert_eq!(mapper.map_key(&release), None);
-        assert_eq!(mapper.map_key(&key(KeyCode::Delete)), None);
+        assert_eq!(
+            mapper.map_key(&key(KeyCode::Delete)),
+            Some(BrowserAction::TrashSelected)
+        );
+        assert_eq!(
+            mapper.map_key(&key(KeyCode::Char('d'))),
+            Some(BrowserAction::TrashSelected)
+        );
+        assert!(BrowserAction::TrashSelected.is_destructive());
     }
 
     #[derive(Debug)]
@@ -3982,10 +4012,38 @@ mod tests {
         assert!(rendered.contains("file.txt"));
         assert!(rendered.contains("sub"));
         assert!(!rendered.contains("deep.txt"));
-        assert!(rendered.contains("Read-only"));
+        assert!(rendered.contains("Scan + Trash preview"));
         assert_eq!(
             events.polls,
             [BROWSER_EVENT_POLL_INTERVAL, BROWSER_EVENT_POLL_INTERVAL]
+        );
+    }
+
+    #[test]
+    fn delete_key_returns_the_selected_live_scan_entry() {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = model();
+        let expected = model.selected_row().unwrap().entry().clone();
+        let mut events = ScriptedEvents {
+            events: VecDeque::from([Some(Event::Key(key(KeyCode::Delete)))]),
+            polls: Vec::new(),
+        };
+
+        let exit = run_browser_loop(
+            &mut terminal,
+            &mut model,
+            &mut events,
+            &DefaultBrowserKeyMapper,
+            &ReadOnlyBrowserReducer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            exit,
+            BrowserExit::TrashSelected {
+                entry: Box::new(expected),
+            }
         );
     }
 

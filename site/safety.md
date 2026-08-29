@@ -7,7 +7,7 @@ title: 安全模型
 SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表面只读，模拟执行表面 sealed，真实 mutation 表面不存在。未来安全目标不能被写成今天已有的删除保证。
 
 > [!CAUTION]
-> 当前没有 native Trash、Permanent、平台 mutation adapter 或 destructive CLI。P3 测试只覆盖确定性模拟，不能证明真实文件操作安全。
+> 当前仅有单对象 Trash development preview：必须交互确认并在提交前重验；没有 Permanent、plan/approve/execute 或 Trash-to-Permanent fallback。P3 测试仍只覆盖确定性模拟。
 
 ## 已实现的只读边界
 
@@ -19,7 +19,7 @@ SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表�
 | 导入输入 | `scan.result` JSON 必须是绝对路径并受 byte/row 上限约束 |
 | 导入可信度 | provenance 降级为 stale preview，coverage 强制 incomplete/not revalidated |
 | `cache status` | 只读检查现有 preview cache 结构与健康；缺失时返回 `absent`，且不创建目录 |
-| TUI | 动作只包含导航；没有选择后执行或隐式 mutation |
+| TUI | 导航之外仅允许 `d`/`Delete` 选择单项 Trash；退出全屏后确认并重验，symlink/reparse/root 禁止操作 |
 | Cleaner | 只读 metadata，兼容性失败关闭 |
 | 能力表达 | unsupported、degraded、report_only、disabled 分开报告 |
 
@@ -66,15 +66,15 @@ P4a.2 增加的是 typed/validated capability qualification record 合同，不�
 
 | Capability cell | Linux | macOS | Windows |
 |---|---|---|---|
-| `trash.local.file` | disabled | disabled | disabled |
-| `trash.local.directory` | disabled | disabled | disabled |
+| `trash.local.file` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
+| `trash.local.directory` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
 | `permanent.local.file` | disabled | disabled | disabled |
 | `permanent.local.directory` | disabled | disabled | disabled |
 | `permanent.local.link` | disabled | disabled | disabled |
 
 验证器拒绝把 `fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 用作 mutation 资格。未来只有 evidence class 为 `real_os_qualification`、有效性为 `current`，且完整匹配 Core/version、policy 与 adapter digest、OS build、arch、filesystem/version、volume、provider/backend、ordinary-user profile 和精确 capability 的 tuple，才可能使单个单元合格。
 
-这只是失败关闭的 registry substrate，不是运行时 registry 服务。当前没有合格 mutation 记录、native adapter、mutation command 或 approval UI。
+这仍是失败关闭的 registry substrate，不是运行时 registry 服务。当前 Trash 只是 `degraded` preview，没有 `qualified` mutation 记录、Permanent adapter 或 approval UI。
 
 ## 未来 mutation 的不可谈判约束
 

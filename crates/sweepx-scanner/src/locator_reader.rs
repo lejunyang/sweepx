@@ -7,8 +7,8 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::windows::ffi::OsStringExt;
 
 use sweepx_model::{
-    EvidenceValue, IdentityEvidence, NativeAbsolutePath, NativeName, NativePathComponent,
-    ObjectType, ScannedEntry,
+    EvidenceValue, IdentityEvidence, NativeAbsolutePath, NativeLocatorEvidence, NativeName,
+    NativePathComponent, ObjectType, ScannedEntry,
 };
 use sweepx_platform::{
     BoundedRegularFileReadError, BoundedRegularFileReadRequest, CancellationToken,
@@ -570,37 +570,38 @@ impl<P: PlatformScanner> LocatorReader<P> {
         })
     }
 
-    /// Compares one invocation-time directory snapshot with one admitted base directory. A match
+    /// Compares one invocation-time directory snapshot with one live scanned directory. A match
     /// proves exact native path equality and equal captured/revalidated identity metadata, but it
-    /// does not retain the process cwd handle across the interval.
+    /// does not retain either directory handle across the interval.
     ///
-    /// This performs no pathname fallback and never uses `display_path` as authority.
-    pub fn compare_base_directory_snapshot(
+    /// The exact target path is reconstructed only for comparison from the admitted scan root and
+    /// the target's validated native lineage. Revalidation always starts from the admitted scan
+    /// root and walks that lineage handle-relatively; the reconstructed target path is never
+    /// admitted and `display_path` is never execution authority.
+    pub fn compare_scanned_directory_snapshot(
         &self,
-        base_directory: &ScannedEntry,
+        target: &ScannedEntry,
         captured: &LocatorDirectoryIdentity,
         cancel: &CancellationToken,
     ) -> Result<LocatorDirectoryComparison, LocatorReadError> {
-        self.validate_base_directory(base_directory)?;
+        self.validate_scanned_directory(target)?;
+        let locator = target
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let expected_target =
+            native_target_absolute_path(locator).map_err(|_| LocatorReadError::InvalidRequest)?;
+        if !native_absolute_paths_equal_exact(&captured.native_absolute_path, &expected_target)
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+        {
+            return Ok(LocatorDirectoryComparison::DifferentNativePath);
+        }
         if cancel.is_cancelled() {
             return Ok(LocatorDirectoryComparison::Failed(
                 LocatorDirectoryComparisonFailure::Cancelled,
             ));
         }
-
-        let locator = base_directory
-            .executable_native_locator()
-            .map_err(|_| LocatorReadError::InvalidRequest)?
-            .ok_or(LocatorReadError::InvalidRequest)?;
-        let Some(expected_root) = locator.scan_root_absolute_path.as_ref() else {
-            return Err(LocatorReadError::InvalidRequest);
-        };
-        if !native_absolute_paths_equal_exact(&captured.native_absolute_path, expected_root)
-            .map_err(|_| LocatorReadError::InvalidRequest)?
-        {
-            return Ok(LocatorDirectoryComparison::DifferentNativePath);
-        }
-        if let Err(error) = self.validate_directory_binding_budget(base_directory) {
+        if let Err(error) = self.validate_directory_binding_budget(target) {
             return Ok(match error {
                 LocatorReadError::ResourceLimit => LocatorDirectoryComparison::Failed(
                     LocatorDirectoryComparisonFailure::ResourceLimit,
@@ -615,9 +616,13 @@ impl<P: PlatformScanner> LocatorReader<P> {
         }
 
         let mut budget = BatchBudget::default();
-        match self.reopen_base(base_directory, cancel, &mut budget) {
+        match self.reopen_base(target, cancel, &mut budget) {
             Ok(reopened) => {
-                if directory_identity_matches_capture(&reopened.metadata, captured) {
+                if cancel.is_cancelled() {
+                    Ok(LocatorDirectoryComparison::Failed(
+                        LocatorDirectoryComparisonFailure::Cancelled,
+                    ))
+                } else if directory_identity_matches_capture(&reopened.metadata, captured) {
                     Ok(LocatorDirectoryComparison::PathAndIdentityMatch)
                 } else {
                     Ok(LocatorDirectoryComparison::Failed(
@@ -639,6 +644,18 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 ))
             }
         }
+    }
+
+    /// Root-only compatibility wrapper for callers that bind an invocation directory to the scan
+    /// base. Non-root directories must use [`Self::compare_scanned_directory_snapshot`].
+    pub fn compare_base_directory_snapshot(
+        &self,
+        base_directory: &ScannedEntry,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryComparison, LocatorReadError> {
+        self.validate_base_directory(base_directory)?;
+        self.compare_scanned_directory_snapshot(base_directory, captured, cancel)
     }
 
     fn validate_batch(
@@ -742,6 +759,30 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 sweepx_model::FieldProvenance::LiveObservation { .. }
             )
             || base
+                .executable_native_locator()
+                .map_err(|_| LocatorReadError::InvalidRequest)?
+                .is_none()
+        {
+            return Err(LocatorReadError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    fn validate_scanned_directory(&self, target: &ScannedEntry) -> Result<(), LocatorReadError> {
+        if target.object_type != ObjectType::Directory
+            || !matches!(
+                target.provenance,
+                sweepx_model::FieldProvenance::LiveObservation { .. }
+            )
+            || !matches!(
+                target.coverage.provenance,
+                sweepx_model::FieldProvenance::LiveObservation { .. }
+            )
+            || target
+                .validated_identity()
+                .map_err(|_| LocatorReadError::InvalidRequest)?
+                .is_none()
+            || target
                 .executable_native_locator()
                 .map_err(|_| LocatorReadError::InvalidRequest)?
                 .is_none()
@@ -1607,6 +1648,65 @@ fn native_absolute_path_buf(path: &NativeAbsolutePath) -> Result<PathBuf, ReadAt
     Err(ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))
 }
 
+fn native_target_absolute_path(locator: &NativeLocatorEvidence) -> Result<NativeAbsolutePath, ()> {
+    let root = locator.scan_root_absolute_path.as_ref().ok_or(())?;
+    root.validate_for_current_platform().map_err(|_| ())?;
+    if locator.entry.entry_id == locator.scan_root.entry_id {
+        return Ok(root.clone());
+    }
+
+    let components = locator
+        .parent_reopen_recipe
+        .iter()
+        .skip(1)
+        .chain(std::iter::once(&locator.entry));
+    #[cfg(unix)]
+    if let NativeAbsolutePath::UnixBytes(root_bytes) = root {
+        let mut bytes = root_bytes.clone();
+        for component in components {
+            component
+                .native_basename
+                .validate_basename_for_current_platform()
+                .map_err(|_| ())?;
+            let NativeName::UnixBytes(name) = &component.native_basename else {
+                return Err(());
+            };
+            if bytes.last() != Some(&b'/') {
+                bytes.push(b'/');
+            }
+            bytes.extend_from_slice(name);
+        }
+        let target = NativeAbsolutePath::unix(bytes);
+        target.validate_for_current_platform().map_err(|_| ())?;
+        return Ok(target);
+    }
+    #[cfg(windows)]
+    if let NativeAbsolutePath::WindowsUtf16(root_units) = root {
+        let mut units = root_units.clone();
+        for component in components {
+            component
+                .native_basename
+                .validate_basename_for_current_platform()
+                .map_err(|_| ())?;
+            let NativeName::WindowsUtf16(name) = &component.native_basename else {
+                return Err(());
+            };
+            if !units.last().is_some_and(
+                |unit| matches!(*unit, value if value == b'\\' as u16 || value == b'/' as u16),
+            ) {
+                units.push(b'\\' as u16);
+            }
+            units.extend_from_slice(name);
+        }
+        let target = NativeAbsolutePath::windows_utf16(units);
+        target.validate_for_current_platform().map_err(|_| ())?;
+        return Ok(target);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = components;
+    Err(())
+}
+
 fn native_absolute_paths_equal_exact(
     left: &NativeAbsolutePath,
     right: &NativeAbsolutePath,
@@ -1751,6 +1851,7 @@ mod tests {
         DuplicateConfig,
         Cancel,
         CancelAfterInspect,
+        CancelAfterDirectoryInspect,
     }
 
     #[derive(Debug)]
@@ -1835,6 +1936,14 @@ mod tests {
             )?;
             if matches!(self.action, EnumerationTestAction::CancelAfterInspect)
                 && child.file_name == native("config")
+                && !self.acted.swap(true, Ordering::SeqCst)
+            {
+                cancel.cancel();
+            }
+            if matches!(
+                self.action,
+                EnumerationTestAction::CancelAfterDirectoryInspect
+            ) && matches!(walked, WalkEntry::Directory(_))
                 && !self.acted.swap(true, Ordering::SeqCst)
             {
                 cancel.cancel();
@@ -1942,6 +2051,182 @@ mod tests {
             .unwrap();
 
         assert_eq!(binding, LocatorDirectoryComparison::PathAndIdentityMatch);
+    }
+
+    #[test]
+    fn scanned_directory_snapshot_matches_nested_native_lineage_and_ignores_display_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let parent = root.join("parent");
+        let target_path = parent.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        let summary = scan(&root, "nested-directory-bind");
+        let mut target = summary
+            .entries
+            .iter()
+            .find(|entry| entry.native_basename == native("target"))
+            .unwrap()
+            .clone();
+        target.display_path = "/forged/reporting/path".to_string();
+        let captured = reader()
+            .capture_directory_identity(&target_path, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(
+            reader().compare_scanned_directory_snapshot(
+                &target,
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Ok(LocatorDirectoryComparison::PathAndIdentityMatch)
+        );
+        assert_eq!(
+            reader()
+                .compare_base_directory_snapshot(&target, &captured, &CancellationToken::new(),),
+            Err(LocatorReadError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn scanned_directory_path_mismatch_is_cheap_and_ignores_cancel_and_reopen_budget() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let target_path = root.join("target");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::create_dir(&other).unwrap();
+        let summary = scan(&root, "nested-directory-mismatch");
+        let target = summary
+            .entries
+            .iter()
+            .find(|entry| entry.native_basename == native("target"))
+            .unwrap();
+        let captured = reader()
+            .capture_directory_identity(&other, &CancellationToken::new())
+            .unwrap();
+        let reader = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_requests: 0,
+                ..LocatorReadLimits::default()
+            },
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        assert_eq!(
+            reader.compare_scanned_directory_snapshot(target, &captured, &cancel),
+            Ok(LocatorDirectoryComparison::DifferentNativePath)
+        );
+    }
+
+    #[test]
+    fn scanned_directory_snapshot_rejects_forged_lineage() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let target_path = root.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        let summary = scan(&root, "nested-directory-forged-lineage");
+        let mut target = summary
+            .entries
+            .iter()
+            .find(|entry| entry.native_basename == native("target"))
+            .unwrap()
+            .clone();
+        target
+            .native_locator
+            .as_mut()
+            .unwrap()
+            .parent_reopen_recipe
+            .clear();
+        let captured = reader()
+            .capture_directory_identity(&target_path, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(
+            reader().compare_scanned_directory_snapshot(
+                &target,
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Err(LocatorReadError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn scanned_directory_snapshot_fails_closed_when_nested_target_is_replaced() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let target_path = root.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        let summary = scan(&root, "nested-directory-replaced");
+        let target = summary
+            .entries
+            .iter()
+            .find(|entry| entry.native_basename == native("target"))
+            .unwrap();
+        let captured = reader()
+            .capture_directory_identity(&target_path, &CancellationToken::new())
+            .unwrap();
+        fs::rename(&target_path, root.join("target-old")).unwrap();
+        fs::create_dir(&target_path).unwrap();
+
+        assert_eq!(
+            reader().compare_scanned_directory_snapshot(
+                target,
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::RevalidationFailed,
+            ))
+        );
+    }
+
+    #[test]
+    fn scanned_directory_snapshot_reports_lineage_budget_and_post_inspection_cancel() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let target_path = root.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        let summary = scan(&root, "nested-directory-budget-cancel");
+        let target = summary
+            .entries
+            .iter()
+            .find(|entry| entry.native_basename == native("target"))
+            .unwrap();
+        let captured = reader()
+            .capture_directory_identity(&target_path, &CancellationToken::new())
+            .unwrap();
+        let constrained = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_components_per_request: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+        assert_eq!(
+            constrained.compare_scanned_directory_snapshot(
+                target,
+                &captured,
+                &CancellationToken::new(),
+            ),
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::ResourceLimit,
+            ))
+        );
+
+        let cancel = CancellationToken::new();
+        let cancelling = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::CancelAfterDirectoryInspect),
+            LocatorReadLimits::default(),
+        );
+        assert_eq!(
+            cancelling.compare_scanned_directory_snapshot(target, &captured, &cancel),
+            Ok(LocatorDirectoryComparison::Failed(
+                LocatorDirectoryComparisonFailure::Cancelled,
+            ))
+        );
     }
 
     #[test]
