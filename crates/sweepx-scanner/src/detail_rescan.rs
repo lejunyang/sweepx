@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
@@ -25,6 +26,8 @@ use super::{
 };
 
 pub const DETAIL_SCAN_MIN_ORDINAL: u128 = ORDINARY_SCAN_MAX_ORDINAL + 1;
+/// Minimum interval between recursive detail snapshots sent to an interactive frontend.
+pub const DETAIL_PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
 
 /// A source-scan allocator used by repeated detail rescans.
 ///
@@ -104,6 +107,17 @@ pub struct DetailRescanResult {
     pub aggregate: DirectoryAggregate,
 }
 
+/// One lower-bound update produced while a recursive detail rescan is still running.
+///
+/// Only the visible direct-child row whose subtree advanced is copied. The enclosing aggregate
+/// lets the frontend update the active directory without retaining descendant rows. Neither value
+/// is complete evidence until the terminal [`DetailRescanResult`] arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailRescanProgress {
+    pub row: ScannedEntry,
+    pub aggregate: DirectoryAggregate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DetailRescanError {
     #[error("detail rescan request is internally inconsistent")]
@@ -157,7 +171,48 @@ where
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) =
-            self.scan_target_directory(&request, reopened, ids, cancel, true)?;
+            self.scan_target_directory(&request, reopened, ids, cancel, true, None)?;
+
+        Ok(DetailRescanResult {
+            observed_root,
+            observed_directory,
+            rows,
+            aggregate,
+        })
+    }
+
+    /// Recursively rescans one directory and emits bounded lower-bound snapshots while walking.
+    ///
+    /// Progress snapshots reuse the final result's scan-scoped row identities and are advisory:
+    /// their coverage remains incomplete until this method returns the final result. The callback
+    /// runs on the scanner worker and therefore must remain non-blocking; dropping a snapshot must
+    /// not affect the scan or its final evidence.
+    pub fn rescan_with_progress<F>(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+        mut on_progress: F,
+    ) -> Result<DetailRescanResult, DetailRescanError>
+    where
+        F: FnMut(DetailRescanProgress),
+    {
+        self.validate_request(&request, ids)?;
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+
+        let reopened = self.reopen_target(&request, cancel)?;
+        let observed_root = reopened.observed_root.clone();
+        let observed_directory = reopened.observed_directory.clone();
+        let (rows, aggregate) = self.scan_target_directory(
+            &request,
+            reopened,
+            ids,
+            cancel,
+            true,
+            Some(&mut on_progress),
+        )?;
 
         Ok(DetailRescanResult {
             observed_root,
@@ -184,7 +239,7 @@ where
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
         let (rows, aggregate) =
-            self.scan_target_directory(&request, reopened, ids, cancel, false)?;
+            self.scan_target_directory(&request, reopened, ids, cancel, false, None)?;
         Ok(DetailRescanResult {
             observed_root,
             observed_directory,
@@ -381,6 +436,7 @@ where
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
         recursive: bool,
+        mut on_progress: Option<&mut dyn FnMut(DetailRescanProgress)>,
     ) -> Result<(Vec<ScannedEntry>, DirectoryAggregate), DetailRescanError> {
         let ReopenedTarget {
             root_metadata,
@@ -626,13 +682,22 @@ where
         // Descendants are consumed only to prove and compute the target's complete recursive
         // aggregate. They never become detail rows.
         if recursive {
+            let mut aggregates = RecursiveAggregateContext {
+                target: &mut aggregate,
+                direct: &mut direct_directory_aggregates,
+            };
+            let mut progress = RecursiveProgressContext {
+                rows: &rows,
+                request,
+                on_progress: &mut on_progress,
+            };
             self.scan_nested_directories(
                 &root_metadata,
                 &mut nested_directories,
-                &mut aggregate,
-                &mut direct_directory_aggregates,
                 ids,
                 cancel,
+                &mut aggregates,
+                &mut progress,
             )?;
         }
 
@@ -675,16 +740,15 @@ where
         &self,
         root_metadata: &EntryMetadata,
         initial: &mut Vec<NestedDirectory<P::DirectoryHandle>>,
-        aggregate: &mut TargetAggregateState,
-        direct_directory_aggregates: &mut std::collections::BTreeMap<
-            ScanEntryId,
-            TargetAggregateState,
-        >,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
+        aggregates: &mut RecursiveAggregateContext<'_>,
+        progress: &mut RecursiveProgressContext<'_, '_, '_>,
     ) -> Result<(), DetailRescanError> {
         let mut frontier: VecDeque<_> = initial.drain(..).collect();
         let mut visited = 0usize;
+        let mut last_progress = Instant::now();
+        let mut progress_dirty = false;
         while let Some(mut current) = frontier.pop_front() {
             visited = visited
                 .checked_add(1)
@@ -747,15 +811,18 @@ where
                     )
                     .map_err(map_platform_error)?;
                     let entry_id = ids.allocate()?;
-                    aggregate.note_entry()?;
-                    let direct = direct_directory_aggregates
+                    aggregates.target.note_entry()?;
+                    let direct = aggregates
+                        .direct
                         .get_mut(&current.direct_child_id)
                         .ok_or(DetailRescanError::InvalidRequest)?;
                     direct.note_entry()?;
                     if current.identity.entry_id == current.direct_child_id {
                         direct.note_direct_child()?;
                     }
-                    if aggregate.recursive_entry_count > self.limits.max_visited_entries as u128 {
+                    if aggregates.target.recursive_entry_count
+                        > self.limits.max_visited_entries as u128
+                    {
                         return Err(DetailRescanError::ResourceLimit);
                     }
                     match walked {
@@ -782,7 +849,7 @@ where
                         }
                         WalkEntry::File(metadata) => {
                             require_same_mount(&self.platform, root_metadata, &metadata)?;
-                            aggregate.note_file(&metadata);
+                            aggregates.target.note_file(&metadata);
                             direct.note_file(&metadata);
                         }
                         WalkEntry::Link(metadata) => {
@@ -795,7 +862,7 @@ where
                             ) {
                                 return Err(map_boundary(&boundary.kind));
                             }
-                            aggregate.mark_incomplete(boundary.reason.clone());
+                            aggregates.target.mark_incomplete(boundary.reason.clone());
                             direct.mark_incomplete(boundary.reason);
                         }
                         WalkEntry::Error(error) => {
@@ -805,10 +872,26 @@ where
                             ) {
                                 return Err(map_walk_error(error.kind));
                             }
-                            aggregate.mark_incomplete(error.reason.clone());
+                            aggregates.target.mark_incomplete(error.reason.clone());
                             direct.mark_incomplete(error.reason);
                         }
                     }
+                    progress_dirty = true;
+                }
+                if progress_dirty
+                    && (last_progress.elapsed() >= DETAIL_PROGRESS_INTERVAL
+                        || (batch.end_of_directory && frontier.is_empty()))
+                {
+                    emit_recursive_progress(
+                        progress.rows,
+                        aggregates.target,
+                        aggregates.direct,
+                        progress.request,
+                        &current.direct_child_id,
+                        progress.on_progress,
+                    );
+                    last_progress = Instant::now();
+                    progress_dirty = false;
                 }
                 if batch.end_of_directory {
                     break;
@@ -817,6 +900,63 @@ where
         }
         Ok(())
     }
+}
+
+struct RecursiveProgressContext<'a, 'request, 'callback> {
+    rows: &'a [ScannedEntry],
+    request: &'a DetailRescanRequest<'request>,
+    on_progress: &'a mut Option<&'callback mut dyn FnMut(DetailRescanProgress)>,
+}
+
+struct RecursiveAggregateContext<'a> {
+    target: &'a mut TargetAggregateState,
+    direct: &'a mut std::collections::BTreeMap<ScanEntryId, TargetAggregateState>,
+}
+
+fn emit_recursive_progress(
+    rows: &[ScannedEntry],
+    aggregate: &TargetAggregateState,
+    direct_directory_aggregates: &std::collections::BTreeMap<ScanEntryId, TargetAggregateState>,
+    request: &DetailRescanRequest<'_>,
+    direct_child_id: &ScanEntryId,
+    on_progress: &mut Option<&mut dyn FnMut(DetailRescanProgress)>,
+) {
+    let Some(on_progress) = on_progress.as_deref_mut() else {
+        return;
+    };
+    let Some(mut row) = rows
+        .iter()
+        .find(|row| {
+            row.identity
+                .as_ref()
+                .is_some_and(|identity| &identity.entry_id == direct_child_id)
+        })
+        .cloned()
+    else {
+        return;
+    };
+    let Some(state) = direct_directory_aggregates.get(direct_child_id) else {
+        return;
+    };
+    let child = state.clone().finish(
+        request.source_scan_id,
+        direct_child_id,
+        request.revision,
+        false,
+    );
+    row.logical_bytes = child.apparent_logical_bytes;
+    row.allocated_bytes = child.filesystem_reported_allocated_bytes;
+    row.reclaimable_estimate = child.potentially_reclaimable_bytes;
+    row.coverage = child.coverage;
+    on_progress(DetailRescanProgress {
+        row,
+        aggregate: aggregate.clone().finish(
+            request.source_scan_id,
+            &request.source_directory_identity.entry_id,
+            request.revision,
+            false,
+        ),
+    });
 }
 
 struct TargetDirectory<D> {
@@ -843,6 +983,7 @@ impl<D> TargetDirectory<D> {
     }
 }
 
+#[derive(Clone)]
 struct TargetAggregateState {
     direct_child_count: u128,
     recursive_entry_count: u128,
@@ -1231,9 +1372,10 @@ mod tests {
             ids.reserve(&entry.identity.as_ref().unwrap().entry_id)
                 .unwrap();
         }
+        let mut progress = Vec::new();
         let result =
             DetailRescanner::new(HostPlatformScanner::new(), ScanResourceLimits::default())
-                .rescan(
+                .rescan_with_progress(
                     DetailRescanRequest {
                         source_scan_id: &scan_id,
                         source_root_identity: root_entry.identity.as_ref().unwrap(),
@@ -1247,6 +1389,7 @@ mod tests {
                     },
                     &mut ids,
                     &CancellationToken::new(),
+                    |update| progress.push(update),
                 )
                 .unwrap();
 
@@ -1277,6 +1420,13 @@ mod tests {
             .find(|entry| entry.native_basename == test_native_name("nested"))
             .unwrap();
         assert_eq!(nested_row.logical_bytes, known_u128(6));
+        assert!(!progress.is_empty());
+        let nested_progress = &progress.last().unwrap().row;
+        assert_eq!(nested_progress.native_basename, test_native_name("nested"));
+        assert!(matches!(
+            nested_progress.logical_bytes,
+            EvidenceValue::LowerBound { value, .. } if value == DecimalU128::new(6)
+        ));
     }
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]

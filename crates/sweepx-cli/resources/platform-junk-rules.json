@@ -1,0 +1,38 @@
+[
+  {
+    "id": "linux.xdg-user-cache",
+    "platform": "linux",
+    "rootKind": "xdg_cache_home",
+    "matchKind": "direct_children",
+    "names": [],
+    "depth": 1,
+    "risk": "R2",
+    "evidence": "The XDG Base Directory specification defines this root for user-specific non-essential cache data; configuration and persistent data homes remain outside it.",
+    "sourceReviewedAt": "2026-08-29",
+    "references": ["https://specifications.freedesktop.org/basedir-spec/latest/"]
+  },
+  {
+    "id": "macos.user-caches",
+    "platform": "macos",
+    "rootKind": "macos_user_caches",
+    "matchKind": "direct_children",
+    "names": [],
+    "depth": 1,
+    "risk": "R2",
+    "evidence": "Apple defines Library/Caches as data applications must be able to regenerate; Application Support, preferences, containers, and user documents remain outside this root.",
+    "sourceReviewedAt": "2026-08-29",
+    "references": ["https://developer.apple.com/documentation/foundation/url/cachesdirectory", "https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html"]
+  },
+  {
+    "id": "windows.packaged-app-cache",
+    "platform": "windows",
+    "rootKind": "windows_packages",
+    "matchKind": "named_descendant",
+    "names": ["LocalCache", "TempState"],
+    "depth": 2,
+    "risk": "R2",
+    "evidence": "Windows exposes LocalCacheFolder and TemporaryFolder separately from persistent LocalFolder data; only those package children are selected and LocalState remains outside the match.",
+    "sourceReviewedAt": "2026-08-29",
+    "references": ["https://learn.microsoft.com/windows/apps/develop/data/store-and-retrieve-app-data"]
+  }
+]

@@ -61,9 +61,10 @@ use sweepx_protocol::{
 pub use sweepx_scanner::ScanSummary;
 use sweepx_scanner::{ProgressEvent, ScanError};
 use sweepx_tui::{
-    DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProvider, DetailRescanReason,
-    DetailRescanRequest as TuiDetailRescanRequest, DetailRescanResult as TuiDetailRescanResult,
-    LoadLimits as TuiLoadLimits, RefreshedDetail, ViewModel, ViewModelError,
+    DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProgress as TuiDetailRescanProgress,
+    DetailRescanProvider, DetailRescanReason, DetailRescanRequest as TuiDetailRescanRequest,
+    DetailRescanResult as TuiDetailRescanResult, LoadLimits as TuiLoadLimits, RefreshedDetail,
+    ViewModel, ViewModelError,
 };
 use thiserror::Error;
 
@@ -425,6 +426,7 @@ struct LiveTuiDetailRescanProvider {
     scanner: DetailRescanner<HostPlatformScanner>,
     ids: Mutex<DetailEntryIdAllocator>,
     cancel: Mutex<CancellationToken>,
+    progress: Mutex<Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>>,
 }
 
 pub fn tui_detail_rescan_provider(summary: &ScanSummary) -> TuiDetailRescanProvider {
@@ -484,10 +486,23 @@ fn live_tui_detail_rescan_provider(
         ),
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
+        progress: Mutex::new(None),
     })
 }
 
 impl DetailRescanProvider for TuiDetailRescanProvider {
+    fn set_progress_sink(
+        &self,
+        sink: Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>,
+    ) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(live) = &self.live
+            && let Ok(mut progress) = live.progress.lock()
+        {
+            *progress = sink;
+        }
+    }
+
     fn prepare_detail_rescan(&self) {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if let Some(live) = &self.live
@@ -526,6 +541,21 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
             let scanned = if request.reason == DetailRescanReason::ProgressiveListing {
                 live.scanner
                     .rescan_direct_children(scanner_request, &mut ids, &cancel)
+            } else if request.reason == DetailRescanReason::ProgressiveAggregate {
+                live.scanner
+                    .rescan_with_progress(scanner_request, &mut ids, &cancel, |progress| {
+                        let Some(sender) = live.progress.lock().ok().and_then(|slot| slot.clone())
+                        else {
+                            return;
+                        };
+                        // UI progress is lossy by design. A full queue means the terminal has a
+                        // newer-enough lower bound pending; the final result remains authoritative.
+                        let _ = sender.try_send(TuiDetailRescanProgress {
+                            binding: binding.clone(),
+                            row: progress.row,
+                            aggregate: progress.aggregate,
+                        });
+                    })
             } else {
                 live.scanner.rescan(scanner_request, &mut ids, &cancel)
             };
@@ -739,6 +769,7 @@ mod tui_detail_rescan_provider_tests {
                 ),
                 ids: Mutex::new(ids),
                 cancel: Mutex::new(CancellationToken::new()),
+                progress: Mutex::new(None),
             }),
         };
         provider.cancel_detail_rescan();

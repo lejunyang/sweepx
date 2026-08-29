@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only `cache status` diagnostics with human/JSON output on Linux and
   macOS, bounded aggregate cache health, and a stable `cache.status.result`
   schema; Windows and NDJSON fail closed before cache access.
+- Progressive TUI directory totals with throttled lower-bound snapshots, bounded lossy UI
+  backpressure, and final exact/incomplete convergence.
+- Evidence-bearing, report-only platform cache discovery through `junk --system` for narrow Linux,
+  macOS, and Windows user-cache roots.
 - Chinese and English human-facing output with stable machine-readable output.
 - Built-in Cleaner schema, deterministic rule VM, catalog, compatibility
   checks, and initial Cargo-target and Chromium cache metadata.

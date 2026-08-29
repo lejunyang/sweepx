@@ -1,0 +1,93 @@
+# MangoDisk adoption decisions
+
+Research target: `harry0703/MangoDisk` at `b011da813795e3221022b6b731be998a2eb2bf2f`.
+
+Source snapshot date: 2026-08-29. The upstream project is GPL-3.0. SweepX therefore treats its source and
+catalog as research evidence, not as code or rule text that can be copied into this MIT/Apache-2.0
+repository.
+
+## What SweepX adopts now
+
+- **Progressive UI with bounded backpressure.** MangoDisk throttles duplicate-scan progress to
+  120 ms. SweepX now applies the same independently implemented product principle to TUI directory
+  aggregation: the scanner emits advisory lower-bound snapshots at most once per 120 ms window, a
+  one-slot channel drops superseded snapshots, and the final result remains authoritative.
+- **Bounded parallel traversal.** SweepX already had a four-worker default, a hard cap of 32,
+  bounded work/result channels, stable commit ordering, cancellation checks, and handle ownership
+  per worker. This overlaps MangoDisk's CPU/device-bounded worker pool and backpressure design.
+- **Independent, evidence-bearing rules.** A rule must identify its platform, controlled root, risk,
+  rebuild boundary, verification date, and first-party references. An upstream catalog entry may
+  suggest an investigation but cannot prove safety or become deletion authority.
+
+## Acceleration work that remains platform-qualified
+
+| Technique | MangoDisk evidence | SweepX decision |
+|---|---|---|
+| NTFS volume layout enumeration | `FSCTL_QUERY_FILE_LAYOUT`, 8 MiB pages, bounded fallback | High-value Windows follow-up. It needs a separate parser, corruption fixtures, cloud-placeholder handling, hard-link semantics, and Win32 fallback before use. |
+| NTFS USN change tokens | `FSCTL_QUERY_USN_JOURNAL` / `FSCTL_READ_USN_JOURNAL` | Future cache-validity accelerator only. Journal ID/range mismatch, wrap, access denial, or an unknown reason must cause a cache miss. |
+| macOS bulk enumeration | `getattrlistbulk`, 64 KiB pages | High-value macOS follow-up. Current SweepX macOS scanning still uses `readdir` plus handle-relative inspection, so no bulk-speed claim is made. |
+| Device-aware concurrency | SSD 4, rotational 2, removable/network/unknown 1 | Adopt after native device classification exists. SweepX keeps its bounded default rather than guessing media type. |
+| Applicability probes and path-trie pruning | Skip known-absent apps and branches outside active rule roots | Adopt with the rule engine. Probe failure remains eligible for scanning and never weakens path/matcher safety. |
+| Index reuse | LRU plus filesystem change token | Adopt only with a proven platform change token. Missing or ambiguous validation is a miss, never a cache hit. |
+
+## Cross-platform junk strategy
+
+The first system catalog should be deliberately smaller than MangoDisk's 205 filesystem rules.
+SweepX will expand by evidence class, with read-only reporting before any rule participates in a
+plan.
+
+### macOS
+
+Start at the direct children of `~/Library/Caches` and other narrowly documented cache roots. Apple says the
+`Caches` directory contains discardable data that applications must be able to recreate. Do not
+classify `Application Support`, preferences, cookies, containers, or arbitrary logs as equivalent
+cache data. Application-specific paths require a bundle/application probe and a source proving the
+selected child is rebuildable.
+
+Sources:
+
+- <https://developer.apple.com/documentation/foundation/url/cachesdirectory>
+- <https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html>
+
+### Windows
+
+Use OS-owned APIs for system categories rather than deleting guessed directories. Windows Storage
+Settings / Disk Cleanup owns Windows Update, Delivery Optimization, Defender, Internet Cache, and
+other system handlers. Per-app rules may target a documented `LocalCacheFolder` or temporary
+folder, but must not generalize all of `%LOCALAPPDATA%` or an application's `LocalFolder` as junk.
+
+Sources:
+
+- <https://learn.microsoft.com/windows/apps/develop/data/store-and-retrieve-app-data>
+- <https://learn.microsoft.com/windows/win32/api/emptyvc/nn-emptyvc-iemptyvolumecache>
+
+### Linux
+
+Linux needs its own policy rather than a mechanical macOS port:
+
+1. `$XDG_CACHE_HOME` (default `~/.cache`) is the primary user-cache namespace because the XDG Base
+   Directory specification defines it for non-essential data. Report application-owned direct
+   children; do not treat `$XDG_DATA_HOME` or `$XDG_CONFIG_HOME` as cache.
+2. Freedesktop thumbnail caches under `$XDG_CACHE_HOME/thumbnails` are a narrow, documented first
+   rule.
+3. `/tmp` and `/var/tmp` require an age/ownership/activity policy and should normally defer to the
+   distribution's `systemd-tmpfiles` policy. Never report either entire shared root as one candidate.
+4. Package managers, Flatpak/Snap, containers, journals, and language toolchains need dedicated
+   adapters or first-party commands because shared stores and reference graphs are not safe
+   directory-name matches.
+5. Any XDG environment override is accepted only when absolute. Symlinks, mount changes, unknown
+   ownership, active processes, and incomplete enumeration keep a rule report-only.
+
+Sources:
+
+- <https://specifications.freedesktop.org/basedir-spec/latest/>
+- <https://specifications.freedesktop.org/thumbnail-spec/latest-single/>
+- <https://systemd.io/TEMPORARY_DIRECTORIES/>
+
+## Rule intake gate
+
+A candidate advances from research only after all of these are present: first-party ownership and
+rebuild evidence, explicit preserved-data boundary, platform/version scope, controlled root,
+no-follow identity-safe scanner fixture, real-system verification date, and a conservative risk and
+default-selection decision. Execution remains separately gated by immutable planning, approval,
+live revalidation, and platform qualification.

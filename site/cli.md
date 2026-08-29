@@ -152,9 +152,10 @@ cargo run -p sweepx-cli -- --format json cleaner show org.sweepx.cargo-target
 ```bash
 sweepx junk ~/Projects
 sweepx --format json junk .
+sweepx --format json junk --system
 ```
 
-当前首批规则只覆盖明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。它只报告候选、规则 ID、风险和可回收估算，不自动删除。
+显式根继续识别明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。不传显式根并加 `--system` 时，Linux 在绝对 `XDG_CACHE_HOME`（否则 `~/.cache`）下逐个报告应用缓存，macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。`--system` 与显式根互斥。所有结果都只报告候选、规则 ID、风险、来源审阅日期、第一方依据和可回收估算，不自动删除；Linux 的 `/tmp`/`/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未按目录名纳入。
 
 ## 文件管理器式 TUI 与回收站预览
 
@@ -166,7 +167,9 @@ cargo run -p sweepx-cli -- trash /absolute/path/to/item
 
 TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。单根会自动进入；多根先展示虚拟根。`Enter` / `Right` / `l` 进入目录，`Esc` / `Backspace` / `Left` / `h` 返回，方向键或 `j`/`k` 移动，`d` / `Delete` 选择移到系统回收站，`q` 或 `Ctrl-C` 退出。回收站动作会先退出全屏，再要求确认并重验扫描身份；symlink 和 reparse point 不可操作。
 
-`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录的递归大小随后在后台回填，后代不作为列表行长期保存。目录 detail rescan 以 single-flight 后台任务运行：query deadline 为 30 秒，导航或退出不会等待非协作 worker。
+`--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录的递归大小在后台扫描时约每 120 ms 以明确的下限值（`>=`）增量回填并重排，最终结果再收敛为 exact 或 incomplete，后代不作为列表行长期保存。进度通道容量为 1，慢终端只会丢弃已过时的中间快照，不会反压扫描。目录 detail rescan 以 single-flight 后台任务运行：30 秒是无进展 deadline，有有效增量时续期；导航或退出不会等待非协作 worker。
+
+扫描加速和跨平台垃圾规则的来源、可借鉴点、GPL 边界以及 Linux 策略见 [MangoDisk 采用决策](https://github.com/lejunyang/sweepx/blob/main/docs/research/mangodisk-adoption.md)。
 
 ## 当前不存在的命令
 

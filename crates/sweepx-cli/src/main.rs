@@ -156,6 +156,9 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     Junk {
+        /// Scan conservative platform cache roots; conflicts with explicit roots.
+        #[arg(long)]
+        system: bool,
         #[arg(value_name = "ROOT")]
         roots: Vec<OsString>,
     },
@@ -444,15 +447,15 @@ fn main() -> ProcessExitCode {
                 .map(RenderedResult::Cleaner)
             }
         },
-        Commands::Junk { roots } => {
-            let roots = match normalize_scan_roots(&roots) {
+        Commands::Junk { system, roots } => {
+            let roots = match normalize_junk_roots(system, &roots) {
                 Ok(roots) => roots,
                 Err(error) => {
                     eprintln!("{error}");
                     return ProcessExitCode::from(2);
                 }
             };
-            return run_junk_scan(&context, format, size_unit, roots);
+            return run_junk_scan(&context, format, size_unit, roots, system);
         }
         Commands::Cache { command } => match command {
             CacheCommands::Status => {
@@ -527,6 +530,22 @@ struct JunkRule {
     risk: String,
     required_parent_markers: Vec<String>,
     evidence: String,
+    source_reviewed_at: String,
+    references: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlatformJunkRule {
+    id: String,
+    platform: String,
+    root_kind: String,
+    match_kind: String,
+    names: Vec<String>,
+    depth: usize,
+    risk: String,
+    evidence: String,
+    source_reviewed_at: String,
     references: Vec<String>,
 }
 
@@ -537,6 +556,7 @@ struct JunkCandidate {
     risk: String,
     reclaimable: ByteValue,
     evidence: String,
+    source_reviewed_at: String,
     references: Vec<String>,
     entry_id: ScanEntryId,
     ancestor_ids: BTreeSet<ScanEntryId>,
@@ -546,12 +566,14 @@ struct JunkCandidate {
 // rebuild contract. MangoDisk's broader inventory is research input, not license-compatible code
 // or automatic authority. Each future rule must carry its own source and safety review.
 const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
+const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-rules.json");
 
 fn run_junk_scan(
     context: &CoreContext,
     format: OutputFormat,
     size_unit: HumanSizeUnit,
     roots: Vec<PathBuf>,
+    include_platform_rules: bool,
 ) -> ProcessExitCode {
     let rules = match load_project_junk_rules() {
         Ok(rules) => rules,
@@ -559,6 +581,17 @@ fn run_junk_scan(
             eprintln!("invalid built-in project junk rules: {error}");
             return ProcessExitCode::from(12);
         }
+    };
+    let platform_rules = if include_platform_rules {
+        match load_platform_junk_rules() {
+            Ok(rules) => rules,
+            Err(error) => {
+                eprintln!("invalid built-in platform junk rules: {error}");
+                return ProcessExitCode::from(12);
+            }
+        }
+    } else {
+        Vec::new()
     };
     let progress = ScanProgress::start(
         context.locale(),
@@ -634,6 +667,7 @@ fn run_junk_scan(
                             reason: ReasonCode::ResourceLimit,
                         }),
                     evidence: rule.evidence.clone(),
+                    source_reviewed_at: rule.source_reviewed_at.clone(),
                     references: rule.references.clone(),
                     entry_id: identity.entry_id.clone(),
                     ancestor_ids: locator
@@ -645,6 +679,11 @@ fn run_junk_scan(
             })
         })
         .collect::<Vec<_>>();
+    candidates.extend(platform_junk_candidates(
+        &scan.summary,
+        &aggregates,
+        &platform_rules,
+    ));
     candidates.sort_by(|left, right| {
         left.ancestor_ids
             .len()
@@ -675,9 +714,9 @@ fn run_junk_scan(
         println!(
             "{}",
             match context.locale() {
-                sweepx_i18n::Locale::ZhCn => "垃圾扫描报告（项目可重建产物；仅报告）",
+                sweepx_i18n::Locale::ZhCn => "垃圾扫描报告（已核验可重建/可丢弃位置；仅报告）",
                 sweepx_i18n::Locale::EnUs =>
-                    "Junk scan report (rebuildable project artifacts; report-only)",
+                    "Junk scan report (verified rebuildable/disposable locations; report-only)",
             }
         );
         for candidate in &candidates {
@@ -725,7 +764,9 @@ fn run_junk_scan(
                 "candidates": candidates.iter().map(|candidate| json!({
                     "path": candidate.path, "ruleId": candidate.rule_id, "risk": candidate.risk,
                     "reclaimable": candidate.reclaimable,
-                    "evidence": candidate.evidence, "references": candidate.references,
+                    "evidence": candidate.evidence,
+                    "sourceReviewedAt": candidate.source_reviewed_at,
+                    "references": candidate.references,
                 })).collect::<Vec<_>>(),
             })
         );
@@ -743,6 +784,7 @@ fn load_project_junk_rules() -> Result<Vec<JunkRule>, String> {
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
             || rule.names.is_empty()
             || rule.evidence.trim().is_empty()
+            || !valid_verification_date(&rule.source_reviewed_at)
             || rule.references.is_empty()
             || !rule
                 .references
@@ -786,6 +828,73 @@ fn junk_rule_applies(
                 .any(|marker| markers.contains(&normalized_rule_name(marker)))
         })
     })
+}
+
+fn platform_junk_candidates(
+    summary: &sweepx_core::ScanSummary,
+    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    rules: &[PlatformJunkRule],
+) -> Vec<JunkCandidate> {
+    let platform = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unsupported"
+    };
+    let mut candidates = Vec::new();
+    for rule in rules.iter().filter(|rule| rule.platform == platform) {
+        for entry in summary
+            .roots
+            .iter()
+            .chain(summary.entries.iter())
+            .filter(|entry| entry.object_type == ObjectType::Directory)
+        {
+            let Some(identity) = entry.identity.as_ref() else {
+                continue;
+            };
+            let Some(locator) = entry.native_locator.as_ref() else {
+                continue;
+            };
+            let depth = locator.parent_reopen_recipe.len();
+            let matched = match rule.match_kind.as_str() {
+                "direct_children" => depth == rule.depth,
+                "named_descendant" => {
+                    depth == rule.depth
+                        && native_name_for_rule(&entry.native_basename).is_some_and(|name| {
+                            rule.names
+                                .iter()
+                                .any(|candidate| normalized_rule_name(candidate) == name)
+                        })
+                }
+                _ => false,
+            };
+            if !matched {
+                continue;
+            }
+            candidates.push(JunkCandidate {
+                path: entry.display_path.clone(),
+                rule_id: rule.id.clone(),
+                risk: rule.risk.clone(),
+                reclaimable: aggregates
+                    .get(identity.entry_id.as_str())
+                    .map(|aggregate| aggregate.potentially_reclaimable_bytes.clone())
+                    .unwrap_or_else(|| entry.reclaimable_estimate.clone()),
+                evidence: rule.evidence.clone(),
+                source_reviewed_at: rule.source_reviewed_at.clone(),
+                references: rule.references.clone(),
+                entry_id: identity.entry_id.clone(),
+                ancestor_ids: locator
+                    .parent_reopen_recipe
+                    .iter()
+                    .map(|component| component.entry_id.clone())
+                    .collect(),
+            });
+        }
+    }
+    candidates
 }
 
 fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
@@ -1065,6 +1174,121 @@ fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_c
     }
 }
 
+fn normalize_junk_roots(system: bool, raw_roots: &[OsString]) -> Result<Vec<PathBuf>, String> {
+    if system && !raw_roots.is_empty() {
+        return Err("junk --system cannot be combined with explicit roots".to_string());
+    }
+    if !system {
+        return normalize_scan_roots(raw_roots).map_err(|error| error.to_string());
+    }
+    let roots = default_platform_junk_roots()?;
+    if roots.is_empty() {
+        return Err("no supported platform junk root is available".to_string());
+    }
+    Ok(roots)
+}
+
+fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
+    let rules = load_platform_junk_rules()?;
+    let mut roots = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        // XDG_CACHE_HOME is valid only as an absolute path. Falling back to ~/.cache follows the
+        // XDG Base Directory specification; data/config homes are intentionally excluded.
+        if rules.iter().any(|rule| rule.platform == "linux")
+            && let Some(cache) = std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .or_else(|| {
+                    user_home_dir()
+                        .filter(|home| home.is_absolute())
+                        .map(|home| home.join(".cache"))
+                })
+            && is_existing_real_directory(&cache)
+        {
+            roots.push(cache);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Apple defines Library/Caches as discardable, but candidate classification remains
+        // report-only and no broader Library/Application Support root is admitted here.
+        if rules.iter().any(|rule| rule.platform == "macos")
+            && let Some(cache) = user_home_dir()
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join("Library/Caches"))
+            && is_existing_real_directory(&cache)
+        {
+            roots.push(cache);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // LocalCache is narrower than LocalAppData. SweepX does not classify an application's
+        // LocalFolder or the whole LocalAppData tree as disposable.
+        if rules.iter().any(|rule| rule.platform == "windows")
+            && let Some(packages) = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("Packages"))
+            && is_existing_real_directory(&packages)
+        {
+            roots.push(packages);
+        }
+    }
+    Ok(roots)
+}
+
+fn is_existing_real_directory(path: &Path) -> bool {
+    // Root discovery is convenience only, but it still avoids following a symlink before the
+    // platform scanner performs the authoritative no-follow admission and identity checks.
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
+    let rules: Vec<PlatformJunkRule> =
+        serde_json::from_str(PLATFORM_JUNK_RULES_JSON).map_err(|error| error.to_string())?;
+    let mut ids = BTreeSet::new();
+    for rule in &rules {
+        let expected = match rule.platform.as_str() {
+            "linux" => ("xdg_cache_home", "direct_children", 1),
+            "macos" => ("macos_user_caches", "direct_children", 1),
+            "windows" => ("windows_packages", "named_descendant", 2),
+            _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
+        };
+        if !ids.insert(rule.id.as_str())
+            || !rule.id.starts_with(&format!("{}.", rule.platform))
+            || (
+                rule.root_kind.as_str(),
+                rule.match_kind.as_str(),
+                rule.depth,
+            ) != expected
+            || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
+            || rule.evidence.trim().is_empty()
+            || !valid_verification_date(&rule.source_reviewed_at)
+            || rule.references.is_empty()
+            || !rule
+                .references
+                .iter()
+                .all(|reference| reference.starts_with("https://"))
+            || !rule.names.iter().all(|name| safe_rule_component(name))
+            || (rule.match_kind == "direct_children" && !rule.names.is_empty())
+            || (rule.match_kind == "named_descendant" && rule.names.is_empty())
+        {
+            return Err(format!("invalid platform junk rule: {}", rule.id));
+        }
+    }
+    Ok(rules)
+}
+
+fn valid_verification_date(value: &str) -> bool {
+    value.len() == 10
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7) && byte == b'-'
+                || !matches!(index, 4 | 7) && byte.is_ascii_digit()
+        })
+}
+
 fn default_full_scan_roots() -> Vec<PathBuf> {
     #[cfg(unix)]
     {
@@ -1306,6 +1530,38 @@ mod tests {
         let rules = load_project_junk_rules().unwrap();
         assert!(rules.len() >= 5);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
+        assert!(
+            rules
+                .iter()
+                .all(|rule| valid_verification_date(&rule.source_reviewed_at))
+        );
+    }
+
+    #[test]
+    fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
+        let rules = load_platform_junk_rules().unwrap();
+        assert_eq!(rules.len(), 3);
+        assert!(rules.iter().all(|rule| !rule.references.is_empty()));
+        assert!(
+            rules
+                .iter()
+                .all(|rule| valid_verification_date(&rule.source_reviewed_at))
+        );
+        let linux = rules.iter().find(|rule| rule.platform == "linux").unwrap();
+        assert_eq!(linux.root_kind, "xdg_cache_home");
+        assert_eq!(linux.match_kind, "direct_children");
+        let windows = rules
+            .iter()
+            .find(|rule| rule.platform == "windows")
+            .unwrap();
+        assert_eq!(windows.names, ["LocalCache", "TempState"]);
+        assert_eq!(windows.depth, 2);
+    }
+
+    #[test]
+    fn junk_system_rejects_explicit_roots() {
+        let roots = vec![OsString::from(".")];
+        assert!(normalize_junk_roots(true, &roots).is_err());
     }
 
     #[test]

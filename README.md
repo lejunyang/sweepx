@@ -105,6 +105,8 @@ cargo run -p sweepx-cli -- cleaner cargo-detect /absolute/path/to/workspace
 
 # 统一垃圾识别入口：首批覆盖常见项目构建产物，结果只报告不删除
 cargo run -p sweepx-cli -- junk ~/Projects
+# 扫描当前平台经过核验的用户缓存根（只报告）
+cargo run -p sweepx-cli -- junk --system
 
 ```
 

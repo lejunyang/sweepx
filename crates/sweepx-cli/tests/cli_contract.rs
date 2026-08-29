@@ -722,6 +722,41 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
     assert_eq!(json["incompleteSizeCount"], 0);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() {
+    let fixture = TempDir::new().unwrap();
+    let cache = fixture.path().join("cache");
+    fs::create_dir_all(cache.join("example")).unwrap();
+    fs::write(cache.join("example/blob"), b"cache").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.env("XDG_CACHE_HOME", &cache)
+        .arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg("--system");
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidates = json["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["ruleId"], "linux.xdg-user-cache");
+    assert_eq!(
+        candidates[0]["path"],
+        cache.join("example").display().to_string()
+    );
+    assert_eq!(candidates[0]["sourceReviewedAt"], "2026-08-29");
+    assert_eq!(candidates[0]["risk"], "R2");
+}
+
+#[test]
+fn junk_system_rejects_an_explicit_root_before_scanning() {
+    let fixture = TempDir::new().unwrap();
+    let mut cmd = cli_command();
+    cmd.arg("junk").arg("--system").arg(fixture.path());
+    cmd.assert().code(2);
+}
+
 #[test]
 fn cargo_detect_rejects_cargo_passthrough_overrides_at_the_cli_boundary() {
     for args in [

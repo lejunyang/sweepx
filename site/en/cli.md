@@ -152,9 +152,10 @@ A unified junk-discovery entry point is available:
 ```bash
 sweepx junk ~/Projects
 sweepx --format json junk .
+sweepx --format json junk --system
 ```
 
-The initial narrow catalog covers clearly rebuildable project artifacts: Rust `target`, Node `node_modules`, Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`, and common `dist/build/out/.next/.turbo` outputs. It reports candidates, rule IDs, risk, and reclaimable estimates; it never deletes automatically.
+Explicit roots continue to discover clearly rebuildable project artifacts: Rust `target`, Node `node_modules`, Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`, and common `dist/build/out/.next/.turbo` outputs. With no explicit root, `--system` reports individual application-cache children below an absolute `XDG_CACHE_HOME` (or `~/.cache`) on Linux and `~/Library/Caches` on macOS; on Windows it admits only depth-2 `LocalCache` / `TempState` directories below `%LOCALAPPDATA%/Packages`. `--system` conflicts with explicit roots. Every result remains report-only and includes the rule ID, risk, source-review date, first-party references, and reclaimable estimate; Linux `/tmp`/`/var/tmp`, Windows system cleanup, and package-manager/container shared stores are not admitted by directory-name matching.
 
 ## File-manager-style TUI and Trash preview
 
@@ -166,7 +167,9 @@ cargo run -p sweepx-cli -- trash /absolute/path/to/item
 
 The TUI consumes the typed result of this live scan without an intermediate JSON file. It auto-enters a single root; multiple roots first appear in a virtual-root view. Use `Enter` / `Right` / `l` to enter a directory, `Esc` / `Backspace` / `Left` / `h` to go back, arrows or `j`/`k` to move, `d` / `Delete` to select an item for Trash, and `q` or `Ctrl-C` to quit. Trash exits the full-screen view, asks for confirmation, and revalidates the live scan identity; symlinks and reparse points cannot be mutated.
 
-`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. The TUI enters after root admission and auto-opens a single root. Direct children appear first; recursive totals for those directories are filled in by background work, without retaining descendants as list rows. Detail rescans are single-flight with a 30 s deadline, and navigation or quit does not wait for a non-cooperative worker.
+`--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. The TUI enters after root admission and auto-opens a single root. Direct children appear first; while the background scan runs, recursive directory totals are merged and resorted as explicit lower bounds (`>=`) at roughly 120 ms intervals. The final result then converges to exact or explicitly incomplete evidence, without retaining descendants as list rows. A one-slot progress channel drops superseded intermediate snapshots instead of applying terminal backpressure. Detail rescans are single-flight; 30 seconds is a no-progress deadline renewed by valid updates, and navigation or quit does not wait for a non-cooperative worker.
+
+See [MangoDisk adoption decisions](https://github.com/lejunyang/sweepx/blob/main/docs/research/mangodisk-adoption.md) for acceleration findings, rule provenance, the GPL boundary, and the Linux policy.
 
 ## Commands that do not exist today
 

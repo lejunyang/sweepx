@@ -25,9 +25,9 @@ use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table}
 use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
 use sweepx_model::{
-    Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance, HumanSizeUnit,
-    NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId, ScanEntryIdError, ScanId,
-    ScanObjectIdentity, ScanSort, ScannedEntry,
+    ArithmeticState, Coverage, CoverageState, DecimalU128, DirectoryAggregate, FieldProvenance,
+    HumanSizeUnit, NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId, ScanEntryIdError,
+    ScanId, ScanObjectIdentity, ScanSort, ScannedEntry,
 };
 use sweepx_protocol::OutputStatus;
 use thiserror::Error;
@@ -128,6 +128,14 @@ pub struct RefreshedDetail {
     pub aggregate: DirectoryAggregate,
 }
 
+/// One validated lower-bound update for the active progressive aggregate scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailRescanProgress {
+    pub binding: DetailRescanBinding,
+    pub row: ScannedEntry,
+    pub aggregate: DirectoryAggregate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailRescanResult {
     Refreshed(Box<RefreshedDetail>),
@@ -152,6 +160,12 @@ pub trait DetailRescanProvider: Send + Sync + 'static {
     fn prepare_detail_rescan(&self) {}
 
     fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult;
+
+    /// Installs a non-blocking sink for advisory lower-bound progress snapshots.
+    ///
+    /// Providers which cannot stream progress may ignore this hook. The reducer validates every
+    /// update against its active binding before exposing it to the terminal model.
+    fn set_progress_sink(&self, _sink: Option<SyncSender<DetailRescanProgress>>) {}
 
     fn cancel_detail_rescan(&self) {}
 }
@@ -859,7 +873,7 @@ impl BrowserModel {
             node_index,
             request,
             previous_state,
-            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
             timed_out: false,
         })
     }
@@ -884,7 +898,7 @@ impl BrowserModel {
             node_index,
             request,
             previous_state,
-            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
             timed_out: false,
         })
     }
@@ -1066,6 +1080,71 @@ impl BrowserModel {
         )?;
         std::mem::swap(self, &mut replacement);
         Ok(())
+    }
+
+    fn apply_detail_rescan_progress(
+        &mut self,
+        pending: &PendingDetailRescan,
+        progress: DetailRescanProgress,
+    ) -> bool {
+        if pending.request.reason != DetailRescanReason::ProgressiveAggregate
+            || progress.binding != pending.request.binding
+            || !self.detail_rescan_binding_matches(pending)
+        {
+            return false;
+        }
+        let Some(directory_identity) = self.nodes[pending.node_index].entry.identity.as_ref()
+        else {
+            return false;
+        };
+        if progress.aggregate.scan_id != pending.request.binding.source_scan_id
+            || progress.aggregate.revision != pending.request.binding.revision
+            || progress.aggregate.scan_entry_id().ok().as_ref()
+                != Some(&directory_identity.entry_id)
+        {
+            return false;
+        }
+        let Ok(Some(progress_identity)) = progress.row.validated_identity() else {
+            return false;
+        };
+        if progress.row.scan_id != pending.request.binding.source_scan_id
+            || progress_identity.parent_id.as_ref() != Some(&directory_identity.entry_id)
+            || progress.row.object_type != ObjectType::Directory
+            || progress.aggregate.coverage.complete
+            || progress.aggregate.coverage.state == CoverageState::Complete
+            || progress.aggregate.arithmetic_state != ArithmeticState::LowerBound
+            || !matches!(
+                progress.row.logical_bytes,
+                sweepx_model::EvidenceValue::LowerBound { .. }
+            )
+        {
+            return false;
+        }
+        let Some(index) = self.children_by_index[pending.node_index]
+            .iter()
+            .copied()
+            .find(|index| progressive_row_matches(&self.nodes[*index].entry, &progress.row))
+        else {
+            return false;
+        };
+        if lower_bound_bytes(&progress.row.logical_bytes)
+            < lower_bound_bytes(&self.nodes[index].entry.logical_bytes)
+            || lower_bound_bytes(&progress.aggregate.apparent_logical_bytes)
+                < self.nodes[pending.node_index]
+                    .aggregate
+                    .as_ref()
+                    .and_then(|aggregate| lower_bound_bytes(&aggregate.apparent_logical_bytes))
+        {
+            return false;
+        }
+        self.nodes[index].entry.logical_bytes = progress.row.logical_bytes;
+        self.nodes[index].entry.allocated_bytes = progress.row.allocated_bytes;
+        self.nodes[index].entry.reclaimable_estimate = progress.row.reclaimable_estimate;
+        self.nodes[index].entry.coverage = progress.row.coverage;
+        self.nodes[pending.node_index].aggregate = Some(progress.aggregate);
+        self.sort_rows();
+        self.reload_loaded_level();
+        true
     }
 
     fn rebuilt_with_detail_rows(
@@ -1351,6 +1430,32 @@ fn browser_node_bytes(node: &BrowserNode) -> Option<u128> {
         .as_ref()
         .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
         .unwrap_or(&node.entry.reclaimable_estimate);
+    match value {
+        sweepx_model::EvidenceValue::Known { value }
+        | sweepx_model::EvidenceValue::LowerBound { value, .. } => Some(value.0),
+        _ => None,
+    }
+}
+
+fn progressive_row_matches(current: &ScannedEntry, progress: &ScannedEntry) -> bool {
+    let (Some(current_identity), Some(progress_identity)) =
+        (current.identity.as_ref(), progress.identity.as_ref())
+    else {
+        return false;
+    };
+    // The aggregate pass re-enumerates direct children and therefore allocates fresh scan-local
+    // entry ids. Match the already validated listing row by its no-follow native identity tuple;
+    // display paths are deliberately excluded from this authority decision.
+    current.scan_id == progress.scan_id
+        && current.object_type == progress.object_type
+        && current.native_basename == progress.native_basename
+        && current_identity.platform_file_identity == progress_identity.platform_file_identity
+        && current_identity.filesystem_object_domain_identity
+            == progress_identity.filesystem_object_domain_identity
+        && current_identity.volume_or_mount_identity == progress_identity.volume_or_mount_identity
+}
+
+fn lower_bound_bytes(value: &sweepx_model::ByteValue) -> Option<u128> {
     match value {
         sweepx_model::EvidenceValue::Known { value }
         | sweepx_model::EvidenceValue::LowerBound { value, .. } => Some(value.0),
@@ -1838,7 +1943,7 @@ struct PendingDetailRescan {
     node_index: usize,
     request: DetailRescanRequest,
     previous_state: DetailRescanState,
-    started_at: Instant,
+    last_activity_at: Instant,
     timed_out: bool,
 }
 
@@ -1901,6 +2006,7 @@ pub struct DetailRescanBrowserReducer<P: DetailRescanProvider> {
     provider: Option<Arc<P>>,
     requests: Option<SyncSender<DetailRescanRequest>>,
     completions: Receiver<CompletedDetailRescan>,
+    progress: Receiver<DetailRescanProgress>,
     worker_done: Receiver<()>,
     worker: Option<JoinHandle<()>>,
     pending: RefCell<Option<PendingDetailRescan>>,
@@ -1926,6 +2032,10 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
         let worker_provider = Arc::clone(&provider);
         let (request_sender, request_receiver) = sync_channel::<DetailRescanRequest>(1);
         let (completion_sender, completion_receiver) = sync_channel(1);
+        // A capacity of one coalesces UI work: scanner throughput is never coupled to terminal
+        // redraw speed, and the next successful snapshot supersedes any skipped lower bound.
+        let (progress_sender, progress_receiver) = sync_channel(1);
+        provider.set_progress_sink(Some(progress_sender));
         let (worker_done_sender, worker_done_receiver) = sync_channel(1);
         let worker = thread::Builder::new()
             .name("sweepx-detail-rescan".to_string())
@@ -1950,6 +2060,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
             provider: Some(provider),
             requests: Some(request_sender),
             completions: completion_receiver,
+            progress: progress_receiver,
             worker_done: worker_done_receiver,
             worker: Some(worker),
             pending: RefCell::new(None),
@@ -1963,12 +2074,16 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
             .borrow()
             .as_ref()
             .map_or(self.deadline, |pending| {
-                self.deadline.saturating_sub(pending.started_at.elapsed())
+                self.deadline
+                    .saturating_sub(pending.last_activity_at.elapsed())
             });
         if self.pending.borrow().is_some()
             && let Some(provider) = &self.provider
         {
             provider.cancel_detail_rescan();
+        }
+        if let Some(provider) = &self.provider {
+            provider.set_progress_sink(None);
         }
         self.requests.take();
         if let Some(worker) = self.worker.take() {
@@ -2004,6 +2119,15 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
     }
 
     fn complete_or_expire(&self, model: &mut BrowserModel) {
+        if let Some(pending) = self.pending.borrow_mut().as_mut() {
+            while let Ok(progress) = self.progress.try_recv() {
+                if model.apply_detail_rescan_progress(pending, progress) {
+                    pending.last_activity_at = Instant::now();
+                }
+            }
+        } else {
+            while self.progress.try_recv().is_ok() {}
+        }
         match self.completions.try_recv() {
             Ok(completed) => {
                 let Some(pending) = self.pending.borrow_mut().take() else {
@@ -2014,7 +2138,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                 if !pending.timed_out {
                     let completed_in_time = completed
                         .finished_at
-                        .saturating_duration_since(pending.started_at)
+                        .saturating_duration_since(pending.last_activity_at)
                         <= self.deadline;
                     let should_enter = if !completed_in_time {
                         model.expire_detail_rescan(&pending)
@@ -2043,7 +2167,7 @@ impl<P: DetailRescanProvider> DetailRescanBrowserReducer<P> {
                 let mut pending = self.pending.borrow_mut();
                 if let Some(pending) = pending.as_mut()
                     && !pending.timed_out
-                    && pending.started_at.elapsed() >= self.deadline
+                    && pending.last_activity_at.elapsed() >= self.deadline
                 {
                     self.provider().cancel_detail_rescan();
                     if model.expire_detail_rescan(pending) {
@@ -3117,6 +3241,27 @@ mod tests {
         DetailRescanResult::Refreshed(refreshed)
     }
 
+    fn progressive_aggregate_progress(
+        request: &DetailRescanRequest,
+        mut row: ScannedEntry,
+        bytes: u128,
+    ) -> DetailRescanProgress {
+        row.logical_bytes = EvidenceValue::LowerBound {
+            value: DecimalU128::new(bytes),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        };
+        row.reclaimable_estimate = row.logical_bytes.clone();
+        let mut aggregate = aggregate(1);
+        aggregate.revision = request.binding.revision;
+        aggregate.coverage = incomplete_coverage();
+        aggregate.arithmetic_state = ArithmeticState::LowerBound;
+        DetailRescanProgress {
+            binding: request.binding.clone(),
+            row,
+            aggregate,
+        }
+    }
+
     fn attach_child_locators(request: &DetailRescanRequest, rows: &mut [ScannedEntry]) {
         for row in rows {
             if row.object_type == ObjectType::Directory {
@@ -3419,6 +3564,80 @@ mod tests {
                 revision: DecimalU128::new(2),
             })
         );
+    }
+
+    #[test]
+    fn progressive_aggregate_applies_lower_bound_updates_before_completion() {
+        #[derive(Clone)]
+        struct ProgressProvider {
+            sink: Arc<StdMutex<Option<SyncSender<DetailRescanProgress>>>>,
+        }
+
+        impl DetailRescanProvider for ProgressProvider {
+            fn set_progress_sink(&self, sink: Option<SyncSender<DetailRescanProgress>>) {
+                *self.sink.lock().unwrap() = sink;
+            }
+
+            fn rescan_detail(&self, request: &DetailRescanRequest) -> DetailRescanResult {
+                let child = entry("/root/sub", ObjectType::Directory, 2, 1, Some(1));
+                if request.reason == DetailRescanReason::ProgressiveListing {
+                    return progressive_listing_result(request, vec![child]);
+                }
+                let mut progress_row = child.clone();
+                progress_row.identity.as_mut().unwrap().entry_id = entry_id(&scan_id(), 99);
+                self.sink
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .send(progressive_aggregate_progress(request, progress_row, 2048))
+                    .unwrap();
+                thread::sleep(Duration::from_millis(50));
+                progressive_aggregate_result(request, vec![child])
+            }
+        }
+
+        let reducer = DetailRescanBrowserReducer::new(ProgressProvider {
+            sink: Arc::new(StdMutex::new(None)),
+        })
+        .unwrap();
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        let mut model = BrowserModel::from_progressive_roots(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            vec![root],
+            Vec::new(),
+            HumanSizeUnit::Auto,
+            ScanSort::Size,
+        )
+        .unwrap();
+
+        reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while model.visible_rows().is_empty() && Instant::now() < deadline {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(
+            model.visible_rows()[0].entry().logical_bytes,
+            EvidenceValue::LowerBound { value, .. } if value == DecimalU128::new(2048)
+        ) && Instant::now() < deadline
+        {
+            reducer.poll_background(&mut model);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(
+            model.visible_rows()[0].entry().logical_bytes,
+            EvidenceValue::LowerBound { value, .. } if value == DecimalU128::new(2048)
+        ));
+        assert!(matches!(
+            model.current_detail_rescan_state(),
+            Some(DetailRescanState::Pending { .. })
+        ));
+        finish_background(&reducer, &mut model);
     }
 
     #[test]
