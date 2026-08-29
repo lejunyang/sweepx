@@ -12,9 +12,10 @@ use sweepx_model::{
 };
 use sweepx_platform::{
     BoundedRegularFileReadError, BoundedRegularFileReadRequest, CancellationToken,
-    DirectoryEntryRecord, DirectoryReadLimits, EntryIdentity, EntryKind, FilesystemIdentity,
-    MountIdentity, PlatformError, PlatformScanner, PresentRegularFileRead, RootAdmission, ScanRoot,
-    WalkEntry, inspect_bound_child, read_bound_regular_file,
+    DirectoryEntryRecord, DirectoryHandleAdmission, DirectoryReadLimits, EntryIdentity, EntryKind,
+    FilesystemIdentity, MountIdentity, PlatformError, PlatformScanner, PresentRegularFileRead,
+    RootAdmission, ScanRoot, WalkEntry, inspect_bound_child,
+    inspect_bound_child_with_directory_admission, read_bound_regular_file,
 };
 use thiserror::Error;
 
@@ -104,6 +105,25 @@ pub struct CargoConfigPairObservation {
     pub config: CargoConfigMemberObservation,
     pub config_toml: CargoConfigMemberObservation,
     pub total_bytes: usize,
+}
+
+/// Presence-only observation for one fixed Cargo configuration member.
+///
+/// Unlike [`CargoConfigMemberObservation`], `Present` carries neither bytes nor metadata. The
+/// scanner establishes it by handle-bound inspection of a regular file with complete
+/// identity/filesystem/mount evidence, then immediately discards that private metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoConfigMemberPresenceObservation {
+    Present,
+    AbsentDuringEnumeration,
+    Failed(LocatorReadFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoConfigPairPresenceObservation {
+    pub consistency: CargoConfigPairConsistency,
+    pub config: CargoConfigMemberPresenceObservation,
+    pub config_toml: CargoConfigMemberPresenceObservation,
 }
 
 #[derive(Debug, Default)]
@@ -291,6 +311,50 @@ impl<P: PlatformScanner> LocatorReader<P> {
             }
             Err(ReadAttempt::Failed(failure)) => return Ok(pair_failed(failure)),
         };
+        Ok(self.observe_cargo_config_members(&mut cargo, cancel, &mut budget))
+    }
+
+    /// Observes Cargo's two configuration names directly inside one previously captured
+    /// directory, as required for an explicit `CARGO_HOME`.
+    ///
+    /// The captured native path remains private. It is re-admitted exactly, and the resulting
+    /// directory kind, object identity, filesystem, mount, and fingerprint must all match the
+    /// capture before this method enumerates anything. Exact members are only inspected as
+    /// identity-bearing regular files; their contents are never read or retained. The returned
+    /// pair is deliberately `NonAtomic`: one retained handle and one bounded enumeration cursor
+    /// prevent pathname substitution, but cannot prove a sealed directory generation.
+    pub fn observe_cargo_config_pair_in_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<CargoConfigPairPresenceObservation, LocatorReadError> {
+        self.validate_captured_cargo_pair_budget(captured)?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadError::Cancelled);
+        }
+        let mut directory = match self.reopen_captured_directory(captured, cancel) {
+            Ok(directory) => directory,
+            Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
+                return Err(LocatorReadError::Cancelled);
+            }
+            Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                return Err(LocatorReadError::ResourceLimit);
+            }
+            Err(ReadAttempt::Absent) => {
+                return Ok(presence_pair_failed(LocatorReadFailure::IdentityMismatch));
+            }
+            Err(ReadAttempt::Failed(failure)) => return Ok(presence_pair_failed(failure)),
+        };
+        let mut budget = BatchBudget::default();
+        Ok(self.observe_cargo_config_member_presence(&mut directory, cancel, &mut budget))
+    }
+
+    fn observe_cargo_config_members(
+        &self,
+        directory: &mut OpenedDirectory<P::DirectoryHandle>,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> CargoConfigPairObservation {
         let mut config = None;
         let mut config_toml = None;
         let mut saw_config = false;
@@ -300,9 +364,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
         let mut observation_failure = None;
 
         loop {
-            let batch = match self.next_directory_batch(&mut cargo, cancel, &mut budget) {
+            let batch = match self.next_directory_batch(directory, cancel, budget) {
                 Ok(batch) => batch,
-                Err(failure) => return Ok(pair_failed(failure)),
+                Err(failure) => return pair_failed(failure),
             };
             for child in &batch.entries {
                 let slot = cargo_config_slot(&child.file_name);
@@ -317,7 +381,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
                         } else {
                             saw_config = true;
                             let observed = self.read_cargo_config_member(
-                                &cargo,
+                                directory,
                                 child,
                                 &mut total_bytes,
                                 cancel,
@@ -334,7 +398,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
                         } else {
                             saw_config_toml = true;
                             let observed = self.read_cargo_config_member(
-                                &cargo,
+                                directory,
                                 child,
                                 &mut total_bytes,
                                 cancel,
@@ -353,27 +417,110 @@ impl<P: PlatformScanner> LocatorReader<P> {
         }
 
         if alias_collision {
-            return Ok(pair_failed(LocatorReadFailure::AmbiguousAlias));
+            return pair_failed(LocatorReadFailure::AmbiguousAlias);
         }
         if let Some(failure) = observation_failure {
-            return Ok(pair_failed(failure));
+            return pair_failed(failure);
         }
         let config = match config {
-            Some(Err(failure)) => return Ok(pair_failed(failure)),
+            Some(Err(failure)) => return pair_failed(failure),
             Some(Ok(read)) => CargoConfigMemberObservation::Present(Box::new(read)),
             None => CargoConfigMemberObservation::AbsentDuringEnumeration,
         };
         let config_toml = match config_toml {
-            Some(Err(failure)) => return Ok(pair_failed(failure)),
+            Some(Err(failure)) => return pair_failed(failure),
             Some(Ok(read)) => CargoConfigMemberObservation::Present(Box::new(read)),
             None => CargoConfigMemberObservation::AbsentDuringEnumeration,
         };
-        Ok(CargoConfigPairObservation {
+        CargoConfigPairObservation {
             consistency: CargoConfigPairConsistency::NonAtomic,
             config,
             config_toml,
             total_bytes,
-        })
+        }
+    }
+
+    fn observe_cargo_config_member_presence(
+        &self,
+        directory: &mut OpenedDirectory<P::DirectoryHandle>,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> CargoConfigPairPresenceObservation {
+        let mut config = None;
+        let mut config_toml = None;
+        let mut saw_config = false;
+        let mut saw_config_toml = false;
+        let mut alias_collision = false;
+        let mut observation_failure = None;
+
+        loop {
+            let batch = match self.next_directory_batch(directory, cancel, budget) {
+                Ok(batch) => batch,
+                Err(failure) => return presence_pair_failed(failure),
+            };
+            if cancel.is_cancelled() {
+                return presence_pair_failed(LocatorReadFailure::Cancelled);
+            }
+            for child in &batch.entries {
+                match cargo_config_slot(&child.file_name) {
+                    CargoConfigSlot::Other => {}
+                    CargoConfigSlot::Alias => {
+                        alias_collision = true;
+                    }
+                    CargoConfigSlot::Config => {
+                        if saw_config {
+                            alias_collision = true;
+                        } else {
+                            saw_config = true;
+                            let observed =
+                                self.inspect_cargo_config_member(directory, child, cancel);
+                            if let Err(failure) = &observed {
+                                observation_failure.get_or_insert_with(|| failure.clone());
+                            }
+                            config = Some(observed);
+                        }
+                    }
+                    CargoConfigSlot::ConfigToml => {
+                        if saw_config_toml {
+                            alias_collision = true;
+                        } else {
+                            saw_config_toml = true;
+                            let observed =
+                                self.inspect_cargo_config_member(directory, child, cancel);
+                            if let Err(failure) = &observed {
+                                observation_failure.get_or_insert_with(|| failure.clone());
+                            }
+                            config_toml = Some(observed);
+                        }
+                    }
+                }
+            }
+            if batch.end_of_directory {
+                break;
+            }
+        }
+
+        if alias_collision {
+            return presence_pair_failed(LocatorReadFailure::AmbiguousAlias);
+        }
+        if let Some(failure) = observation_failure {
+            return presence_pair_failed(failure);
+        }
+        let config = match config {
+            Some(Ok(())) => CargoConfigMemberPresenceObservation::Present,
+            Some(Err(failure)) => return presence_pair_failed(failure),
+            None => CargoConfigMemberPresenceObservation::AbsentDuringEnumeration,
+        };
+        let config_toml = match config_toml {
+            Some(Ok(())) => CargoConfigMemberPresenceObservation::Present,
+            Some(Err(failure)) => return presence_pair_failed(failure),
+            None => CargoConfigMemberPresenceObservation::AbsentDuringEnumeration,
+        };
+        CargoConfigPairPresenceObservation {
+            consistency: CargoConfigPairConsistency::NonAtomic,
+            config,
+            config_toml,
+        }
     }
 
     /// Captures one admitted directory identity snapshot from the current platform without
@@ -635,6 +782,77 @@ impl<P: PlatformScanner> LocatorReader<P> {
         Ok(())
     }
 
+    fn validate_captured_cargo_pair_budget(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+    ) -> Result<(), LocatorReadError> {
+        if captured.kind != EntryKind::Directory
+            || captured
+                .native_absolute_path
+                .validate_for_current_platform()
+                .is_err()
+        {
+            return Err(LocatorReadError::InvalidRequest);
+        }
+        if self.limits.max_requests < 2 {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        // Each possible direct-child observation is one request comprising the admitted root and
+        // one basename. Re-admission itself does not create a second path authority.
+        let root_components = 1usize;
+        let member_components = root_components
+            .checked_add(1)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        let total_components = member_components
+            .checked_mul(2)
+            .ok_or(LocatorReadError::ResourceLimit)?;
+        if member_components > self.limits.max_components_per_request
+            || total_components > self.limits.max_total_components
+        {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        Ok(())
+    }
+
+    fn reopen_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<OpenedDirectory<P::DirectoryHandle>, ReadAttempt> {
+        let root = ScanRoot::new(native_absolute_path_buf(&captured.native_absolute_path)?)
+            .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
+        let admission = self
+            .platform
+            .admit_root(&root, cancel)
+            .map_err(|error| ReadAttempt::Failed(map_platform_failure(error)))?;
+        admission
+            .validate_for_root(&root)
+            .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::Unavailable))?;
+        let RootAdmission {
+            root_locator,
+            metadata,
+            directory,
+            ..
+        } = admission;
+        if cancel.is_cancelled() {
+            return Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled));
+        }
+        if root_locator != captured.native_absolute_path {
+            return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
+        }
+        if metadata.mount_identity.as_ref() != Some(&captured.mount_identity) {
+            return Err(ReadAttempt::Failed(LocatorReadFailure::MountChanged));
+        }
+        if !directory_identity_matches_capture(&metadata, captured) {
+            return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
+        }
+        Ok(OpenedDirectory {
+            path: metadata.path.clone(),
+            metadata,
+            handle: directory,
+        })
+    }
+
     fn next_directory_batch(
         &self,
         directory: &mut OpenedDirectory<P::DirectoryHandle>,
@@ -765,6 +983,51 @@ impl<P: PlatformScanner> LocatorReader<P> {
         }
         *total_bytes = next_total;
         Ok(read)
+    }
+
+    fn inspect_cargo_config_member(
+        &self,
+        directory: &OpenedDirectory<P::DirectoryHandle>,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+    ) -> Result<(), LocatorReadFailure> {
+        let walked = inspect_bound_child_with_directory_admission(
+            &self.platform,
+            &directory.handle,
+            &directory.path,
+            child,
+            cancel,
+            DirectoryHandleAdmission::Deny,
+        )
+        .map_err(map_platform_failure)?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled);
+        }
+        let metadata = match walked {
+            WalkEntry::File(metadata) => metadata,
+            WalkEntry::Link(_) => return Err(LocatorReadFailure::SymlinkOrReparse),
+            WalkEntry::Directory(_) => return Err(LocatorReadFailure::NotRegular),
+            WalkEntry::Boundary(boundary)
+                if boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit =>
+            {
+                return Err(LocatorReadFailure::NotRegular);
+            }
+            WalkEntry::Boundary(boundary) => return Err(map_boundary_failure(boundary.kind)),
+            WalkEntry::Error(error) => return Err(map_walk_failure(error.kind)),
+        };
+        let (Some(_identity), Some(filesystem), Some(mount)) = (
+            metadata.identity,
+            metadata.filesystem_identity,
+            metadata.mount_identity,
+        ) else {
+            return Err(LocatorReadFailure::IdentityMismatch);
+        };
+        if let Err(ReadAttempt::Failed(failure)) =
+            validate_same_scope(&directory.metadata, &filesystem, &mount)
+        {
+            return Err(failure);
+        }
+        Ok(())
     }
 
     fn read_scanned_file(
@@ -1246,6 +1509,14 @@ fn pair_failed(failure: LocatorReadFailure) -> CargoConfigPairObservation {
     }
 }
 
+fn presence_pair_failed(failure: LocatorReadFailure) -> CargoConfigPairPresenceObservation {
+    CargoConfigPairPresenceObservation {
+        consistency: CargoConfigPairConsistency::NonAtomic,
+        config: CargoConfigMemberPresenceObservation::Failed(failure.clone()),
+        config_toml: CargoConfigMemberPresenceObservation::Failed(failure),
+    }
+}
+
 fn validate_component(
     expected: &NativePathComponent,
     metadata: &sweepx_platform::EntryMetadata,
@@ -1442,11 +1713,14 @@ fn map_walk_failure(kind: sweepx_platform::ErrorKind) -> LocatorReadFailure {
 #[cfg(all(test, target_os = "linux", feature = "platform-linux"))]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::{HostPlatformScanner, Scanner, ScannerOptions};
     use sweepx_model::ScanId;
-    use sweepx_platform::CancellationToken;
+    use sweepx_platform::{
+        CancellationToken, DirectoryEntryBatch, DirectoryHandleAdmission, PlatformScanner,
+    };
 
     fn scan(root: &std::path::Path, scan_id: &str) -> crate::ScanSummary {
         Scanner::new(
@@ -1469,6 +1743,136 @@ mod tests {
 
     fn reader() -> LocatorReader<HostPlatformScanner> {
         LocatorReader::new(HostPlatformScanner::new(), LocatorReadLimits::default())
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum EnumerationTestAction {
+        Passthrough,
+        DuplicateConfig,
+        Cancel,
+        CancelAfterInspect,
+    }
+
+    #[derive(Debug)]
+    struct EnumerationTestScanner {
+        inner: HostPlatformScanner,
+        action: EnumerationTestAction,
+        acted: AtomicBool,
+    }
+
+    impl EnumerationTestScanner {
+        fn new(action: EnumerationTestAction) -> Self {
+            Self {
+                inner: HostPlatformScanner::new(),
+                action,
+                acted: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl PlatformScanner for EnumerationTestScanner {
+        type DirectoryHandle = <HostPlatformScanner as PlatformScanner>::DirectoryHandle;
+
+        fn platform_name(&self) -> &'static str {
+            self.inner.platform_name()
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            self.inner.admit_root(root, cancel)
+        }
+
+        fn enumerate_children(
+            &self,
+            directory: &mut Self::DirectoryHandle,
+            cancel: &CancellationToken,
+            limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            let mut batch = self.inner.enumerate_children(directory, cancel, limits)?;
+            if matches!(self.action, EnumerationTestAction::Cancel)
+                && !self.acted.swap(true, Ordering::SeqCst)
+            {
+                cancel.cancel();
+            }
+            if matches!(self.action, EnumerationTestAction::DuplicateConfig)
+                && !self.acted.load(Ordering::SeqCst)
+                && let Some(config) = batch
+                    .entries
+                    .iter()
+                    .find(|entry| entry.file_name == native("config"))
+                    .cloned()
+            {
+                batch.entries.push(config);
+                self.acted.store(true, Ordering::SeqCst);
+            }
+            Ok(batch)
+        }
+
+        fn inspect_child(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inner.inspect_child(parent, child, cancel)
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            let walked = self.inner.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                directory_admission,
+            )?;
+            if matches!(self.action, EnumerationTestAction::CancelAfterInspect)
+                && child.file_name == native("config")
+                && !self.acted.swap(true, Ordering::SeqCst)
+            {
+                cancel.cancel();
+            }
+            Ok(walked)
+        }
+
+        fn is_same_mount(
+            &self,
+            root: &sweepx_platform::EntryMetadata,
+            entry: &sweepx_platform::EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            self.inner.is_same_mount(root, entry)
+        }
+
+        fn read_regular_file_relative(
+            &self,
+            _parent: &Self::DirectoryHandle,
+            _request: &BoundedRegularFileReadRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+            panic!("presence-only Cargo home observation must not read file contents")
+        }
+    }
+
+    fn assert_presence_pair_failed(
+        observed: &CargoConfigPairPresenceObservation,
+        expected: LocatorReadFailure,
+    ) {
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert_eq!(
+            observed.config,
+            CargoConfigMemberPresenceObservation::Failed(expected.clone())
+        );
+        assert_eq!(
+            observed.config_toml,
+            CargoConfigMemberPresenceObservation::Failed(expected)
+        );
     }
 
     #[test]
@@ -2120,6 +2524,321 @@ mod tests {
                 Err(LocatorReadError::ResourceLimit)
             );
         }
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_reads_direct_members_and_not_dot_cargo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir_all(cargo_home.join(".cargo")).unwrap();
+        fs::write(cargo_home.join("config"), b"[build]\ntarget-dir='legacy'\n").unwrap();
+        fs::write(
+            cargo_home.join("config.toml"),
+            b"[build]\ntarget-dir='modern'\n",
+        )
+        .unwrap();
+        fs::write(cargo_home.join(".cargo/config"), b"wrong-level").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+        let paged = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::Passthrough),
+            LocatorReadLimits {
+                max_directory_batch_entries: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+
+        let observed = paged
+            .observe_cargo_config_pair_in_captured_directory(&captured, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert_eq!(
+            observed.config,
+            CargoConfigMemberPresenceObservation::Present
+        );
+        assert_eq!(
+            observed.config_toml,
+            CargoConfigMemberPresenceObservation::Present
+        );
+        let debug = format!("{observed:?}");
+        assert!(!debug.contains(&cargo_home.to_string_lossy().to_string()));
+        assert!(!debug.contains("target-dir"));
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_reports_non_atomic_absence_and_ignores_nested_dot_cargo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir_all(cargo_home.join(".cargo")).unwrap();
+        fs::write(cargo_home.join("credentials.toml"), b"[registry]\n").unwrap();
+        fs::write(cargo_home.join(".cargo/config"), b"not-a-direct-member").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+
+        let observed = reader()
+            .observe_cargo_config_pair_in_captured_directory(&captured, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(observed.consistency, CargoConfigPairConsistency::NonAtomic);
+        assert_eq!(
+            observed.config,
+            CargoConfigMemberPresenceObservation::AbsentDuringEnumeration
+        );
+        assert_eq!(
+            observed.config_toml,
+            CargoConfigMemberPresenceObservation::AbsentDuringEnumeration
+        );
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_rejects_aliases_duplicates_and_symlinks() {
+        let alias_temp = tempfile::TempDir::new().unwrap();
+        let alias_home = alias_temp.path().join("explicit-cargo-home");
+        fs::create_dir(&alias_home).unwrap();
+        fs::write(alias_home.join("CONFIG"), b"alias").unwrap();
+        let alias_capture = reader()
+            .capture_directory_identity(&alias_home, &CancellationToken::new())
+            .unwrap();
+        let alias = reader()
+            .observe_cargo_config_pair_in_captured_directory(
+                &alias_capture,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_presence_pair_failed(&alias, LocatorReadFailure::AmbiguousAlias);
+
+        let duplicate_temp = tempfile::TempDir::new().unwrap();
+        let duplicate_home = duplicate_temp.path().join("explicit-cargo-home");
+        fs::create_dir(&duplicate_home).unwrap();
+        fs::write(duplicate_home.join("config"), b"exact").unwrap();
+        let duplicate_capture = reader()
+            .capture_directory_identity(&duplicate_home, &CancellationToken::new())
+            .unwrap();
+        let duplicate_reader = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::DuplicateConfig),
+            LocatorReadLimits::default(),
+        );
+        let duplicate = duplicate_reader
+            .observe_cargo_config_pair_in_captured_directory(
+                &duplicate_capture,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_presence_pair_failed(&duplicate, LocatorReadFailure::AmbiguousAlias);
+
+        let link_temp = tempfile::TempDir::new().unwrap();
+        let link_home = link_temp.path().join("explicit-cargo-home");
+        fs::create_dir(&link_home).unwrap();
+        fs::write(link_home.join("real-config"), b"real").unwrap();
+        std::os::unix::fs::symlink("real-config", link_home.join("config")).unwrap();
+        let link_capture = reader()
+            .capture_directory_identity(&link_home, &CancellationToken::new())
+            .unwrap();
+        let link = reader()
+            .observe_cargo_config_pair_in_captured_directory(
+                &link_capture,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_presence_pair_failed(&link, LocatorReadFailure::SymlinkOrReparse);
+
+        let directory_temp = tempfile::TempDir::new().unwrap();
+        let directory_home = directory_temp.path().join("explicit-cargo-home");
+        fs::create_dir_all(directory_home.join("config")).unwrap();
+        let directory_capture = reader()
+            .capture_directory_identity(&directory_home, &CancellationToken::new())
+            .unwrap();
+        let directory = reader()
+            .observe_cargo_config_pair_in_captured_directory(
+                &directory_capture,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_presence_pair_failed(&directory, LocatorReadFailure::NotRegular);
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_rejects_replaced_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"original").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+        fs::rename(&cargo_home, temp.path().join("old-cargo-home")).unwrap();
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"replacement").unwrap();
+
+        let observed = reader()
+            .observe_cargo_config_pair_in_captured_directory(&captured, &CancellationToken::new())
+            .unwrap();
+
+        assert_presence_pair_failed(&observed, LocatorReadFailure::IdentityMismatch);
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_revalidates_every_directory_identity_field() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"must-not-be-read").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+
+        let mut identity_changed = captured.clone();
+        identity_changed.identity = EntryIdentity::from_windows_file_id(
+            captured.identity.device().wrapping_add(1),
+            captured.identity.windows_file_id(),
+        );
+        let mut filesystem_changed = captured.clone();
+        filesystem_changed.filesystem_identity.device = filesystem_changed
+            .filesystem_identity
+            .device
+            .wrapping_add(1);
+        let mut mount_changed = captured.clone();
+        mount_changed.mount_identity.value = mount_changed.mount_identity.value.wrapping_add(1);
+        let mut fingerprint_changed = captured.clone();
+        fingerprint_changed.fingerprint.push_str("-changed");
+
+        for (tampered, expected) in [
+            (identity_changed, LocatorReadFailure::IdentityMismatch),
+            (filesystem_changed, LocatorReadFailure::IdentityMismatch),
+            (mount_changed, LocatorReadFailure::MountChanged),
+            (fingerprint_changed, LocatorReadFailure::IdentityMismatch),
+        ] {
+            let observed = reader()
+                .observe_cargo_config_pair_in_captured_directory(
+                    &tampered,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            assert_presence_pair_failed(&observed, expected);
+        }
+
+        let mut wrong_kind = captured;
+        wrong_kind.kind = EntryKind::File;
+        assert_eq!(
+            reader().observe_cargo_config_pair_in_captured_directory(
+                &wrong_kind,
+                &CancellationToken::new(),
+            ),
+            Err(LocatorReadError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_reports_cancellation_at_each_public_boundary() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"config").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+
+        let cancelled_before_admission = CancellationToken::new();
+        cancelled_before_admission.cancel();
+        assert_eq!(
+            reader().observe_cargo_config_pair_in_captured_directory(
+                &captured,
+                &cancelled_before_admission,
+            ),
+            Err(LocatorReadError::Cancelled)
+        );
+
+        let cancel_during_enumeration = CancellationToken::new();
+        let cancelling_reader = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::Cancel),
+            LocatorReadLimits::default(),
+        );
+        let observed = cancelling_reader
+            .observe_cargo_config_pair_in_captured_directory(&captured, &cancel_during_enumeration)
+            .unwrap();
+        assert_presence_pair_failed(&observed, LocatorReadFailure::Cancelled);
+
+        let cancel_after_inspection = CancellationToken::new();
+        let cancelling_reader = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::CancelAfterInspect),
+            LocatorReadLimits::default(),
+        );
+        let observed = cancelling_reader
+            .observe_cargo_config_pair_in_captured_directory(&captured, &cancel_after_inspection)
+            .unwrap();
+        assert_presence_pair_failed(&observed, LocatorReadFailure::Cancelled);
+    }
+
+    #[test]
+    fn captured_cargo_home_pair_honors_request_component_and_directory_budgets_without_bytes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"1234").unwrap();
+        fs::write(cargo_home.join("credentials.toml"), b"ignored").unwrap();
+        let captured = reader()
+            .capture_directory_identity(&cargo_home, &CancellationToken::new())
+            .unwrap();
+
+        for limits in [
+            LocatorReadLimits {
+                max_requests: 1,
+                ..LocatorReadLimits::default()
+            },
+            LocatorReadLimits {
+                max_components_per_request: 1,
+                ..LocatorReadLimits::default()
+            },
+            LocatorReadLimits {
+                max_total_components: 3,
+                ..LocatorReadLimits::default()
+            },
+        ] {
+            assert_eq!(
+                LocatorReader::new(HostPlatformScanner::new(), limits)
+                    .observe_cargo_config_pair_in_captured_directory(
+                        &captured,
+                        &CancellationToken::new(),
+                    ),
+                Err(LocatorReadError::ResourceLimit)
+            );
+        }
+
+        let directory_bounded = LocatorReader::new(
+            HostPlatformScanner::new(),
+            LocatorReadLimits {
+                max_directory_entries: 1,
+                max_directory_batch_entries: 1,
+                ..LocatorReadLimits::default()
+            },
+        );
+        let directory_observed = directory_bounded
+            .observe_cargo_config_pair_in_captured_directory(&captured, &CancellationToken::new())
+            .unwrap();
+        assert_presence_pair_failed(&directory_observed, LocatorReadFailure::ResourceLimit);
+
+        let byte_bounded = LocatorReader::new(
+            EnumerationTestScanner::new(EnumerationTestAction::Passthrough),
+            LocatorReadLimits {
+                max_file_bytes: 0,
+                max_total_bytes: 0,
+                ..LocatorReadLimits::default()
+            },
+        );
+        let byte_observed = byte_bounded
+            .observe_cargo_config_pair_in_captured_directory(&captured, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(
+            byte_observed.config,
+            CargoConfigMemberPresenceObservation::Present
+        );
+        assert_eq!(
+            byte_observed.config_toml,
+            CargoConfigMemberPresenceObservation::AbsentDuringEnumeration
+        );
     }
 
     #[test]

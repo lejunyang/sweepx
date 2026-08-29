@@ -635,6 +635,34 @@ fn cargo_detect_compatibility_gate_does_not_disclose_environment_values() {
     }
 }
 
+#[test]
+fn cargo_detect_rejects_cargo_passthrough_overrides_at_the_cli_boundary() {
+    for args in [
+        vec![
+            "cleaner",
+            "cargo-detect",
+            "--target-dir",
+            "/tmp/sweepx-forbidden-target",
+            "/tmp/sweepx-workspace",
+        ],
+        vec![
+            "cleaner",
+            "cargo-detect",
+            "--config",
+            "build.target-dir='/tmp/sweepx-forbidden-target'",
+            "/tmp/sweepx-workspace",
+        ],
+    ] {
+        let mut cmd = cli_command();
+        cmd.current_dir(cli_crate_dir()).args(args);
+
+        let output = cmd.assert().code(2).get_output().clone();
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("unexpected argument"));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn cache_status_json_reports_absent_without_creating_default_state_dir() {

@@ -1151,6 +1151,278 @@ const resultSchemaCases = [
     }
   },
   {
+    name: "cargo detect accepts redacted ancestor config presence",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "present_redacted" };
+      scope.blockers.splice(scope.blockers.indexOf("ancestor_configs_not_checked"), 1);
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect accepts redacted Cargo-home config presence",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cargoHomeConfig = { state: "present_redacted" };
+      scope.blockers.splice(scope.blockers.indexOf("cargo_home_config_not_checked"), 1);
+      scope.blockers.push("cargo_home_config_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect accepts both external sources as present and redacted",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "present_redacted" };
+      scope.cargoHomeConfig = { state: "present_redacted" };
+      scope.blockers = scope.blockers.filter(
+        (blocker) =>
+          blocker !== "ancestor_configs_not_checked" &&
+          blocker !== "cargo_home_config_not_checked"
+      );
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.push("cargo_home_config_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect external presence cannot unlock target or mutation authority",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "present_redacted" };
+      scope.cargoHomeConfig = { state: "present_redacted" };
+      scope.blockers = scope.blockers.filter(
+        (blocker) =>
+          blocker !== "ancestor_configs_not_checked" &&
+          blocker !== "cargo_home_config_not_checked"
+      );
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.push("cargo_home_config_present_redacted");
+      scope.blockers.sort();
+      scope.precedenceComplete = true;
+      output.data.candidateAllowed = true;
+    }
+  },
+  {
+    name: "cargo detect accepts a typed ancestor config observation failure",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "failed", reasonCode: "config_read_failed" };
+      scope.blockers.splice(scope.blockers.indexOf("ancestor_configs_not_checked"), 1);
+      scope.blockers.push("ancestor_configs_failed");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect accepts a typed Cargo-home config observation failure",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cargoHomeConfig = { state: "failed", reasonCode: "resource_limit" };
+      scope.blockers.splice(scope.blockers.indexOf("cargo_home_config_not_checked"), 1);
+      scope.blockers.push("cargo_home_config_failed");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect preserves legacy verified-absent external states",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: true,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "verified_absent" };
+      scope.cargoHomeConfig = { state: "verified_absent" };
+      scope.blockers = scope.blockers.filter(
+        (blocker) =>
+          blocker !== "ancestor_configs_not_checked" &&
+          blocker !== "cargo_home_config_not_checked"
+      );
+    }
+  },
+  {
+    name: "cargo detect ancestor presence requires its exact blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.ancestorConfigs = {
+        state: "present_redacted"
+      };
+    }
+  },
+  {
+    name: "cargo detect ancestor presence rejects a not-checked blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "present_redacted" };
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect ancestor not-checked rejects a present blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers.push(
+        "ancestor_configs_present_redacted"
+      );
+    }
+  },
+  {
+    name: "cargo detect ancestor failure requires its exact blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.ancestorConfigs = {
+        state: "failed",
+        reasonCode: "config_read_failed"
+      };
+    }
+  },
+  {
+    name: "cargo detect verified-absent ancestor rejects source blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.ancestorConfigs = {
+        state: "verified_absent"
+      };
+    }
+  },
+  {
+    name: "cargo detect Cargo-home presence requires its exact blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cargoHomeConfig = {
+        state: "present_redacted"
+      };
+    }
+  },
+  {
+    name: "cargo detect Cargo-home presence rejects a failed blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cargoHomeConfig = { state: "present_redacted" };
+      scope.blockers.splice(scope.blockers.indexOf("cargo_home_config_not_checked"), 1);
+      scope.blockers.push("cargo_home_config_present_redacted");
+      scope.blockers.push("cargo_home_config_failed");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect Cargo-home not-checked rejects a present blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.blockers.push(
+        "cargo_home_config_present_redacted"
+      );
+    }
+  },
+  {
+    name: "cargo detect Cargo-home failure requires its exact blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cargoHomeConfig = {
+        state: "failed",
+        reasonCode: "config_read_failed"
+      };
+    }
+  },
+  {
+    name: "cargo detect ancestor failure rejects a present blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = { state: "failed", reasonCode: "config_read_failed" };
+      scope.blockers.splice(scope.blockers.indexOf("ancestor_configs_not_checked"), 1);
+      scope.blockers.push("ancestor_configs_failed");
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect Cargo-home failure rejects a not-checked blocker",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cargoHomeConfig = { state: "failed", reasonCode: "config_read_failed" };
+      scope.blockers.push("cargo_home_config_failed");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect verified-absent Cargo-home rejects source blockers",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      output.data.hints[0].evidence.cargo.configScope.cargoHomeConfig = {
+        state: "verified_absent"
+      };
+    }
+  },
+  {
+    name: "cargo detect redacted external source rejects raw paths",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.ancestorConfigs = {
+        state: "present_redacted",
+        paths: ["/private/ancestor/.cargo/config.toml"]
+      };
+      scope.blockers.splice(scope.blockers.indexOf("ancestor_configs_not_checked"), 1);
+      scope.blockers.push("ancestor_configs_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect redacted external source rejects reason codes",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cargoHomeConfig = {
+        state: "present_redacted",
+        reasonCode: "config_scope_not_checked"
+      };
+      scope.blockers.splice(scope.blockers.indexOf("cargo_home_config_not_checked"), 1);
+      scope.blockers.push("cargo_home_config_present_redacted");
+      scope.blockers.sort();
+    }
+  },
+  {
+    name: "cargo detect CLI sources cannot use external presence state",
+    file: "sweepx.output.cargo-detect.result.example.json",
+    expected: false,
+    mutate(output) {
+      const scope = output.data.hints[0].evidence.cargo.configScope;
+      scope.cli.targetDir = { state: "present_redacted" };
+      scope.blockers.push("cli_target_dir_not_checked");
+      scope.blockers.sort();
+    }
+  },
+  {
     name: "cargo detect unmodeled CLI target-dir requires its blocker",
     file: "sweepx.output.cargo-detect.result.example.json",
     expected: false,

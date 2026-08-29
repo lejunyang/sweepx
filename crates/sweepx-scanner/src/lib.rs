@@ -6,10 +6,11 @@ pub use detail_rescan::{
     DetailRescanResult, DetailRescanner,
 };
 pub use locator_reader::{
-    CargoConfigMemberObservation, CargoConfigPairConsistency, CargoConfigPairObservation,
-    LocatorBatchReadRequest, LocatorBatchReadResult, LocatorDirectoryComparison,
-    LocatorDirectoryComparisonFailure, LocatorDirectoryIdentity, LocatorFileRead,
-    LocatorFileRequest, LocatorReadError, LocatorReadFailure, LocatorReadLimits, LocatorReader,
+    CargoConfigMemberObservation, CargoConfigMemberPresenceObservation, CargoConfigPairConsistency,
+    CargoConfigPairObservation, CargoConfigPairPresenceObservation, LocatorBatchReadRequest,
+    LocatorBatchReadResult, LocatorDirectoryComparison, LocatorDirectoryComparisonFailure,
+    LocatorDirectoryIdentity, LocatorFileRead, LocatorFileRequest, LocatorReadError,
+    LocatorReadFailure, LocatorReadLimits, LocatorReader,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

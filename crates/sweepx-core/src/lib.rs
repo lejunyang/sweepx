@@ -2397,27 +2397,30 @@ pub fn cleaner_cargo_detect_with_invocation_and_cancel(
     cancel: &CancellationToken,
 ) -> Result<CleanerSuccess, CoreError> {
     cleaner_cargo_detect_with_scope_runtime(context, request, cancel, || {
+        let explicit_cargo_home = std::env::var_os("CARGO_HOME");
         let runtime = cargo_cleaner_evidence::CargoConfigScopeRuntime::from_presence(
             std::env::var_os("CARGO_TARGET_DIR").is_some(),
             std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some(),
-            std::env::var_os("CARGO_HOME").is_some(),
+            explicit_cargo_home.is_some(),
         );
         let reader = sweepx_scanner::LocatorReader::new(
             HostPlatformScanner::new(),
             cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
         );
-        // Caller cancellation is intentionally scoped to post-scan evidence collection. Cwd
-        // capture precedes the synchronous scan and therefore uses an independent token.
+        // Caller cancellation is intentionally scoped to post-scan evidence collection. Cwd and
+        // explicit CARGO_HOME capture precede the synchronous scan and use an independent token.
         let capture_cancel = CancellationToken::new();
         if invocation.cargo_cli_overrides_absent {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_sweepx_cli(
                 runtime,
+                explicit_cargo_home.as_deref(),
                 &reader,
                 &capture_cancel,
             )
         } else {
             cargo_cleaner_evidence::CargoInvocationContext::capture_for_unmodeled_caller(
                 runtime,
+                explicit_cargo_home.as_deref(),
                 &reader,
                 &capture_cancel,
             )
@@ -2487,7 +2490,7 @@ where
         ));
         return Ok(CleanerSuccess { output });
     }
-    let invocation = invocation();
+    let mut invocation = invocation();
     let scan = scan_with_store(
         context,
         &ScanRequest {
@@ -2502,6 +2505,7 @@ where
         HostPlatformScanner::new(),
         cargo_cleaner_evidence::cargo_fixed_input_locator_limits(),
     );
+    invocation.observe_cargo_home_config(&reader, cancel);
     let detected = cargo_cleaner_detect::detect_live_cargo_cleaner_candidates(
         &scan.summary,
         cleaner,

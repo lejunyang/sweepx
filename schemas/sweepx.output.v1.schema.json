@@ -1815,6 +1815,15 @@
           }
         },
         {
+          "$comment": "At least one precedence-relevant config was observed, but no path, value, count, order, or stable absence claim is exposed.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "const": "present_redacted" }
+          }
+        },
+        {
           "type": "object",
           "additionalProperties": false,
           "required": ["state", "reasonCode"],
@@ -1939,9 +1948,11 @@
       "enum": [
         "ancestor_configs_failed",
         "ancestor_configs_not_checked",
+        "ancestor_configs_present_redacted",
         "cargo_build_target_dir_present_redacted",
         "cargo_home_config_failed",
         "cargo_home_config_not_checked",
+        "cargo_home_config_present_redacted",
         "cargo_home_present_redacted",
         "cargo_target_dir_present_redacted",
         "cli_config_overrides_failed",
@@ -2267,8 +2278,28 @@
           "additionalProperties": false,
           "required": ["targetDir", "configOverrides"],
           "properties": {
-            "targetDir": { "$ref": "#/$defs/cargoExternalSourceState" },
-            "configOverrides": { "$ref": "#/$defs/cargoExternalSourceState" }
+            "targetDir": {
+              "allOf": [
+                { "$ref": "#/$defs/cargoExternalSourceState" },
+                {
+                  "not": {
+                    "properties": { "state": { "const": "present_redacted" } },
+                    "required": ["state"]
+                  }
+                }
+              ]
+            },
+            "configOverrides": {
+              "allOf": [
+                { "$ref": "#/$defs/cargoExternalSourceState" },
+                {
+                  "not": {
+                    "properties": { "state": { "const": "present_redacted" } },
+                    "required": ["state"]
+                  }
+                }
+              ]
+            }
           }
         },
         "invocationCwd": { "$ref": "#/$defs/cargoInvocationCwdState" },
@@ -2276,7 +2307,7 @@
         "blockers": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 24,
+          "maxItems": 26,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/cargoConfigScopeBlocker" }
         }
@@ -2538,6 +2569,238 @@
                 "not": {
                   "contains": {
                     "enum": ["cli_target_dir_failed", "cli_target_dir_not_checked"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ancestorConfigs": {
+                "properties": { "state": { "const": "present_redacted" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["ancestorConfigs"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "ancestor_configs_present_redacted" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "ancestor_configs_failed",
+                          "ancestor_configs_not_checked"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ancestorConfigs": {
+                "properties": { "state": { "const": "not_checked" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["ancestorConfigs"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "ancestor_configs_not_checked" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "ancestor_configs_failed",
+                          "ancestor_configs_present_redacted"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ancestorConfigs": {
+                "properties": { "state": { "const": "failed" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["ancestorConfigs"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "ancestor_configs_failed" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "ancestor_configs_not_checked",
+                          "ancestor_configs_present_redacted"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ancestorConfigs": {
+                "properties": { "state": { "const": "verified_absent" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["ancestorConfigs"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "ancestor_configs_failed",
+                      "ancestor_configs_not_checked",
+                      "ancestor_configs_present_redacted"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cargoHomeConfig": {
+                "properties": { "state": { "const": "present_redacted" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["cargoHomeConfig"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cargo_home_config_present_redacted" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "cargo_home_config_failed",
+                          "cargo_home_config_not_checked"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cargoHomeConfig": {
+                "properties": { "state": { "const": "not_checked" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["cargoHomeConfig"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cargo_home_config_not_checked" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "cargo_home_config_failed",
+                          "cargo_home_config_present_redacted"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cargoHomeConfig": {
+                "properties": { "state": { "const": "failed" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["cargoHomeConfig"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "allOf": [
+                  { "contains": { "const": "cargo_home_config_failed" } },
+                  {
+                    "not": {
+                      "contains": {
+                        "enum": [
+                          "cargo_home_config_not_checked",
+                          "cargo_home_config_present_redacted"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "cargoHomeConfig": {
+                "properties": { "state": { "const": "verified_absent" } },
+                "required": ["state"]
+              }
+            },
+            "required": ["cargoHomeConfig"]
+          },
+          "then": {
+            "properties": {
+              "blockers": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "cargo_home_config_failed",
+                      "cargo_home_config_not_checked",
+                      "cargo_home_config_present_redacted"
+                    ]
                   }
                 }
               }

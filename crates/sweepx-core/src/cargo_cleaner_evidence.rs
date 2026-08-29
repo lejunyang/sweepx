@@ -16,10 +16,11 @@ use sweepx_model::{
 };
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::{
-    CargoConfigMemberObservation, CargoConfigPairConsistency, CargoConfigPairObservation,
-    LocatorBatchReadRequest, LocatorDirectoryComparison, LocatorDirectoryComparisonFailure,
-    LocatorDirectoryIdentity, LocatorFileRead, LocatorFileRequest, LocatorReadError,
-    LocatorReadFailure, LocatorReadLimits, LocatorReader, ProgressEvent, ScanSummary,
+    CargoConfigMemberObservation, CargoConfigMemberPresenceObservation, CargoConfigPairConsistency,
+    CargoConfigPairObservation, CargoConfigPairPresenceObservation, LocatorBatchReadRequest,
+    LocatorDirectoryComparison, LocatorDirectoryComparisonFailure, LocatorDirectoryIdentity,
+    LocatorFileRead, LocatorFileRequest, LocatorReadError, LocatorReadFailure, LocatorReadLimits,
+    LocatorReader, ProgressEvent, ScanSummary,
 };
 
 const CARGO_WORKSPACE_EVIDENCE_SCHEMA: &str = "cargo.workspace.v1";
@@ -245,28 +246,32 @@ impl CargoConfigScopeRuntime {
 pub(crate) struct CargoInvocationContext {
     runtime: CargoConfigScopeRuntime,
     cwd: Result<LocatorDirectoryIdentity, CargoEvidenceReason>,
+    cargo_home_config: CargoHomeConfigCapture,
     cli_overrides_absent: bool,
 }
 
 impl CargoInvocationContext {
     pub(crate) fn capture_for_sweepx_cli<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_home: Option<&std::ffi::OsStr>,
         reader: &LocatorReader<P>,
         cancel: &CancellationToken,
     ) -> Self {
-        Self::capture(runtime, true, reader, cancel)
+        Self::capture(runtime, explicit_cargo_home, true, reader, cancel)
     }
 
     pub(crate) fn capture_for_unmodeled_caller<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_home: Option<&std::ffi::OsStr>,
         reader: &LocatorReader<P>,
         cancel: &CancellationToken,
     ) -> Self {
-        Self::capture(runtime, false, reader, cancel)
+        Self::capture(runtime, explicit_cargo_home, false, reader, cancel)
     }
 
     fn capture<P: PlatformScanner>(
         runtime: CargoConfigScopeRuntime,
+        explicit_cargo_home: Option<&std::ffi::OsStr>,
         cli_overrides_absent: bool,
         reader: &LocatorReader<P>,
         cancel: &CancellationToken,
@@ -274,9 +279,24 @@ impl CargoInvocationContext {
         let cwd = std::env::current_dir()
             .map_err(|_| CargoEvidenceReason::MissingIdentity)
             .and_then(|path| capture_directory_identity(reader, &path, cancel));
+        let cargo_home_config = match explicit_cargo_home {
+            None => CargoHomeConfigCapture::NotChecked,
+            Some(raw_path) => {
+                let path = std::path::Path::new(raw_path);
+                if !path.is_absolute() {
+                    CargoHomeConfigCapture::Failed(CargoEvidenceReason::MissingIdentity)
+                } else {
+                    match capture_directory_identity(reader, path, cancel) {
+                        Ok(identity) => CargoHomeConfigCapture::Captured(identity),
+                        Err(reason) => CargoHomeConfigCapture::Failed(reason),
+                    }
+                }
+            }
+        };
         Self {
             runtime,
             cwd,
+            cargo_home_config,
             cli_overrides_absent,
         }
     }
@@ -291,6 +311,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: capture_directory_identity(reader, cwd, &CancellationToken::new()),
+            cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent,
         }
     }
@@ -299,6 +320,7 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent: false,
         }
     }
@@ -308,7 +330,50 @@ impl CargoInvocationContext {
         Self {
             runtime,
             cwd: Err(CargoEvidenceReason::MissingIdentity),
+            cargo_home_config: CargoHomeConfigCapture::NotChecked,
             cli_overrides_absent: true,
+        }
+    }
+
+    /// Resolves the captured explicit `CARGO_HOME` exactly once after the source scan.
+    ///
+    /// The directory identity is opaque outside the locator reader. Only this aggregate outcome
+    /// is retained; the raw environment value is never serialized, and the presence-only reader
+    /// never returns config bytes to Core.
+    pub(crate) fn observe_cargo_home_config<P: PlatformScanner>(
+        &mut self,
+        reader: &LocatorReader<P>,
+        cancel: &CancellationToken,
+    ) {
+        let CargoHomeConfigCapture::Captured(directory) = &self.cargo_home_config else {
+            return;
+        };
+        self.cargo_home_config =
+            match reader.observe_cargo_config_pair_in_captured_directory(directory, cancel) {
+                Ok(pair) => cargo_config_pair_presence(&pair),
+                Err(error) => CargoHomeConfigCapture::Failed(map_locator_batch_error(error)),
+            };
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CargoHomeConfigCapture {
+    /// No explicit `CARGO_HOME` was present at invocation capture time.
+    NotChecked,
+    /// An explicit absolute directory was captured before the scan and awaits observation.
+    Captured(LocatorDirectoryIdentity),
+    /// At least one direct config name was observed. No file contents were read.
+    PresentRedacted,
+    /// The explicit path was invalid, capture failed, or post-scan observation failed.
+    Failed(CargoEvidenceReason),
+}
+
+impl CargoHomeConfigCapture {
+    const fn external_source_input(&self) -> CargoConfigExternalSourceInput {
+        match self {
+            Self::NotChecked | Self::Captured(_) => CargoConfigExternalSourceInput::NotChecked,
+            Self::PresentRedacted => CargoConfigExternalSourceInput::PresentRedacted,
+            Self::Failed(reason) => CargoConfigExternalSourceInput::Failed(*reason),
         }
     }
 }
@@ -344,6 +409,7 @@ impl CargoEnvironmentPresence {
 #[cfg_attr(not(test), allow(dead_code))]
 enum CargoConfigExternalSourceInput {
     VerifiedAbsent,
+    PresentRedacted,
     NotChecked,
     Failed(CargoEvidenceReason),
 }
@@ -386,7 +452,7 @@ impl CargoConfigScopeInputs {
             runtime: invocation.runtime,
             workspace_pair: CargoWorkspacePairInput::NotChecked,
             ancestor_configs: CargoConfigExternalSourceInput::NotChecked,
-            cargo_home_config: CargoConfigExternalSourceInput::NotChecked,
+            cargo_home_config: invocation.cargo_home_config.external_source_input(),
             cli_target_dir: cli_source,
             cli_config_overrides: cli_source,
             invocation_cwd: CargoInvocationCwdInput::NotChecked,
@@ -524,6 +590,7 @@ enum CargoWorkspaceTargetDirDeclarationProjection {
 )]
 enum CargoConfigExternalSourceState {
     VerifiedAbsent,
+    PresentRedacted,
     NotChecked { reason_code: CargoEvidenceReason },
     Failed { reason_code: CargoEvidenceReason },
 }
@@ -569,9 +636,11 @@ enum CargoInvocationCwdBinding {
 enum CargoConfigScopeBlocker {
     AncestorConfigsFailed,
     AncestorConfigsNotChecked,
+    AncestorConfigsPresentRedacted,
     CargoBuildTargetDirPresentRedacted,
     CargoHomeConfigFailed,
     CargoHomeConfigNotChecked,
+    CargoHomeConfigPresentRedacted,
     CargoHomePresentRedacted,
     CargoTargetDirPresentRedacted,
     CliConfigOverridesFailed,
@@ -598,9 +667,11 @@ impl CargoConfigScopeBlocker {
         match self {
             Self::AncestorConfigsFailed => "ancestor_configs_failed",
             Self::AncestorConfigsNotChecked => "ancestor_configs_not_checked",
+            Self::AncestorConfigsPresentRedacted => "ancestor_configs_present_redacted",
             Self::CargoBuildTargetDirPresentRedacted => "cargo_build_target_dir_present_redacted",
             Self::CargoHomeConfigFailed => "cargo_home_config_failed",
             Self::CargoHomeConfigNotChecked => "cargo_home_config_not_checked",
+            Self::CargoHomeConfigPresentRedacted => "cargo_home_config_present_redacted",
             Self::CargoHomePresentRedacted => "cargo_home_present_redacted",
             Self::CargoTargetDirPresentRedacted => "cargo_target_dir_present_redacted",
             Self::CliConfigOverridesFailed => "cli_config_overrides_failed",
@@ -1180,6 +1251,53 @@ fn cargo_workspace_pair_input(
     }
 }
 
+fn cargo_config_pair_presence(pair: &CargoConfigPairPresenceObservation) -> CargoHomeConfigCapture {
+    debug_assert_eq!(
+        pair.consistency,
+        CargoConfigPairConsistency::NonAtomic,
+        "Cargo-home absence must never be promoted without a stable pair observation"
+    );
+    let failure = [&pair.config, &pair.config_toml]
+        .into_iter()
+        .filter_map(|member| match member {
+            CargoConfigMemberPresenceObservation::Failed(failure) => {
+                Some(map_config_presence_failure(failure))
+            }
+            CargoConfigMemberPresenceObservation::Present
+            | CargoConfigMemberPresenceObservation::AbsentDuringEnumeration => None,
+        })
+        .min_by_key(|reason| cargo_config_failure_precedence(*reason));
+    if let Some(reason) = failure {
+        CargoHomeConfigCapture::Failed(reason)
+    } else if matches!(pair.config, CargoConfigMemberPresenceObservation::Present)
+        || matches!(
+            pair.config_toml,
+            CargoConfigMemberPresenceObservation::Present
+        )
+    {
+        CargoHomeConfigCapture::PresentRedacted
+    } else {
+        // The pair is explicitly non-atomic, so an empty enumeration cannot prove absence.
+        CargoHomeConfigCapture::NotChecked
+    }
+}
+
+fn map_config_presence_failure(failure: &LocatorReadFailure) -> CargoEvidenceReason {
+    match failure {
+        LocatorReadFailure::Cancelled => CargoEvidenceReason::Cancelled,
+        LocatorReadFailure::ResourceLimit => CargoEvidenceReason::ResourceLimit,
+        LocatorReadFailure::AmbiguousAlias => CargoEvidenceReason::AmbiguousConfig,
+        LocatorReadFailure::IdentityMismatch
+        | LocatorReadFailure::MountChanged
+        | LocatorReadFailure::InvalidBinding
+        | LocatorReadFailure::SymlinkOrReparse
+        | LocatorReadFailure::NotRegular
+        | LocatorReadFailure::ReadFailed
+        | LocatorReadFailure::ProviderOrOffline
+        | LocatorReadFailure::Unavailable => CargoEvidenceReason::ConfigReadFailed,
+    }
+}
+
 fn cargo_config_scope_inputs(
     invocation: &CargoInvocationContext,
     workspace_pair: CargoWorkspacePairInput,
@@ -1702,6 +1820,9 @@ fn project_external_source(
         CargoConfigExternalSourceInput::VerifiedAbsent => {
             CargoConfigExternalSourceState::VerifiedAbsent
         }
+        CargoConfigExternalSourceInput::PresentRedacted => {
+            CargoConfigExternalSourceState::PresentRedacted
+        }
         CargoConfigExternalSourceInput::NotChecked => CargoConfigExternalSourceState::NotChecked {
             reason_code: CargoEvidenceReason::ConfigScopeNotChecked,
         },
@@ -1771,24 +1892,28 @@ fn config_scope_blockers(evidence: &CargoConfigScopeEvidenceV1) -> Vec<CargoConf
         &evidence.ancestor_configs,
         CargoConfigScopeBlocker::AncestorConfigsNotChecked,
         CargoConfigScopeBlocker::AncestorConfigsFailed,
+        CargoConfigScopeBlocker::AncestorConfigsPresentRedacted,
     );
     collect_external_blocker(
         &mut blockers,
         &evidence.cargo_home_config,
         CargoConfigScopeBlocker::CargoHomeConfigNotChecked,
         CargoConfigScopeBlocker::CargoHomeConfigFailed,
+        CargoConfigScopeBlocker::CargoHomeConfigPresentRedacted,
     );
     collect_external_blocker(
         &mut blockers,
         &evidence.cli.target_dir,
         CargoConfigScopeBlocker::CliTargetDirNotChecked,
         CargoConfigScopeBlocker::CliTargetDirFailed,
+        CargoConfigScopeBlocker::CliTargetDirNotChecked,
     );
     collect_external_blocker(
         &mut blockers,
         &evidence.cli.config_overrides,
         CargoConfigScopeBlocker::CliConfigOverridesNotChecked,
         CargoConfigScopeBlocker::CliConfigOverridesFailed,
+        CargoConfigScopeBlocker::CliConfigOverridesNotChecked,
     );
     match evidence.invocation_cwd {
         CargoInvocationCwdBinding::BoundToWorkspaceRoot => {}
@@ -1826,9 +1951,11 @@ fn collect_external_blocker(
     state: &CargoConfigExternalSourceState,
     not_checked: CargoConfigScopeBlocker,
     failed: CargoConfigScopeBlocker,
+    present_redacted: CargoConfigScopeBlocker,
 ) {
     match state {
         CargoConfigExternalSourceState::VerifiedAbsent => {}
+        CargoConfigExternalSourceState::PresentRedacted => blockers.push(present_redacted),
         CargoConfigExternalSourceState::NotChecked { .. } => blockers.push(not_checked),
         CargoConfigExternalSourceState::Failed { .. } => blockers.push(failed),
     }
@@ -2359,6 +2486,7 @@ pub(crate) fn test_config_scope_projection(
     let invocation = CargoInvocationContext {
         runtime,
         cwd: Err(CargoEvidenceReason::MissingIdentity),
+        cargo_home_config: CargoHomeConfigCapture::NotChecked,
         cli_overrides_absent: true,
     };
     decode_config_scope(CargoConfigInputs {
@@ -2438,6 +2566,252 @@ mod linux_real_stack_tests {
             .map(|identity| identity.entry_id.clone())
             .expect("target entry");
         (temp, summary, manifest_id, target_id)
+    }
+
+    #[test]
+    fn explicit_cargo_home_config_presence_is_redacted_and_observed_once() {
+        let (temp, summary, manifest_id, target_id) = workspace_layout("cargo-home-config-present");
+        let root_id = summary.roots[0].identity.as_ref().unwrap().entry_id.clone();
+        let cargo_home = temp.path().join("secret-explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        let secret_contents = "secret-cargo-home-config-contents";
+        fs::write(
+            cargo_home.join("config.toml"),
+            format!("[build]\ntarget-dir='{secret_contents}'\n"),
+        )
+        .unwrap();
+        let reader = reader();
+        let mut invocation = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(cargo_home.as_os_str()),
+            &reader,
+            &CancellationToken::new(),
+        );
+
+        invocation.observe_cargo_home_config(&reader, &CancellationToken::new());
+        assert!(matches!(
+            invocation.cargo_home_config,
+            CargoHomeConfigCapture::PresentRedacted
+        ));
+
+        // Observation is invocation-scoped. Once reduced to a redacted aggregate, later calls do
+        // not reopen the path or change the result.
+        fs::remove_file(cargo_home.join("config.toml")).unwrap();
+        invocation.observe_cargo_home_config(&reader, &CancellationToken::new());
+        let evidence = collect_and_produce_cargo_typed_evidence(
+            &reader,
+            &summary,
+            &root_id,
+            &manifest_id,
+            &target_id,
+            &invocation,
+            &CancellationToken::new(),
+        );
+        let scope = &evidence.config_scope;
+
+        assert!(matches!(
+            scope.cargo_home_config,
+            CargoConfigExternalSourceState::PresentRedacted
+        ));
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomeConfigPresentRedacted)
+        );
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomePresentRedacted)
+        );
+        assert_eq!(
+            scope.environment.cargo_home.state,
+            CargoEnvironmentPresence::PresentRedacted
+        );
+        assert!(matches!(
+            scope.cli.target_dir,
+            CargoConfigExternalSourceState::VerifiedAbsent
+        ));
+        assert!(matches!(
+            scope.cli.config_overrides,
+            CargoConfigExternalSourceState::VerifiedAbsent
+        ));
+        assert!(!scope.precedence_complete);
+        assert!(matches!(
+            &evidence.target_dir,
+            CargoEvidence::NotChecked {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(matches!(
+            &evidence.target_shape,
+            CargoEvidence::Unknown {
+                reason: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(!evidence.candidate_allowed());
+        assert!(!evidence.plan_allowed());
+
+        let serialized = serde_json::to_string(&scope.projected()).unwrap();
+        assert!(serialized.contains("\"cargoHomeConfig\":{\"state\":\"present_redacted\"}"));
+        assert!(!serialized.contains(&cargo_home.to_string_lossy().to_string()));
+        assert!(!serialized.contains(secret_contents));
+    }
+
+    #[test]
+    fn explicit_cargo_home_non_atomic_absence_stays_not_checked() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("empty-explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        let reader = reader();
+        let mut absent = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+            None,
+            &reader,
+            &CancellationToken::new(),
+        );
+        absent.observe_cargo_home_config(&reader, &CancellationToken::new());
+        assert!(matches!(
+            absent.cargo_home_config,
+            CargoHomeConfigCapture::NotChecked
+        ));
+        let mut invocation = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(cargo_home.as_os_str()),
+            &reader,
+            &CancellationToken::new(),
+        );
+
+        invocation.observe_cargo_home_config(&reader, &CancellationToken::new());
+        let scope = decode_config_scope(CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(&invocation),
+        });
+
+        assert!(matches!(
+            scope.cargo_home_config,
+            CargoConfigExternalSourceState::NotChecked {
+                reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+            }
+        ));
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomeConfigNotChecked)
+        );
+        assert!(
+            !scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomeConfigPresentRedacted)
+        );
+        assert!(!scope.precedence_complete);
+    }
+
+    #[test]
+    fn explicit_cargo_home_invalid_capture_and_cancelled_observation_fail_closed() {
+        let reader = reader();
+        let invalid = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(std::ffi::OsStr::new("relative-cargo-home-must-not-resolve")),
+            &reader,
+            &CancellationToken::new(),
+        );
+        assert!(matches!(
+            invalid.cargo_home_config,
+            CargoHomeConfigCapture::Failed(CargoEvidenceReason::MissingIdentity)
+        ));
+        let missing_absolute = tempfile::TempDir::new()
+            .unwrap()
+            .path()
+            .join("missing-cargo-home");
+        let capture_failed = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(missing_absolute.as_os_str()),
+            &reader,
+            &CancellationToken::new(),
+        );
+        assert!(matches!(
+            capture_failed.cargo_home_config,
+            CargoHomeConfigCapture::Failed(CargoEvidenceReason::MissingIdentity)
+        ));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("cancelled-explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"[build]\ntarget-dir='secret'\n").unwrap();
+        let mut cancelled = CargoInvocationContext::capture_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(cargo_home.as_os_str()),
+            &reader,
+            &CancellationToken::new(),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        cancelled.observe_cargo_home_config(&reader, &cancel);
+        let scope = decode_config_scope(CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(&cancelled),
+        });
+
+        assert!(matches!(
+            scope.cargo_home_config,
+            CargoConfigExternalSourceState::Failed {
+                reason_code: CargoEvidenceReason::Cancelled
+            }
+        ));
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomeConfigFailed)
+        );
+        assert!(!scope.precedence_complete);
+    }
+
+    #[test]
+    fn explicit_cargo_home_replacement_fails_closed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo_home = temp.path().join("replaceable-explicit-cargo-home");
+        let moved_home = temp.path().join("captured-explicit-cargo-home");
+        fs::create_dir(&cargo_home).unwrap();
+        fs::write(cargo_home.join("config"), b"[build]\ntarget-dir='secret'\n").unwrap();
+        let reader = reader();
+        let mut invocation = CargoInvocationContext::capture_for_unmodeled_caller(
+            CargoConfigScopeRuntime::from_presence(false, false, true),
+            Some(cargo_home.as_os_str()),
+            &reader,
+            &CancellationToken::new(),
+        );
+
+        fs::rename(&cargo_home, moved_home).unwrap();
+        fs::create_dir(&cargo_home).unwrap();
+        invocation.observe_cargo_home_config(&reader, &CancellationToken::new());
+        let scope = decode_config_scope(CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs::production(&invocation),
+        });
+
+        assert!(matches!(
+            scope.cargo_home_config,
+            CargoConfigExternalSourceState::Failed {
+                reason_code: CargoEvidenceReason::ConfigReadFailed
+            }
+        ));
+        assert!(
+            scope
+                .blockers
+                .contains(&CargoConfigScopeBlocker::CargoHomeConfigFailed)
+        );
+        assert!(matches!(
+            scope.cli.target_dir,
+            CargoConfigExternalSourceState::NotChecked { .. }
+        ));
+        assert!(matches!(
+            scope.cli.config_overrides,
+            CargoConfigExternalSourceState::NotChecked { .. }
+        ));
+        assert!(!scope.precedence_complete);
     }
 
     #[test]
@@ -3190,6 +3564,88 @@ mod tests {
         for secret in ["/secret/target", "/secret/cargo-home", "non-unicode"] {
             assert!(!serialized.contains(secret));
         }
+    }
+
+    #[test]
+    fn external_presence_states_have_source_specific_blockers() {
+        let scope = decode_config_scope(CargoConfigInputs {
+            config: CargoConfigFile::VerifiedAbsent,
+            config_toml: CargoConfigFile::VerifiedAbsent,
+            scope: CargoConfigScopeInputs {
+                runtime: CargoConfigScopeRuntime::from_presence(false, false, false),
+                workspace_pair: CargoWorkspacePairInput::StableSnapshot,
+                ancestor_configs: CargoConfigExternalSourceInput::PresentRedacted,
+                cargo_home_config: CargoConfigExternalSourceInput::PresentRedacted,
+                cli_target_dir: CargoConfigExternalSourceInput::VerifiedAbsent,
+                cli_config_overrides: CargoConfigExternalSourceInput::VerifiedAbsent,
+                invocation_cwd: CargoInvocationCwdInput::BoundToWorkspaceRoot,
+            },
+        });
+
+        assert!(matches!(
+            scope.ancestor_configs,
+            CargoConfigExternalSourceState::PresentRedacted
+        ));
+        assert!(matches!(
+            scope.cargo_home_config,
+            CargoConfigExternalSourceState::PresentRedacted
+        ));
+        assert_eq!(
+            scope.blockers,
+            vec![
+                CargoConfigScopeBlocker::AncestorConfigsPresentRedacted,
+                CargoConfigScopeBlocker::CargoHomeConfigPresentRedacted,
+            ]
+        );
+        assert!(!scope.precedence_complete);
+    }
+
+    #[test]
+    fn absent_cargo_home_and_library_cli_defaults_remain_not_checked() {
+        let cli = CargoInvocationContext::unavailable_for_sweepx_cli(
+            CargoConfigScopeRuntime::from_presence(false, false, false),
+        );
+        let library = CargoInvocationContext::unavailable(CargoConfigScopeRuntime::from_presence(
+            false, false, false,
+        ));
+
+        for invocation in [&cli, &library] {
+            let scope = decode_config_scope(CargoConfigInputs {
+                config: CargoConfigFile::VerifiedAbsent,
+                config_toml: CargoConfigFile::VerifiedAbsent,
+                scope: CargoConfigScopeInputs::production(invocation),
+            });
+            assert!(matches!(
+                scope.cargo_home_config,
+                CargoConfigExternalSourceState::NotChecked {
+                    reason_code: CargoEvidenceReason::ConfigScopeNotChecked
+                }
+            ));
+            assert!(
+                scope
+                    .blockers
+                    .contains(&CargoConfigScopeBlocker::CargoHomeConfigNotChecked)
+            );
+        }
+
+        let cli_scope = CargoConfigScopeInputs::production(&cli);
+        assert_eq!(
+            cli_scope.cli_target_dir,
+            CargoConfigExternalSourceInput::VerifiedAbsent
+        );
+        assert_eq!(
+            cli_scope.cli_config_overrides,
+            CargoConfigExternalSourceInput::VerifiedAbsent
+        );
+        let library_scope = CargoConfigScopeInputs::production(&library);
+        assert_eq!(
+            library_scope.cli_target_dir,
+            CargoConfigExternalSourceInput::NotChecked
+        );
+        assert_eq!(
+            library_scope.cli_config_overrides,
+            CargoConfigExternalSourceInput::NotChecked
+        );
     }
 
     #[test]
