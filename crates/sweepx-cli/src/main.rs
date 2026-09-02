@@ -662,6 +662,11 @@ struct PlatformJunkRule {
     root_kind: String,
     match_kind: String,
     names: Vec<String>,
+    /// Child names that must exist inside the root before it is reported.
+    ///
+    /// For tool-reported roots this is the structural check that the directory really is the
+    /// cache the tool described, rather than whatever else now sits at that path.
+    required_markers: Vec<String>,
     depth: usize,
     risk: String,
     evidence: String,
@@ -965,7 +970,10 @@ fn platform_junk_candidates(
         "unsupported"
     };
     let mut candidates = Vec::new();
-    for rule in rules.iter().filter(|rule| rule.platform == platform) {
+    for rule in rules
+        .iter()
+        .filter(|rule| rule.platform == platform || rule.platform == "any")
+    {
         for entry in summary
             .roots
             .iter()
@@ -989,6 +997,10 @@ fn platform_junk_candidates(
                                 .any(|candidate| normalized_rule_name(candidate) == name)
                         })
                 }
+                // The scan root itself is the candidate. Root discovery already confirmed the
+                // tool reported this path and that the required markers are present, so the
+                // rule reports one aggregate for the whole cache rather than per-file rows.
+                "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
                 _ => false,
             };
             if !matched {
@@ -1015,6 +1027,38 @@ fn platform_junk_candidates(
         }
     }
     candidates
+}
+
+/// Confirms a scanned root is the one this rule's tool reported.
+///
+/// Root discovery and candidate classification are separate passes, and the user may also name
+/// roots explicitly, so a depth-0 directory is not automatically this rule's cache. Without
+/// re-checking, scanning an unrelated directory would be labelled "npm cache".
+///
+/// The comparison uses the captured lossless native path, not `display_path`: display paths are
+/// presentation data and are never execution or classification authority in this codebase. The
+/// markers are then re-checked so a rule only reports a directory that still has the cache's
+/// shape. This is report-only classification and grants no deletion authority; the scanner's
+/// no-follow identity checks remain the authority over what was traversed.
+fn tool_reported_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+    let Some(tool) = tool_reported_root_for(&rule.root_kind) else {
+        return false;
+    };
+    let Some(reported) = tool.resolve() else {
+        return false;
+    };
+    let Some(locator) = entry.native_locator.as_ref() else {
+        return false;
+    };
+    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
+        // Without a captured native path there is nothing trustworthy to compare against, so the
+        // rule declines rather than falling back to the display string.
+        return false;
+    };
+    if !captured.equals_path(&reported).unwrap_or(false) {
+        return false;
+    }
+    root_has_required_markers(&reported, &rule.required_markers)
 }
 
 fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
@@ -1311,6 +1355,24 @@ fn normalize_junk_roots(system: bool, raw_roots: &[OsString]) -> Result<Vec<Path
 fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
     let rules = load_platform_junk_rules()?;
     let mut roots = Vec::new();
+    // Tool-reported roots come first because they are platform-independent and each one is
+    // verified against the rule's markers before being admitted.
+    for rule in &rules {
+        let Some(tool) = tool_reported_root_for(&rule.root_kind) else {
+            continue;
+        };
+        let Some(root) = tool.resolve() else {
+            continue;
+        };
+        if !is_existing_real_directory(&root)
+            || !root_has_required_markers(&root, &rule.required_markers)
+        {
+            continue;
+        }
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         // XDG_CACHE_HOME is valid only as an absolute path. Falling back to ~/.cache follows the
@@ -1365,6 +1427,78 @@ fn is_existing_real_directory(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
+/// One tool-reported cache root, as the tool itself describes it.
+///
+/// Measured on Windows on 2026-09-01: for npm, pnpm, and pip the location reported by the tool
+/// differed from the documented platform default *and both paths existed*. Shipping the defaults
+/// would therefore have reported a stale cache nobody uses while missing the live one, with no
+/// way to tell them apart from the path alone. Asking the tool is the only way to be right.
+struct ToolReportedRoot {
+    /// Program to run. Resolved through the platform's normal executable search.
+    program: &'static str,
+    /// Arguments that make the tool print exactly one path on stdout.
+    arguments: &'static [&'static str],
+}
+
+impl ToolReportedRoot {
+    /// Returns the tool's own answer, or `None` when the tool is absent or unhelpful.
+    ///
+    /// A missing tool, a nonzero exit, empty output, or a relative path all yield `None`: this
+    /// is discovery, so an unusable answer must drop the rule rather than fall back to a guess.
+    /// Only the first line is used, because a tool may add warnings after it.
+    fn resolve(&self) -> Option<PathBuf> {
+        let output = std::process::Command::new(self.program)
+            .args(self.arguments)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let path = PathBuf::from(text.lines().next()?.trim());
+        // A relative path cannot be admitted as a scan root, and resolving one here against the
+        // current directory would invent a location the tool never reported.
+        path.is_absolute().then_some(path)
+    }
+}
+
+/// Maps a `rootKind` to the tool that reports it.
+///
+/// Returning `None` means the kind is not tool-reported and is discovered from platform
+/// conventions instead.
+fn tool_reported_root_for(root_kind: &str) -> Option<ToolReportedRoot> {
+    match root_kind {
+        "npm_reported_cache" => Some(ToolReportedRoot {
+            program: "npm",
+            arguments: &["config", "get", "cache"],
+        }),
+        "pnpm_reported_store" => Some(ToolReportedRoot {
+            program: "pnpm",
+            arguments: &["store", "path"],
+        }),
+        "pip_reported_cache" => Some(ToolReportedRoot {
+            program: "pip",
+            arguments: &["cache", "dir"],
+        }),
+        _ => None,
+    }
+}
+
+/// Confirms a directory has the shape the rule expects before it is reported.
+///
+/// Without this a rule would report whatever now occupies the path the tool named. The check is
+/// read-only and uses `symlink_metadata` so a symlinked marker cannot stand in for a real child;
+/// the scanner still performs the authoritative no-follow admission afterwards.
+fn root_has_required_markers(root: &Path, markers: &[String]) -> bool {
+    markers.iter().all(|marker| {
+        std::fs::symlink_metadata(root.join(marker)).is_ok_and(|metadata| {
+            let file_type = metadata.file_type();
+            file_type.is_dir() || file_type.is_file()
+        })
+    })
+}
+
 fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
     let rules: Vec<PlatformJunkRule> =
         serde_json::from_str(PLATFORM_JUNK_RULES_JSON).map_err(|error| error.to_string())?;
@@ -1374,10 +1508,27 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
             "linux" => ("xdg_cache_home", "direct_children", 1),
             "macos" => ("macos_user_caches", "direct_children", 1),
             "windows" => ("windows_packages", "named_descendant", 2),
+            // A tool-reported root is the scan root itself, so its depth is 0 and its
+            // `rootKind` must be one the discovery table actually knows how to resolve.
+            // Otherwise a rule could name a root that is silently never produced.
+            "any" => {
+                if tool_reported_root_for(&rule.root_kind).is_none() {
+                    return Err(format!(
+                        "platform junk rule {} names an unresolvable root kind: {}",
+                        rule.id, rule.root_kind
+                    ));
+                }
+                (rule.root_kind.as_str(), "verified_tool_root", 0)
+            }
             _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
         };
+        let id_prefix = if rule.platform == "any" {
+            "tool."
+        } else {
+            &format!("{}.", rule.platform)
+        };
         if !ids.insert(rule.id.as_str())
-            || !rule.id.starts_with(&format!("{}.", rule.platform))
+            || !rule.id.starts_with(id_prefix)
             || (
                 rule.root_kind.as_str(),
                 rule.match_kind.as_str(),
@@ -1391,9 +1542,18 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 .references
                 .iter()
                 .all(|reference| reference.starts_with("https://"))
-            || !rule.names.iter().all(|name| safe_rule_component(name))
+            || !rule
+                .names
+                .iter()
+                .chain(rule.required_markers.iter())
+                .all(|name| safe_rule_component(name))
             || (rule.match_kind == "direct_children" && !rule.names.is_empty())
             || (rule.match_kind == "named_descendant" && rule.names.is_empty())
+            // A tool-reported root is admitted on the tool's word alone, so it must carry at
+            // least one structural marker; without one the rule would report whatever now
+            // occupies that path.
+            || (rule.match_kind == "verified_tool_root"
+                && (!rule.names.is_empty() || rule.required_markers.is_empty()))
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
         }
@@ -1660,7 +1820,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 6);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -1676,6 +1836,72 @@ mod tests {
             .unwrap();
         assert_eq!(windows.names, ["LocalCache", "TempState"]);
         assert_eq!(windows.depth, 2);
+    }
+
+    /// Every tool-reported rule must be resolvable and structurally guarded.
+    ///
+    /// Measured on Windows on 2026-09-01: npm, pnpm, and pip each reported a cache location that
+    /// differed from the documented platform default while *both* paths existed. A rule that
+    /// hardcoded the default would have reported a stale cache and missed the live one. So each
+    /// such rule must name a root kind the discovery table can resolve, and must carry at least
+    /// one marker so the tool's answer is verified rather than trusted outright.
+    #[test]
+    fn tool_reported_rules_are_resolvable_and_marker_guarded() {
+        let rules = load_platform_junk_rules().unwrap();
+        let tool_rules: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.match_kind == "verified_tool_root")
+            .collect();
+
+        assert_eq!(tool_rules.len(), 3, "expected the npm, pnpm, and pip rules");
+        for rule in tool_rules {
+            assert!(
+                tool_reported_root_for(&rule.root_kind).is_some(),
+                "rule {} names a root kind nothing can resolve, so it would never be produced",
+                rule.id
+            );
+            assert!(
+                !rule.required_markers.is_empty(),
+                "rule {} would report whatever now occupies the reported path",
+                rule.id
+            );
+            // The reported directory is itself the candidate, so it must not also try to match
+            // child names.
+            assert_eq!(rule.depth, 0, "rule {} must match the root itself", rule.id);
+            assert!(rule.names.is_empty());
+            assert_eq!(rule.platform, "any");
+        }
+    }
+
+    /// A rule naming an unresolvable tool root must be rejected outright.
+    ///
+    /// Such a rule would silently never produce a candidate, which looks like "nothing to clean"
+    /// rather than like a broken rule.
+    #[test]
+    fn a_tool_rule_with_an_unknown_root_kind_is_refused() {
+        assert!(tool_reported_root_for("npm_reported_cache").is_some());
+        assert!(tool_reported_root_for("definitely_not_a_known_tool").is_none());
+    }
+
+    /// Markers must be verified against the real filesystem, not assumed.
+    #[test]
+    fn required_markers_are_checked_against_the_filesystem() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+
+        // No markers yet: the directory must not qualify.
+        assert!(!root_has_required_markers(root, &["_cacache".to_string()]));
+        // An empty marker list is vacuously satisfied, which is why the validator forbids it
+        // for tool-reported rules.
+        assert!(root_has_required_markers(root, &[]));
+
+        std::fs::create_dir(root.join("_cacache")).unwrap();
+        assert!(root_has_required_markers(root, &["_cacache".to_string()]));
+        // Every marker must be present, not merely one of them.
+        assert!(!root_has_required_markers(
+            root,
+            &["_cacache".to_string(), "index-v5".to_string()]
+        ));
     }
 
     #[test]
@@ -1702,6 +1928,64 @@ mod tests {
         assert_eq!(
             tui_exit_code(4, BrowserExit::Terminated { signal: None }),
             1
+        );
+    }
+
+    /// Elevation must be opt-in, so the flag must default to off on every subcommand.
+    #[test]
+    fn elevation_is_off_unless_the_flag_is_given() {
+        let cli = Cli::try_parse_from(["sweepx", "scan", "."]).unwrap();
+        assert!(!cli.elevate);
+
+        let cli = Cli::try_parse_from(["sweepx", "scan", "--elevate", "."]).unwrap();
+        assert!(cli.elevate);
+        // Global, so it must also be accepted before the subcommand and on other commands.
+        assert!(
+            Cli::try_parse_from(["sweepx", "--elevate", "junk", "--system"])
+                .unwrap()
+                .elevate
+        );
+    }
+
+    /// Not passing the flag must select the policy that cannot prompt.
+    ///
+    /// Asserts the mapping rather than the effect, because the effect is "no UAC dialog",
+    /// which cannot be observed from a test.
+    #[test]
+    fn default_invocation_selects_detect_only_policy() {
+        // Mirrors `startup_privilege`'s mapping; a change there must be reflected here.
+        let policy = |opted_in: bool| {
+            if opted_in {
+                ElevationPolicy::RequestWhenUserOptedIn
+            } else {
+                ElevationPolicy::DetectOnly
+            }
+        };
+        assert_eq!(policy(false), ElevationPolicy::DetectOnly);
+        assert_eq!(policy(false), ElevationPolicy::default());
+        assert_eq!(policy(true), ElevationPolicy::RequestWhenUserOptedIn);
+    }
+
+    /// The opt-in flag must not reach the elevated child.
+    ///
+    /// If it did, the child would evaluate the same opt-in and could relaunch again. The
+    /// program path must also be absolute, so the shell cannot resolve a bare name to a
+    /// different image and start *that* elevated.
+    #[test]
+    fn the_relaunch_request_drops_the_opt_in_flag() {
+        let request = current_relaunch_request().expect("the test binary has a path");
+
+        assert!(
+            request.program.is_absolute(),
+            "an elevated relaunch must name an absolute image"
+        );
+        assert!(
+            !request
+                .arguments
+                .iter()
+                .any(|argument| argument == ELEVATE_FLAG),
+            "forwarding {ELEVATE_FLAG} would let the child evaluate the opt-in again: {:?}",
+            request.arguments
         );
     }
 }
