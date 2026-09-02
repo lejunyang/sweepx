@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -189,10 +191,16 @@ pub struct GeneratedFixture {
     qualification_source: GeneratedFixtureQualificationSource,
 }
 
+// Only the Linux P4 Trash qualification path reads `manifest` and
+// `trash_target_issued`; both are retained on every host so generation stays a
+// single code path, and the single-issue guard cannot be silently dropped by a
+// platform that does not yet consume it.
 #[derive(Debug)]
 struct GeneratedFixtureQualificationSource {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     manifest: FixtureManifest,
     top_dir: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     trash_target_issued: AtomicBool,
     #[cfg(target_os = "linux")]
     baseline: LinuxFixtureTreeBaseline,
@@ -208,6 +216,9 @@ pub struct LinuxTrashTargetQualification {
     expected_filesystem: String,
     fixture_manifest: FixtureManifest,
     oracle_receipt: Receipt,
+    // Rechecks that compare the live tree against the baseline are Linux-only, so
+    // no other host currently reads the retained top directory.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     top_dir: PathBuf,
     target_path: PathBuf,
     #[cfg(target_os = "linux")]
@@ -359,6 +370,12 @@ pub enum FixtureError {
     HardlinkTargetNotFile { path: Vec<String> },
     #[error("manifest hardlink target chain contains a cycle at: {path:?}")]
     HardlinkCycle { path: Vec<String> },
+    #[error("creating fixture symlink {path} requires an OS privilege this process does not hold")]
+    SymlinkPrivilegeUnavailable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("manifest symlink target is missing: {path:?}")]
     SymlinkTargetMissing { path: Vec<String> },
     #[error("manifest symlink target escapes fixture root: {path:?}")]
@@ -432,7 +449,7 @@ impl GeneratedFixture {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = entry_id;
-            return Err(FixtureError::LinuxTrashUnsupportedHost);
+            Err(FixtureError::LinuxTrashUnsupportedHost)
         }
 
         #[cfg(target_os = "linux")]
@@ -647,7 +664,7 @@ impl LinuxTrashTargetQualification {
     pub fn verify_unchanged(&self) -> Result<(), FixtureError> {
         #[cfg(not(target_os = "linux"))]
         {
-            return Err(FixtureError::LinuxTrashUnsupportedHost);
+            Err(FixtureError::LinuxTrashUnsupportedHost)
         }
 
         #[cfg(target_os = "linux")]
@@ -679,7 +696,7 @@ impl LinuxTrashTargetQualification {
     pub fn verify_target_removed_and_rest_unchanged(&self) -> Result<(), FixtureError> {
         #[cfg(not(target_os = "linux"))]
         {
-            return Err(FixtureError::LinuxTrashUnsupportedHost);
+            Err(FixtureError::LinuxTrashUnsupportedHost)
         }
 
         #[cfg(target_os = "linux")]
@@ -748,6 +765,11 @@ impl LinuxTrashTargetQualification {
     }
 }
 
+/// Recomputes the oracle receipt for an already generated fixture top directory.
+///
+/// Only Linux Trash qualification consumes this today; it stays compiled on every
+/// host so the receipt derivation cannot drift away from `oracle_from_manifest`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn oracle_receipt_for_top_dir(
     top_dir: &Path,
     manifest: &FixtureManifest,
@@ -1354,13 +1376,25 @@ fn validate_fixture_root_common(path: &Path) -> Result<(), FixtureError> {
             path: path.to_path_buf(),
         });
     }
-    let mut components = path.components();
-    if matches!(components.next(), Some(Component::RootDir)) && components.next().is_none() {
+    if is_filesystem_root(path) {
         return Err(FixtureError::FixtureRootIsFilesystemRoot {
             path: path.to_path_buf(),
         });
     }
     Ok(())
+}
+
+/// Reports whether `path` denotes a whole volume or filesystem root.
+///
+/// A fixture generator writes into the root it is given, so accepting a volume root
+/// would point deterministic fixture setup at an entire disk. Checking for a bare
+/// `RootDir` is not enough on Windows: `C:\` decomposes into `Prefix` + `RootDir`,
+/// so a drive or UNC share root has no `Normal` component either and must be
+/// rejected the same way as Unix `/`.
+fn is_filesystem_root(path: &Path) -> bool {
+    !path
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)))
 }
 
 fn validate_empty_fixture_root(path: &Path) -> Result<(), FixtureError> {
@@ -1692,24 +1726,62 @@ fn render_file_bytes(seed: DecimalU128, entry: &FixtureEntry) -> Vec<u8> {
     }
 }
 
+/// Creates one fixture symlink, reporting missing OS privilege distinctly.
+///
+/// Windows only allows an unprivileged process to create symlinks when Developer
+/// Mode is enabled, so `ERROR_PRIVILEGE_NOT_HELD` is mapped to a dedicated variant.
+/// Callers can then skip a symlink-dependent fixture honestly instead of reporting
+/// a generic I/O failure that looks like a fixture defect.
 fn create_symlink(target: &Path, link_target: &Path) -> Result<(), FixtureError> {
     #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(link_target, target).map_err(|source| FixtureError::Io {
-            path: target.to_path_buf(),
-            source,
-        })?;
-    }
+    let result = std::os::unix::fs::symlink(link_target, target);
     #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_file(link_target, target).map_err(|source| {
+    let result = std::os::windows::fs::symlink_file(link_target, target);
+
+    result.map_err(|source| {
+        if symlink_privilege_missing(&source) {
+            FixtureError::SymlinkPrivilegeUnavailable {
+                path: target.to_path_buf(),
+                source,
+            }
+        } else {
             FixtureError::Io {
                 path: target.to_path_buf(),
                 source,
             }
-        })?;
-    }
+        }
+    })?;
     Ok(())
+}
+
+/// Reports whether a symlink creation failure was caused by a missing OS privilege.
+fn symlink_privilege_missing(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // ERROR_PRIVILEGE_NOT_HELD. Windows maps this to `Uncategorized`, so the raw
+        // code is the only reliable discriminator on stable.
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+            || error.kind() == std::io::ErrorKind::PermissionDenied
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Reports whether this host can create the symlinks a fixture manifest requires.
+///
+/// Probes the real filesystem instead of assuming a platform capability, so a
+/// Windows host with Developer Mode enabled still runs the full symlink fixtures.
+/// `probe_dir` must be a writable directory; the probe link is always removed.
+pub fn host_supports_fixture_symlinks(probe_dir: &Path) -> bool {
+    let link = probe_dir.join("sweepx-symlink-capability-probe");
+    let _ = fs::remove_file(&link);
+    let supported = create_symlink(&link, Path::new("sweepx-symlink-probe-target")).is_ok();
+    let _ = fs::remove_file(&link);
+    supported
 }
 
 fn validate_symlink_target_within_root(

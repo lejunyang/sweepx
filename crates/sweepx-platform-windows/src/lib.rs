@@ -171,6 +171,24 @@ mod backend {
         Exhausted,
     }
 
+    /// Returns `FILE_OPEN_NO_RECALL` only when the requested open can accept it.
+    ///
+    /// `FILE_OPEN_NO_RECALL` asks the filesystem not to fetch remotely stored file
+    /// *data*. A directory has no data stream to recall, so NTFS rejects the pair
+    /// `FILE_DIRECTORY_FILE | FILE_OPEN_NO_RECALL` with `STATUS_INVALID_PARAMETER`
+    /// (surfaced as `ERROR_INVALID_PARAMETER`, os error 87) and every directory open
+    /// fails — which previously broke root admission and therefore every scan.
+    ///
+    /// The flag is still requested for non-directory and type-agnostic opens, so
+    /// scanning never silently triggers a cloud-provider hydration of file contents.
+    const fn no_recall_option_for(type_options: u32) -> u32 {
+        if type_options & FILE_DIRECTORY_FILE != 0 {
+            0
+        } else {
+            FILE_OPEN_NO_RECALL
+        }
+    }
+
     fn object_identity(observed: &ObservedMetadata) -> ObjectIdentity {
         ObjectIdentity {
             volume: observed.file_id.VolumeSerialNumber,
@@ -793,7 +811,7 @@ mod backend {
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     FILE_OPEN,
                     type_options
-                        | FILE_OPEN_NO_RECALL
+                        | no_recall_option_for(type_options)
                         | FILE_OPEN_REPARSE_POINT
                         | FILE_SYNCHRONOUS_IO_NONALERT,
                     ptr::null(),
@@ -1844,6 +1862,43 @@ mod backend {
                 .expect("test directory is admitted")
         }
 
+        /// Reports whether a symlink creation error means this host lacks the privilege.
+        ///
+        /// Creating a symlink on Windows requires `SeCreateSymbolicLinkPrivilege` or
+        /// Developer Mode. Windows reports the refusal as `ERROR_PRIVILEGE_NOT_HELD`,
+        /// which maps to `ErrorKind::Uncategorized` rather than `PermissionDenied`, so
+        /// matching on the error kind alone silently fails to skip and the test then
+        /// panics on a purely environmental limitation. The skip is announced so an
+        /// unverified reparse-point behavior can never be read as a pass.
+        fn skip_without_symlink_privilege(error: &io::Error, link_kind: &str) -> bool {
+            const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+            if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+                || error.kind() == io::ErrorKind::PermissionDenied
+            {
+                eprintln!(
+                    "SKIP: cannot create a {link_kind} symlink on this host (needs Developer \
+                     Mode or elevation); reparse-point behavior is NOT verified here"
+                );
+                return true;
+            }
+            false
+        }
+
+        /// Reports whether `directory` resolves filenames case-insensitively.
+        ///
+        /// Probed through `std::fs`, which goes via Win32 `CreateFileW` rather than the
+        /// scanner's own `NtCreateFile` path, so the oracle is independent of the code
+        /// under test. The probe file is created and removed here to avoid depending on
+        /// any fixture the caller may still be asserting against.
+        fn directory_folds_filename_case(directory: &Path) -> bool {
+            let exact = directory.join("SweepXCaseProbe.tmp");
+            let folded = directory.join("sweepxcaseprobe.tmp");
+            fs::write(&exact, b"probe").expect("case probe file is written");
+            let folds = fs::metadata(&folded).is_ok();
+            fs::remove_file(&exact).expect("case probe file is removed");
+            folds
+        }
+
         fn parse(path: &str) -> Result<ParsedDrivePath, RootOpenError> {
             WindowsPlatformScanner::parse_drive_path(Path::new(path))
         }
@@ -2389,19 +2444,41 @@ mod backend {
                 Err(BoundedRegularFileReadError::LimitExceeded { max_bytes: 9, .. })
             ));
 
+            // Filename case sensitivity is a property of the host and volume, not of
+            // this scanner: NTFS with the default kernel `obcaseinsensitive=1` folds
+            // case even when the open explicitly requests case sensitivity, while a
+            // case-sensitive volume (ext4, APFS configured case-sensitive, or a
+            // per-directory case-sensitive NTFS directory) does not. Asserting a single
+            // outcome would encode one host's behavior as a portable contract, so the
+            // live behavior is probed first and the matching invariant is asserted.
             let wrong_case = BoundedRegularFileReadRequest::establish_live(
                 NativeName::windows_utf16("mixed.bin".encode_utf16().collect::<Vec<_>>()),
                 10,
             )
             .expect("case variant is syntactically valid");
-            assert!(matches!(
-                scanner().read_regular_file_relative(
-                    &admission.directory,
-                    &wrong_case,
-                    &CancellationToken::new(),
-                ),
-                Err(BoundedRegularFileReadError::NotFound)
-            ));
+            let folded_read = scanner().read_regular_file_relative(
+                &admission.directory,
+                &wrong_case,
+                &CancellationToken::new(),
+            );
+            if directory_folds_filename_case(&root.0) {
+                // Case-insensitive host: the folded spelling must resolve to the *same*
+                // native object, never a different one. Identity is what makes this safe,
+                // so it is checked explicitly rather than inferred from success.
+                let folded_read =
+                    folded_read.expect("a case-insensitive host resolves the folded spelling");
+                assert_eq!(folded_read.bytes, b"0123456789");
+                assert_eq!(
+                    folded_read.observed_before.identity, read.observed_before.identity,
+                    "a folded spelling must never resolve to a different native object"
+                );
+            } else {
+                assert!(
+                    matches!(folded_read, Err(BoundedRegularFileReadError::NotFound)),
+                    "a case-sensitive host must not resolve the folded spelling, got \
+                     {folded_read:?}"
+                );
+            }
 
             let raw_handle: OwnedHandle = fs::File::open(root.0.join("MiXeD.bin"))
                 .expect("fixture file opens")
@@ -2442,7 +2519,7 @@ mod backend {
             let link = root.0.join("link.bin");
             fs::write(&target, b"target").expect("target file is written");
             if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
-                if error.kind() == io::ErrorKind::PermissionDenied {
+                if skip_without_symlink_privilege(&error, "file") {
                     return;
                 }
                 panic!("file symlink creation failed: {error}");
@@ -2606,7 +2683,7 @@ mod backend {
             fs::create_dir(&target).expect("target directory is created");
             match std::os::windows::fs::symlink_dir(&target, &link) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return,
+                Err(error) if skip_without_symlink_privilege(&error, "directory") => return,
                 Err(error) => panic!("directory symlink creation failed: {error}"),
             }
 
@@ -2626,7 +2703,7 @@ mod backend {
             fs::create_dir_all(&nested).expect("target hierarchy is created");
             match std::os::windows::fs::symlink_dir(&target, &link) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return,
+                Err(error) if skip_without_symlink_privilege(&error, "directory") => return,
                 Err(error) => panic!("directory symlink creation failed: {error}"),
             }
 
@@ -2940,6 +3017,37 @@ mod backend {
         #[test]
         fn inspect_missing_child_is_a_walk_error() {
             let root = TempDir::new("missing-child");
+            // A real entry gives enumeration something to return, so the batch-membership
+            // guard is satisfied and the assertion below reaches the intended behavior:
+            // a name that vanished between enumeration and inspection.
+            fs::write(root.0.join("present"), b"x").expect("sibling entry is created");
+            let scanner = scanner();
+            let mut admission = scanner
+                .admit_root(
+                    &ScanRoot::new(root.0.clone()).expect("root is absolute"),
+                    &CancellationToken::new(),
+                )
+                .expect("root is admitted");
+            let present = child_by_name(&scanner, &mut admission.directory, "present");
+            fs::remove_file(root.0.join("present")).expect("enumerated entry is removed");
+
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &present, &CancellationToken::new())
+                    .expect("missing child is represented in-band"),
+                WalkEntry::Error(_)
+            ));
+        }
+
+        /// A token absent from the latest batch is refused before any reopen attempt.
+        ///
+        /// This is the companion of the test above: a name the scanner never enumerated
+        /// is rejected out of band as an invalid entry, rather than being looked up on
+        /// disk, because a display name is never traversal authority.
+        #[test]
+        fn inspect_child_absent_from_the_batch_is_refused_before_any_open() {
+            let root = TempDir::new("unenumerated-child");
+            fs::write(root.0.join("missing"), b"x").expect("target exists on disk");
             let scanner = scanner();
             let admission = scanner
                 .admit_root(
@@ -2947,17 +3055,20 @@ mod backend {
                     &CancellationToken::new(),
                 )
                 .expect("root is admitted");
-            let missing = DirectoryEntryRecord::from_parent_and_name(
+            let never_enumerated = DirectoryEntryRecord::from_parent_and_name(
                 &root.0,
                 NativeName::windows_utf16("missing".encode_utf16().collect::<Vec<_>>()),
             )
-            .expect("missing child record is valid");
+            .expect("record is syntactically valid");
 
+            // The file exists, so a pathname-based implementation would happily open it.
             assert!(matches!(
-                scanner
-                    .inspect_child(&admission.directory, &missing, &CancellationToken::new())
-                    .expect("missing child is represented in-band"),
-                WalkEntry::Error(_)
+                scanner.inspect_child(
+                    &admission.directory,
+                    &never_enumerated,
+                    &CancellationToken::new()
+                ),
+                Err(PlatformError::InvalidDirectoryEntry { .. })
             ));
         }
 
@@ -2966,23 +3077,33 @@ mod backend {
             let root = TempDir::new("case-exact-child");
             fs::write(root.0.join("MixedCase"), b"x").expect("test file is created");
             let scanner = scanner();
-            let admission = scanner
+            let mut admission = scanner
                 .admit_root(
                     &ScanRoot::new(root.0.clone()).expect("root is absolute"),
                     &CancellationToken::new(),
                 )
                 .expect("root is admitted");
+            // Enumerate first so the case-folded name is rejected because it does not
+            // match the enumerated token, not merely because no batch existed yet. NTFS
+            // itself is case-insensitive, so a case-folded open would otherwise succeed.
+            // The exact token is taken from that same batch, proving the rejection below
+            // is about case exactness rather than a blanket refusal.
+            let exact = child_by_name(&scanner, &mut admission.directory, "MixedCase");
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &exact, &CancellationToken::new())
+                    .expect("exact token inspects"),
+                WalkEntry::File { .. }
+            ));
+
             let wrong_case = DirectoryEntryRecord::from_parent_and_name(
                 &root.0,
                 NativeName::windows_utf16("mixedcase".encode_utf16().collect::<Vec<_>>()),
             )
             .expect("case-variant record is valid");
-
             assert!(matches!(
-                scanner
-                    .inspect_child(&admission.directory, &wrong_case, &CancellationToken::new())
-                    .expect("case mismatch is represented in-band"),
-                WalkEntry::Error(_)
+                scanner.inspect_child(&admission.directory, &wrong_case, &CancellationToken::new()),
+                Err(PlatformError::InvalidDirectoryEntry { .. })
             ));
         }
 
@@ -2994,7 +3115,7 @@ mod backend {
             fs::create_dir(&target).expect("target directory is created");
             match std::os::windows::fs::symlink_dir(&target, &link) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return,
+                Err(error) if skip_without_symlink_privilege(&error, "directory") => return,
                 Err(error) => panic!("directory symlink creation failed: {error}"),
             }
             let scanner = scanner();

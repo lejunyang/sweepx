@@ -561,7 +561,11 @@ pub enum PreflightPermitError {
     ForkedProcess,
 }
 
-#[cfg(test)]
+// Every permit test needs a real `AuditStore`: a preflight permit is only meaningful
+// when it is bound to a durable intent, and that binding is exactly what these tests
+// assert. Hosts without durable state cannot construct the fixture, so the suite is
+// Unix-only and the module below pins the fail-closed contract that applies there.
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -1107,5 +1111,41 @@ mod tests {
         // The child's copy cannot spend authority held by the parent process.
         assert!(consume_preflight_permit(&consume_permit, &clock).is_ok());
         assert!(consumed_submit_permit.validate_for_submit(&clock).is_ok());
+    }
+}
+
+// A host without durable audit state cannot issue a preflight permit at all.
+//
+// The Unix suite above verifies one-shot consumption, TTL boundaries and intent
+// binding. Those cannot be exercised here, so this pins the property that keeps the
+// absence safe: permit issuance depends on a durable intent, and a host that cannot
+// record one must refuse rather than issue an unbacked permit.
+#[cfg(all(test, not(unix)))]
+mod unsupported_host_tests {
+    use sweepx_audit::{AuditError, AuditStore};
+    use tempfile::TempDir;
+
+    /// The durable store that every permit is bound to is refused, inertly.
+    ///
+    /// A permit that outlived its durable intent would let a revalidation proof be
+    /// replayed against state nobody recorded, so the dependency must fail closed at
+    /// the store rather than degrade to an in-memory stand-in.
+    #[test]
+    fn preflight_permits_have_no_durable_intent_source_on_this_host() {
+        let temp = TempDir::new().expect("temporary directory is created");
+        let root = temp.path().join("audit");
+        std::fs::create_dir(&root).expect("audit directory is created");
+
+        assert!(matches!(
+            AuditStore::open(&root),
+            Err(AuditError::UnsupportedPlatform)
+        ));
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .expect("audit directory is readable")
+                .count(),
+            0,
+            "a refused audit store must not leave partial state behind"
+        );
     }
 }

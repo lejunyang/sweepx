@@ -1,17 +1,46 @@
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use sha2::Digest;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use sweepx_fixtures::{
-    ContentPattern, FixtureEntry, FixtureEntryKind, FixtureError, LINUX_P4_TRASH_TARGET_ENTRY_ID,
-    P4BarrierName, P4EvidenceBundle, Receipt, TaggedValue, contract_manifest_path,
-    contract_p4_evidence_bundle_path, contract_receipt_path, default_p0_p1_manifest,
-    generate_from_contract_files, generate_from_manifest, linux_p4_trash_manifest,
-    load_receipt_contract, oracle_from_contract_files, oracle_from_manifest,
+    FixtureEntry, FixtureEntryKind, FixtureError, Receipt, TaggedValue, contract_manifest_path,
+    contract_receipt_path, default_p0_p1_manifest, generate_from_contract_files,
+    generate_from_manifest, host_supports_fixture_symlinks, load_receipt_contract,
+    oracle_from_contract_files, oracle_from_manifest,
 };
 use tempfile::tempdir;
+
+// The Linux P4 Trash qualification surface only exists on Linux hosts, so its
+// imports are gated with the tests that exercise it.
+#[cfg(target_os = "linux")]
+use sha2::Digest;
+#[cfg(target_os = "linux")]
+use sweepx_fixtures::{
+    ContentPattern, LINUX_P4_TRASH_TARGET_ENTRY_ID, P4BarrierName, P4EvidenceBundle,
+    contract_p4_evidence_bundle_path, linux_p4_trash_manifest,
+};
+
+/// Skips a symlink-dependent fixture when the host cannot create symlinks at all.
+///
+/// The default P0/P1 manifest contains a relative symlink, and Windows refuses
+/// symlink creation to an unprivileged process unless Developer Mode is on. The
+/// capability is probed against the real filesystem rather than assumed from the
+/// target OS, and a skip is announced so it can never be mistaken for a pass of the
+/// symlink behavior itself.
+macro_rules! require_symlink_support {
+    ($probe_dir:expr, $test_name:literal) => {
+        if !host_supports_fixture_symlinks($probe_dir) {
+            eprintln!(
+                "SKIP {}: host cannot create symlinks (on Windows this needs Developer Mode \
+                 or elevation); the symlink fixture behavior is NOT verified here",
+                $test_name
+            );
+            return;
+        }
+    };
+}
 
 #[test]
 fn minimal_contract_generation_matches_full_expected_receipt() {
@@ -28,6 +57,10 @@ fn generation_receipt_is_byte_for_byte_reproducible_from_seed() {
     let manifest = default_p0_p1_manifest();
     let root_a = tempdir().expect("tempdir a");
     let root_b = tempdir().expect("tempdir b");
+    require_symlink_support!(
+        root_a.path(),
+        "generation_receipt_is_byte_for_byte_reproducible_from_seed"
+    );
 
     let generated_a = generate_from_manifest(root_a.path(), &manifest).expect("generate a");
     let generated_b = generate_from_manifest(root_b.path(), &manifest).expect("generate b");
@@ -54,13 +87,49 @@ fn generation_refuses_nonempty_root_and_filesystem_root() {
         generate_from_manifest(root.path(), &manifest).expect_err("must reject nonempty root");
     assert!(matches!(err, FixtureError::FixtureRootNotEmpty { .. }));
 
-    let err = generate_from_manifest(Path::new("/"), &manifest).expect_err("must reject fs root");
-    assert!(matches!(
-        err,
-        FixtureError::FixtureRootIsFilesystemRoot { .. }
-    ));
+    // A volume root must be refused on every host. `/` is the Unix filesystem root;
+    // on Windows the equivalent is a drive root, which still has no `Normal` path
+    // component even though it does carry a `Prefix`.
+    for filesystem_root in filesystem_roots() {
+        let err =
+            generate_from_manifest(&filesystem_root, &manifest).expect_err("must reject fs root");
+        assert!(
+            matches!(err, FixtureError::FixtureRootIsFilesystemRoot { .. }),
+            "{} must be refused as a filesystem root, got {err:?}",
+            filesystem_root.display()
+        );
+    }
 }
 
+/// Returns host filesystem/volume roots that fixture generation must always refuse.
+fn filesystem_roots() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut roots = vec![std::path::PathBuf::from(r"C:\")];
+        // The drive holding this checkout is covered too, so the assertion is not
+        // limited to whichever volume happens to be C:.
+        if let Ok(current) = std::env::current_dir() {
+            let mut components = current.components();
+            if let (Some(prefix), Some(root)) = (components.next(), components.next()) {
+                let drive_root: std::path::PathBuf = [prefix, root].iter().collect();
+                if !roots.contains(&drive_root) {
+                    roots.push(drive_root);
+                }
+            }
+        }
+        roots
+    }
+    #[cfg(not(windows))]
+    {
+        vec![std::path::PathBuf::from("/")]
+    }
+}
+
+// Creating a symlink is unprivileged on Unix but requires elevation or Developer
+// Mode on Windows, so the symlink-root rejection is asserted only where the test
+// can actually build the link. A skipped assertion is preferable to a fixture that
+// silently proves nothing.
+#[cfg(unix)]
 #[test]
 fn generation_refuses_symlink_fixture_root_and_canonicalizes_root() {
     let manifest = default_p0_p1_manifest();
@@ -80,8 +149,26 @@ fn generation_refuses_symlink_fixture_root_and_canonicalizes_root() {
     assert_eq!(generated.receipt.root_path, oracle.receipt.root_path);
 }
 
+/// Asserts root canonicalization on hosts where the symlink half cannot be built.
+#[cfg(not(unix))]
+#[test]
+fn generation_canonicalizes_root() {
+    let manifest = default_p0_p1_manifest();
+    let holder = tempdir().expect("holder");
+    require_symlink_support!(holder.path(), "generation_canonicalizes_root");
+    let real_root = holder.path().join("real-root");
+    fs::create_dir(&real_root).expect("create real root");
+
+    let generated = generate_from_manifest(&real_root, &manifest).expect("generate real root");
+    let oracle = oracle_from_manifest(&real_root, &manifest).expect("oracle");
+    assert_eq!(generated.receipt.root_path, "/NORMALIZED/p1-deterministic");
+    assert_eq!(generated.receipt.root_path, oracle.receipt.root_path);
+}
+
 #[test]
 fn generation_refuses_symlink_escape_outside_fixture_root() {
+    // No symlink is ever created here: the escape must be refused during manifest
+    // validation, before any mutation, so this runs on every host.
     let mut manifest = default_p0_p1_manifest();
     let symlink = manifest
         .entries
@@ -205,6 +292,10 @@ fn multi_node_hardlink_cycle_is_rejected_before_mutation() {
 fn oracle_reports_independent_identity_boundaries_and_hardlink_group() {
     let manifest = default_p0_p1_manifest();
     let root = tempdir().expect("tempdir");
+    require_symlink_support!(
+        root.path(),
+        "oracle_reports_independent_identity_boundaries_and_hardlink_group"
+    );
     let generated = generate_from_manifest(root.path(), &manifest).expect("generate");
 
     let oracle = oracle_from_manifest(root.path(), &manifest).expect("oracle");
@@ -259,10 +350,51 @@ fn oracle_reports_independent_identity_boundaries_and_hardlink_group() {
         }
     );
 
-    let alpha_meta = fs::metadata(generated.fixture_dir.join("alpha.txt")).expect("alpha meta");
-    let hard_meta =
-        fs::metadata(generated.fixture_dir.join("nested/alpha-hard.txt")).expect("hard meta");
-    assert_eq!(alpha_meta.ino(), hard_meta.ino());
+    assert_same_native_file(
+        &generated.fixture_dir.join("alpha.txt"),
+        &generated.fixture_dir.join("nested/alpha-hard.txt"),
+    );
+}
+
+/// Asserts that two paths name the same native file object, not merely equal bytes.
+///
+/// The hardlink group in the oracle is a manifest-derived claim, so it is checked
+/// against the live filesystem. Unix compares `(dev, ino)` directly. Windows has no
+/// stable `Metadata` accessor for the file ID (`file_index` is still unstable), so
+/// the shared-inode property is observed behaviorally: a write through one name must
+/// be visible through the other. Two distinct files with identical content fail that
+/// write half, so this cannot pass by content coincidence.
+fn assert_same_native_file(left: &Path, right: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left_meta = fs::metadata(left).expect("left metadata");
+        let right_meta = fs::metadata(right).expect("right metadata");
+        assert_eq!(left_meta.dev(), right_meta.dev());
+        assert_eq!(left_meta.ino(), right_meta.ino());
+    }
+    #[cfg(not(unix))]
+    {
+        let original = fs::read(left).expect("read left");
+        assert_eq!(original, fs::read(right).expect("read right"));
+
+        let probe = b"hardlink-identity-probe".to_vec();
+        fs::write(left, &probe).expect("write through left name");
+        assert_eq!(
+            fs::read(right).expect("read right after write"),
+            probe,
+            "a write through one hardlink name must be visible through the other"
+        );
+        assert_eq!(
+            fs::metadata(left).expect("left metadata").len(),
+            fs::metadata(right).expect("right metadata").len()
+        );
+
+        // Restore the generated content so later assertions still see the fixture
+        // exactly as the manifest describes it.
+        fs::write(left, &original).expect("restore left");
+        assert_eq!(fs::read(right).expect("read right after restore"), original);
+    }
 }
 
 #[test]
@@ -313,6 +445,10 @@ fn receipt_comparison_is_independent_of_generation_root() {
     let manifest = default_p0_p1_manifest();
     let root_a = tempdir().expect("root a");
     let root_b = tempdir().expect("root b");
+    require_symlink_support!(
+        root_a.path(),
+        "receipt_comparison_is_independent_of_generation_root"
+    );
 
     let receipt_a = generate_from_manifest(root_a.path(), &manifest)
         .expect("generate a")
@@ -801,6 +937,7 @@ fn linux_p4_named_evidence_trace_and_bundle_are_deterministic() {
     assert_eq!(bundle, expected);
 }
 
+#[cfg(target_os = "linux")]
 fn load_p4_evidence_bundle(path: impl AsRef<Path>) -> Result<P4EvidenceBundle, serde_json::Error> {
     let bytes = std::fs::read(path).expect("read p4 evidence bundle contract");
     serde_json::from_slice(&bytes)

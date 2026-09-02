@@ -1,22 +1,37 @@
-#[cfg(test)]
+// The Linux backend below speaks directly to Linux kernel interfaces (`openat2`,
+// `statx`, `fdopendir`/`readdir`). Those items do not exist in `libc` on other
+// targets, so the whole backend is gated on `target_os = "linux"` and non-Linux
+// hosts get the fail-closed stub at the end of this file. This keeps a
+// `--workspace` build honest on Windows and macOS instead of failing to compile.
+#[cfg(all(test, target_os = "linux"))]
 use std::cell::RefCell;
+#[cfg(target_os = "linux")]
 use std::ffi::{CStr, CString};
+#[cfg(target_os = "linux")]
 use std::io;
+#[cfg(target_os = "linux")]
 use std::mem::{self, MaybeUninit};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use sweepx_model::{DecimalU128, NativeName, ReasonCode};
+#[cfg(target_os = "linux")]
 use sweepx_platform::{
     BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
+    EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
+    OpenedDirectory, PresentRegularFileRead, RegularFileChangeStamp, RegularFileIdentityMismatch,
+    RegularFileMountMismatch, RegularFileObservation, RegularFileReadExpectation,
+    error_kind_for_io, fingerprint_for, known_count, known_u128, reason_for_io,
+};
+use sweepx_platform::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryHandleAdmission,
-    DirectoryReadLimits, EntryIdentity, EntryKind, EntryMetadata, ErrorRecord, FilesystemIdentity,
-    HardLinkKey, MountIdentity, OpenedDirectory, PlatformError, PlatformScanner,
-    PresentRegularFileRead, RegularFileChangeStamp, RegularFileIdentityMismatch,
-    RegularFileMountMismatch, RegularFileObservation, RegularFileReadExpectation, RootAdmission,
-    ScanRoot, WalkEntry, error_kind_for_io, fingerprint_for, known_count, known_u128,
-    reason_for_io,
+    DirectoryReadLimits, EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot,
+    WalkEntry,
 };
 
 // Native mutation remains a test-only qualification concern. In particular,
@@ -27,11 +42,26 @@ mod trash_qualification;
 #[derive(Debug, Default, Clone)]
 pub struct LinuxPlatformScanner;
 
+impl LinuxPlatformScanner {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Placeholder directory handle for hosts without the Linux backend.
+///
+/// It carries no descriptor because no traversal authority can exist here; every
+/// [`PlatformScanner`] method on a non-Linux host reports `Unsupported` instead.
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug)]
+pub struct LinuxUnavailableDirectory;
+
 /// An owned, scan-scoped capability for one admitted directory.
 ///
 /// The descriptor is intentionally not cloneable: the scanner frontier is the
 /// sole owner of traversal authority. `display_path` is reporting data only and
 /// is never used to reopen the directory.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct LinuxDirectoryHandle {
     fd: OwnedFd,
@@ -39,6 +69,7 @@ pub struct LinuxDirectoryHandle {
     cursor: DirectoryCursor,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 enum DirectoryCursor {
     NotStarted,
@@ -48,14 +79,17 @@ enum DirectoryCursor {
     },
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct DirectoryStream(*mut libc::DIR);
 
 // SAFETY: a stream lives in exactly one non-Clone directory handle. The handle
 // is movable between threads, but enumeration requires exclusive `&mut` access
 // and the DIR* is never used concurrently or exposed outside this module.
+#[cfg(target_os = "linux")]
 unsafe impl Send for DirectoryStream {}
 
+#[cfg(target_os = "linux")]
 impl Drop for DirectoryStream {
     fn drop(&mut self) {
         // SAFETY: the non-null stream was returned by `fdopendir` and ownership
@@ -66,12 +100,9 @@ impl Drop for DirectoryStream {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl LinuxPlatformScanner {
     const REGULAR_FILE_READ_CHUNK_BYTES: usize = 8192;
-
-    pub fn new() -> Self {
-        Self
-    }
 
     fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), PlatformError> {
         if cancel.is_cancelled() {
@@ -547,7 +578,7 @@ impl LinuxPlatformScanner {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn run_regular_file_read_test_hook(
         event: RegularFileReadTestHookEvent,
         cancel: &CancellationToken,
@@ -569,6 +600,7 @@ impl LinuxPlatformScanner {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl PlatformScanner for LinuxPlatformScanner {
     type DirectoryHandle = LinuxDirectoryHandle;
 
@@ -988,7 +1020,72 @@ impl PlatformScanner for LinuxPlatformScanner {
     }
 }
 
-#[cfg(test)]
+/// Reports the portable fail-closed contract on hosts without the Linux backend.
+///
+/// A missing backend must never degrade into pathname-based traversal, so every
+/// operation reports `Unsupported` rather than attempting a weaker scan.
+#[cfg(not(target_os = "linux"))]
+impl PlatformScanner for LinuxPlatformScanner {
+    type DirectoryHandle = LinuxUnavailableDirectory;
+
+    fn platform_name(&self) -> &'static str {
+        "linux"
+    }
+
+    fn admit_root(
+        &self,
+        _root: &ScanRoot,
+        _cancel: &CancellationToken,
+    ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Linux scanner backend is unavailable on this host".to_string(),
+        ))
+    }
+
+    fn enumerate_children(
+        &self,
+        _directory: &mut Self::DirectoryHandle,
+        _cancel: &CancellationToken,
+        _limits: DirectoryReadLimits,
+    ) -> Result<DirectoryEntryBatch, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Linux scanner backend is unavailable on this host".to_string(),
+        ))
+    }
+
+    fn inspect_child(
+        &self,
+        _parent: &Self::DirectoryHandle,
+        _child: &DirectoryEntryRecord,
+        _cancel: &CancellationToken,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Linux scanner backend is unavailable on this host".to_string(),
+        ))
+    }
+
+    fn inspect_child_with_directory_admission(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        _directory_admission: DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        self.inspect_child(parent, child, cancel)
+    }
+
+    fn is_same_mount(
+        &self,
+        _root: &EntryMetadata,
+        _entry: &EntryMetadata,
+    ) -> Result<bool, PlatformError> {
+        Err(PlatformError::Unsupported(
+            "Linux scanner backend is unavailable on this host".to_string(),
+        ))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegularFileReadTestHookEvent {
     AfterReadChunk,
@@ -996,26 +1093,26 @@ enum RegularFileReadTestHookEvent {
     AfterObservedAfter,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[derive(Debug)]
 enum RegularFileReadTestHookAction {
     Cancel,
     RewriteBytes { path: PathBuf, bytes: Vec<u8> },
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[derive(Debug)]
 struct RegularFileReadTestHook {
     event: RegularFileReadTestHookEvent,
     action: RegularFileReadTestHookAction,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 thread_local! {
     static REGULAR_FILE_READ_TEST_HOOK: RefCell<Option<RegularFileReadTestHook>> = const { RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::ffi::OsStr;
     use std::fs;

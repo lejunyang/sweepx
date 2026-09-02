@@ -1,19 +1,32 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use sweepx_audit::{
-    ActionId, AuditError, AuditStore, AuthorizationSource, BatchId, DigestString, IntentRequest,
-    IntentReservation, ItemId, Observation, PathHash, RegisterAuthorization, RequestedMode,
-    RiskTier as AuditRiskTier, SessionId, SimulatedOutcome,
+    ActionId, AuthorizationSource, BatchId, ItemId, RequestedMode, RiskTier as AuditRiskTier,
+    SessionId,
 };
-use sweepx_safety::simulation::{
-    DeterministicRevalidationObserver, SimulatedAuthorizationRequest,
-    issue_simulated_preflight_permit, verify_simulated_revalidation,
-};
+use sweepx_safety::simulation::SimulatedAuthorizationRequest;
 use sweepx_safety::{
     AuditBindingError, DeletionMode, DeletionPlan, DeletionPlanInput, ExecutionAuthorization,
-    ExplanationDigest, FixedClock, ManifestDigest, PlanAction, PlanId, PlanItemInput,
-    PreflightPermitError, RiskFactor, RiskTier, TargetIdentity, consume_preflight_permit,
+    ExplanationDigest, FixedClock, ManifestDigest, PlanAction, PlanId, PlanItemInput, RiskFactor,
+    RiskTier, TargetIdentity,
 };
+
+// The round-trip test below drives a real `AuditStore`; the two binding tests above do
+// not. Only the store-backed imports are gated so the binding tests keep running on
+// hosts where durable state is disabled.
+#[cfg(unix)]
+use sweepx_audit::{
+    AuditError, AuditStore, DigestString, IntentRequest, IntentReservation, Observation, PathHash,
+    RegisterAuthorization, SimulatedOutcome,
+};
+#[cfg(unix)]
+use sweepx_safety::simulation::{
+    DeterministicRevalidationObserver, issue_simulated_preflight_permit,
+    verify_simulated_revalidation,
+};
+#[cfg(unix)]
+use sweepx_safety::{PreflightPermitError, consume_preflight_permit};
+#[cfg(unix)]
 use tempfile::TempDir;
 
 const HOST_ID: &str = "host-p3-integration";
@@ -221,6 +234,12 @@ fn audit_binding_rejects_mismatched_principal_host_and_workflow() {
     ));
 }
 
+/// Requires durable audit state, which is disabled on non-Unix hosts by design.
+///
+/// The one-shot and duplicate guards this asserts are properties *of the durable
+/// record*, so there is nothing meaningful to assert without a store; the refusal
+/// itself is covered in `sweepx-audit` and `sweepx-safety::permit`.
+#[cfg(unix)]
 #[test]
 fn public_api_round_trip_enforces_one_shot_and_conflicting_duplicate_guards() {
     let plan = plan(vec![item(

@@ -1225,6 +1225,24 @@ mod tests {
         NativeName::unix(name.as_bytes().to_vec())
     }
 
+    /// Builds an absolute path that the host actually accepts as absolute.
+    ///
+    /// `ScanRoot` requires an absolute path, and absoluteness is platform-defined:
+    /// `/root` is absolute on Unix but *not* on Windows, where a path needs a volume
+    /// prefix. Tests that must construct a real `ScanRoot` therefore cannot hardcode a
+    /// Unix-shaped literal. Pure string-comparison tests below still use plain literals,
+    /// since those never go through absoluteness validation.
+    fn absolute_path(relative: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!("C:\\{relative}"))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(format!("/{relative}"))
+        }
+    }
+
     #[test]
     fn child_constructor_derives_path_from_parent_and_native_name() {
         let record =
@@ -1257,12 +1275,12 @@ mod tests {
 
     #[test]
     fn root_admission_validation_rejects_substituted_root_metadata() {
-        let requested = ScanRoot::new("/root").unwrap();
+        let requested = ScanRoot::new(absolute_path("root")).unwrap();
         let admission = RootAdmission {
             root: requested.clone(),
             root_locator: requested.native_absolute_path().unwrap(),
             metadata: EntryMetadata {
-                path: PathBuf::from("/outside"),
+                path: absolute_path("outside"),
                 file_name: native_name("outside"),
                 kind: EntryKind::Directory,
                 logical_bytes: known_u128(0),

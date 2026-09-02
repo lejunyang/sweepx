@@ -4623,25 +4623,48 @@ pub fn hash_native_path(path: &Path) -> Result<PathHash, AuditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
     use std::time::Duration;
 
     use tempfile::TempDir;
 
+    /// Asserts the documented fail-closed contract on hosts without durable state.
+    ///
+    /// Windows durable state is disabled by design, so opening a store must be
+    /// refused outright rather than degrading into a weaker audit trail. Asserting
+    /// it here keeps the store-backed suite honestly skipped instead of silently
+    /// absent, so a future accidental Windows implementation cannot pass unnoticed.
+    #[cfg(not(unix))]
+    #[test]
+    fn audit_store_is_refused_on_hosts_without_durable_state() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("audit");
+        fs::create_dir(&root).unwrap();
+
+        assert!(matches!(
+            AuditStore::open(&root),
+            Err(AuditError::UnsupportedPlatform)
+        ));
+        // A refused admission must not leave state behind. `LOCK_FILE` is Unix-gated,
+        // so the literal name is used here.
+        assert!(!root.join("audit.lock").exists());
+        assert!(!root.join(DATABASE_FILE).exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
     fn store() -> (TempDir, AuditStore) {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("audit");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        }
-        #[cfg(not(unix))]
-        fs::create_dir(&root).unwrap();
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let store = AuditStore::open(&root).unwrap();
         (temp, store)
     }
 
+    #[cfg(unix)]
     fn binding(index: u8, mode: RequestedMode) -> AuthorizationBinding {
         let item = ItemId::new(format!("item-{index:02}-sqlite")).unwrap();
         let action = ActionId::new(format!("action-{index:02}-sqlite")).unwrap();
@@ -4687,6 +4710,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn register(store: &AuditStore, binding: &AuthorizationBinding) {
         store
             .register_authorization(RegisterAuthorization {
@@ -4695,6 +4719,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn reserve(
         store: &AuditStore,
         claim: &ClaimedExecution,
@@ -4713,6 +4738,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn permanent_success() -> SimulatedOutcome {
         SimulatedOutcome {
             actual_platform_operation: "simulated_permanent_delete".to_string(),
@@ -4734,13 +4760,18 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct FixedObserver(RecoveryObservation);
+    #[cfg(unix)]
     impl RecoveryObserver for FixedObserver {
         fn observe(&self, _: &RecoveryIntentView) -> Result<RecoveryObservation, AuditError> {
             Ok(self.0.clone())
         }
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn sqlite_configuration_and_every_mutation_is_chained() {
         let (_temp, store) = store();
@@ -4786,6 +4817,9 @@ mod tests {
         );
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn claim_lock_lives_for_the_entire_session_and_recovery_fences_after_drop() {
         let (_temp, store) = store();
@@ -4806,6 +4840,9 @@ mod tests {
         assert!(recovery.fence_epoch() > fence);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn exact_pairing_and_duplicate_action_are_rejected() {
         let (_temp, store) = store();
@@ -4837,6 +4874,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn mismatched_token_and_contradictory_outcome_are_rejected() {
         let (_temp, store) = store();
@@ -4868,6 +4908,9 @@ mod tests {
         drop(second_claim);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn recovery_is_idempotent_and_reserved_or_indeterminate_blocks_consume() {
         let (_temp, store) = store();
@@ -4903,6 +4946,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn pending_recovery_requires_an_explicit_recovery_outcome_before_consume() {
         let (_temp, store) = store();
@@ -4960,6 +5006,9 @@ mod tests {
         store.consume_execution(&recovery).unwrap();
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_reports_terminal_state_without_reconciliation() {
         let (_temp, store) = store();
@@ -4994,6 +5043,9 @@ mod tests {
         );
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_distinguishes_pending_and_indeterminate() {
         let (_temp, store) = store();
@@ -5080,6 +5132,9 @@ mod tests {
         );
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_returns_explicit_corruption_error() {
         let (_temp, store) = store();
@@ -5098,6 +5153,9 @@ mod tests {
         assert!(matches!(error, ProjectionError::Corruption(_)));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_classifies_invalid_database_header_as_corruption() {
         let (_temp, store) = store();
@@ -5109,6 +5167,9 @@ mod tests {
         assert!(matches!(error, ProjectionError::Corruption(_)));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_uses_authorized_for_registered_only_actions() {
         let (_temp, store) = store();
@@ -5129,6 +5190,9 @@ mod tests {
         assert!(!action.needs_reconciliation);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_snapshot_indeterminate_dominates_pending_and_preserves_shared_item_authorizations()
      {
@@ -5216,6 +5280,9 @@ mod tests {
         assert!(second_auth.needs_reconciliation);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn projection_only_tamper_is_rejected_by_event_replay() {
         let (_temp, store) = store();
@@ -5231,6 +5298,9 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
     #[cfg(unix)]
     #[test]
     fn symlink_sidecar_is_rejected_before_connection_open() {
@@ -5252,6 +5322,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn token_requires_the_live_claim_and_current_reserved_fence() {
         let (_temp, store) = store();
@@ -5289,6 +5362,9 @@ mod tests {
         let _ = <ClaimedExecution as AmbiguousIfSync<_>>::marker;
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn token_is_spent_by_outcome_while_claim_stays_live() {
         let (_temp, store) = store();
@@ -5308,6 +5384,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn exact_reserved_intent_arms_and_disarms_without_exposing_the_raw_token() {
         let (_temp, store) = store();
@@ -5364,6 +5443,9 @@ mod tests {
         let _ = <ArmedDurableIntent<'static> as AmbiguousIfSerialize<_>>::marker;
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn arming_rejects_stale_and_mismatched_authority() {
         let (_temp, store) = store();
@@ -5409,6 +5491,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn spent_intent_cannot_be_armed() {
         let (_temp, store) = store();
@@ -5448,6 +5533,9 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn armed_intent_rejects_a_fork_without_touching_external_state() {
         use std::os::unix::process::ExitStatusExt;
@@ -5482,6 +5570,9 @@ mod tests {
         armed.validate_in_memory_current_process().unwrap();
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn cloned_store_cannot_claim_while_same_process_session_is_active() {
         let (_temp, store) = store();
@@ -5503,6 +5594,9 @@ mod tests {
         );
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn recovery_observer_allows_normal_lock_free_observation() {
         struct PassiveObserver;
@@ -5532,6 +5626,9 @@ mod tests {
         assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn recovery_observer_denies_same_store_reentry_without_deadlock() {
         struct ReentrantObserver<'a> {
@@ -5570,6 +5667,9 @@ mod tests {
         assert_eq!(records[0].disposition, RecoveryDisposition::Indeterminate);
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn recovery_observer_cannot_arm_a_native_intent() {
         struct ReentrantObserver<'a> {
@@ -5632,6 +5732,9 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn manually_unlocked_claim_cannot_validate_token() {
         let (_temp, store) = store();
@@ -5651,6 +5754,9 @@ mod tests {
         ));
     }
 
+    // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
+    // store-backed contract can only be observed on a Unix host.
+    #[cfg(unix)]
     #[test]
     fn event_tamper_and_sqlite_corruption_are_detected() {
         let (_temp, store) = store();

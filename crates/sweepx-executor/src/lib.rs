@@ -669,7 +669,10 @@ impl SimulatedExecutor {
         )
     }
 
-    #[cfg(test)]
+    // Only the Unix suite can reach this hook, because constructing an executor at all
+    // requires a durable audit store. Gating it on plain `cfg(test)` would make it dead
+    // code on Windows, and CI denies warnings.
+    #[cfg(all(test, unix))]
     fn with_test_components(
         adapter: impl SimulatedAdapter + 'static,
         clock: impl Clock + 'static,
@@ -1312,5 +1315,12 @@ fn requested_mode(mode: DeletionMode) -> RequestedMode {
     }
 }
 
-#[cfg(test)]
+// Every executor test drives a real `AuditStore`, because durable reservation is what
+// makes at-most-once submission observable. Hosts without durable state cannot build
+// that fixture at all, so the suite is Unix-only and `windows_tests` asserts the
+// fail-closed refusal instead of silently reporting nothing.
+#[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, not(unix)))]
+mod windows_tests;
