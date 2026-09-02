@@ -17,7 +17,7 @@ absolute roots
   -> optional in-process file-manager TUI
   -> Linux bounded SQLite journal + terminal snapshot (unless scan --no-state)
   -> macOS legacy terminal snapshot (unless scan --no-state)
-  -> Windows no durable state (state_dir defaults to None)
+  -> Windows durable state under %LOCALAPPDATA%\sweepx\state (private DACL enforced)
 
 bounded scan.result JSON
   -> imported provenance downgrade
