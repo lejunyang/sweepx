@@ -140,7 +140,7 @@ Cargo Cleaner 现在声明 `>=0.1.0, <0.2.0` 并与当前 Core 兼容；Chromium
 
 已经落地的只读边界与未来 mutation 设计共享以下原则，但只有经过实现和相应测试的部分才是当前能力：
 
-1. **普通用户、只读优先。** 当前扫描不请求 UAC、`sudo`、polkit 或其他提权，并保持 no-follow、边界可见和错误可见。
+1. **普通用户、只读优先。** 默认扫描不请求 UAC、`sudo`、polkit 或其他提权，并保持 no-follow、边界可见和错误可见。唯一例外是用户显式传入 `--elevate`：它在 Windows 上请求一次 UAC 同意并以提权身份重启进程，用于启用 NTFS 加速扫描路径；不传该参数时永远不会出现提权弹窗。提权只放宽只读加速能力，破坏性操作在提权会话下仍按设计硬拒绝。
 2. **观察不等于授权。** Candidate、Explanation、DeletionPlan、ExecutionAuthorization、PreflightPermit、平台结果与审计记录是不同对象。
 3. **不确定性不等于零。** `unknown`、`lower_bound`、`unsupported`、`not_checked` 和 `incomplete` 不能渲染成已知 `0` 或“安全”。
 4. **导入结果不可执行。** 缓存、历史报告、导入 JSON、文件名或年龄都不能成为 mutation authority。

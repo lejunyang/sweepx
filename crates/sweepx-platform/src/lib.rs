@@ -15,6 +15,14 @@ use sweepx_model::{
 };
 use thiserror::Error;
 
+pub mod privilege;
+
+pub use privilege::{
+    ElevatedRelaunch, ElevationPolicy, ElevationRefusal, PrivilegeLevel, PrivilegeObservation,
+    PrivilegeOrigin, PrivilegeProvider, StartupPrivilegeDecision, decide_startup_privilege,
+    resolve_privilege,
+};
+
 pub type ByteValue = EvidenceValue<DecimalU128>;
 
 #[derive(Debug, Clone, Default)]

@@ -27,6 +27,7 @@ Global options:
 | `--unit auto|b|kib|mib|gib|tib` | Human/TUI size unit; `kb/mb/gb/tb` are accepted aliases |
 | `--sort size|path` | Human/TUI ordering; size descending by default |
 | `--state-dir ABSOLUTE_DIR` | Select the SQLite journal directory on Linux or legacy snapshot directory on macOS; Windows durable state is disabled, `state_dir` defaults to `None`, and explicitly setting it fails closed |
+| `--elevate` | Windows-only in effect, off by default. If the current process is not elevated, request one UAC consent and relaunch itself elevated before doing anything else; the parent then returns the child's exit code unchanged. An already-elevated process never relaunches; a declined prompt or an unsupported platform continues at the current privilege level without changing scan results. The flag is not forwarded to the relaunched child, so a second elevation is structurally impossible |
 | `scan --no-state` | Skip Linux journal or macOS legacy-snapshot writes when later status/operation state is unnecessary or the state filesystem does not support the journal; conflicts with `--state-dir` |
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.

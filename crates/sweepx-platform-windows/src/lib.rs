@@ -5,6 +5,9 @@ use sweepx_platform::{
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
 
+mod privilege;
+pub use privilege::WindowsPrivilegeProvider;
+
 mod ntfs_acceleration;
 pub use ntfs_acceleration::{
     FILE_LAYOUT_PAGE_BYTES, FileLayoutDataStream, FileLayoutName, FileLayoutRecord,

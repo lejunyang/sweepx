@@ -34,6 +34,10 @@ use sweepx_i18n::detect_locale;
 use sweepx_model::{
     ByteValue, EvidenceValue, HumanSizeUnit, ObjectType, ReasonCode, ScanEntryId, ScanSort,
 };
+use sweepx_platform::{
+    ElevatedRelaunch, ElevationPolicy, PrivilegeProvider, StartupPrivilegeDecision,
+    decide_startup_privilege,
+};
 use sweepx_protocol::OutputEnvelope;
 use sweepx_tui::{BrowserExit, BrowserModel, run_live_browser_with_detail_rescan};
 
@@ -115,6 +119,14 @@ struct Cli {
     /// Sort human scan and TUI rows. Machine output keeps scanner order.
     #[arg(long, global = true, value_enum, default_value = "size")]
     sort: SortArg,
+    /// Re-run elevated to enable privileged read-only accelerators.
+    ///
+    /// Without this flag SweepX only *detects* privilege it was already started with and
+    /// never prompts. With it, and only when not already elevated, SweepX asks the OS to
+    /// start one elevated copy and adopts that copy's exit code. Declining leaves the
+    /// unprivileged scan running. Elevation never widens what deletion may touch.
+    #[arg(long, global = true)]
+    elevate: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -193,6 +205,26 @@ enum CacheCommands {
 
 fn main() -> ProcessExitCode {
     let cli = Cli::parse();
+
+    // Privilege is settled first, before locale parsing, before any state directory is
+    // resolved, and before any scan begins. On Windows elevation is only granted at
+    // process creation, so honoring `--elevate` means re-running as a second process;
+    // doing that after a state directory existed would leave one run's files owned by a
+    // different identity than the process that continues. If an elevated child ran, its
+    // exit code is the whole invocation's answer and this process must add nothing.
+    match startup_privilege(cli.elevate) {
+        StartupPrivilege::ElevatedChildCompleted { exit_code } => {
+            return ProcessExitCode::from(exit_code);
+        }
+        StartupPrivilege::Continue { notice } => {
+            // A declined or unavailable elevation is reportable, not fatal: the run
+            // continues on its unprivileged path.
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
+        }
+    }
+
     let explicit_locale = match cli.locale.as_deref() {
         Some(raw) => match parse_locale_override(raw) {
             Ok(locale) => Some(locale),
@@ -519,6 +551,94 @@ fn main() -> ProcessExitCode {
             eprintln!("{error}");
             ProcessExitCode::from(core_error_exit_code(&error) as u8)
         }
+    }
+}
+
+/// Long flag that opts in to elevation, and the one argument never forwarded to a child.
+const ELEVATE_FLAG: &str = "--elevate";
+
+/// Outcome of the startup privilege gate.
+enum StartupPrivilege {
+    /// This process performs the work. `notice` reports a failed opt-in, if any.
+    Continue { notice: Option<String> },
+    /// An elevated child already did the work; exit with its code and do nothing else.
+    ElevatedChildCompleted { exit_code: u8 },
+}
+
+/// Settles privilege for this invocation before any work begins.
+///
+/// Detection always runs and never prompts. A prompt is possible only when the user passed
+/// `--elevate` *and* this process is not already elevated, which is what keeps the default
+/// path incapable of raising a UAC dialog.
+fn startup_privilege(opted_in: bool) -> StartupPrivilege {
+    let policy = if opted_in {
+        ElevationPolicy::RequestWhenUserOptedIn
+    } else {
+        ElevationPolicy::DetectOnly
+    };
+    let Some(relaunch) = current_relaunch_request() else {
+        // Without a trustworthy image path there is nothing safe to relaunch, so the run
+        // continues unprivileged rather than guessing at what to start elevated.
+        return StartupPrivilege::Continue {
+            notice: opted_in.then(|| {
+                "could not determine this program's own path; continuing without elevation"
+                    .to_string()
+            }),
+        };
+    };
+
+    let provider = platform_privilege_provider();
+    match decide_startup_privilege(provider.as_ref(), policy, &relaunch) {
+        StartupPrivilegeDecision::ElevatedChildCompleted { exit_code } => {
+            StartupPrivilege::ElevatedChildCompleted { exit_code }
+        }
+        StartupPrivilegeDecision::Continue { refusal, .. } => StartupPrivilege::Continue {
+            notice: refusal.map(|refusal| format!("continuing without elevation: {refusal}")),
+        },
+    }
+}
+
+/// Builds the relaunch request for this process, dropping the opt-in flag.
+///
+/// Dropping `--elevate` is what bounds the recursion: a child that saw it again would run the
+/// same opt-in logic. It is already elevated by then, so detection would stop it, but removing
+/// the flag makes a second relaunch impossible by construction rather than relying on that one
+/// check.
+fn current_relaunch_request() -> Option<ElevatedRelaunch> {
+    let program = std::env::current_exe().ok()?;
+    if !program.is_absolute() {
+        return None;
+    }
+    let arguments = std::env::args_os()
+        .skip(1)
+        .filter(|argument| argument != ELEVATE_FLAG)
+        .collect();
+    Some(ElevatedRelaunch::new(program, arguments))
+}
+
+/// Selects the privilege backend for this host.
+///
+/// A host without a backend gets the fail-closed default: detection reports `Unknown`, which
+/// grants no accelerator and still refuses destructive mode.
+fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
+    #[cfg(windows)]
+    {
+        Box::new(sweepx_platform_windows::WindowsPrivilegeProvider::new())
+    }
+    #[cfg(not(windows))]
+    {
+        /// Placeholder until a Unix backend exists. Reports an unknown level rather than
+        /// claiming the process is unprivileged, so R-23's destructive refusal still applies.
+        struct UnknownPrivilege;
+        impl PrivilegeProvider for UnknownPrivilege {
+            fn provider_name(&self) -> &'static str {
+                "unimplemented"
+            }
+            fn observe(&self) -> sweepx_platform::PrivilegeObservation {
+                sweepx_platform::PrivilegeObservation::unknown()
+            }
+        }
+        Box::new(UnknownPrivilege)
     }
 }
 

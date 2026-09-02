@@ -22,12 +22,16 @@ serde_json = "1.0.145"
 sweepx-core = { version = "0.1.0", path = "../sweepx-core" }
 sweepx-i18n = { version = "0.1.0", path = "../sweepx-i18n" }
 sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
 sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
 sweepx-tui = { version = "0.1.0", path = "../sweepx-tui" }
 trash = { version = "5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+sweepx-platform-windows = { version = "0.1.0", path = "../sweepx-platform-windows" }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
