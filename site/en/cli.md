@@ -172,6 +172,49 @@ The TUI consumes the typed result of this live scan without an intermediate JSON
 
 See [MangoDisk adoption decisions](https://github.com/lejunyang/sweepx/blob/main/docs/research/mangodisk-adoption.md) for acceleration findings, rule provenance, the GPL boundary, and the Linux policy.
 
+## Windows scan acceleration and privilege
+
+Windows has an accelerated scan path built on native NTFS metadata. Every scan root is qualified read-only before traversal, and **a refusal never affects correctness**: the portable handle-relative traversal stays authoritative and its totals remain exact.
+
+Acceleration needs a `GENERIC_READ` volume handle. Measured on this host on 2026-09-02, against both `C:` and `E:`:
+
+| Requested access | Not elevated | Elevated |
+|---|---|---|
+| `0` / `FILE_READ_ATTRIBUTES` / `+SYNCHRONIZE` | handle opens, but both FSCTLs return `ERROR_INVALID_FUNCTION (1)` | **identical; still `1`** |
+| `GENERIC_READ` | open is refused with `ERROR_ACCESS_DENIED (5)` | open succeeds and `FSCTL_QUERY_USN_JOURNAL` works |
+
+The decisive point is that the lower access levels still report the control codes as absent **even when elevated**. That is not "insufficient rights" but "the function does not exist at that handle level", so there is no reduced-privilege access level to trade down to. Acceleration being unavailable without elevation is a platform property, not an implementation gap.
+
+A refusal appears as one `scan.progress` event carrying `accelerationRefusalReason` (a stable machine code, never localized) and `elevationMightHelp`. Its `coverageEffect` is `observed` rather than `incomplete`: declining an optimization loses no coverage, and an ordinary unelevated scan must not be reported as partial because of it. `elevationMightHelp` is `true` only when privilege is genuinely the cause, so the user is not sent to a UAC prompt that cannot fix the problem — elevation does not help when, for example, the volume is not NTFS.
+
+Pass `--elevate` to request acceleration explicitly; it asks for one UAC consent and relaunches the process elevated. Destructive operations remain hard-refused in an elevated session by design and are not relaxed just because privilege is higher.
+
+When acceleration does qualify, one bulk read of the volume's NTFS metadata produces a **preview** of each scan root, reported in the scan summary under `acceleration`:
+
+```json
+"acceleration": {
+  "used": true,
+  "preview": {
+    "entryCount": "37371",
+    "logicalBytes": "14812812602",
+    "elapsedMicros": "1058065",
+    "exact": true,
+    "authoritative": false
+  }
+}
+```
+
+A refusal is reported in the same place as `{"used": false, "reason": "not_elevated", "elevationMightHelp": true}`.
+
+Two properties of a preview matter:
+
+- `authoritative` is always `false`. Preview numbers come from a metadata snapshot and carry **no reopen recipe**, which is what a delete revalidates against. They exist so a large tree can show a total quickly; nothing may be removed on their strength, and the traversal's results supersede them.
+- `exact` is `false` when any record under the root could not be resolved. The size is then a lower bound and must never be displayed as precise.
+
+Measured on this host on 2026-09-02 against `E:\Projects\sweepx` (14.5 GB, 36,531 objects): the preview completed in **1.06 s** where the full authoritative scan took **133 s**, roughly **126x faster to a first answer**. The authoritative scan itself is not made faster — the preview is additive, and its whole-volume read is a fixed cost of about a second, so it only pays off on large trees.
+
+Preview output is verified against an ordinary directory walk, which reaches the filesystem through a completely different code path; the path set and the summed bytes must match exactly.
+
 ## Commands that do not exist today
 
 ```text

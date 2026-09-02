@@ -192,6 +192,7 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - Linux scanner 已实现为 development-grade/degraded，只能依据当前测试理解，不能据此宣称生产资格或完整文件系统覆盖。
 - macOS scanner 现为 handle-bound degraded live scanner，并通过统一 `sweepx scan` / `scan --tui` 接入；这不等于三平台扫描资格完成。
 - Windows scanner 现为 development-grade/degraded 的只读 handle-relative live scanner，并通过统一的 `scan` / `scan --tui` 接入；这不等于 Windows 或三平台扫描已取得发布资格。
+- Windows NTFS 加速扫描路径已接入为**预览数据源**：资格判定通过时，一次批量元数据读取即产出扫描根的条目数与容量预览（实测 14.5 GB / 36,531 个对象耗时 1.06 s，而完整权威扫描 133 s），但预览标记 `authoritative: false` 且不携带 reopen recipe，不能据以删除任何对象；可移植的 handle-relative 遍历始终权威，加速资格失败只作为观察事件出现，不影响总计精确性。预览输出与独立目录遍历交叉验证，要求路径集合与字节总和完全一致。实测显示 `FSCTL_QUERY_USN_JOURNAL` 需要提权下的 `GENERIC_READ` 卷句柄，低权限句柄即使提权也报告功能不存在，因此未提权时不启用加速是平台属性而非实现缺陷；详见 [原生扫描加速验收矩阵](docs/research/native-scan-qualification.md)。
 - P4 的 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图。
 - 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流；尚未实际发布稳定版本，也没有签名、SBOM、provenance 或稳定支持承诺。
 

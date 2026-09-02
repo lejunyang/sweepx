@@ -1,6 +1,11 @@
+mod acceleration;
 mod detail_rescan;
 mod locator_reader;
 
+pub use acceleration::{
+    AcceleratedPreview, AccelerationDecision, AccelerationRefusal, qualify_acceleration,
+    read_accelerated_preview,
+};
 pub use detail_rescan::{
     DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest,
     DetailRescanResult, DetailRescanner,
@@ -60,12 +65,57 @@ impl Default for ScannerOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressEvent {
-    RootAccepted { path: PathBuf },
-    EntryObserved { path: PathBuf, kind: ObjectType },
-    Boundary { path: PathBuf, kind: BoundaryKind },
-    Error { path: PathBuf, reason: ReasonCode },
-    Cancelled { path: PathBuf },
-    ResourceLimit { path: PathBuf },
+    RootAccepted {
+        path: PathBuf,
+    },
+    EntryObserved {
+        path: PathBuf,
+        kind: ObjectType,
+    },
+    Boundary {
+        path: PathBuf,
+        kind: BoundaryKind,
+    },
+    Error {
+        path: PathBuf,
+        reason: ReasonCode,
+    },
+    Cancelled {
+        path: PathBuf,
+    },
+    ResourceLimit {
+        path: PathBuf,
+    },
+    /// The accelerated scan path was not used for this root.
+    ///
+    /// Purely informational: the portable traversal produces complete, exact results, so this is
+    /// neither an error nor a boundary. It exists so a user can tell *why* a scan took the slow
+    /// path -- most often because the process is not elevated, which is the normal case.
+    ///
+    /// `reason` is a stable machine code from [`AccelerationRefusal::code`] and must not be
+    /// localized. `elevation_might_help` is carried separately so a caller can decide whether
+    /// mentioning `--elevate` is honest, without re-deriving that from the code string.
+    AccelerationUnavailable {
+        path: PathBuf,
+        reason: &'static str,
+        elevation_might_help: bool,
+    },
+    /// A fast, non-authoritative preview of a root read from NTFS metadata.
+    ///
+    /// Emitted before the traversal so a caller can show a provisional total in about a second
+    /// on a tree that takes minutes to walk. It carries **no execution authority**: there is no
+    /// reopen recipe behind these numbers, so nothing may be deleted on the strength of a
+    /// preview, and a caller must replace them with the traversal's results when those arrive.
+    ///
+    /// `complete` is false when some records under the root could not be resolved, in which case
+    /// `logical_bytes` is a lower bound and must never be rendered as an exact size.
+    AcceleratedPreview {
+        path: PathBuf,
+        entry_count: u64,
+        logical_bytes: u128,
+        complete: bool,
+        elapsed_micros: u128,
+    },
     Finished,
 }
 
@@ -268,10 +318,13 @@ impl ScanSink for CollectingScanSink {
                 | ProgressEvent::Error { path, .. }
                 | ProgressEvent::Cancelled { path }
                 | ProgressEvent::ResourceLimit { path }
+                | ProgressEvent::AccelerationUnavailable { path, .. }
+                | ProgressEvent::AcceleratedPreview { path, .. }
                 | ProgressEvent::EntryObserved { path, .. } => path.as_path(),
                 ProgressEvent::Finished => root,
             };
-            self.mark_overflow(root, overflow_path, "retained progress cap exceeded");
+            // Progress events are an observation log, not an input to any total.
+            self.mark_detail_overflow(root, overflow_path, "retained progress cap exceeded");
             return Ok(());
         }
         self.summary.progress.push(event);
@@ -849,6 +902,52 @@ where
         } = admission;
         let root_path = root.path().to_path_buf();
         let initial_aggregate_count = sink.retained_aggregate_count();
+
+        // Qualify the accelerated path before traversing.
+        //
+        // When it qualifies, a bulk NTFS read produces a *preview* of the root: totals in about a
+        // second where the handle-relative walk needs minutes. The walk still runs and still
+        // produces every authoritative record, because only a live handle yields the reopen
+        // recipe that a delete is allowed to act on. The preview is emitted first so a caller can
+        // show a provisional size immediately and replace it when the walk finishes.
+        let acceleration = qualify_acceleration(&root_path, cancel);
+        if let Some(refusal) = acceleration.refusal() {
+            // Reported as progress, not a boundary. A boundary means filesystem coverage was lost;
+            // declining an optimization loses nothing, and recording it as a boundary would make
+            // every ordinary unelevated scan look partial.
+            sink.push_progress(
+                &root_path,
+                ProgressEvent::AccelerationUnavailable {
+                    path: root_path.clone(),
+                    reason: refusal.code(),
+                    elevation_might_help: refusal.elevation_might_help(),
+                },
+            )?;
+        } else {
+            match read_accelerated_preview(&root_path, cancel) {
+                Ok(preview) => sink.push_progress(
+                    &root_path,
+                    ProgressEvent::AcceleratedPreview {
+                        path: root_path.clone(),
+                        entry_count: preview.entry_count,
+                        logical_bytes: preview.logical_bytes,
+                        complete: preview.complete,
+                        elapsed_micros: preview.elapsed.as_micros(),
+                    },
+                )?,
+                // A preview failure is never fatal: the authoritative walk below is unaffected,
+                // so this degrades to exactly the unaccelerated experience.
+                Err(refusal) => sink.push_progress(
+                    &root_path,
+                    ProgressEvent::AccelerationUnavailable {
+                        path: root_path.clone(),
+                        reason: refusal.code(),
+                        elevation_might_help: refusal.elevation_might_help(),
+                    },
+                )?,
+            }
+        }
+
         let mut frontier = VecDeque::from([FrontierDirectory {
             path: root_metadata.path.clone(),
             handle: directory,

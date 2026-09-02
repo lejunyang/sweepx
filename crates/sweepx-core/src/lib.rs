@@ -1547,6 +1547,7 @@ fn scan_with_store_options<S: SnapshotStore>(
             "errorCount": DecimalU128::new(scan_error_count(&summary)),
             "platform": host_scan_platform(),
             "mode": "read_only",
+            "acceleration": acceleration_summary(&summary),
             "cachePreview": camelize_json_keys(serde_json::to_value(&cache_metadata).expect("cache preview metadata serializable"))
         });
         output.data = camelize_json_keys(json!({
@@ -4310,6 +4311,54 @@ fn eval_state_label(state: sweepx_cleaner_vm::EvalState) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Summarizes what the accelerated Windows path did for this scan.
+///
+/// Surfaced in the scan summary because `--format ndjson` is disabled for `scan`, so the progress
+/// stream is not observable to users; without this, whether acceleration ran would be invisible.
+///
+/// The preview numbers are reported under `preview` and marked `authoritative: false`. They are a
+/// fast provisional read of NTFS metadata with **no reopen recipe** behind them, so they may be
+/// displayed while a scan is in flight but must never be used to justify deleting anything, and
+/// `exact` is false when records were unresolved, making the size a lower bound.
+fn acceleration_summary(summary: &ScanSummary) -> serde_json::Value {
+    for progress in &summary.progress {
+        match progress {
+            ProgressEvent::AcceleratedPreview {
+                entry_count,
+                logical_bytes,
+                complete,
+                elapsed_micros,
+                ..
+            } => {
+                return json!({
+                    "used": true,
+                    "preview": {
+                        "entryCount": DecimalU128::new(u128::from(*entry_count)),
+                        "logicalBytes": DecimalU128::new(*logical_bytes),
+                        "elapsedMicros": DecimalU128::new(*elapsed_micros),
+                        "exact": complete,
+                        "authoritative": false,
+                    }
+                });
+            }
+            ProgressEvent::AccelerationUnavailable {
+                reason,
+                elevation_might_help,
+                ..
+            } => {
+                return json!({
+                    "used": false,
+                    "reason": reason,
+                    "elevationMightHelp": elevation_might_help,
+                });
+            }
+            _ => {}
+        }
+    }
+    json!({ "used": false, "reason": "not_attempted", "elevationMightHelp": false })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_scan_events(
     stream_id: &str,
     operation_id: &OperationId,
@@ -4386,6 +4435,46 @@ fn build_scan_events(
                         "displayPath": path.display().to_string(),
                         "boundaryKind": "resource_limit",
                         "coverageEffect": "incomplete"
+                    }),
+                ),
+                // Declining an optimization is an observation, not lost coverage. It is
+                // deliberately reported with `coverageEffect: "observed"`: the portable
+                // traversal still produces exact totals, and marking it "incomplete" like the
+                // arms above would make every ordinary unelevated scan look partial.
+                ProgressEvent::AccelerationUnavailable {
+                    path,
+                    reason,
+                    elevation_might_help,
+                } => (
+                    EventType::ScanProgress,
+                    json!({
+                        "displayPath": path.display().to_string(),
+                        "accelerationRefusalReason": reason,
+                        "elevationMightHelp": elevation_might_help,
+                        "coverageEffect": "observed"
+                    }),
+                ),
+                // A preview is a provisional observation, never a coverage claim. It is reported
+                // with `coverageEffect: "observed"` and an explicit `authoritative: false` so a
+                // consumer cannot mistake these numbers for the traversal's results: there is no
+                // reopen recipe behind them, so they may be displayed but never acted on.
+                // `exact` is false when records were unresolved, marking the size a lower bound.
+                ProgressEvent::AcceleratedPreview {
+                    path,
+                    entry_count,
+                    logical_bytes,
+                    complete,
+                    elapsed_micros,
+                } => (
+                    EventType::ScanProgress,
+                    json!({
+                        "displayPath": path.display().to_string(),
+                        "previewEntryCount": DecimalU128::new(u128::from(*entry_count)),
+                        "previewLogicalBytes": DecimalU128::new(*logical_bytes),
+                        "previewElapsedMicros": DecimalU128::new(*elapsed_micros),
+                        "authoritative": false,
+                        "exact": complete,
+                        "coverageEffect": "observed"
                     }),
                 ),
                 ProgressEvent::Finished => (
@@ -6052,6 +6141,71 @@ fn sync_directory(path: &Path) -> Result<(), StateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview must never be presented as authoritative or, when partial, as exact.
+    ///
+    /// This is the field a UI reads to decide whether it may show a number as final, so the
+    /// contract is pinned here rather than left to the caller's judgement.
+    #[test]
+    fn an_accelerated_preview_is_reported_as_non_authoritative() {
+        let mut summary = ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: vec![ProgressEvent::AcceleratedPreview {
+                path: PathBuf::from("E:\\tree"),
+                entry_count: 37_371,
+                logical_bytes: 14_812_812_602,
+                complete: true,
+                elapsed_micros: 1_058_065,
+            }],
+        };
+        let value = acceleration_summary(&summary);
+        assert_eq!(value["used"], serde_json::json!(true));
+        assert_eq!(
+            value["preview"]["authoritative"],
+            serde_json::json!(false),
+            "preview numbers have no reopen recipe behind them and must not claim authority"
+        );
+        assert_eq!(value["preview"]["exact"], serde_json::json!(true));
+        assert_eq!(value["preview"]["entryCount"], serde_json::json!("37371"));
+
+        // An incomplete snapshot must degrade `exact`, since its size is only a lower bound.
+        summary.progress = vec![ProgressEvent::AcceleratedPreview {
+            path: PathBuf::from("E:\\tree"),
+            entry_count: 10,
+            logical_bytes: 20,
+            complete: false,
+            elapsed_micros: 1,
+        }];
+        assert_eq!(
+            acceleration_summary(&summary)["preview"]["exact"],
+            serde_json::json!(false),
+            "an unresolved record makes the total a lower bound, not an exact size"
+        );
+    }
+
+    /// Declining acceleration must say so, and must only suggest elevation when it would help.
+    #[test]
+    fn a_declined_acceleration_reports_its_reason() {
+        let summary = ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: vec![ProgressEvent::AccelerationUnavailable {
+                path: PathBuf::from("E:\\tree"),
+                reason: "not_elevated",
+                elevation_might_help: true,
+            }],
+        };
+        let value = acceleration_summary(&summary);
+        assert_eq!(value["used"], serde_json::json!(false));
+        assert_eq!(value["reason"], serde_json::json!("not_elevated"));
+        assert_eq!(value["elevationMightHelp"], serde_json::json!(true));
+    }
+
     #[cfg(unix)]
     use std::io::{Seek, SeekFrom};
 
