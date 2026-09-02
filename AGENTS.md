@@ -4,7 +4,6 @@
 
 - Prefer one user-visible vertical slice over many narrow internal milestones.
 - During implementation, run focused crate tests. Run broad matrices once at the delivery boundary.
-- Do not use sub-agents unless the user explicitly requests delegation.
 
 ## Comments and documentation
 
