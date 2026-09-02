@@ -8,6 +8,45 @@ use sweepx_platform::{
 mod privilege;
 pub use privilege::WindowsPrivilegeProvider;
 
+// Verification of accelerated records is Windows-only but privilege-free, so it is compiled
+// wherever this crate is compiled rather than gated behind the acceleration feature: the
+// scanner needs it to be able to reject an unverified record even when the reader is disabled.
+#[cfg(windows)]
+mod accelerated_verification;
+#[cfg(windows)]
+pub use accelerated_verification::{
+    AcceleratedClaim, VerificationRefusal, VerifiedRecord, agrees_with_traversal,
+    verify_accelerated_record,
+};
+
+// Path reconstruction is pure logic over parsed records, so it compiles and tests everywhere
+// even though only an elevated read can supply real input.
+mod path_reconstruction;
+pub use path_reconstruction::{MAX_ANCESTOR_DEPTH, ReconstructionRefusal, RecordIndex};
+
+// The accelerated scan source is Windows-only logic over parsed records. Selection and path
+// rebuilding are pure, so they are tested without a volume handle; only the records must come
+// from a privileged read.
+#[cfg(windows)]
+mod accelerated_source;
+#[cfg(windows)]
+pub use accelerated_source::{
+    AcceleratedEntry, AcceleratedSubtree, MAX_SOURCE_RECORDS, SourceRefusal, root_file_reference,
+    select_subtree,
+};
+
+/// Reads every NTFS layout record for the volume containing `root`.
+///
+/// Requires elevation. Exposed so the scanner can build a fast preview without duplicating the
+/// paging and bound logic that the qualification probe already validates.
+#[cfg(windows)]
+pub fn read_volume_layout_records(
+    root: &std::path::Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<ntfs_acceleration::FileLayoutRecord>, u32> {
+    ntfs_acceleration::native::read_all_layout_records(root, cancelled)
+}
+
 mod ntfs_acceleration;
 pub use ntfs_acceleration::{
     FILE_LAYOUT_PAGE_BYTES, FileLayoutDataStream, FileLayoutName, FileLayoutRecord,
