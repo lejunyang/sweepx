@@ -938,10 +938,23 @@ pub struct ScanResourceLimits {
     pub max_directory_batch_entries: usize,
     /// Maximum estimated child-record bytes requested from a backend in one batch.
     pub max_directory_batch_bytes: usize,
+    /// Maximum concurrently retained directory handles plus reserved child-handle permits.
+    ///
+    /// This bounds *live operating-system handles*, not retained results. Because the
+    /// traversal is depth-first, the pool is spent descending one path at a time rather
+    /// than being divided across a whole level, so a directory with a very wide fan-out
+    /// no longer exhausts it. Raising this value increases peak handle usage; it does not
+    /// increase how many results are kept, which `max_retained_*` governs separately.
     pub max_frontier_entries: usize,
     pub max_visited_entries: usize,
     /// Maximum in-memory directory aggregation states, including the root.
     pub max_retained_aggregates: usize,
+    /// Maximum individual entry rows retained in a scan result.
+    ///
+    /// Distinct from [`Self::max_retained_aggregates`]: per-entry rows are detail, while
+    /// aggregates are what totals are computed from. Reaching this cap therefore must not be
+    /// reported as incomplete *coverage* -- the directory was fully walked and its aggregate
+    /// is exact; only the per-file listing was truncated.
     pub max_retained_entries: usize,
     pub max_retained_boundaries: usize,
     pub max_progress_events: usize,
@@ -954,7 +967,14 @@ impl Default for ScanResourceLimits {
             max_directory_bytes: 16 * 1024 * 1024,
             max_directory_batch_entries: 4096,
             max_directory_batch_bytes: 1024 * 1024,
-            max_frontier_entries: 4096,
+            // Raised from 4096 alongside the move to depth-first traversal. The old value
+            // was reached by real caches -- npm's `_cacache` holds 24453 directories with a
+            // 256-way fan-out -- which forced `partial` results and lower-bound totals.
+            // Depth-first traversal is the actual fix, because it makes peak usage scale
+            // with tree *depth*; this larger pool additionally leaves room for the wide
+            // sibling sets encountered on the way down. It stays well inside a normal
+            // process handle budget.
+            max_frontier_entries: 32_768,
             max_visited_entries: 131_072,
             max_retained_aggregates: 131_072,
             max_retained_entries: 16_384,

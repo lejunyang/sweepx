@@ -97,7 +97,22 @@ pub trait ScanSink {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError>;
 
+    /// Number of times evidence was lost because a retention cap was reached.
+    ///
+    /// "Evidence" means data a total or a coverage claim is computed from: aggregates and
+    /// boundary records. Losing one of those makes the affected results genuinely incomplete.
     fn overflow_count(&self) -> usize {
+        0
+    }
+
+    /// Number of times *detail* was truncated because a retention cap was reached.
+    ///
+    /// Detail means per-entry rows and progress events. These are dropped after their bytes
+    /// have already been folded into the directory aggregate, so truncating them does not make
+    /// a total wrong -- it only makes the listing partial. Kept separate from
+    /// [`Self::overflow_count`] so a large scan is not reported as having inexact totals
+    /// merely because it produced more rows than the result buffer holds.
+    fn detail_overflow_count(&self) -> usize {
         0
     }
 
@@ -114,6 +129,8 @@ struct CollectingScanSink {
     limits: ScanResourceLimits,
     overflowed_roots: BTreeSet<PathBuf>,
     overflow_count: usize,
+    detail_overflowed_roots: BTreeSet<PathBuf>,
+    detail_overflow_count: usize,
 }
 
 impl CollectingScanSink {
@@ -129,6 +146,8 @@ impl CollectingScanSink {
             limits,
             overflowed_roots: BTreeSet::new(),
             overflow_count: 0,
+            detail_overflowed_roots: BTreeSet::new(),
+            detail_overflow_count: 0,
         }
     }
 
@@ -136,9 +155,35 @@ impl CollectingScanSink {
         self.summary
     }
 
+    /// Records loss of evidence a total or coverage claim depends on.
+    ///
+    /// Callers must use this only when the dropped record would have changed a total or a
+    /// boundary claim; truncated detail belongs in [`Self::mark_detail_overflow`], because
+    /// this one causes every open aggregate to be reported as a lower bound.
     fn mark_overflow(&mut self, root: &Path, path: &Path, detail: &str) {
         if self.overflowed_roots.insert(root.to_path_buf()) {
             self.overflow_count += 1;
+            self.push_boundary_marker(BoundaryRecord {
+                path: path.to_path_buf(),
+                kind: BoundaryKind::ResourceLimit,
+                reason: ReasonCode::ResourceLimit,
+                detail: detail.to_string(),
+            });
+            self.push_progress_marker(ProgressEvent::ResourceLimit {
+                path: path.to_path_buf(),
+            });
+        }
+    }
+
+    /// Records truncation of per-entry or progress detail.
+    ///
+    /// Still surfaced as a boundary so the truncation is visible and the caller can report the
+    /// listing as partial -- silence would let a truncated listing look complete. It
+    /// deliberately does not touch aggregate coverage: the bytes were already accumulated
+    /// before the row was dropped, so the totals remain exact.
+    fn mark_detail_overflow(&mut self, root: &Path, path: &Path, detail: &str) {
+        if self.detail_overflowed_roots.insert(root.to_path_buf()) {
+            self.detail_overflow_count += 1;
             self.push_boundary_marker(BoundaryRecord {
                 path: path.to_path_buf(),
                 kind: BoundaryKind::ResourceLimit,
@@ -191,7 +236,9 @@ impl ScanSink for CollectingScanSink {
 
     fn push_entry(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError> {
         if self.summary.entries.len() >= self.limits.max_retained_entries {
-            self.mark_overflow(
+            // Detail truncation: this entry's bytes were already folded into its directory
+            // aggregate by the traversal, so the totals stay exact and only the row is lost.
+            self.mark_detail_overflow(
                 root,
                 Path::new(&entry.display_path),
                 "retained entry cap exceeded",
@@ -204,6 +251,8 @@ impl ScanSink for CollectingScanSink {
 
     fn push_boundary(&mut self, root: &Path, boundary: BoundaryRecord) -> Result<(), ScanError> {
         if self.summary.boundaries.len() >= self.limits.max_retained_boundaries {
+            // Losing a boundary record loses the evidence that something was skipped, so the
+            // affected totals must be reported as lower bounds rather than exact.
             self.mark_overflow(root, &boundary.path, "retained boundary cap exceeded");
             return Ok(());
         }
@@ -250,6 +299,10 @@ impl ScanSink for CollectingScanSink {
         self.overflow_count
     }
 
+    fn detail_overflow_count(&self) -> usize {
+        self.detail_overflow_count
+    }
+
     fn retained_aggregate_count(&self) -> usize {
         self.summary.aggregates.len()
     }
@@ -270,9 +323,34 @@ struct FrontierDirectory<D> {
     started: bool,
     consumed_entries: usize,
     consumed_bytes: usize,
+    /// Children that were enumerated but not yet inspected, because the handle permits for
+    /// this pass ran out.
+    ///
+    /// Deferring instead of refusing is what keeps a wide directory's totals exact. A
+    /// directory can have far more children than the whole permit pool -- npm's
+    /// `content-v2/sha512` has 256 -- and refusing the remainder turned every ancestor
+    /// aggregate into a lower bound. These records were already produced by an enumeration of
+    /// this exact handle, so re-inspecting them later needs no re-enumeration and no
+    /// pathname reopen; the handle stays alive because the directory is returned to the
+    /// frontier while this list is non-empty.
+    ///
+    /// Bounded by one enumeration batch, so retained memory stays proportional to
+    /// `max_directory_batch_entries` times the number of open directories.
+    pending_children: Vec<sweepx_platform::DirectoryEntryRecord>,
 }
 
 const MAX_SCANNER_WORKERS: usize = 32;
+/// How many directories one scheduling round may expand at once.
+///
+/// The traversal is depth-first, so a round takes the most recently discovered
+/// directories. Capping the round bounds how far the frontier can grow in one step: the
+/// live handle set stays proportional to the tree's *depth* rather than its *breadth*.
+///
+/// This is a constant rather than the configured worker count on purpose. Permits are
+/// divided across the round, so deriving the round size from worker count would make
+/// *which* entries get admitted depend on how many threads the caller asked for. Worker
+/// count may change throughput; it must never change results.
+const DEPTH_FIRST_ROUND_DIRECTORIES: usize = MAX_SCANNER_WORKERS;
 /// Highest ordinal reserved for the ordinary breadth-first scan. Detail rescans allocate only
 /// above this value so retained and refreshed rows cannot collide within one scan id.
 pub const ORDINARY_SCAN_MAX_ORDINAL: u128 = u128::MAX / 2;
@@ -356,7 +434,19 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         max_batch_entries: limits.max_directory_batch_entries.min(remaining_entries),
         max_batch_bytes: limits.max_directory_batch_bytes.min(remaining_bytes),
     };
-    let batch =
+
+    // Children left over from an earlier pass are inspected before any new enumeration, so a
+    // wide directory drains its backlog rather than reading further ahead and growing it.
+    // `replaying_backlog` is recorded here rather than inferred from the batch afterwards: a
+    // freshly enumerated mid-stream batch is indistinguishable from a replayed one by shape
+    // alone, and mistaking one for the other would corrupt the cumulative entry accounting.
+    let replaying_backlog = !current.pending_children.is_empty();
+    let batch = if replaying_backlog {
+        // The cursor is still mid-stream, so `continued` keeps the continuation slot reserved
+        // and the handle owned.
+        let backlog = std::mem::take(&mut current.pending_children);
+        sweepx_platform::DirectoryEntryBatch::continued(backlog)
+    } else {
         match platform.enumerate_children(&mut current.handle, cancel, requested_batch_limits) {
             Ok(batch) => batch,
             Err(PlatformError::Cancelled) => {
@@ -387,7 +477,8 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
                     outcome: DirectoryTaskOutcome::Fatal(error),
                 };
             }
-        };
+        }
+    };
     if batch.entries.is_empty() && !batch.end_of_directory {
         return DirectoryTaskResult {
             ticket,
@@ -416,33 +507,37 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             }),
         };
     }
-    current.consumed_entries = match current.consumed_entries.checked_add(batch_entries) {
-        Some(value) => value,
-        None => {
-            return DirectoryTaskResult {
-                ticket,
-                child_directory_permits,
-                outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
-                    "directory entry accounting overflow".to_string(),
-                )),
-            };
-        }
-    };
-    current.consumed_bytes = match current
-        .consumed_bytes
-        .checked_add(batch_bytes.expect("batch byte accounting checked above"))
-    {
-        Some(value) => value,
-        None => {
-            return DirectoryTaskResult {
-                ticket,
-                child_directory_permits,
-                outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
-                    "directory byte accounting overflow".to_string(),
-                )),
-            };
-        }
-    };
+    // Replayed records were already counted when first enumerated; counting them again would
+    // drive the per-directory cumulative limit toward a false positive.
+    if !replaying_backlog {
+        current.consumed_entries = match current.consumed_entries.checked_add(batch_entries) {
+            Some(value) => value,
+            None => {
+                return DirectoryTaskResult {
+                    ticket,
+                    child_directory_permits,
+                    outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
+                        "directory entry accounting overflow".to_string(),
+                    )),
+                };
+            }
+        };
+        current.consumed_bytes = match current
+            .consumed_bytes
+            .checked_add(batch_bytes.expect("batch byte accounting checked above"))
+        {
+            Some(value) => value,
+            None => {
+                return DirectoryTaskResult {
+                    ticket,
+                    child_directory_permits,
+                    outcome: DirectoryTaskOutcome::Fatal(PlatformError::ResourceLimit(
+                        "directory byte accounting overflow".to_string(),
+                    )),
+                };
+            }
+        };
+    }
     current.started = true;
     let end_of_directory = batch.end_of_directory;
     let directory_limit_blocks_continuation = !end_of_directory
@@ -451,12 +546,29 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     let mut inspected = Vec::with_capacity(batch_entries);
     let mut terminal = None;
     let mut opened_child_permits = 0usize;
-    for directory_entry in batch.entries {
+    let mut deferred = Vec::new();
+    // Deferring is only safe while this pass can still make progress. A directory granted at
+    // least one permit inspects at least one child per pass, so its backlog strictly shrinks
+    // and the traversal terminates. A directory granted zero permits would defer its entire
+    // batch unchanged and be rescheduled forever, so it must fall back to refusing its child
+    // directories -- reporting the boundary honestly rather than hanging.
+    let may_defer = child_directory_permits > 0;
+    for (index, directory_entry) in batch.entries.into_iter().enumerate() {
         if cancel.is_cancelled() {
             terminal = Some(InspectionTerminal::Cancelled {
                 path: directory_entry.path,
             });
             break;
+        }
+        let permit_available = opened_child_permits < child_directory_permits;
+        // Once the permits are spent, keep the rest for a later pass instead of refusing them.
+        // A record cannot be classified as file-or-directory without inspecting it, so
+        // refusing here would discard a real subtree and turn every ancestor total into a
+        // lower bound; deferring keeps both the handle budget and the totals intact.
+        if !permit_available && may_defer {
+            deferred.reserve(batch_entries - index);
+            deferred.push(directory_entry);
+            continue;
         }
         match inspect_directory_entry(
             platform,
@@ -464,7 +576,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             &path,
             &directory_entry,
             cancel,
-            opened_child_permits < child_directory_permits,
+            permit_available,
         ) {
             Ok(WalkEntry::Directory(opened)) => {
                 opened_child_permits += 1;
@@ -483,6 +595,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             }
         }
     }
+    current.pending_children = deferred;
 
     DirectoryTaskResult {
         ticket,
@@ -745,6 +858,7 @@ where
             started: false,
             consumed_entries: 0,
             consumed_bytes: 0,
+            pending_children: Vec::new(),
         }]);
         let mut active_frontier_entries = 1usize;
         let mut visited_directories = 0usize;
@@ -833,17 +947,40 @@ where
                         && scheduled.is_empty()
                         && !frontier.is_empty()
                     {
-                        let directory_count = frontier.len();
+                        // Depth-first, with a reserve kept back for descending.
+                        //
+                        // A breadth-first round expanded *every* directory at the current level
+                        // and split the whole permit pool across them, so a wide directory
+                        // (npm's `content-v2/sha512` has 256 subdirectories, 24453 in total)
+                        // exhausted the pool at that level. Every unadmitted child became a
+                        // `frontier limit exceeded` boundary, which makes the *aggregates*
+                        // incomplete -- the totals users read became lower bounds, and no amount
+                        // of result-side merging can recover a subtree that was never walked.
+                        //
+                        // Two rules make that bounded rather than lossy. First, the newest
+                        // directories are expanded first, so permits are spent descending.
+                        // Second, only part of the free pool is granted; the reserve is what
+                        // lets the next level down open a handle, so peak usage tracks the
+                        // tree's *depth* instead of its widest level.
                         let available = self
                             .options
                             .resource_limits
                             .max_frontier_entries
                             .saturating_sub(active_frontier_entries);
-                        let quotient = available / directory_count;
-                        let remainder = available % directory_count;
+                        let grantable = available - available / 2;
+                        // Deriving the round size from what can actually be granted keeps every
+                        // scheduled directory at one permit or more. A directory granted zero
+                        // must fall back to refusing its child directories, so handing out
+                        // zeroes here would reintroduce the very boundaries this avoids.
+                        let directory_count = frontier
+                            .len()
+                            .min(DEPTH_FIRST_ROUND_DIRECTORIES)
+                            .min(grantable.max(1));
+                        let quotient = grantable / directory_count;
+                        let remainder = grantable % directory_count;
                         for index in 0..directory_count {
                             let current = frontier
-                                .pop_front()
+                                .pop_back()
                                 .expect("frontier round length was captured");
                             let child_directory_permits = quotient
                                 .saturating_add(usize::from(index < remainder))
@@ -1035,8 +1172,13 @@ where
                         }
                     };
                     let path = current.path.clone();
-                    let continuation_reserved =
-                        !end_of_directory && !directory_limit_blocks_continuation;
+                    // A directory stays owned while it still has unconsumed stream *or* an
+                    // uninspected backlog. Dropping it with a non-empty backlog would silently
+                    // discard children that were already enumerated, which is exactly the
+                    // lower-bound outcome this scheduling is meant to prevent.
+                    let continuation_reserved = (!end_of_directory
+                        || !current.pending_children.is_empty())
+                        && !directory_limit_blocks_continuation;
                     if continuation_reserved {
                         // Keep the continuation slot reserved while this stable ticket commits,
                         // exactly as in the single-worker traversal.
@@ -1184,6 +1326,7 @@ where
                                     started: false,
                                     consumed_entries: 0,
                                     consumed_bytes: 0,
+                                    pending_children: Vec::new(),
                                 });
                                 active_frontier_entries += 1;
                             }
@@ -1392,6 +1535,17 @@ where
             traversal
         })?;
 
+        // Only lost *evidence* invalidates the totals. A dropped aggregate or boundary means a
+        // subtree's contribution is unaccounted for, so every still-open directory must be
+        // reported as a lower bound.
+        //
+        // Truncated detail is deliberately not escalated here. `propagate_file_entry` folds an
+        // entry's bytes into its ancestors' aggregates before the row reaches the sink, so a row
+        // dropped by the retention cap has already been counted. Escalating it would have
+        // reported exact totals as incomplete -- observed on a wide tree where all 12001
+        // aggregates were flagged `resource_limit` purely because the scan produced more rows
+        // than the result buffer holds. The truncation is still visible as a boundary record, so
+        // the *listing* is honestly reported as partial while the *totals* stay exact.
         if sink.overflow_count() > overflow_count_before {
             mark_all_open_incomplete(&mut directory_states, ReasonCode::ResourceLimit);
         }
@@ -1918,6 +2072,24 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// Builds a synthetic absolute path that the host accepts as absolute.
+    ///
+    /// These scanner tests drive a fake backend, so the paths never touch a real
+    /// filesystem, but `ScanRoot` still validates absoluteness -- and that is
+    /// platform-defined. `/root` is absolute on Unix yet relative on Windows, where a
+    /// path needs a volume prefix, so a hardcoded Unix literal would make every test
+    /// here fail on Windows for a reason unrelated to what it asserts.
+    fn test_path(relative: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!("C:\\{}", relative.replace('/', "\\")))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(format!("/{relative}"))
+        }
+    }
     use sweepx_platform::{
         DirectoryEntryBatch, DirectoryEntryRecord, EntryIdentity, FilesystemIdentity, MountIdentity,
     };
@@ -2060,10 +2232,19 @@ mod tests {
 
     #[test]
     fn sequencer_commits_worker_results_in_stable_ticket_order() {
-        let root = PathBuf::from("/scheduler-root");
-        let slow = root.join("dir-000");
-        let fast = root.join("dir-001");
-        let probe = Arc::new(SchedulerProbe::new(2).with_out_of_order(slow.clone(), fast.clone()));
+        let root = test_path("scheduler-root");
+        // Traversal is depth-first, so the *last* enumerated child is dispatched first and
+        // therefore holds the earlier ticket. Making that one the slow worker is what gives
+        // this test its teeth: the earlier ticket must still commit first even though it
+        // finishes last. Pinning the slow role to `dir-000` instead would hand the earlier
+        // ticket to the worker that also finishes first, and the assertion below would pass
+        // without the sequencer reordering anything.
+        let first_dispatched_and_slow = root.join("dir-001");
+        let second_dispatched_but_fast = root.join("dir-000");
+        let probe = Arc::new(SchedulerProbe::new(2).with_out_of_order(
+            first_dispatched_and_slow.clone(),
+            second_dispatched_but_fast.clone(),
+        ));
         let platform = SchedulingPlatform::new(2, Arc::clone(&probe));
 
         let summary = Scanner::new(
@@ -2080,8 +2261,19 @@ mod tests {
         )
         .unwrap();
 
+        // Wall-clock completion really was the reverse of dispatch order...
         let completion_order = probe.completion_order();
-        assert_eq!(&completion_order[..2], [fast.clone(), slow.clone()]);
+        assert_eq!(
+            &completion_order[..2],
+            [
+                second_dispatched_but_fast.clone(),
+                first_dispatched_and_slow.clone()
+            ],
+            "the probe failed to invert completion order, so this test would prove nothing"
+        );
+        // ...yet the committed leaves follow dispatch order, not completion order. The two
+        // directories themselves are committed by the root's ticket, so they appear in
+        // enumeration order.
         assert_eq!(
             summary
                 .entries
@@ -2089,10 +2281,10 @@ mod tests {
                 .map(|entry| PathBuf::from(&entry.display_path))
                 .collect::<Vec<_>>(),
             [
-                slow.clone(),
-                fast.clone(),
-                slow.join("leaf"),
-                fast.join("leaf"),
+                second_dispatched_but_fast.clone(),
+                first_dispatched_and_slow.clone(),
+                first_dispatched_and_slow.join("leaf"),
+                second_dispatched_but_fast.join("leaf"),
             ]
         );
         assert_eq!(
@@ -2114,7 +2306,7 @@ mod tests {
     fn platform_panic_completes_its_ticket_without_hanging_the_scheduler() {
         let probe = Arc::new(SchedulerProbe::new(0));
         let platform = SchedulingPlatform::new(8, Arc::clone(&probe))
-            .with_panic_path(PathBuf::from("/scheduler-root/dir-000"));
+            .with_panic_path(test_path("scheduler-root/dir-000"));
         let root = platform.root.clone();
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
 
@@ -2145,29 +2337,56 @@ mod tests {
     #[test]
     fn cancellation_stops_new_directory_dispatch_with_bounded_overshoot() {
         let probe = Arc::new(SchedulerProbe::new(0));
-        let platform = SchedulingPlatform::new(8, Arc::clone(&probe));
+        let child_count = 8;
+        let platform = SchedulingPlatform::new(child_count, Arc::clone(&probe));
         let root = platform.root.clone();
-        let first = root.join("dir-000");
-        probe.set_cancel_path(first);
+        // Depth-first dispatch takes the newest directory first, so the round that carries the
+        // cancel trigger begins with the last enumerated child.
+        let first_dispatched = root.join("dir-007");
+        probe.set_cancel_path(first_dispatched.clone());
         let cancel = CancellationToken::new();
+        let max_workers = 2;
 
         let summary = Scanner::new(
             platform,
             ScannerOptions {
-                max_workers: 2,
+                max_workers,
                 ..ScannerOptions::default()
             },
         )
-        .scan(&[ScanRoot::new(root).unwrap()], &cancel)
+        .scan(&[ScanRoot::new(root.clone()).unwrap()], &cancel)
         .unwrap();
 
+        // Only the directories already dispatched into the bounded in-flight window may start.
+        // Which of them records itself first is a race between the workers, so asserting an
+        // order here would assert a race outcome; the meaningful claims are the window's size
+        // and *which* directories it drew from.
         let started = probe.started_paths();
-        assert!(started.len() <= 2, "cancel dispatched too far: {started:?}");
+        assert!(
+            started.len() <= max_workers,
+            "cancel dispatched beyond the bounded in-flight window: {started:?}"
+        );
+        assert!(
+            started.contains(&first_dispatched),
+            "the directory that triggers cancellation must have run: {started:?}"
+        );
+        // Depth-first order is observable here: the window must be drawn from the *last*
+        // enumerated children. Under the old breadth-first scheduling this set would have been
+        // `dir-000`/`dir-001` instead, so this also guards the traversal order.
+        let newest_children: BTreeSet<PathBuf> = (child_count - max_workers..child_count)
+            .map(|index| root.join(format!("dir-{index:03}")))
+            .collect();
+        assert!(
+            started.iter().all(|path| newest_children.contains(path)),
+            "depth-first dispatch must draw from the newest children, got {started:?}"
+        );
+        // Nothing from a deeper level may start: cancellation is observed before this round's
+        // children are ever enumerated, so every started path is a direct child of the root.
         assert!(
             started
                 .iter()
-                .all(|path| path.ends_with("dir-000") || path.ends_with("dir-001")),
-            "a directory beyond the bounded in-flight window started: {started:?}"
+                .all(|path| path.parent() == Some(root.as_path())),
+            "a directory from a deeper level started after cancellation: {started:?}"
         );
         assert!(
             summary
@@ -2180,6 +2399,205 @@ mod tests {
                 .aggregates
                 .iter()
                 .all(|aggregate| !aggregate.coverage.complete)
+        );
+    }
+
+    /// A wide, deep tree must scan completely instead of degrading to lower bounds.
+    ///
+    /// This is the npm `_cacache` shape in miniature: a directory whose fan-out exceeds the
+    /// frontier permit pool, with content nested underneath it. Under breadth-first
+    /// scheduling the pool was divided across the whole level, so most children became
+    /// `frontier limit exceeded` boundaries and every ancestor aggregate turned into a
+    /// lower bound -- the totals users read were wrong no matter how results were merged
+    /// afterwards. The assertions below are about *evidence quality*, which is what that
+    /// bug actually damaged.
+    #[test]
+    fn a_wide_fan_out_tree_is_scanned_completely_within_a_small_frontier() {
+        let fan_out = 64;
+        let frontier_permits = 8;
+        assert!(
+            fan_out > frontier_permits,
+            "the fan-out must exceed the permit pool or this proves nothing"
+        );
+
+        let platform = NestedFanOutPlatform::new(fan_out);
+        let root = platform.root.clone();
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                scan_id: ScanId::new("wide-fan-out"),
+                max_workers: 4,
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries: frontier_permits,
+                    ..ScanResourceLimits::default()
+                },
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(
+            !summary
+                .boundaries
+                .iter()
+                .any(|boundary| boundary.detail == "frontier limit exceeded"),
+            "a bounded depth-first traversal must not shed directories at a wide level"
+        );
+        // Every directory in the tree: the root, its children, and one leaf directory under
+        // each child.
+        assert_eq!(summary.aggregates.len(), 1 + fan_out * 2);
+        assert!(
+            summary
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.coverage.complete),
+            "totals must be exact, not lower bounds, when nothing was actually skipped"
+        );
+        assert!(
+            summary
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.arithmetic_state == ArithmeticState::Exact)
+        );
+        // Each leaf directory holds one file, and the payload must reach the root total.
+        let root_aggregate = aggregate_for_path(&summary, &root);
+        assert_eq!(
+            root_aggregate.apparent_logical_bytes,
+            known_u128((fan_out as u128) * NestedFanOutPlatform::FILE_BYTES)
+        );
+        assert_eq!(
+            root_aggregate.recursive_entry_count,
+            known_count((fan_out as u128) * 3)
+        );
+    }
+
+    /// Truncating the entry listing must not be reported as inexact totals.
+    ///
+    /// Observed on a real wide tree: 12001 directories were all walked and the byte total was
+    /// provably exact, yet every aggregate came back `resource_limit` and the run reported
+    /// `partial`, purely because the scan produced more rows than the result buffer holds.
+    /// Users read the totals; telling them a complete total is a lower bound is a correctness
+    /// bug in the opposite direction from the one the cap exists to prevent.
+    #[test]
+    fn truncating_the_entry_listing_keeps_directory_totals_exact() {
+        let fan_out = 16;
+        let platform = NestedFanOutPlatform::new(fan_out);
+        let root = platform.root.clone();
+        // Well below the number of entries this tree produces, so the cap is certain to bite.
+        let retained_entries = 4;
+
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                scan_id: ScanId::new("detail-truncation"),
+                max_workers: 4,
+                resource_limits: ScanResourceLimits {
+                    max_retained_entries: retained_entries,
+                    ..ScanResourceLimits::default()
+                },
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            summary.entries.len(),
+            retained_entries,
+            "the cap must actually have truncated the listing"
+        );
+        assert!(
+            summary.boundaries.iter().any(|boundary| {
+                boundary.kind == BoundaryKind::ResourceLimit
+                    && boundary.detail == "retained entry cap exceeded"
+            }),
+            "truncation must stay visible so the listing is not mistaken for complete"
+        );
+
+        // Nothing was skipped, so every total must still be exact.
+        assert_eq!(summary.aggregates.len(), 1 + fan_out * 2);
+        assert!(
+            summary
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.coverage.complete),
+            "detail truncation must not turn exact totals into lower bounds"
+        );
+        assert!(
+            summary
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.arithmetic_state == ArithmeticState::Exact)
+        );
+        // The root total is joined through the retained root row, which is never truncated.
+        let root_aggregate = aggregate_for_path(&summary, &root);
+        assert_eq!(
+            root_aggregate.apparent_logical_bytes,
+            known_u128((fan_out as u128) * NestedFanOutPlatform::FILE_BYTES)
+        );
+        assert_eq!(
+            root_aggregate.recursive_entry_count,
+            known_count((fan_out as u128) * 3)
+        );
+    }
+
+    /// Losing a *boundary* record is different in kind, and must still degrade the totals.
+    ///
+    /// A boundary is the evidence that a subtree was skipped. Once it is dropped there is no
+    /// record that anything is missing, so the affected totals genuinely are lower bounds and
+    /// must say so. This is the property the detail-truncation fix above must not weaken.
+    #[test]
+    fn losing_boundary_evidence_still_reports_totals_as_incomplete() {
+        let live_handles = Arc::new(AtomicUsize::new(0));
+        let max_live_handles = Arc::new(AtomicUsize::new(0));
+        let child_inspections = Arc::new(AtomicUsize::new(0));
+        let platform = HandleCountingPlatform::new(
+            16,
+            Arc::clone(&live_handles),
+            Arc::clone(&max_live_handles),
+            Arc::clone(&child_inspections),
+        );
+        let root = platform.root.clone();
+
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                scan_id: ScanId::new("boundary-loss"),
+                max_workers: 4,
+                resource_limits: ScanResourceLimits {
+                    // One permit forces refusals; a tiny boundary buffer then loses the
+                    // records describing them.
+                    max_frontier_entries: 1,
+                    max_retained_boundaries: 2,
+                    ..ScanResourceLimits::default()
+                },
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(summary.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "retained boundary cap exceeded"
+        }));
+        let root_aggregate = aggregate_for_path(&summary, &root);
+        assert!(
+            !root_aggregate.coverage.complete,
+            "dropping the record of a skipped subtree must leave the total a lower bound"
+        );
+        assert!(
+            root_aggregate
+                .coverage
+                .incomplete_reasons
+                .contains(&ReasonCode::ResourceLimit)
         );
     }
 
@@ -2650,7 +3068,7 @@ mod tests {
 
     #[test]
     fn full_frontier_still_observes_files_and_links() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let directory = root.join("dir");
         let file = root.join("file.bin");
         let link = root.join("link");
@@ -2769,7 +3187,7 @@ mod tests {
 
     #[test]
     fn hardlink_dedup_uses_all_windows_file_id_bits() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let first = root.join("first.bin");
         let first_hard_link = root.join("first-hard.bin");
         let second = root.join("second.bin");
@@ -2909,7 +3327,7 @@ mod tests {
 
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     #[test]
-    fn retained_entry_cap_marks_root_incomplete_and_records_resource_limit() {
+    fn retained_entry_cap_truncates_detail_without_making_totals_inexact() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
@@ -2938,23 +3356,30 @@ mod tests {
             )
             .unwrap();
 
+        // The listing is truncated, and that truncation stays visible.
         assert_eq!(result.entries.len(), 1);
-        assert!(
-            result
-                .boundaries
-                .iter()
-                .any(|boundary| boundary.kind == BoundaryKind::ResourceLimit)
-        );
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "retained entry cap exceeded"
+        }));
         assert!(
             result
                 .progress
                 .iter()
                 .any(|event| matches!(event, ProgressEvent::ResourceLimit { .. }))
         );
+
+        // The totals must survive it. Each entry's bytes are folded into its ancestors before
+        // the row reaches the sink, so dropping the row loses detail and nothing else.
         let root_aggregate = aggregate_for_path(&result, &root);
-        assert!(!root_aggregate.coverage.complete);
+        assert_eq!(root_aggregate.apparent_logical_bytes, known_u128(2));
+        assert_eq!(root_aggregate.direct_child_count, known_count(2));
         assert!(
-            root_aggregate
+            root_aggregate.coverage.complete,
+            "truncating the entry listing must not report the byte totals as a lower bound"
+        );
+        assert!(
+            !root_aggregate
                 .coverage
                 .incomplete_reasons
                 .contains(&ReasonCode::ResourceLimit)
@@ -2963,7 +3388,7 @@ mod tests {
 
     #[test]
     fn aggregate_preserves_lower_bound_allocated_and_reclaimable() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let file = root.join("file.bin");
         let scanner = Scanner::new(
             FakePlatform::new(
@@ -3009,7 +3434,7 @@ mod tests {
 
     #[test]
     fn aggregate_propagates_unknown_allocated_and_reclaimable_reason() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let file = root.join("file.bin");
         let scanner = Scanner::new(
             FakePlatform::new(
@@ -3072,7 +3497,7 @@ mod tests {
 
     #[test]
     fn live_identity_uses_typed_metadata_and_aggregate_joins_directory_entry_id() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let child = root.join("child");
         let scanner = Scanner::new(
             FakePlatform::tree(
@@ -3155,7 +3580,7 @@ mod tests {
 
     #[test]
     fn unknown_platform_identity_stays_explicitly_unknown() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let child = root.join("file");
         let mut metadata = test_metadata(child.clone(), "file", EntryKind::File, Some(1));
         metadata.identity = None;
@@ -3191,9 +3616,9 @@ mod tests {
 
     #[test]
     fn entry_ids_are_unique_across_multiple_roots_and_cancelled_admission() {
-        let first = PathBuf::from("/first");
-        let cancelled = PathBuf::from("/cancelled");
-        let third = PathBuf::from("/third");
+        let first = test_path("first");
+        let cancelled = test_path("cancelled");
+        let third = test_path("third");
         let scanner = Scanner::new(
             MultiRootIdentityPlatform {
                 cancelled_root: cancelled.clone(),
@@ -3243,8 +3668,8 @@ mod tests {
 
     #[test]
     fn forged_child_path_is_rejected_before_backend_inspection() {
-        let root = PathBuf::from("/root");
-        let outside = PathBuf::from("/outside/evil");
+        let root = test_path("root");
+        let outside = test_path("outside/evil");
         let inspect_calls = Arc::new(AtomicUsize::new(0));
         let scanner = Scanner::new(
             FakePlatform::new(
@@ -3284,9 +3709,9 @@ mod tests {
 
     #[test]
     fn forged_child_name_is_rejected_before_backend_inspection() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let child_path = root.join("safe");
-        let outside = PathBuf::from("/outside/evil");
+        let outside = test_path("outside/evil");
         let inspect_calls = Arc::new(AtomicUsize::new(0));
         let scanner = Scanner::new(
             FakePlatform::new(
@@ -3321,9 +3746,9 @@ mod tests {
 
     #[test]
     fn substituted_inspection_metadata_cannot_redirect_accounting() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let safe = root.join("safe");
-        let outside = PathBuf::from("/outside/evil");
+        let outside = test_path("outside/evil");
         let scanner = Scanner::new(
             FakePlatform::new(
                 root.clone(),
@@ -3352,7 +3777,7 @@ mod tests {
 
     #[test]
     fn retained_child_handle_prevents_ancestor_replacement_redirect() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let child = root.join("child");
         let safe = child.join("safe");
         let replacement = child.join("evil");
@@ -3419,7 +3844,7 @@ mod tests {
 
     #[test]
     fn unknown_mount_identity_fails_closed_even_if_backend_claims_same_mount() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let child = root.join("child");
         let nested = child.join("safe");
         let scanner = Scanner::new(
@@ -3475,7 +3900,7 @@ mod tests {
 
     #[test]
     fn fake_resource_limit_keeps_aggregate_incomplete() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let scanner = Scanner::new(
             FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
                 PlatformError::ResourceLimit("adversarial byte budget".to_string()),
@@ -3502,7 +3927,7 @@ mod tests {
 
     #[test]
     fn enumeration_io_error_does_not_duplicate_directory_identity() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let scanner = Scanner::new(
             FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new()).with_enumeration_failure(
                 PlatformError::Io {
@@ -3551,7 +3976,7 @@ mod tests {
 
     #[test]
     fn cancellation_during_fake_inspection_keeps_aggregate_incomplete() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let scanner = Scanner::new(
             FakePlatform::new(
                 root.clone(),
@@ -3584,7 +4009,7 @@ mod tests {
 
     #[test]
     fn scanner_consumes_bounded_batches_until_end_of_directory() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let paths: Vec<_> = ["one", "two", "three"]
             .into_iter()
             .map(|name| root.join(name))
@@ -3631,7 +4056,7 @@ mod tests {
 
     #[test]
     fn retained_aggregate_cap_blocks_new_subtrees_and_marks_root_incomplete() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let first = root.join("first");
         let second = root.join("second");
         let nested = first.join("nested");
@@ -3723,7 +4148,7 @@ mod tests {
 
     #[test]
     fn cumulative_directory_cap_stops_continuation_and_marks_incomplete() {
-        let root = PathBuf::from("/root");
+        let root = test_path("root");
         let entries: Vec<_> = ["one", "two", "three"]
             .into_iter()
             .map(|name| test_entry(&root, name))
@@ -3786,18 +4211,20 @@ mod tests {
         let second = DirectoryState::new(ScanEntryId::for_scan_ordinal(&scan_id, 2).unwrap())
             .into_aggregate(&scan_id);
 
-        sink.push_aggregate(Path::new("/first"), first).unwrap();
-        sink.push_aggregate(Path::new("/second"), second).unwrap();
+        sink.push_aggregate(test_path("first").as_path(), first)
+            .unwrap();
+        sink.push_aggregate(test_path("second").as_path(), second)
+            .unwrap();
         let summary = sink.finish();
 
         assert_eq!(summary.aggregates.len(), 1);
         assert!(summary.boundaries.iter().any(|boundary| {
-            boundary.path == Path::new("/second")
+            boundary.path == test_path("second").as_path()
                 && boundary.kind == BoundaryKind::ResourceLimit
                 && boundary.detail == "retained aggregate cap exceeded across scan roots"
         }));
         assert!(summary.progress.iter().any(|event| {
-            matches!(event, ProgressEvent::ResourceLimit { path } if path == Path::new("/second"))
+            matches!(event, ProgressEvent::ResourceLimit { path } if path == test_path("second").as_path())
         }));
     }
 
@@ -3943,6 +4370,225 @@ mod tests {
     }
 
     #[derive(Debug)]
+    /// A two-level wide tree: `root/dir-NNN/leaf/payload.bin`.
+    ///
+    /// Models the shape that defeated breadth-first permit allocation -- a very wide level
+    /// with content *below* it, so shedding children at the wide level silently loses real
+    /// bytes rather than just directory rows.
+    struct NestedFanOutPlatform {
+        root: PathBuf,
+        fan_out: usize,
+    }
+
+    /// Distinguishes the three directory roles without consulting a display path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FanOutRole {
+        Root,
+        Branch,
+        Leaf,
+    }
+
+    /// Handle for [`NestedFanOutPlatform`], carrying its own role and identity.
+    ///
+    /// The branch index travels in the handle rather than being re-parsed from the path:
+    /// only the branch level is named `dir-NNN`, so deriving it from a leaf's own path would
+    /// fail. Carrying it also mirrors the real contract, where a display path is never the
+    /// source of traversal state.
+    #[derive(Debug)]
+    struct FanOutHandle {
+        path: PathBuf,
+        role: FanOutRole,
+        branch_index: u64,
+        cursor: usize,
+    }
+
+    impl NestedFanOutPlatform {
+        /// Bytes in each leaf's single file; distinct per leaf would obscure the total.
+        const FILE_BYTES: u128 = 1024;
+
+        fn new(fan_out: usize) -> Self {
+            Self {
+                root: test_path("fan-out-root"),
+                fan_out,
+            }
+        }
+
+        fn directory_metadata(&self, path: PathBuf, inode: u64) -> EntryMetadata {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("fan-out-root")
+                .to_string();
+            let mut metadata = test_metadata(path, &name, EntryKind::Directory, Some(1));
+            metadata.identity = Some(EntryIdentity::from_unix(1, inode));
+            metadata
+        }
+
+        fn file_metadata(&self, path: PathBuf, inode: u64) -> EntryMetadata {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("payload.bin")
+                .to_string();
+            let mut metadata = test_metadata(path, &name, EntryKind::File, Some(1));
+            let identity = EntryIdentity::from_unix(1, inode);
+            metadata.logical_bytes = known_u128(Self::FILE_BYTES);
+            metadata.allocated_bytes = known_u128(Self::FILE_BYTES);
+            metadata.hard_link_key = Some(HardLinkKey::from(identity.clone()));
+            metadata.identity = Some(identity);
+            metadata
+        }
+
+        /// Parses a branch directory's index from its own generated name.
+        ///
+        /// Only valid for a `dir-NNN` path; every other level receives its index through
+        /// [`FanOutHandle::branch_index`].
+        fn branch_index(path: &Path) -> u64 {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("dir-"))
+                .and_then(|index| index.parse::<u64>().ok())
+                .expect("generated fan-out branch name")
+        }
+    }
+
+    impl PlatformScanner for NestedFanOutPlatform {
+        type DirectoryHandle = FanOutHandle;
+
+        fn platform_name(&self) -> &'static str {
+            "nested-fan-out-fake"
+        }
+
+        fn admit_root(
+            &self,
+            root: &ScanRoot,
+            cancel: &CancellationToken,
+        ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            Ok(RootAdmission::new(
+                root.clone(),
+                self.directory_metadata(self.root.clone(), 1),
+                FanOutHandle {
+                    path: self.root.clone(),
+                    role: FanOutRole::Root,
+                    branch_index: 0,
+                    cursor: 0,
+                },
+                root.native_absolute_path()
+                    .map_err(|error| PlatformError::RootRejected(error.to_string()))?,
+            ))
+        }
+
+        fn enumerate_children(
+            &self,
+            directory: &mut Self::DirectoryHandle,
+            cancel: &CancellationToken,
+            _limits: DirectoryReadLimits,
+        ) -> Result<DirectoryEntryBatch, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            if directory.cursor > 0 {
+                return Ok(DirectoryEntryBatch::complete(Vec::new()));
+            }
+            directory.cursor = 1;
+            let entries = match directory.role {
+                FanOutRole::Root => (0..self.fan_out)
+                    .map(|index| test_entry(&directory.path, &format!("dir-{index:03}")))
+                    .collect(),
+                FanOutRole::Branch => vec![test_entry(&directory.path, "leaf")],
+                FanOutRole::Leaf => vec![test_entry(&directory.path, "payload.bin")],
+            };
+            Ok(DirectoryEntryBatch::complete(entries))
+        }
+
+        fn inspect_child(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            if cancel.is_cancelled() {
+                return Err(PlatformError::Cancelled);
+            }
+            child.validate_for_parent(&parent.path).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: parent.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+
+            // Files terminate the tree, so no permit is involved. Distinct identities matter:
+            // hard-link dedup keys off file identity, so reusing one inode across leaves
+            // would silently collapse `unique_logical_bytes` and hide a real regression.
+            if parent.role == FanOutRole::Leaf {
+                // Offset keeps file inodes disjoint from directory inodes.
+                let inode = 1_000_000 + parent.branch_index;
+                return Ok(WalkEntry::File(
+                    self.file_metadata(child.path.clone(), inode),
+                ));
+            }
+
+            // Report the same boundary the real backends report, so a regression shows up as
+            // the exact evidence the traversal fix is supposed to eliminate.
+            if directory_admission == DirectoryHandleAdmission::Deny {
+                return Ok(WalkEntry::Boundary(BoundaryRecord {
+                    path: child.path.clone(),
+                    kind: BoundaryKind::ResourceLimit,
+                    reason: ReasonCode::ResourceLimit,
+                    detail: "frontier limit exceeded".to_string(),
+                }));
+            }
+
+            let (role, branch_index, inode) = match parent.role {
+                FanOutRole::Root => {
+                    let index = Self::branch_index(&child.path);
+                    (FanOutRole::Branch, index, 100 + index)
+                }
+                FanOutRole::Branch => (
+                    FanOutRole::Leaf,
+                    parent.branch_index,
+                    100_000 + parent.branch_index,
+                ),
+                FanOutRole::Leaf => unreachable!("leaf children are handled above"),
+            };
+            Ok(WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+                metadata: self.directory_metadata(child.path.clone(), inode),
+                handle: FanOutHandle {
+                    path: child.path.clone(),
+                    role,
+                    branch_index,
+                    cursor: 0,
+                },
+            }))
+        }
+
+        fn is_same_mount(
+            &self,
+            _root: &EntryMetadata,
+            _entry: &EntryMetadata,
+        ) -> Result<bool, PlatformError> {
+            Ok(true)
+        }
+    }
+
     struct HandleCountingPlatform {
         root: PathBuf,
         child_count: usize,
@@ -3959,7 +4605,7 @@ mod tests {
             child_inspections: Arc<AtomicUsize>,
         ) -> Self {
             Self {
-                root: PathBuf::from("/handle-root"),
+                root: test_path("handle-root"),
                 child_count,
                 live_handles,
                 max_live_handles,
@@ -4210,7 +4856,7 @@ mod tests {
     impl SchedulingPlatform {
         fn new(child_count: usize, probe: Arc<SchedulerProbe>) -> Self {
             Self {
-                root: PathBuf::from("/scheduler-root"),
+                root: test_path("scheduler-root"),
                 child_count,
                 probe,
                 panic_path: None,
@@ -4519,7 +5165,7 @@ mod tests {
             if directory.capability_id == 2
                 && self.replace_child_path_after_open.load(Ordering::SeqCst)
             {
-                assert_eq!(directory.path, PathBuf::from("/root/child"));
+                assert_eq!(directory.path, test_path("root/child"));
                 // A path-reopening implementation would observe `evil`; the retained capability
                 // continues to enumerate the directory admitted as capability 2.
                 let entries: Vec<_> = entries
