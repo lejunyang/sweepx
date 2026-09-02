@@ -16,6 +16,46 @@
 - Keep CLI help, README, and both `site/` language variants aligned with behavior changes.
 - Preserve stable machine field names and enum values across locales.
 
+## Commit discipline
+
+- Commit each coherent functional unit as soon as it builds, passes its own tests, and is
+  self-consistent. Do not accumulate several features in one working tree: a large mixed diff
+  cannot be reviewed, bisected, or reverted independently.
+- One commit answers one question. Split a feature from a refactor, a fix from a rename, and code
+  from unrelated documentation. Documentation that *describes the same change* belongs in that
+  change.
+- Conventional-commit subjects with a scope, imperative mood, no trailing period, for example
+  `feat(scan): …`, `fix(scanner): …`, `docs(research): …`, `test(platform): …`, `chore: …`.
+- Explain **why** in the body — the constraint discovered, the alternative rejected, the measured
+  number. What changed is already in the diff.
+- Every commit must leave the tree green: `cargo fmt --all --check`, `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`, and the tests for the crates it touches.
+- Never use `git reset --hard`, `git checkout -- .`, or any other command that discards
+  uncommitted work in this repository. Committing early is what makes that unnecessary.
+
+## Working on Windows
+
+- The pinned toolchain may be unavailable from the configured mirror. Set
+  `$env:RUSTUP_TOOLCHAIN="stable"` for the session rather than editing `rust-toolchain.toml`.
+- `.gitattributes` normalizes to LF. Cleaner packages are digest-verified over exact bytes, so a
+  CRLF checkout silently breaks signature validation.
+- Editing any rule JSON changes its package digest; re-sign with `sweepx-cleaner-sign` in the same
+  commit or `built_ins_load_and_validate` fails.
+- Case sensitivity is a property of the host and volume, not of the code. Probe the actual
+  behavior and assert the matching invariant instead of hardcoding either expectation.
+
+## Evidence before claims
+
+- Verify through a path independent of the one that produced the result. A reader that agrees with
+  itself proves nothing; an ordinary directory walk cross-checking a native metadata read does.
+- When a cross-check disagrees, find the cause before adjusting the check. Two silent
+  under-reporting defects in the accelerated source were found exactly this way, and both looked
+  like exact totals.
+- Do not tune a guess. If a constant or flag meaning is uncertain, print the real distribution and
+  read it. A regression test should pin the *measured* value, not reference the constant it is
+  meant to protect.
+- Record measured numbers with their subject and date, and state what they do not cover.
+
 ## Filesystem safety
 
 - Display paths are never execution authority. Revalidate native identity immediately before a
