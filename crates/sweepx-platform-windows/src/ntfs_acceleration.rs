@@ -1298,8 +1298,10 @@ mod tests {
     /// layer depends on. This drives the real volume: capture, verify quiet, mutate, verify the
     /// mutation was noticed.
     ///
-    /// Requires `SWEEPX_RUN_NATIVE_NTFS_PROBE=1`. Unlike the layout reader this needs no
-    /// elevation, so it is a genuinely cheap check.
+    /// Requires `SWEEPX_RUN_NATIVE_NTFS_PROBE=1`. Reading the journal bounds needs the same
+    /// volume handle the layout reader needs, so an unelevated run is denied with error 5 and
+    /// skips. It is far cheaper than a layout read once admitted -- measured at 0.055 ms against
+    /// 1.06 s for a full-volume read -- but cheap is not the same as unprivileged.
     #[cfg(windows)]
     #[test]
     #[ignore = "mutates a temporary directory on a real NTFS volume"]

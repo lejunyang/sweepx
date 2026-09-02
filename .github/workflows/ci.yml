@@ -221,7 +221,11 @@ jobs:
         shell: pwsh
         run: |
           $env:SWEEPX_RUN_NATIVE_NTFS_PROBE = "1"
-          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows native_ntfs_probe -- --ignored --nocapture
+          # Both probes are named explicitly because libtest ORs its filters. `native_ntfs_probe`
+          # alone silently skipped the change-token probe, which carries an unrelated name. The
+          # remaining ignored probes are deliberately excluded: they panic rather than skip when
+          # the volume handle is denied, and one is pinned to a drive letter that no runner has.
+          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows -- --ignored --nocapture --test-threads=1 native_ntfs_probe the_change_token_notices_a_real_write
       - name: Exercise macOS bulk directory enumeration
         if: matrix.capability_os == 'macos'
         run: >-
@@ -243,7 +247,7 @@ jobs:
           cargo test --locked --target "${{ matrix.target }}" --package sweepx-cli cache_status
       - name: Build native CLI
         run: cargo build --locked --package sweepx-cli --target ${{ matrix.target }}
-      - name: Smoke-test Windows scan and fail-closed state
+      - name: Smoke-test Windows scan and durable state
         if: matrix.capability_os == 'windows'
         shell: pwsh
         env:
@@ -279,16 +283,50 @@ jobs:
             throw "expected Windows scan to report the fixture entry"
           }
 
-          $stateError = & $env:BIN --format json --state-dir $stateDir scan $scanRoot 2>&1 | Out-String
-          $stateExit = $LASTEXITCODE
-          if ($stateExit -ne 3) {
-            throw "explicit Windows state directory must fail closed with exit code 3, got $stateExit"
+          # Durable state is enabled on Windows, so the smoke test asserts the property it exists
+          # for: a preview written by one run is loaded back by the next. Checking only that the
+          # directory appears would pass even if nothing were ever read from it again.
+          $firstText = & $env:BIN --format json --state-dir $stateDir scan $scanRoot | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "explicit Windows state directory must be accepted, got exit code $LASTEXITCODE"
           }
-          if ($stateError -notmatch "durable state is disabled on Windows") {
-            throw "explicit Windows state directory did not report the fail-closed reason"
+          $first = $firstText | ConvertFrom-Json
+          if ($first.summary.cachePreview.storeStatus -ne "written") {
+            throw "expected the first run to persist a preview, got $($first.summary.cachePreview.storeStatus)"
           }
-          if (Test-Path -LiteralPath $stateDir) {
-            throw "failed Windows state admission must not create the state directory"
+          $writtenGeneration = $first.summary.cachePreview.writtenGeneration
+          if (-not $writtenGeneration) {
+            throw "expected a generation id for the persisted preview"
+          }
+          if (-not (Test-Path -LiteralPath $stateDir)) {
+            throw "an accepted state directory must exist after the run"
+          }
+
+          $secondText = & $env:BIN --format json --state-dir $stateDir scan $scanRoot | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "the second Windows scan must succeed, got exit code $LASTEXITCODE"
+          }
+          $second = $secondText | ConvertFrom-Json
+          if ($second.summary.cachePreview.loadStatus -ne "stale_preview") {
+            throw "expected the second run to load the persisted preview, got $($second.summary.cachePreview.loadStatus)"
+          }
+          if ($second.summary.cachePreview.loadedGeneration -ne $writtenGeneration) {
+            throw "expected generation $writtenGeneration to be loaded, got $($second.summary.cachePreview.loadedGeneration)"
+          }
+
+          # The guard that makes durable state defensible here: a directory other accounts can
+          # reach must be refused rather than used. Widened through the OS's own tool so the
+          # test exercises a real misconfiguration and not a synthetic one.
+          $sharedDir = Join-Path $fixture "shared-state"
+          New-Item -ItemType Directory -Path $sharedDir | Out-Null
+          icacls $sharedDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
+          $sharedError = & $env:BIN --format json --state-dir $sharedDir scan $scanRoot 2>&1 | Out-String
+          $sharedExit = $LASTEXITCODE
+          if ($sharedExit -eq 0) {
+            throw "a state directory reachable by other users must be refused"
+          }
+          if ($sharedError -notmatch "accessible only to them") {
+            throw "the refusal did not explain the privacy requirement: $sharedError"
           }
       - name: Smoke-test binary and capability truthfulness
         shell: bash
