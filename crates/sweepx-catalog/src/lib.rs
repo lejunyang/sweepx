@@ -486,6 +486,104 @@ struct PackageHistoryIdentity<'a> {
     package_digest: &'a str,
 }
 
+/// Computes the signed file table for a package exactly as loading does.
+///
+/// Exposed so signing tooling cannot drift from verification: a tool that rebuilt
+/// this table itself would eventually disagree with the loader about canonical form,
+/// path ordering, or which bytes of the manifest are covered, and would then emit
+/// packages that fail to load for reasons no one can see by reading the JSON.
+pub fn package_file_table(
+    manifest_bytes: &[u8],
+    rule_files: &[(&str, &[u8])],
+    evidence_files: &[(&str, &[u8])],
+) -> Result<Vec<PackageDigestEntry>, CatalogError> {
+    let manifest_value = parse_strict_json_value(manifest_bytes)?;
+    build_file_table(&manifest_value, rule_files, evidence_files)
+}
+
+/// A publisher key supplied by the caller instead of taken from the built-in store.
+///
+/// Exists for development tooling that must verify a package signed by a key which is,
+/// by definition, not yet a shipped trust anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitPublisherKey {
+    /// Key identifier; must equal the manifest's `publisher.keyId`.
+    pub key_id: String,
+    /// Publisher identifier; must equal the manifest's `publisher.id`.
+    pub publisher_id: String,
+    /// Base64url (unpadded) ed25519 public key.
+    pub public_key_b64u: String,
+    /// Start of the key's validity window, RFC 3339.
+    pub valid_from: String,
+    /// End of the key's validity window, RFC 3339.
+    pub valid_until: String,
+}
+
+/// Runs the complete package admission path against the built-in trust store.
+///
+/// This is the same code the built-in loader uses, so tooling can prove a package it
+/// just produced actually loads instead of asserting that it should.
+pub fn load_package_bytes(
+    manifest_bytes: &[u8],
+    signature_bytes: &[u8],
+    rule_files: &[(&str, &[u8])],
+    evidence_files: &[(&str, &[u8])],
+) -> Result<LoadedCleanerPackage, CatalogError> {
+    load_package_inner(
+        manifest_bytes,
+        signature_bytes,
+        rule_files,
+        evidence_files,
+        &TrustSource::Builtin,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+/// Runs the complete package admission path against one caller-supplied key.
+///
+/// Every structural check is identical to [`load_package_bytes`]; only the source of the
+/// publisher key differs. This is a verification primitive, **not** a way to widen what
+/// the application trusts: it adds nothing to the built-in store, and the shipped
+/// loader never calls it. Development signing tooling needs it because a freshly
+/// generated key cannot already be a shipped trust anchor, and verifying with the
+/// signer's own key is what proves the bytes and the signature agree.
+pub fn load_package_bytes_with_key(
+    manifest_bytes: &[u8],
+    signature_bytes: &[u8],
+    rule_files: &[(&str, &[u8])],
+    evidence_files: &[(&str, &[u8])],
+    key: &ExplicitPublisherKey,
+    now: OffsetDateTime,
+) -> Result<LoadedCleanerPackage, CatalogError> {
+    load_package_inner(
+        manifest_bytes,
+        signature_bytes,
+        rule_files,
+        evidence_files,
+        &TrustSource::Explicit(key),
+        now,
+    )
+}
+
+/// Reports whether a key id is a shipped trust anchor.
+///
+/// Lets tooling tell a contributor that a locally signed package will not be accepted
+/// by the shipped binary until the key is added to the store, rather than leaving them
+/// to discover it as an opaque load failure later.
+pub fn is_builtin_trusted_key(key_id: &str) -> bool {
+    BUILTIN_TRUST_STORE
+        .iter()
+        .any(|entry| entry.key_id == key_id && !entry.revoked)
+}
+
+/// Where a package's publisher key comes from during verification.
+enum TrustSource<'a> {
+    /// The compiled-in trust store: the only source the shipped loader uses.
+    Builtin,
+    /// A key named by the caller, used by development signing tooling.
+    Explicit(&'a ExplicitPublisherKey),
+}
+
 impl BuiltInCleaner {
     pub fn load(&self) -> Result<LoadedCleanerPackage, CatalogError> {
         self.load_with(
@@ -503,6 +601,26 @@ impl BuiltInCleaner {
         rule_files: &[(&str, &[u8])],
         evidence_files: &[(&str, &[u8])],
     ) -> Result<LoadedCleanerPackage, CatalogError> {
+        load_package_inner(
+            manifest_bytes,
+            signature_bytes,
+            rule_files,
+            evidence_files,
+            &TrustSource::Builtin,
+            OffsetDateTime::now_utc(),
+        )
+    }
+}
+
+fn load_package_inner(
+    manifest_bytes: &[u8],
+    signature_bytes: &[u8],
+    rule_files: &[(&str, &[u8])],
+    evidence_files: &[(&str, &[u8])],
+    trust: &TrustSource<'_>,
+    now: OffsetDateTime,
+) -> Result<LoadedCleanerPackage, CatalogError> {
+    {
         let manifest_value = parse_strict_json_value(manifest_bytes)?;
         let manifest: CleanerManifest =
             deserialize_rejecting_unknown_fields(manifest_bytes, "cleaner.json")?;
@@ -560,7 +678,26 @@ impl BuiltInCleaner {
             });
         }
 
-        verify_signature(&manifest, &signature, &file_table)?;
+        match trust {
+            TrustSource::Builtin => verify_signature_with_store(
+                &manifest,
+                &signature,
+                &file_table,
+                BUILTIN_TRUST_STORE,
+                now,
+            )?,
+            TrustSource::Explicit(key) => verify_signature_bindings_and_times(
+                &manifest,
+                &signature,
+                &file_table,
+                &key.key_id,
+                &key.publisher_id,
+                &key.public_key_b64u,
+                &key.valid_from,
+                &key.valid_until,
+                now,
+            )?,
+        }
 
         Ok(LoadedCleanerPackage {
             manifest,
@@ -1325,20 +1462,6 @@ pub enum CatalogError {
         known_publisher: String,
         candidate_publisher: String,
     },
-}
-
-fn verify_signature(
-    manifest: &CleanerManifest,
-    signature: &CleanerSignatureEnvelope,
-    file_table: &[PackageDigestEntry],
-) -> Result<(), CatalogError> {
-    verify_signature_with_store(
-        manifest,
-        signature,
-        file_table,
-        BUILTIN_TRUST_STORE,
-        OffsetDateTime::now_utc(),
-    )
 }
 
 #[cfg(test)]

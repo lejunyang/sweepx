@@ -390,6 +390,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core",
  "serde",
  "sha2",
  "subtle",
@@ -1376,6 +1377,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sweepx-cleaner-sign"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "rand_core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sweepx-catalog",
+ "sweepx-cleaner-schema",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "sweepx-cleaner-vm"
 version = "0.1.0"
 dependencies = [
@@ -1399,6 +1417,8 @@ dependencies = [
  "sweepx-core",
  "sweepx-i18n",
  "sweepx-model",
+ "sweepx-platform",
+ "sweepx-platform-windows",
  "sweepx-protocol",
  "sweepx-tui",
  "tempfile",

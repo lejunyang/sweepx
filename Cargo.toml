@@ -22,6 +22,7 @@ members = [
   "crates/sweepx-safety",
   "crates/sweepx-audit",
   "crates/sweepx-executor",
+  "crates/sweepx-cleaner-sign",
 ]
 resolver = "2"
 
