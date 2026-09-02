@@ -47,6 +47,22 @@ pub fn read_volume_layout_records(
     ntfs_acceleration::native::read_all_layout_records(root, cancelled)
 }
 
+// Change detection is pure comparison over journal bounds, so it compiles and is tested on every
+// host; only capturing the bounds needs a real volume.
+mod change_tracking;
+pub use change_tracking::{ChangeVerdict, VolumeChangeToken, compare_to_current};
+
+/// Reads the current USN journal bounds for the volume containing `root`.
+///
+/// Separate from [`read_volume_layout_records`] because this is the cheap half: it reads a single
+/// fixed-size structure rather than the whole volume's metadata, which is what makes validating a
+/// cached result worthwhile. Returns the raw Win32 error so callers can distinguish a volume that
+/// has no journal from one they may not read.
+#[cfg(windows)]
+pub fn read_volume_change_token(root: &std::path::Path) -> Result<VolumeChangeToken, u32> {
+    ntfs_acceleration::native::read_journal_bounds(root).map(VolumeChangeToken::capture)
+}
+
 mod ntfs_acceleration;
 pub use ntfs_acceleration::{
     FILE_LAYOUT_PAGE_BYTES, FileLayoutDataStream, FileLayoutName, FileLayoutRecord,

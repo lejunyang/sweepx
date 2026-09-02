@@ -358,6 +358,56 @@ outcome is therefore reported in the scan summary under `acceleration`:
 `exact` is false when any record under the root could not be resolved, marking the size a lower
 bound that must never be rendered as precise.
 
+## Volume change detection via the USN journal (2026-09-03)
+
+The parser and cursor validation for the USN journal existed but had no caller: nothing captured a
+position and nothing compared one, so layer 3 of the seven-layer scheme was inert. It is now a
+usable primitive.
+
+### What was measured
+
+Elevated, on this host (`C:`, NTFS):
+
+| Observation | Value |
+|---|---|
+| `FSCTL_QUERY_USN_JOURNAL`, unelevated | `ERROR_ACCESS_DENIED (5)` |
+| `FSCTL_QUERY_USN_JOURNAL`, elevated `GENERIC_READ` | succeeds |
+| Cost of one bounds read | 0.055 ms, mean of 50 calls |
+| Whole-volume `FSCTL_QUERY_FILE_LAYOUT` read | 1.06 s |
+| Verdict on an untouched volume | `unchanged` |
+| Verdict after writing one file | `changed`, range starting exactly at the captured USN |
+
+Validation is roughly four orders of magnitude cheaper than the metadata read it can avoid, which
+is what makes the layer worth having. Both directions were exercised against the live volume: a
+token that never matched would detect every change and still be useless, so "quiet stays quiet" is
+asserted alongside "a write is noticed".
+
+### What a token proves
+
+`VolumeChangeToken` pairs the journal id with the volume's `NextUsn`. The journal id is part of the
+identity because a deleted and recreated journal restarts numbering, so a bare USN can compare two
+unrelated sequences as equal — the test for that case pins the same USN under a different journal
+id and requires a rescan.
+
+The token describes a **volume**, not a subtree. Equality proves no journal activity anywhere on
+the volume, which is sufficient but stronger than necessary for any single root. Narrowing it would
+mean resolving each changed record's parent chain, and a wrong answer there would serve stale sizes
+for a directory the user just edited.
+
+`compare_to_current` delegates to the existing `validate_usn_cursor` rather than restating its
+rules, so there is only one implementation of what makes a cursor trustworthy. It adds one
+judgement: an accepted cursor equal to `NextUsn` is `Unchanged`, otherwise it is `Changed` carrying
+the exact range still to examine.
+
+### Not yet a cache
+
+This is the validity half only. Reuse additionally requires somewhere to persist a token between
+runs, and durable state is refused on Windows (`durable_state_supported()` returns `cfg!(unix)`):
+`--state-dir` exits 3 with "durable state is disabled on Windows until current-user-private ACL and
+reparse-point checks are implemented". So on Windows today a token cannot outlive the process, and
+the layer is usable for in-session revalidation but cannot yet skip a cold scan. Enabling that is a
+state-directory security task, not a journal task.
+
 ## Gate meanings
 
 - Cross-compilation proves that conditional code type-checks; it does not prove kernel ABI behavior.

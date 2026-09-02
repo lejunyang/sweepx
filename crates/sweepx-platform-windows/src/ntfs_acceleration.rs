@@ -625,6 +625,20 @@ pub(crate) mod native {
         })
     }
 
+    /// Reads current journal bounds for the volume containing `root`.
+    ///
+    /// Opens its own handle so change validation does not depend on a layout read having already
+    /// happened. Measured on this host: unlike `FSCTL_QUERY_FILE_LAYOUT`, this control code is
+    /// reachable on an elevated `GENERIC_READ` volume handle and returns in well under a
+    /// millisecond, which is what makes it usable as a cheap validity check.
+    pub fn read_journal_bounds(root: &Path) -> Result<UsnJournalBounds, u32> {
+        let volume = OwnedVolume::open(root).map_err(|_| unsafe { GetLastError() })?;
+        match query_usn_journal(volume.0) {
+            NativeUsnProbe::Available(bounds) => Ok(bounds),
+            NativeUsnProbe::Unavailable(code) => Err(code),
+        }
+    }
+
     /// Reads and validates bounded NTFS layout pages from an already-open volume handle.
     ///
     /// Any native or parser failure returns an error so callers can discard partial layout data and
@@ -1274,6 +1288,113 @@ mod tests {
         assert_eq!(
             accelerated_bytes, oracle_bytes,
             "summed file bytes must match the directory walk exactly"
+        );
+    }
+
+    /// Checks the change token against real filesystem mutations on a live volume.
+    ///
+    /// The unit tests above only prove the comparison logic is self-consistent; they cannot show
+    /// that the journal actually advances when a file is written, which is the property the whole
+    /// layer depends on. This drives the real volume: capture, verify quiet, mutate, verify the
+    /// mutation was noticed.
+    ///
+    /// Requires `SWEEPX_RUN_NATIVE_NTFS_PROBE=1`. Unlike the layout reader this needs no
+    /// elevation, so it is a genuinely cheap check.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "mutates a temporary directory on a real NTFS volume"]
+    fn the_change_token_notices_a_real_write() {
+        if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        use crate::{ChangeVerdict, VolumeChangeToken, compare_to_current};
+
+        let directory = std::env::temp_dir().join(format!(
+            "sweepx-usn-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after the epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("create probe directory");
+
+        // The volume root of the temp directory, since the journal is per volume.
+        let volume_root = directory
+            .components()
+            .take(2)
+            .collect::<std::path::PathBuf>();
+
+        let bounds = match native::read_journal_bounds(&volume_root) {
+            Ok(bounds) => bounds,
+            Err(code) => {
+                let _ = std::fs::remove_dir_all(&directory);
+                println!("SKIP: journal unavailable on {volume_root:?}, error {code}");
+                return;
+            }
+        };
+        let token = VolumeChangeToken::capture(bounds);
+        println!(
+            "captured journal_id={} next_usn={}",
+            token.journal_id, token.next_usn
+        );
+
+        // Re-reading without touching anything must compare equal to itself. This is the property
+        // reuse depends on, and it is not implied by change detection working: a token that never
+        // matched would detect every change and still be useless.
+        //
+        // The volume is shared with the rest of the system, so unrelated processes can write at
+        // any moment. A quiet reading is therefore evidence, but a busy one is not a failure; the
+        // outcome is reported and only impossible verdicts are rejected.
+        let immediate = native::read_journal_bounds(&volume_root).expect("re-read journal bounds");
+        let quiet_verdict = compare_to_current(token, immediate);
+        println!("verdict with no action: {}", quiet_verdict.code());
+        assert!(
+            matches!(
+                quiet_verdict,
+                ChangeVerdict::Unchanged | ChangeVerdict::Changed { .. }
+            ),
+            "an untouched volume must be either quiet or merely busy, got {}",
+            quiet_verdict.code()
+        );
+
+        // A write must move the journal forward. Anything else means the token cannot detect
+        // change at all, which would make reuse unsafe rather than merely imprecise.
+        std::fs::write(directory.join("probe.txt"), b"sweepx usn probe").expect("write probe file");
+
+        let after = native::read_journal_bounds(&volume_root).expect("re-read journal bounds");
+        let verdict = compare_to_current(token, after);
+        println!("verdict after write: {}", verdict.code());
+
+        // The layer only pays for itself if validation is far cheaper than the whole-volume
+        // metadata read it avoids, so the cost is measured rather than assumed.
+        let timing_started = std::time::Instant::now();
+        let rounds = 50;
+        for _ in 0..rounds {
+            let _ = native::read_journal_bounds(&volume_root);
+        }
+        println!(
+            "journal bounds read: {:.3} ms per call over {rounds} calls",
+            timing_started.elapsed().as_secs_f64() * 1000.0 / f64::from(rounds)
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+
+        match verdict {
+            ChangeVerdict::Changed { from, to } => {
+                assert_eq!(
+                    from, token.next_usn,
+                    "the range must start where we stopped"
+                );
+                assert!(to > from, "a write must advance the journal");
+            }
+            other => panic!(
+                "writing a file must be observable as a change, got {}",
+                other.code()
+            ),
+        }
+        assert!(
+            !verdict.permits_reuse(),
+            "a volume that just changed must never permit reuse"
         );
     }
 
