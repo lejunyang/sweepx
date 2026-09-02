@@ -1,0 +1,44 @@
+# ------------------------------------------------------------------------------
+# Line-ending policy
+#
+# SweepX verifies signed cleaner packages by hashing file bytes, and it compares
+# generated fixture receipts byte for byte. A checkout that rewrites LF to CRLF
+# (git's `core.autocrlf=true`, the Windows default) changes those bytes and makes
+# signature and receipt verification fail on Windows only.
+#
+# Normalizing text to LF in the working tree keeps content digests reproducible on
+# every platform, so this is a correctness requirement rather than a style choice.
+# ------------------------------------------------------------------------------
+
+# Normalize all text files to LF in the repository and in the working tree.
+* text=auto eol=lf
+
+# Signed catalog assets are hashed byte for byte. Mark them explicitly so no future
+# `core.autocrlf` or per-developer setting can rewrite them.
+*.json    text eol=lf
+SIGNATURE text eol=lf
+
+# Rust, TOML, Markdown and shell sources: LF everywhere for reproducible builds.
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# Windows-only scripts keep CRLF, which is what cmd.exe and PowerShell expect.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binary assets must never be transformed.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.zip     binary
+*.gz      binary
+*.woff    binary
+*.woff2   binary
