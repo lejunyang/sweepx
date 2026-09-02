@@ -10,7 +10,6 @@ pub use catalog_trust::{
 };
 
 use std::collections::BTreeMap;
-#[cfg(unix)]
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -29,7 +28,6 @@ use sweepx_analysis::{
 };
 use sweepx_audit::{AuditStore, ProjectionError};
 use sweepx_cache::CompactedPreview;
-#[cfg(unix)]
 use sweepx_cache::{
     AtomicGenerationStore, BudgetUsage, CacheError, CacheInspection, CacheInspectionError,
     CacheInspectionHealth, CacheInspectionWarning, LoadResult, PreviewBudgets, PreviewCoverage,
@@ -41,7 +39,6 @@ use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 #[cfg(target_os = "linux")]
 use sweepx_event_journal::{EventJournal, FinalSnapshotMetadata};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
-#[cfg(unix)]
 use sweepx_model::EvidenceValue;
 use sweepx_model::{
     CapabilityState, Coverage, CoverageState, DecimalU128, FieldProvenance, HumanSizeUnit,
@@ -89,14 +86,10 @@ const OPERATION_ID_MAX_LEN: usize = 128;
 pub const DEFAULT_ANALYSIS_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_HUMAN_SCAN_ROWS: usize = 40;
 pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str = "scan --format ndjson is disabled until SweepX has a runtime-qualified live event stream and public replay/watch support";
-#[cfg(unix)]
 const PREVIEW_GENERATION_POINTER_DIR: &str = "preview-cache";
 const CACHE_LOAD_MODE_MISS: &str = "miss";
-#[cfg(unix)]
 const CACHE_LOAD_MODE_HIT: &str = "stale_preview";
-#[cfg(unix)]
 const CACHE_LOAD_MODE_QUARANTINED: &str = "quarantined";
-#[cfg(unix)]
 const CACHE_STORE_MODE_WRITTEN: &str = "written";
 const CACHE_STORE_MODE_SKIPPED: &str = "skipped";
 
@@ -1002,7 +995,10 @@ pub enum StateError {
     SymlinkStateDir(PathBuf),
     #[error("state directory must be a directory: {0}")]
     InvalidStateDir(PathBuf),
-    #[error("state directory must be owned by the current user and mode 0700: {0}")]
+    // The requirement is the same on both platforms -- reachable only by this user -- but the
+    // mechanism differs, so the message names the property rather than the Unix mode bits it used
+    // to quote. Telling a Windows user to "chmod 0700" is not actionable.
+    #[error("state directory must be owned by the current user and accessible only to them: {0}")]
     InsecureStateDir(PathBuf),
     #[error("invalid operation id: {0}")]
     InvalidOperationId(String),
@@ -1017,11 +1013,12 @@ pub enum StateError {
 
 /// Whether the current build can safely persist operation snapshots.
 ///
-/// Windows remains disabled until the store can enforce a current-user-only
-/// DACL and reject reparse points for every state-directory component and
-/// snapshot file. Returning `false` is intentional fail-closed behavior.
+/// Enabled where the store can enforce a per-user-private state directory. On Unix that is mode
+/// `0700` plus an owner check; on Windows it is an explicit, inheritance-protected DACL naming only
+/// the user, SYSTEM and Administrators, an ownership check, and rejection of reparse points for
+/// every component of the path. Any platform without such enforcement stays fail-closed.
 pub const fn durable_state_supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, target_os = "windows"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1281,7 +1278,7 @@ pub const fn scan_ndjson_supported() -> bool {
 }
 
 pub const fn cache_status_supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, target_os = "windows"))
 }
 
 pub fn cache_status_usage_error(context: &CoreContext, detail: &str) -> CacheStatusSuccess {
@@ -1508,10 +1505,7 @@ fn scan_with_store_options<S: SnapshotStore>(
             &digest_hex(ids.operation_id_str())[..12]
         ));
         let compat = compat_snapshot(host_scan_platform());
-        #[cfg(unix)]
         let loaded_preview = load_stale_preview(request.state_dir.as_deref());
-        #[cfg(windows)]
-        let loaded_preview = empty_cache_preview_load();
         let scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
@@ -1521,10 +1515,7 @@ fn scan_with_store_options<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         let summary = scanner.scan(&roots, &cancel)?;
-        #[cfg(unix)]
         let stored_preview = store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary);
-        #[cfg(windows)]
-        let stored_preview = empty_cache_preview_store();
         let finished_at = timestamp_now();
         let status = scan_status(&summary);
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
@@ -1751,7 +1742,7 @@ pub fn replay_completed_status(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 pub fn cache_status(
     _context: &CoreContext,
     request: &CacheStatusRequest,
@@ -1878,14 +1869,6 @@ fn cache_status_error_output(
         [("detail", detail.to_string())],
     ));
     output
-}
-
-#[cfg(windows)]
-pub fn cache_status(
-    _context: &CoreContext,
-    _request: &CacheStatusRequest,
-) -> Result<CacheStatusSuccess, CoreError> {
-    Err(StateError::DurableStateUnsupportedOnWindows.into())
 }
 
 pub fn cancel_with_store<S: SnapshotStore>(
@@ -2157,8 +2140,8 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             "operation.snapshot.durable",
-            CapabilityState::Disabled,
-            "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED",
+            CapabilityState::Qualified,
+            "STATUS_SNAPSHOT_SUPPORTED",
         ),
         capability_record(
             &recorded_at,
@@ -2173,8 +2156,8 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Windows,
             "cache.preview.inspect",
-            CapabilityState::Disabled,
-            "CACHE_PREVIEW_INSPECTION_UNAVAILABLE",
+            CapabilityState::Degraded,
+            "CACHE_PREVIEW_INSPECTION_READ_ONLY",
         ),
         capability_record(
             &recorded_at,
@@ -3424,27 +3407,8 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
 }
 
 #[cfg(windows)]
-fn empty_cache_preview_load() -> CachePreviewLoad {
-    CachePreviewLoad {
-        status: CACHE_LOAD_MODE_MISS,
-        generation: None,
-        preview: None,
-        warnings: Vec::new(),
-    }
-}
-
 #[cfg(windows)]
-fn empty_cache_preview_store() -> CachePreviewStoreResult {
-    CachePreviewStoreResult {
-        status: CACHE_STORE_MODE_SKIPPED,
-        generation: None,
-        preview_bytes: 0,
-        resource_limit: false,
-        warnings: Vec::new(),
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
         return CachePreviewLoad {
@@ -3494,7 +3458,7 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn store_stale_preview(
     state_dir: Option<&Path>,
     scan_id: &ScanId,
@@ -3640,7 +3604,7 @@ fn cache_preview_metadata(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn preview_generation_store(
     state_dir: Option<&Path>,
 ) -> Result<Option<AtomicGenerationStore>, StateError> {
@@ -3655,7 +3619,7 @@ fn preview_generation_store(
     Ok(Some(AtomicGenerationStore::new(preview_root)))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn preview_summaries_from_scan(summary: &ScanSummary) -> Vec<PreviewSummary> {
     let aggregate_by_id = summary
         .aggregates
@@ -3751,7 +3715,7 @@ fn preview_summaries_from_scan(summary: &ScanSummary) -> Vec<PreviewSummary> {
     rows
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn stale_preview_value(value: &sweepx_model::ByteValue) -> sweepx_model::ByteValue {
     match value {
         sweepx_model::EvidenceValue::Known { value } => {
@@ -3773,7 +3737,7 @@ fn stale_preview_value(value: &sweepx_model::ByteValue) -> sweepx_model::ByteVal
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn stale_preview_count(value: &sweepx_model::CountValue) -> sweepx_model::CountValue {
     match value {
         sweepx_model::EvidenceValue::Known { value } => {
@@ -3795,7 +3759,7 @@ fn stale_preview_count(value: &sweepx_model::CountValue) -> sweepx_model::CountV
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn stale_preview_aggregate(
     aggregate: &sweepx_model::DirectoryAggregate,
 ) -> sweepx_model::DirectoryAggregate {
@@ -3814,7 +3778,7 @@ fn stale_preview_aggregate(
     aggregate
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn state_dir_bytes(path: &Path) -> io::Result<u64> {
     fn visit(path: &Path, total: &mut u64, visited_dirs: &mut usize) -> io::Result<()> {
         const MAX_STATE_DIR_ENTRIES: usize = 16_384;
@@ -3848,7 +3812,7 @@ fn state_dir_bytes(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn sanitize_cache_id(value: &str) -> String {
     value
         .chars()
@@ -3862,7 +3826,7 @@ fn sanitize_cache_id(value: &str) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
     let name = path.file_name()?;
     #[cfg(unix)]
@@ -5250,26 +5214,16 @@ fn mutation_capability_record(
     record
 }
 
+/// Cache inspection is read-only everywhere it exists, which is "degraded" rather than qualified.
+///
+/// Windows is no longer a separate case: the durable preview cache runs there now that the state
+/// directory can be made current-user-private.
 fn cache_status_capability_state() -> CapabilityState {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        CapabilityState::Degraded
-    }
-    #[cfg(target_os = "windows")]
-    {
-        CapabilityState::Disabled
-    }
+    CapabilityState::Degraded
 }
 
 fn cache_status_capability_reason() -> &'static str {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        "CACHE_PREVIEW_INSPECTION_READ_ONLY"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "CACHE_PREVIEW_INSPECTION_UNAVAILABLE"
-    }
+    "CACHE_PREVIEW_INSPECTION_READ_ONLY"
 }
 
 fn os_family_name(os_family: OsFamily) -> &'static str {
@@ -5374,7 +5328,7 @@ fn capability_reason(reason_code: &str) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CacheStatusDisposition {
     Absent,
@@ -5382,7 +5336,7 @@ enum CacheStatusDisposition {
     Degraded,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_inspection_state_error(error: CacheError) -> StateError {
     match error {
         CacheError::Io(error) => StateError::Io(error),
@@ -5394,7 +5348,7 @@ fn cache_inspection_state_error(error: CacheError) -> StateError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_disposition(inspection: &CacheInspection) -> CacheStatusDisposition {
     if !inspection.exists {
         CacheStatusDisposition::Absent
@@ -5410,7 +5364,7 @@ fn cache_status_disposition(inspection: &CacheInspection) -> CacheStatusDisposit
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_disposition_name(disposition: CacheStatusDisposition) -> &'static str {
     match disposition {
         CacheStatusDisposition::Absent => "absent",
@@ -5419,7 +5373,7 @@ fn cache_status_disposition_name(disposition: CacheStatusDisposition) -> &'stati
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_output_status(disposition: CacheStatusDisposition) -> OutputStatus {
     match disposition {
         CacheStatusDisposition::Absent | CacheStatusDisposition::Available => OutputStatus::Ok,
@@ -5427,7 +5381,7 @@ fn cache_status_output_status(disposition: CacheStatusDisposition) -> OutputStat
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_inspection_health_name(health: CacheInspectionHealth) -> &'static str {
     match health {
         CacheInspectionHealth::Healthy => "available",
@@ -5437,7 +5391,7 @@ fn cache_inspection_health_name(health: CacheInspectionHealth) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_inspection_warning_json(warning: &CacheInspectionWarning) -> Value {
     match warning {
         CacheInspectionWarning::GenerationScanTruncated { limit } => json!({
@@ -5451,7 +5405,7 @@ fn cache_inspection_warning_json(warning: &CacheInspectionWarning) -> Value {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_inspection_warnings_json(inspection: &CacheInspection) -> Vec<Value> {
     let mut warnings = inspection
         .warnings
@@ -5467,7 +5421,7 @@ fn cache_inspection_warnings_json(inspection: &CacheInspection) -> Vec<Value> {
     warnings
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_inspection_error_json(error: &CacheInspectionError) -> Value {
     match error {
         CacheInspectionError::CurrentPointerTooLarge { bytes } => json!({
@@ -5508,7 +5462,7 @@ fn cache_inspection_error_json(error: &CacheInspectionError) -> Value {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_warning_message(warning: &CacheInspectionWarning) -> ProtocolMessage {
     match warning {
         CacheInspectionWarning::GenerationScanTruncated { limit } => protocol_error(
@@ -5528,7 +5482,7 @@ fn cache_status_warning_message(warning: &CacheInspectionWarning) -> ProtocolMes
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_warning_messages(inspection: &CacheInspection) -> Vec<ProtocolMessage> {
     let mut warnings = inspection
         .warnings
@@ -5547,7 +5501,7 @@ fn cache_status_warning_messages(inspection: &CacheInspection) -> Vec<ProtocolMe
     warnings
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn cache_status_error_message(error: &CacheInspectionError) -> ProtocolMessage {
     match error {
         CacheInspectionError::CurrentPointerTooLarge { bytes } => protocol_error(
@@ -5867,6 +5821,9 @@ fn timestamp_after(timestamp: &str, duration: time::Duration) -> String {
         .expect("rfc3339 formatting available")
 }
 
+#[cfg(target_os = "windows")]
+mod windows_state_security;
+
 pub fn state_dir_from_explicit_or_default(
     explicit: Option<&Path>,
 ) -> Result<Option<PathBuf>, StateError> {
@@ -5892,9 +5849,18 @@ pub fn state_dir_from_explicit_or_default(
     }
 }
 
+/// The default state directory on Windows.
+///
+/// `%LOCALAPPDATA%` is the platform's own location for per-user, non-roaming application state,
+/// and it already carries a user-private ACL. Local rather than roaming is deliberate: the state
+/// describes one machine's disk layout, so replicating it across a roaming profile would copy
+/// machine-specific data to hosts where it is meaningless and merely widens exposure.
 #[cfg(target_os = "windows")]
 fn default_state_dir() -> Option<PathBuf> {
-    None
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|base| base.is_absolute())
+        .map(|base| base.join("sweepx").join("state"))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5995,6 +5961,54 @@ fn normalize_scan_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, CoreError> {
     Ok(retained)
 }
 
+/// Walks `path` component by component, refusing reparse points and creating what is missing.
+///
+/// The Windows counterpart to the Unix ancestor-chain check. Reparse points matter more here than
+/// the symlink case does on Unix: a **directory junction** can be created by an ordinary user with
+/// no elevation and no developer mode, so an attacker who can write into any ancestor can redirect
+/// the state directory elsewhere. Measured on this host, Rust reports a junction as
+/// `is_symlink() == true`, so one check covers junctions, directory symlinks and file symlinks.
+///
+/// Missing components are created with an explicit private DACL rather than an inherited one, and
+/// the result is verified, so a widened profile ACL cannot silently propagate.
+#[cfg(target_os = "windows")]
+fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
+    if !path.is_absolute() {
+        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        // The prefix and root of an absolute Windows path (`C:` then `\`) are not directories that
+        // can be created or inspected on their own; the first real component follows them.
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(StateError::SymlinkStateDir(current));
+                }
+                if !meta.is_dir() {
+                    return Err(StateError::InvalidStateDir(current));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                windows_state_security::create_private_dir(&current)?;
+                let meta = fs::symlink_metadata(&current)?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(StateError::SymlinkStateDir(current));
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     if !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows);
@@ -6002,7 +6016,7 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "windows"))]
     validate_or_prepare_private_ancestor_chain(path)?;
     if path.exists() {
         let meta = fs::symlink_metadata(path)?;
@@ -6019,7 +6033,7 @@ fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
     ensure_private_dir(path)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
@@ -6047,7 +6061,7 @@ fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
     if !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows);
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "windows"))]
     validate_or_prepare_private_ancestor_chain(path)?;
     if path.exists() {
         let meta = fs::symlink_metadata(path)?;
@@ -6070,7 +6084,17 @@ fn set_private_dir_mode(path: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Windows has no mode bits; privacy is established by the DACL written at creation time.
+///
+/// Rewriting the ACL of a directory that already exists is deliberately not done here: an existing
+/// directory may have been created by another tool or an administrator, and silently re-securing it
+/// would hide the very misconfiguration `ensure_private_dir` exists to report.
+#[cfg(target_os = "windows")]
+fn set_private_dir_mode(_path: &Path) -> Result<(), StateError> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn set_private_dir_mode(_path: &Path) -> Result<(), StateError> {
     Err(StateError::DurableStateUnsupportedOnWindows)
 }
@@ -6085,7 +6109,23 @@ fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Verifies that a Windows state directory is reachable only by this user.
+///
+/// The Windows analogue of the Unix `0700` + owner check: the DACL must name nobody except the
+/// user, SYSTEM and Administrators, and the directory must be owned by the calling token. Both are
+/// required — a directory owned by someone else can have its DACL rewritten at any time, so a
+/// currently-correct ACL on a foreign-owned directory is not a guarantee.
+#[cfg(target_os = "windows")]
+fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
+    let private = windows_state_security::is_current_user_private(path)?;
+    let owned = windows_state_security::is_owned_by_current_user(path)?;
+    if !private || !owned {
+        return Err(StateError::InsecureStateDir(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn ensure_private_dir(_path: &Path) -> Result<(), StateError> {
     Err(StateError::DurableStateUnsupportedOnWindows)
 }
@@ -6132,9 +6172,25 @@ fn atomic_write_private_file(path: &Path, bytes: &[u8]) -> Result<(), StateError
     Ok(())
 }
 
+/// Flushes a directory entry so a rename is durable across a crash.
+///
+/// Unix requires an explicit `fsync` on the parent directory: without it the rename can be lost
+/// even though the file's own data reached disk.
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), StateError> {
     let file = File::open(path)?;
     file.sync_all()?;
+    Ok(())
+}
+
+/// Windows has no directory-flush equivalent, and asking for one fails.
+///
+/// `File::open` on a directory returns `ERROR_ACCESS_DENIED` (measured), because opening a
+/// directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`, which `std` does not set. That is not a
+/// durability gap to work around: NTFS journals the metadata change, so once `MoveFileEx` returns,
+/// the rename is already recoverable. Doing nothing is therefore correct rather than a compromise.
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
@@ -6265,7 +6321,10 @@ mod tests {
 
     #[test]
     fn durable_state_support_matches_platform_security_implementation() {
-        assert_eq!(durable_state_supported(), cfg!(unix));
+        assert_eq!(
+            durable_state_supported(),
+            cfg!(any(unix, target_os = "windows"))
+        );
     }
 
     #[test]
@@ -6316,23 +6375,33 @@ mod tests {
         assert!(durable_store(None).unwrap().is_none());
     }
 
+    /// A Windows state directory is created private and is then accepted by its own checks.
+    ///
+    /// Replaces a test that asserted the store always refused. What still matters is that the
+    /// directory it creates is one the security checks approve of, since creation and verification
+    /// are separate implementations that must agree.
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_durable_store_fails_before_creating_state() {
+    fn windows_durable_store_creates_a_private_state_dir() {
         let temp = tempfile::TempDir::new().unwrap();
         let state = temp.path().join("state");
 
-        assert!(matches!(
-            DurableSnapshotStore::new(&state),
-            Err(StateError::DurableStateUnsupportedOnWindows)
-        ));
-        assert!(!state.exists());
-        assert!(matches!(
-            durable_store(Some(&state)),
-            Err(StateError::DurableStateUnsupportedOnWindows)
-        ));
-        assert!(!state.exists());
-        assert!(state_dir_from_explicit_or_default(None).unwrap().is_none());
+        let store = DurableSnapshotStore::new(&state).expect("durable state is supported");
+        assert!(state.is_dir());
+        assert!(
+            windows_state_security::is_current_user_private(&state).unwrap(),
+            "the created state directory must satisfy the check that guards every later open"
+        );
+        assert!(windows_state_security::is_owned_by_current_user(&state).unwrap());
+        drop(store);
+
+        assert!(durable_store(Some(&state)).unwrap().is_some());
+        assert!(
+            state_dir_from_explicit_or_default(None)
+                .unwrap()
+                .is_some_and(|path| path.is_absolute()),
+            "the Windows default must resolve to an absolute LOCALAPPDATA path"
+        );
     }
 
     #[cfg(not(windows))]
@@ -7021,11 +7090,11 @@ mod tests {
                     && item["qualificationKey"]["capability"] == "operation.snapshot.durable"
             })
             .expect("windows durable snapshot capability");
-        assert_eq!(windows_snapshot["state"], "disabled");
         assert_eq!(
-            windows_snapshot["reasonCode"],
-            "WINDOWS_DURABLE_STATE_SECURITY_UNIMPLEMENTED"
+            windows_snapshot["state"], "qualified",
+            "durable state is enforced on Windows by an explicit DACL and ownership check"
         );
+        assert_eq!(windows_snapshot["reasonCode"], "STATUS_SNAPSHOT_SUPPORTED");
     }
 
     #[test]

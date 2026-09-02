@@ -42,6 +42,13 @@ sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-featur
 
 [target.'cfg(target_os = "windows")'.dependencies]
 sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-windows"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.21.0"

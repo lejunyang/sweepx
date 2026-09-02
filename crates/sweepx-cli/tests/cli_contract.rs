@@ -103,12 +103,9 @@ fn capabilities_json_uses_fixed_machine_keys() {
         .iter()
         .find(|item| item["id"] == "cache.status")
         .unwrap();
-    let expected_cache_status_state = if cfg!(target_os = "windows") {
-        "disabled"
-    } else {
-        "degraded"
-    };
-    assert_eq!(cache_status["state"], expected_cache_status_state);
+    // Cache status inspects the durable preview cache, which now exists on Windows too, so the
+    // command is degraded (read-only) on every platform rather than disabled on one.
+    assert_eq!(cache_status["state"], "degraded");
     let junk = commands.iter().find(|item| item["id"] == "junk").unwrap();
     assert_eq!(junk["state"], "degraded");
     assert_eq!(junk["mutating"], false);
@@ -195,12 +192,9 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     && item["qualificationKey"]["capability"] == "operation.snapshot.durable"
             })
             .unwrap();
-        let expected_snapshot_state = if os == "windows" {
-            "disabled"
-        } else {
-            "qualified"
-        };
-        assert_eq!(durable_snapshot["state"], expected_snapshot_state);
+        // Durable snapshots are qualified on every supported platform now that Windows can
+        // enforce a current-user-private state directory.
+        assert_eq!(durable_snapshot["state"], "qualified");
     }
 
     let linux_tui = json["data"]["capabilities"]
@@ -291,21 +285,10 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     && item["qualificationKey"]["capability"] == "cache.preview.inspect"
             })
             .unwrap();
-        assert_eq!(
-            cache_preview["state"],
-            if os == "windows" {
-                "disabled"
-            } else {
-                "degraded"
-            }
-        );
+        assert_eq!(cache_preview["state"], "degraded");
         assert_eq!(
             cache_preview["reasonCode"],
-            if os == "windows" {
-                "CACHE_PREVIEW_INSPECTION_UNAVAILABLE"
-            } else {
-                "CACHE_PREVIEW_INSPECTION_READ_ONLY"
-            }
+            "CACHE_PREVIEW_INSPECTION_READ_ONLY"
         );
     }
 
@@ -1405,19 +1388,27 @@ fn no_state_conflicts_with_explicit_state_directory() {
     assert!(!state_dir.exists());
 }
 
+/// Without `--state-dir`, Windows now defaults into `%LOCALAPPDATA%` and persists there.
+///
+/// The previous version of this test asserted that no durable state was created at all, which was
+/// a statement about the missing security enforcement rather than a desired property. What must
+/// stay true is that the default lands under LOCALAPPDATA and not in the Unix-style location.
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_scan_runs_without_creating_durable_state() {
+fn windows_scan_defaults_durable_state_into_local_appdata() {
     let fixture = TempDir::new().unwrap();
     let root = fixture.path().join("root");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("visible.txt"), b"hello").unwrap();
     let user_profile = fixture.path().join("profile");
+    let local_appdata = fixture.path().join("local-appdata");
     fs::create_dir(&user_profile).unwrap();
+    fs::create_dir(&local_appdata).unwrap();
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
         .env("USERPROFILE", &user_profile)
+        .env("LOCALAPPDATA", &local_appdata)
         .env_remove("XDG_STATE_HOME")
         .arg("--format")
         .arg("json")
@@ -1428,8 +1419,7 @@ fn windows_scan_runs_without_creating_durable_state() {
 
     assert_ne!(json["status"], "unsupported");
     assert_eq!(json["summary"]["platform"], "windows");
-    assert_eq!(json["summary"]["cachePreview"]["loadStatus"], "miss");
-    assert_eq!(json["summary"]["cachePreview"]["storeStatus"], "skipped");
+    assert_eq!(json["summary"]["cachePreview"]["storeStatus"], "written");
     assert!(
         json["data"]["entries"]
             .as_array()
@@ -1439,17 +1429,84 @@ fn windows_scan_runs_without_creating_durable_state() {
                     .is_some_and(|path| path.ends_with("visible.txt"))
             }))
     );
-    assert!(!user_profile.join(".local/state/sweepx").exists());
+    assert!(
+        local_appdata.join("sweepx").join("state").is_dir(),
+        "the default state directory must live under LOCALAPPDATA"
+    );
+    assert!(
+        !user_profile.join(".local/state/sweepx").exists(),
+        "the Unix location must never be used on Windows"
+    );
 }
 
+/// An explicit `--state-dir` is accepted on Windows and the cache survives between runs.
+///
+/// This is the behavior the durable-state work exists to deliver, so it is asserted through the
+/// real binary: the first run writes a generation and the second loads that same generation back.
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_explicit_state_dir_fails_before_scan_or_state_creation() {
+fn windows_explicit_state_dir_persists_between_runs() {
     let fixture = TempDir::new().unwrap();
     let root = fixture.path().join("root");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("visible.txt"), b"hello").unwrap();
     let state_dir = fixture.path().join("state");
+
+    let run = || {
+        let mut cmd = cli_command();
+        cmd.current_dir(cli_crate_dir())
+            .arg("--format")
+            .arg("json")
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .arg("scan")
+            .arg(&root);
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+
+    let first = run();
+    assert_eq!(first["summary"]["cachePreview"]["loadStatus"], "miss");
+    assert_eq!(first["summary"]["cachePreview"]["storeStatus"], "written");
+    let written = first["summary"]["cachePreview"]["writtenGeneration"]
+        .as_str()
+        .expect("a generation id must be recorded when a preview is written")
+        .to_string();
+    assert!(state_dir.is_dir());
+
+    let second = run();
+    assert_eq!(
+        second["summary"]["cachePreview"]["loadStatus"], "stale_preview",
+        "a second run must find the generation the first one wrote"
+    );
+    assert_eq!(
+        second["summary"]["cachePreview"]["loadedGeneration"], written,
+        "the generation loaded must be exactly the one persisted"
+    );
+}
+
+/// A state directory reachable by other users must be refused rather than silently used.
+///
+/// This is the guard that makes enabling durable state on Windows defensible, so it is exercised
+/// against a directory widened through the OS's own tool, the same way a real misconfiguration
+/// would arise.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_refuses_a_state_dir_that_other_users_can_reach() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let state_dir = fixture.path().join("shared-state");
+    fs::create_dir(&state_dir).unwrap();
+
+    let granted = std::process::Command::new("icacls")
+        .arg(&state_dir)
+        .arg("/grant")
+        .arg("*S-1-1-0:(OI)(CI)F")
+        .output()
+        .expect("icacls runs");
+    assert!(granted.status.success());
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -1459,11 +1516,12 @@ fn windows_explicit_state_dir_fails_before_scan_or_state_creation() {
         .arg(&state_dir)
         .arg("scan")
         .arg(&root);
-    let output = cmd.assert().code(3).get_output().clone();
+    let output = cmd.assert().failure().get_output().clone();
     let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(stderr.contains("durable state is disabled on Windows"));
-    assert!(!state_dir.exists());
+    assert!(
+        stderr.contains("accessible only to them"),
+        "unexpected refusal message: {stderr}"
+    );
 }
 
 #[cfg(target_os = "linux")]
