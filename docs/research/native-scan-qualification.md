@@ -453,11 +453,12 @@ second scan of a quiescent volume reports `verified_preview`, and writing one fi
 drops the next scan back to `stale_preview` with `cache.preview.unverified.changed`. Both directions
 matter: a token that never matched would also "detect every change" while being useless.
 
-### A same-volume cache cannot verify, and two-phase writing does not fix it
+### A same-volume cache invalidates itself unless changes are attributed
 
 When the state directory shares a volume with the scan root — **the default shape**, since
-`%LOCALAPPDATA%` is on `C:` — the preview never reaches `verified_preview`. The cache's own write is
-journalled on the volume it is recording, so the stored position is stale the instant it lands.
+`%LOCALAPPDATA%` is on `C:` — bare token comparison never reaches `verified_preview`. The cache's own
+write is journalled on the volume it is recording, so the stored position is stale the instant it
+lands.
 
 Measured on `C:` with a probe reading the journal directly:
 
@@ -469,17 +470,31 @@ Measured on `C:` with a probe reading the journal directly:
 | writes to `C:` only, measured on `E:` | 0 |
 
 The idle delta of 0 confirms the volume-level token is not simply too noisy to be useful, and the
-cross-volume 0 confirms volumes are independent — which is why the cross-volume case works.
+cross-volume 0 confirms volumes are independent — which is why the cross-volume case worked from the
+start.
 
-The obvious fix, capturing the token *after* `write_generation` and rewriting the generation with
-it, was implemented and measured: **it does not converge.** Four consecutive same-volume runs each
-reported `cache.preview.unverified.changed`, because the second write is journalled exactly like the
-first. It was reverted rather than tuned; adding a third write would only move the problem.
+**A rejected fix, recorded so it is not retried.** Capturing the token *after* `write_generation` and
+rewriting the generation with it was implemented and measured: **it does not converge.** Four
+consecutive same-volume runs each reported `cache.preview.unverified.changed`, because the second
+write is journalled exactly like the first. It was reverted rather than tuned; a third write would
+only move the problem.
 
-Excluding the cache's own records needs per-record attribution via `FSCTL_READ_USN_JOURNAL`, which
-is not wired up. Until it is, a same-volume cache degrades to `stale_preview`, which is the pre-L3
-behavior and never a false claim of freshness. A user who wants verified reuse today can put the
-state directory on a different volume from the trees being scanned.
+**The fix that works: per-record attribution.** `FSCTL_READ_USN_JOURNAL` reads the records in the
+changed range, and the range is accepted as quiet when *every* record belongs to the cache's own
+directories. Both directories must be excluded together — the generation payload is renamed into
+`generations/` while the pointer is renamed into its parent, so a write that excluded only one still
+looked partly foreign.
+
+Attribution keys on the **parent reference number**, read from an open handle to the real directory,
+never on filenames. A name comparison would let any process create `current.json` in a location it
+controls and have its writes dismissed. It also fails closed in every ambiguous direction: a record
+parented *below* an excluded directory is foreign (the cache creates no nested directories), an
+unresolvable exclusion set attributes nothing rather than everything, and an unreadable range refuses
+reuse instead of assuming quiet.
+
+Reading the range needs the same elevated volume handle as everything else here. `read_directory_reference`
+does **not** — it opens the directory, not the volume — which is why the identity half is verified
+unprivileged against `GetFileInformationByHandleEx` reached through `std::fs`.
 
 ## Gate meanings
 

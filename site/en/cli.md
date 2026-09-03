@@ -229,12 +229,14 @@ that did move all keep the previous behavior and add a warning naming the reason
 because a half-valid preview would show correct sizes for one part of a tree and stale sizes for
 another while looking correct.
 
-Two conditions must hold for a preview to verify. Reading the journal needs the same elevated
-volume handle acceleration needs, so an unelevated run records no evidence and behaves exactly as it
-did before this existed. And the state directory must be on a *different* volume from the trees being
-scanned: the cache's own write is journalled on the volume it records, which advances that volume's
-change position and leaves the stored evidence stale on arrival. Since the default state directory
-lives on `C:`, scanning `C:` verifies nothing today and reports `stale_preview` as before. Evidence is stored inside the
+Reading the journal needs the same elevated volume handle acceleration needs, so an unelevated run
+records no evidence and behaves exactly as it did before this existed.
+
+A state directory on the same volume as the scanned tree — the default, since state lives under
+`%LOCALAPPDATA%` — still verifies. The cache's own write is journalled on the volume it records, so
+SweepX reads the changed records and treats the volume as quiet when all of them belong to the cache's
+own directories. Anything else in that range, including a write elsewhere on the volume that happened
+alongside the cache's, refuses reuse and reports `stale_preview`. Evidence is stored inside the
 checksummed generation payload, so editing a token on disk invalidates the whole generation rather
 than buying a false "unchanged".
 
