@@ -1,3 +1,4 @@
+mod cache_validity;
 mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;
@@ -89,6 +90,13 @@ pub const SCAN_NDJSON_UNAVAILABLE_MESSAGE: &str = "scan --format ndjson is disab
 const PREVIEW_GENERATION_POINTER_DIR: &str = "preview-cache";
 const CACHE_LOAD_MODE_MISS: &str = "miss";
 const CACHE_LOAD_MODE_HIT: &str = "stale_preview";
+/// A stored preview whose recorded evidence still holds, so it describes the volume as it is now.
+///
+/// Distinct from `stale_preview` because the two license different things: a stale preview is a
+/// hint that must be re-derived before it is trusted, while a verified one has been shown to match
+/// the current filesystem. Collapsing them would either discard the benefit of verification or
+/// silently present unverified sizes as exact.
+const CACHE_LOAD_MODE_VERIFIED: &str = "verified_preview";
 const CACHE_LOAD_MODE_QUARANTINED: &str = "quarantined";
 const CACHE_STORE_MODE_WRITTEN: &str = "written";
 const CACHE_STORE_MODE_SKIPPED: &str = "skipped";
@@ -1503,7 +1511,8 @@ fn scan_with_store_options<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         let summary = scanner.scan(&roots, &cancel)?;
-        let stored_preview = store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary);
+        let stored_preview =
+            store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
         let finished_at = timestamp_now();
         let status = scan_status(&summary);
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
@@ -3394,8 +3403,6 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     format!("…{}", value.chars().skip(count - keep).collect::<String>())
 }
 
-#[cfg(windows)]
-#[cfg(windows)]
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
@@ -3408,12 +3415,24 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     };
 
     match store.load_current() {
-        Ok(LoadResult::Hit(generation)) => CachePreviewLoad {
-            status: CACHE_LOAD_MODE_HIT,
-            generation: Some(generation.generation),
-            preview: Some(generation.preview),
-            warnings: Vec::new(),
-        },
+        Ok(LoadResult::Hit(generation)) => {
+            // Verification only ever upgrades the status. A preview that cannot be verified stays
+            // exactly as useful as it was before validity existed, so a denied volume handle costs
+            // nothing beyond the upgrade it could not earn.
+            let (status, warnings) = match cache_validity::evaluate_reuse(&generation.validity) {
+                Ok(()) => (CACHE_LOAD_MODE_VERIFIED, Vec::new()),
+                Err(refusal) => (
+                    CACHE_LOAD_MODE_HIT,
+                    vec![format!("cache.preview.unverified.{}", refusal.code())],
+                ),
+            };
+            CachePreviewLoad {
+                status,
+                generation: Some(generation.generation),
+                preview: Some(generation.preview),
+                warnings,
+            }
+        }
         Ok(LoadResult::Miss) => {
             let quarantined = store.root().join("quarantine").exists();
             CachePreviewLoad {
@@ -3451,6 +3470,7 @@ fn store_stale_preview(
     state_dir: Option<&Path>,
     scan_id: &ScanId,
     summary: &ScanSummary,
+    roots: &[ScanRoot],
 ) -> CachePreviewStoreResult {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
         return CachePreviewStoreResult {
@@ -3515,6 +3535,10 @@ fn store_stale_preview(
         schema: STORED_PREVIEW_SCHEMA.to_string(),
         created_at: timestamp_now(),
         preview: admission.compacted.clone(),
+        // Captured after the scan rather than before it. A token taken beforehand would also cover
+        // the scan's own duration, so any write racing the walk would be invisible to the next
+        // run; taking it afterwards can only over-invalidate, which is the safe direction.
+        validity: cache_validity::capture_validity(roots),
     };
     match store.write_generation(&stored) {
         Ok(()) => CachePreviewStoreResult {

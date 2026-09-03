@@ -201,12 +201,51 @@ pub enum CacheError {
     Json(#[from] serde_json::Error),
 }
 
+/// Evidence that a stored preview still describes the filesystem it was taken from.
+///
+/// Stored inside [`StoredGeneration`] rather than beside it so that the evidence and the data it
+/// vouches for are replaced by the same atomic rename. Two files could disagree after a crash, and
+/// the dangerous direction of that disagreement — fresh evidence pointing at stale data — is
+/// exactly what would show a user sizes for a tree that has since changed.
+///
+/// The record is deliberately platform-neutral: this crate must not depend on any platform crate,
+/// and a cache written by one build should stay readable by another. Interpreting a token is the
+/// caller's job; this type only carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeValidityRecord {
+    /// Which mechanism produced this token, so a consumer never interprets one kind as another.
+    ///
+    /// A record whose kind is unknown to the reader must be treated as no evidence at all rather
+    /// than guessed at.
+    pub kind: String,
+    /// Identifies the volume the token was captured from, in a form the producer can match again.
+    pub volume: String,
+    /// Identifies the incarnation of the change log, so a recreated log cannot look like the
+    /// original one that happened to reach the same position.
+    pub sequence_id: String,
+    /// The position the change log had reached when the preview was captured.
+    pub position: String,
+}
+
+/// The token kind produced by the NTFS USN change journal.
+///
+/// A constant rather than a bare literal because it is a storage contract: changing it silently
+/// invalidates every cache on disk instead of failing loudly.
+pub const VALIDITY_KIND_NTFS_USN: &str = "ntfs_usn";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredGeneration {
     pub generation: String,
     pub schema: String,
     pub created_at: String,
     pub preview: CompactedPreview,
+    /// Per-volume evidence that this preview is still current, empty when none was obtainable.
+    ///
+    /// Defaults to empty so that a generation written before validity existed — or by a build that
+    /// could not capture a token — deserializes into "no evidence" and is therefore never
+    /// reusable. Absence of evidence must fail closed; there is no migration to forget.
+    #[serde(default)]
+    pub validity: Vec<VolumeValidityRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1742,6 +1781,7 @@ impl PreviewSummaryExt for PreviewSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestTempDir {
@@ -1944,6 +1984,129 @@ mod tests {
         }));
     }
 
+    /// A generation written before validity existed loads with no evidence, not an error.
+    ///
+    /// Uses a hand-written payload with the field absent, which is exactly what is sitting in
+    /// users' caches right now. Reading it must succeed — a hard failure would quarantine every
+    /// existing cache on upgrade — and must yield empty evidence so the generation is never
+    /// treated as verified. Building the JSON through the struct would prove nothing, because the
+    /// serializer would put the field back.
+    #[test]
+    fn a_generation_without_validity_loads_as_having_no_evidence() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let modern = StoredGeneration {
+            generation: "gen-old".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-08-26T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
+        };
+        store.write_generation(&modern).unwrap();
+
+        // Rewrite the payload without the field, then recompute the checksum so the test
+        // exercises the missing field rather than tamper detection.
+        let path = temp.path().join("generations/gen-old.json");
+        let mut envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        envelope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("validity")
+            .expect("the field must be present before it is removed");
+        let legacy: StoredGeneration = serde_json::from_value(envelope["payload"].clone()).unwrap();
+        envelope["checksum_sha256"] = json!(checksum_hex(&legacy).unwrap());
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        let loaded = store.load_current().unwrap();
+        let LoadResult::Hit(generation) = loaded else {
+            panic!("a generation predating validity must still load, got {loaded:?}");
+        };
+        assert!(
+            generation.validity.is_empty(),
+            "an absent field must read as no evidence, never as evidence"
+        );
+    }
+
+    /// Validity survives a write/read round trip byte for byte.
+    ///
+    /// Written through the real store rather than compared in memory, because the field only earns
+    /// its place if it crosses the atomic-rename boundary intact; serializing and deserializing in
+    /// one process would not exercise the envelope or its checksum.
+    #[test]
+    fn validity_records_survive_a_store_round_trip() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let validity = vec![
+            VolumeValidityRecord {
+                kind: VALIDITY_KIND_NTFS_USN.to_string(),
+                volume: r"C:\".to_string(),
+                sequence_id: "17293822569102704640".to_string(),
+                position: "9007199254740993".to_string(),
+            },
+            VolumeValidityRecord {
+                kind: VALIDITY_KIND_NTFS_USN.to_string(),
+                volume: r"E:\".to_string(),
+                sequence_id: "1".to_string(),
+                position: "2".to_string(),
+            },
+        ];
+        let generation = StoredGeneration {
+            generation: "gen-validity".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-09-03T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: validity.clone(),
+        };
+        store.write_generation(&generation).unwrap();
+
+        let LoadResult::Hit(loaded) = store.load_current().unwrap() else {
+            panic!("the generation just written must load");
+        };
+        assert_eq!(
+            loaded.validity, validity,
+            "identifiers beyond 2^53 must survive as written, not as rounded floats"
+        );
+    }
+
+    /// Tampering with stored validity invalidates the whole generation.
+    ///
+    /// The evidence is inside the checksummed payload precisely so that editing it on disk cannot
+    /// buy a false "unchanged" verdict; it costs the attacker the entire generation instead.
+    #[test]
+    fn editing_validity_on_disk_invalidates_the_generation() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let generation = StoredGeneration {
+            generation: "gen-tamper".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-09-03T00:00:00Z".to_string(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: vec![VolumeValidityRecord {
+                kind: VALIDITY_KIND_NTFS_USN.to_string(),
+                volume: r"C:\".to_string(),
+                sequence_id: "1".to_string(),
+                position: "100".to_string(),
+            }],
+        };
+        store.write_generation(&generation).unwrap();
+
+        let path = temp.path().join("generations/gen-tamper.json");
+        let mut envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // Edit the token in place and leave the checksum alone: that is what an attacker who
+        // wants a false "unchanged" verdict would have to do.
+        assert_eq!(
+            envelope["payload"]["validity"][0]["position"], "100",
+            "the field this test edits must exist, or the edit proves nothing"
+        );
+        envelope["payload"]["validity"][0]["position"] = json!("999");
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        assert!(
+            matches!(store.load_current(), Ok(LoadResult::Miss)),
+            "an edited token must cost the generation, not grant a reuse"
+        );
+    }
+
     #[test]
     fn corrupted_generation_falls_back_to_miss_and_quarantines() {
         let temp = TestTempDir::new();
@@ -1953,6 +2116,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
         store.write_generation(&generation).unwrap();
 
@@ -1974,6 +2138,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),
@@ -2024,6 +2189,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
 
         let real_generations = temp.path().join("real-generations");
@@ -2064,6 +2230,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
         let error = store.write_generation(&generation).unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
@@ -2117,6 +2284,7 @@ mod tests {
                 )],
                 &PreviewBudgets::default(),
             ),
+            validity: Vec::new(),
         };
         store.write_generation(&generation).unwrap();
         fs::create_dir_all(temp.path().join("quarantine")).unwrap();
@@ -2320,6 +2488,7 @@ mod tests {
                 )],
                 &PreviewBudgets::default(),
             ),
+            validity: Vec::new(),
         };
         store.write_generation(&generation).unwrap();
 
@@ -2397,6 +2566,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-28T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
 
         let error = store.write_generation(&generation).unwrap_err();
@@ -2469,6 +2639,7 @@ mod tests {
             schema: "bad-schema".to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),
@@ -2590,6 +2761,7 @@ mod tests {
                 )],
                 &PreviewBudgets::default(),
             ),
+            validity: Vec::new(),
         };
 
         store.write_generation(&generation).unwrap();
@@ -2606,6 +2778,7 @@ mod tests {
             schema: STORED_PREVIEW_SCHEMA.to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
 
         let error = store.write_generation(&generation).unwrap_err();
@@ -2630,6 +2803,7 @@ mod tests {
             schema: "wrong.schema".to_string(),
             created_at: "2026-08-26T00:00:00Z".to_string(),
             preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
         };
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),

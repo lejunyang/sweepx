@@ -63,6 +63,16 @@ pub fn read_volume_change_token(root: &std::path::Path) -> Result<VolumeChangeTo
     ntfs_acceleration::native::read_journal_bounds(root).map(VolumeChangeToken::capture)
 }
 
+/// Reads the raw journal bounds for the volume containing `root`.
+///
+/// Exposed alongside [`read_volume_change_token`] because comparing a stored token needs the
+/// current bounds, not a second token: [`compare_to_current`] deliberately takes bounds so the
+/// asymmetry between "what was recorded" and "what is true now" stays visible in the types.
+#[cfg(windows)]
+pub fn read_volume_journal_bounds(root: &std::path::Path) -> Result<UsnJournalBounds, u32> {
+    ntfs_acceleration::native::read_journal_bounds(root)
+}
+
 mod ntfs_acceleration;
 pub use ntfs_acceleration::{
     FILE_LAYOUT_PAGE_BYTES, FileLayoutDataStream, FileLayoutName, FileLayoutRecord,

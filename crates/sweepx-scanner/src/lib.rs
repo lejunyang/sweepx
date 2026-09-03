@@ -44,6 +44,13 @@ pub use sweepx_platform_linux::LinuxPlatformScanner as HostPlatformScanner;
 pub use sweepx_platform_macos::MacosPlatformScanner as HostPlatformScanner;
 #[cfg(all(target_os = "windows", feature = "platform-windows"))]
 pub use sweepx_platform_windows::WindowsPlatformScanner as HostPlatformScanner;
+/// Volume change detection, re-exported so consumers reach it through the same edge as the
+/// scanner rather than taking a second dependency on the platform crate.
+#[cfg(all(target_os = "windows", feature = "platform-windows"))]
+pub use sweepx_platform_windows::{
+    ChangeVerdict, VolumeChangeToken, compare_to_current, read_volume_change_token,
+    read_volume_journal_bounds,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannerOptions {
