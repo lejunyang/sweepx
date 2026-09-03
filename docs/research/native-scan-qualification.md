@@ -399,14 +399,54 @@ rules, so there is only one implementation of what makes a cursor trustworthy. I
 judgement: an accepted cursor equal to `NextUsn` is `Unchanged`, otherwise it is `Changed` carrying
 the exact range still to examine.
 
-### Not yet a cache
+### Wired into the cache (2026-09-03)
 
-This is the validity half only. Reuse additionally requires somewhere to persist a token between
-runs, and durable state is refused on Windows (`durable_state_supported()` returns `cfg!(unix)`):
-`--state-dir` exits 3 with "durable state is disabled on Windows until current-user-private ACL and
-reparse-point checks are implemented". So on Windows today a token cannot outlive the process, and
-the layer is usable for in-session revalidation but cannot yet skip a cold scan. Enabling that is a
-state-directory security task, not a journal task.
+The validity half now has a consumer. `store_stale_preview` captures a per-volume token after the
+walk and stores it inside `StoredGeneration.validity`; `load_stale_preview` re-checks it and, when
+every recorded volume compares `Unchanged`, reports `verified_preview` instead of `stale_preview`.
+
+Three constraints fixed where the token lives, and they are worth keeping in mind before moving it:
+
+- It is inside the generation payload, so the same atomic rename replaces data and evidence
+  together. Two files could disagree after a crash, and the dangerous direction — fresh evidence
+  vouching for stale data — is exactly the accident the journal exists to prevent. Being under the
+  envelope checksum also means editing a token on disk costs the whole generation rather than
+  buying a false `Unchanged`.
+- It is `#[serde(default)]`, so every generation written before this existed reads back as *no*
+  evidence and is never reusable. Absence fails closed and no migration is needed.
+- It is a platform-neutral record (`kind` / `volume` / `sequence_id` / `position`) rather than a
+  `VolumeChangeToken`, because `sweepx-cache` depends only on `sweepx-model`. Core owns the
+  conversion, so the on-disk format does not acquire a Windows shape.
+
+Reuse requires *all* recorded volumes to be unchanged, since one generation can span volumes. A
+half-valid preview is worse than a miss: part of the tree would be correct and part stale, and it
+would look correct.
+
+Durable state on Windows is no longer the blocker — it landed with a current-user-private ACL and
+reparse-point guard, and `%LOCALAPPDATA%\sweepx\state` persists across runs.
+
+### The remaining blocker is elevation, and it cannot be worked around
+
+Capture needs the journal, and the journal needs an elevated volume handle. Measured on this host
+against `C:\` and `E:\`, trying access masks from cheapest upward:
+
+| Access requested | `CreateFileW` | `FSCTL_QUERY_USN_JOURNAL` |
+| --- | --- | --- |
+| zero | opens | `ERROR_INVALID_FUNCTION` (1) |
+| `FILE_READ_ATTRIBUTES` | opens | `ERROR_INVALID_FUNCTION` (1) |
+| `SYNCHRONIZE` | opens | `ERROR_INVALID_FUNCTION` (1) |
+| `FILE_READ_ATTRIBUTES \| SYNCHRONIZE` | opens | `ERROR_INVALID_FUNCTION` (1) |
+| `FILE_READ_DATA` | `ERROR_ACCESS_DENIED` (5) | — |
+| `GENERIC_READ` | `ERROR_ACCESS_DENIED` (5) | — |
+
+There is no middle rung: the masks that open cannot issue the FSCTL, and the masks that could are
+refused at open. So L3 raises an unelevated run's ceiling by nothing, and shares the elevation gate
+with the accelerated reader rather than sitting behind a cheaper one.
+
+Verified end to end unelevated: two consecutive scans store empty validity and the second reports
+`stale_preview` with `cache.preview.unverified.no_evidence` — the pre-L3 behavior exactly, which is
+the intended degradation. **The elevated upgrade to `verified_preview` has not yet been confirmed
+against a live volume**; the unit tests cover the decision logic, not the privileged read.
 
 ## Gate meanings
 

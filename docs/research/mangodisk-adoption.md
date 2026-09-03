@@ -21,14 +21,18 @@ repository.
 
 ## Acceleration work that remains platform-qualified
 
-| Technique | MangoDisk evidence | SweepX decision |
+Status as of 2026-09-03. "Landed" means wired into a user-visible path on Windows, not merely
+implemented.
+
+| Technique | MangoDisk evidence | SweepX status |
 |---|---|---|
-| NTFS volume layout enumeration | `FSCTL_QUERY_FILE_LAYOUT`, 8 MiB pages, bounded fallback | High-value Windows follow-up. It needs a separate parser, corruption fixtures, cloud-placeholder handling, hard-link semantics, and Win32 fallback before use. |
-| NTFS USN change tokens | `FSCTL_QUERY_USN_JOURNAL` / `FSCTL_READ_USN_JOURNAL` | Future cache-validity accelerator only. Journal ID/range mismatch, wrap, access denial, or an unknown reason must cause a cache miss. |
-| macOS bulk enumeration | `getattrlistbulk`, 64 KiB pages | High-value macOS follow-up. Current SweepX macOS scanning still uses `readdir` plus handle-relative inspection, so no bulk-speed claim is made. |
-| Device-aware concurrency | SSD 4, rotational 2, removable/network/unknown 1 | Adopt after native device classification exists. SweepX keeps its bounded default rather than guessing media type. |
-| Applicability probes and path-trie pruning | Skip known-absent apps and branches outside active rule roots | Adopt with the rule engine. Probe failure remains eligible for scanning and never weakens path/matcher safety. |
-| Index reuse | LRU plus filesystem change token | Adopt only with a proven platform change token. Missing or ambiguous validation is a miss, never a cache hit. |
+| NTFS volume layout enumeration | `FSCTL_QUERY_FILE_LAYOUT`, 8 MiB pages, bounded fallback | **Landed** as a non-authoritative preview source, elevation-gated, cross-checked against a directory walk. Measured 1.06 s vs 133 s on this repo (~126×), 36531 paths agreeing exactly. |
+| NTFS USN change tokens | `FSCTL_QUERY_USN_JOURNAL` / `FSCTL_READ_USN_JOURNAL` | **Landed** as cache validity: a per-volume token is stored in the generation and re-checked on load, upgrading `stale_preview` to `verified_preview`. Only `QUERY` is wired; `READ_USN_JOURNAL` (incremental deltas) is still unimplemented. Elevation-gated — see the access-mask table in `native-scan-qualification.md`. |
+| macOS bulk enumeration | `getattrlistbulk`, 64 KiB pages | Not applicable to the current Windows work. Unchanged: macOS still uses `readdir` plus handle-relative inspection, so no bulk-speed claim is made. |
+| Device-aware concurrency | SSD 4, rotational 2, removable/network/unknown 1 | **Not implemented.** `max_workers` is a fixed default of 4, capped at 32. Blocked on evidence, not effort: this host has no rotational, removable or network volume, so any tuning here would be an unmeasured guess. |
+| Applicability probes | Skip known-absent apps and branches outside active rule roots | **Landed** via tool-reported roots and required-marker checks; a probe failure still leaves the root eligible. |
+| Path-trie pruning | Skip branches outside active rule roots | **Not implemented**, and the payoff is doubtful here: rule roots are already few and shallow, so the walk it would prune is small next to the layout read it cannot. |
+| Index reuse | LRU plus filesystem change token | **Partly landed.** The change token and durable state both exist, so a verified preview can now cross runs. There is no LRU or multi-generation retention: one current generation, older ones pruned. |
 
 ## Cross-platform junk strategy
 

@@ -69,7 +69,7 @@ cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 - 当前 Linux capability 是 `degraded`，不是发布资格。
 - macOS backend 现为 handle-bound degraded scanner，并通过统一的 `scan` / `scan --tui` 路径接入；这不等于发布资格。
 - Windows backend 现提供 handle-relative 的 degraded 只读扫描，并通过 `scan` / `scan --tui` 接入；这不等于发布资格。
-- Linux 可显式选择 SQLite journal 目录；macOS 可选择 legacy snapshot 目录；Windows 不要传 `--state-dir`。
+- Linux 可显式选择 SQLite journal 目录；macOS 可选择 legacy snapshot 目录；Windows 可选择 durable state 目录，该目录必须仅当前用户可访问。
 - `scan --format ndjson` 当前在扫描前返回 unsupported；Linux 已有 bounded SQLite journal、单事务完整流/terminal persistence 与 journal-first status，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 replay 不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel，因此 `scan --format ndjson` 继续 disabled。
 
 只有脚本和系统集成才需要显式机器输出：
@@ -101,7 +101,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=None`，scan 不写 terminal snapshot，显式 `--state-dir` 失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+`status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=%LOCALAPPDATA%\sweepx\state` 并在该目录写入 durable snapshot；若状态目录可被其他用户访问则失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
 
 ## Preview cache 只读诊断
 
@@ -112,7 +112,7 @@ cargo run -p sweepx-cli -- \
   cache status
 ```
 
-- Linux 与 macOS 支持 `cache status`；Windows 当前返回 unsupported。
+- Linux、macOS 与 Windows 均支持 `cache status`。
 - 只支持 `human` 与 `json`；`--format ndjson` 在创建或读取任何 state/cache 目录之前以 usage error 失败。
 - 若默认或显式 state/cache 缺失，结果返回 `disposition=absent`、exit 0，且不会创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。
 - 检查范围严格限制为 `preview-cache/current.json`、pointer 指向的 current generation 文件，以及平铺的 `generations/` 与 `quarantine/` 目录。
@@ -215,6 +215,19 @@ Windows 上存在一条基于 NTFS 原生元数据的加速扫描路径。每个
 
 预览输出会与普通目录遍历做交叉验证（两者访问文件系统的代码路径完全不同），要求路径集合与字节总和逐一相等。
 
+### 跨运行复用预览
+
+只有在能够证明预览仍然成立时，它才有价值。扫描写入预览时，会在同一个 generation 内记录所覆盖各卷的
+NTFS 变更日志位置。下次运行会重新读取该位置：若卷未发生变化，则预览描述的就是当前文件系统状态，扫描会
+报告 `loadStatus: "verified_preview"` 而不是 `stale_preview`。
+
+校验只会提升加载结果。没有记录证据、日志不可读，或卷确实发生了变化，都会保持原有行为并附带说明原因的
+warning，例如 `cache.preview.unverified.no_evidence`。复用还要求所覆盖的**每一个**卷都未变化，因为
+半有效的预览会让一部分目录显示正确大小、另一部分显示过期大小，而整体看起来却是正确的。
+
+读取日志需要与加速相同的提权卷句柄，因此未提权运行不会记录任何证据，行为与该功能引入之前完全一致。证据
+存储在带校验和的 generation payload 内，因此在磁盘上篡改 token 会使整个 generation 失效，而不会换来
+一次虚假的 "unchanged"。
 
 ## 当前不存在的命令
 

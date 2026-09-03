@@ -69,7 +69,7 @@ cargo run -p sweepx-cli -- scan --no-state /absolute/path/to/root
 - The current Linux capability is `degraded`, not release qualification.
 - The macOS backend now exposes a handle-bound degraded scanner through the same `scan` / `scan --tui` path; that is not release qualification.
 - The Windows backend now provides a handle-relative degraded read-only scanner through `scan` / `scan --tui`; that is not release qualification.
-- Linux may explicitly select a SQLite journal directory; macOS may select a legacy snapshot directory; do not pass `--state-dir` on Windows.
+- Linux may explicitly select a SQLite journal directory; macOS may select a legacy snapshot directory; Windows may select a durable state directory, which must be reachable only by the current user.
 - `scan --format ndjson` currently returns unsupported before scanning. Linux has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, journal-first status, and degraded completed replay through `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`: it performs one same-snapshot full validation, then reads pages of at most 1024 events from a completed, persisted stream; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. Because events are still constructed after the scan, that replay is not live streaming, does not wait for new events, does not create a background operation, and does not support cancel, so `scan --format ndjson` remains disabled.
 
 Request machine output explicitly for scripts and integrations:
@@ -101,7 +101,7 @@ cargo run -p sweepx-cli -- \
   cancel --operation-id <OPERATION_ID>
 ```
 
-`status` reads persisted terminal state journal-first on Linux and supports degraded completed replay through `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]`: it covers only completed, persisted streams, performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. It does not wait for new events, does not create a background operation, and does not support cancel, so it is not live progress. macOS reads from the legacy snapshot and still has no replay/watch surface. On Windows, `state_dir` defaults to `None`, scan persists no terminal snapshot, and explicit `--state-dir` fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
+`status` reads persisted terminal state journal-first on Linux and supports degraded completed replay through `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]`: it covers only completed, persisted streams, performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. It does not wait for new events, does not create a background operation, and does not support cancel, so it is not live progress. macOS reads from the legacy snapshot and still has no replay/watch surface. On Windows, `state_dir` defaults to `%LOCALAPPDATA%\sweepx\state` and durable snapshots are written there; a state directory reachable by other users fails closed. There is no live in-process registry, so output reports `canCancel: false` and cancellation remains `disabled`. The cancel command exists to distinguish `not_found`, `already_terminal`, and `unsupported` honestly, not to pretend it can interrupt the synchronous scan.
 
 ## Read-only preview-cache diagnostics
 
@@ -112,7 +112,7 @@ cargo run -p sweepx-cli -- \
   cache status
 ```
 
-- Linux and macOS support `cache status`; Windows currently returns unsupported.
+- Linux, macOS and Windows all support `cache status`.
 - It supports `human` and `json` only; `--format ndjson` fails with a usage error before any state/cache directory is created or read.
 - If default or explicit state/cache is missing, the result returns `disposition=absent` with exit 0 and does not create `state_dir`, `preview-cache/`, `current.json`, or any generation/quarantine directory.
 - Inspection is strictly bounded to `preview-cache/current.json`, the pointer-selected current generation file, and the flat `generations/` and `quarantine/` directories.
@@ -214,6 +214,25 @@ Two properties of a preview matter:
 Measured on this host on 2026-09-02 against `E:\Projects\sweepx` (14.5 GB, 36,531 objects): the preview completed in **1.06 s** where the full authoritative scan took **133 s**, roughly **126x faster to a first answer**. The authoritative scan itself is not made faster — the preview is additive, and its whole-volume read is a fixed cost of about a second, so it only pays off on large trees.
 
 Preview output is verified against an ordinary directory walk, which reaches the filesystem through a completely different code path; the path set and the summed bytes must match exactly.
+
+### Reusing a preview across runs
+
+A stored preview is only useful if something can say it is still true. When a scan writes a preview
+it also records, inside the same generation, the position of each covered volume's NTFS change
+journal. The next run re-reads that position: if the volume has not moved, the preview describes
+the filesystem as it is now and the scan reports `loadStatus: "verified_preview"` instead of
+`stale_preview`.
+
+Verification only ever upgrades a load. No recorded evidence, an unreadable journal, or a volume
+that did move all keep the previous behavior and add a warning naming the reason, for example
+`cache.preview.unverified.no_evidence`. Reuse also requires *every* covered volume to be unchanged,
+because a half-valid preview would show correct sizes for one part of a tree and stale sizes for
+another while looking correct.
+
+Reading the journal needs the same elevated volume handle acceleration needs, so an unelevated run
+records no evidence and behaves exactly as it did before this existed. Evidence is stored inside the
+checksummed generation payload, so editing a token on disk invalidates the whole generation rather
+than buying a false "unchanged".
 
 ## Commands that do not exist today
 
