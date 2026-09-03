@@ -1129,9 +1129,14 @@ fn cache_status_human_output_explains_empty_existing_cache() {
     assert!(text.contains("approxBytesComplete=true"));
 }
 
+/// Inspecting a cache that does not exist reports absence without creating it.
+///
+/// Replaces a test asserting the command was unsupported on Windows. The non-creating property is
+/// the one worth keeping: a status query that created the directory it was asked about would make
+/// "is there a cache here" impossible to answer, and would leave state behind on a read-only path.
 #[cfg(target_os = "windows")]
 #[test]
-fn cache_status_is_unsupported_before_state_creation() {
+fn cache_status_reports_an_absent_cache_without_creating_state() {
     let fixture = TempDir::new().unwrap();
     let state_dir = fixture.path().join("state");
 
@@ -1144,21 +1149,75 @@ fn cache_status_is_unsupported_before_state_creation() {
         .arg("cache")
         .arg("status");
 
-    let output = cmd.assert().code(3).get_output().clone();
+    let output = cmd.assert().success().get_output().clone();
     assert!(output.stderr.is_empty());
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["kind"], "cache.status.result");
-    assert_eq!(json["exitCode"], 3);
-    assert_eq!(
-        json["errors"][0]["code"],
-        "cache.status.unsupported_platform"
+    assert_eq!(json["summary"]["exists"], false);
+    assert_eq!(json["summary"]["currentHealth"], "missing");
+    assert_eq!(json["errors"].as_array().map(Vec::len), Some(0));
+    assert!(
+        !state_dir.exists(),
+        "inspection must never create the state directory"
     );
-    assert!(!state_dir.exists());
 }
 
+/// A cache written by a scan is then reported back by `cache status`.
+///
+/// Exercised through two separate CLI invocations so the reader and the writer are genuinely
+/// different processes: a single in-process round trip could agree with itself through shared
+/// state and prove nothing about what landed on disk.
 #[cfg(target_os = "windows")]
 #[test]
-fn cache_status_ndjson_usage_error_precedes_platform_support() {
+fn cache_status_reports_the_generation_a_scan_wrote() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("visible.txt"), b"hello").unwrap();
+    let state_dir = fixture.path().join("state");
+
+    let mut scan = cli_command();
+    scan.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("scan")
+        .arg(&root);
+    let scan_output = scan.assert().success().get_output().stdout.clone();
+    let scan_json: Value = serde_json::from_slice(&scan_output).unwrap();
+    let written = scan_json["summary"]["cachePreview"]["writtenGeneration"]
+        .as_str()
+        .expect("the scan must persist a generation")
+        .to_string();
+
+    let mut status = cli_command();
+    status
+        .current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("cache")
+        .arg("status");
+    let status_output = status.assert().success().get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&status_output).unwrap();
+
+    assert_eq!(json["summary"]["exists"], true);
+    assert_eq!(json["summary"]["currentGeneration"], written);
+    assert_eq!(json["summary"]["generationCount"], "1");
+    assert_eq!(json["summary"]["quarantineCount"], "0");
+    assert_eq!(json["errors"].as_array().map(Vec::len), Some(0));
+}
+
+/// A bad `--format` is rejected before any state directory work happens.
+///
+/// Renamed from "...precedes_platform_support": Windows is now a supported platform, so the
+/// ordering that still matters is usage validation before filesystem access. A usage error must
+/// not leave a state directory behind.
+#[cfg(target_os = "windows")]
+#[test]
+fn cache_status_ndjson_usage_error_precedes_state_access() {
     let fixture = TempDir::new().unwrap();
     let state_dir = fixture.path().join("state");
     let mut cmd = cli_command();

@@ -14,9 +14,6 @@ mod trash_command;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::json;
-#[cfg(target_os = "windows")]
-use sweepx_core::cache_status_unsupported;
-#[cfg(unix)]
 use sweepx_core::{CacheStatusRequest, cache_status, cache_status_state_error};
 use sweepx_core::{
     CancelRequest, CancellationToken, CleanerCargoDetectInvocation, CleanerCargoDetectRequest,
@@ -499,34 +496,22 @@ fn main() -> ProcessExitCode {
                     print_output(&context, OutputFormat::Json, size_unit, sort, &result);
                     return ProcessExitCode::from(result.exit_code());
                 }
-                #[cfg(target_os = "windows")]
-                {
-                    let result = RenderedResult::CacheStatus(cache_status_unsupported(&context));
-                    let code = result.exit_code();
-                    print_output(&context, format, size_unit, sort, &result);
-                    return ProcessExitCode::from(code);
-                }
-                #[cfg(unix)]
-                {
-                    let state_dir =
-                        match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                let result = RenderedResult::CacheStatus(cache_status_state_error(
-                                    &context, &error,
-                                ));
-                                let code = result.exit_code();
-                                print_output(&context, format, size_unit, sort, &result);
-                                return ProcessExitCode::from(code);
-                            }
-                        };
-                    match cache_status(&context, &CacheStatusRequest { state_dir }) {
-                        Ok(result) => Ok(RenderedResult::CacheStatus(result)),
-                        Err(sweepx_core::CoreError::State(error)) => Ok(
-                            RenderedResult::CacheStatus(cache_status_state_error(&context, &error)),
-                        ),
-                        Err(error) => Err(error),
+                let state_dir = match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let result =
+                            RenderedResult::CacheStatus(cache_status_state_error(&context, &error));
+                        let code = result.exit_code();
+                        print_output(&context, format, size_unit, sort, &result);
+                        return ProcessExitCode::from(code);
                     }
+                };
+                match cache_status(&context, &CacheStatusRequest { state_dir }) {
+                    Ok(result) => Ok(RenderedResult::CacheStatus(result)),
+                    Err(sweepx_core::CoreError::State(error)) => Ok(RenderedResult::CacheStatus(
+                        cache_status_state_error(&context, &error),
+                    )),
+                    Err(error) => Err(error),
                 }
             }
         },

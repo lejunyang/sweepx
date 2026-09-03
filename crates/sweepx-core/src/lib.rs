@@ -1294,18 +1294,6 @@ pub fn cache_status_usage_error(context: &CoreContext, detail: &str) -> CacheSta
     CacheStatusSuccess { output }
 }
 
-pub fn cache_status_unsupported(context: &CoreContext) -> CacheStatusSuccess {
-    CacheStatusSuccess {
-        output: cache_status_error_output(
-            context,
-            OutputStatus::Unsupported,
-            ExitCode::Unsupported,
-            "cache.status.unsupported_platform",
-            "cache status is unavailable on this platform",
-        ),
-    }
-}
-
 pub fn cache_status_state_error(context: &CoreContext, error: &StateError) -> CacheStatusSuccess {
     let (exit_code, code, detail) = match error {
         StateError::NonAbsoluteStateDir(_) | StateError::DefaultStateDirUnavailable => (

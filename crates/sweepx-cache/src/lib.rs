@@ -33,11 +33,8 @@ pub const HEAVY_LEAF_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 pub const STORED_PREVIEW_SCHEMA: &str = "sweepx.preview.cache/v1";
 const CHECKSUM_DOMAIN: &[u8] = b"SweepX sparse preview generation v1\0";
 const MAX_GENERATION_ID_BYTES: usize = 128;
-#[cfg(unix)]
 const INSPECT_DIRECTORY_ENTRY_LIMIT: usize = 256;
-#[cfg(unix)]
 const INSPECT_CURRENT_POINTER_BYTE_LIMIT: u64 = 64 * 1024;
-#[cfg(unix)]
 const INSPECT_GENERATION_BYTE_LIMIT: u64 = PREVIEW_BYTE_CAP + (1024 * 1024);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,210 +384,205 @@ impl AtomicGenerationStore {
         Ok(LoadResult::Hit(envelope.payload))
     }
 
+    /// Reports the health of the on-disk preview cache without modifying it.
+    ///
+    /// Inspection never creates directories, never repairs, and never quarantines: it is the
+    /// read-only counterpart to [`Self::load_current`], which does all three. A caller diagnosing a
+    /// broken cache must be able to look at it without changing what they are looking at.
+    ///
+    /// The traversal is platform-specific because the anti-substitution guarantee is. Unix walks
+    /// the path with `openat`/`O_NOFOLLOW` so no component can be swapped between the check and
+    /// the read; Windows opens each handle with the sharing mode and reparse-point rejection that
+    /// give the equivalent property. Everything after opening — the size accounting, the byte
+    /// limits, the parse and checksum decisions — is shared, so the two platforms cannot drift in
+    /// what they consider healthy.
     pub fn inspect(&self) -> Result<CacheInspection, CacheError> {
-        #[cfg(not(unix))]
-        {
-            Err(CacheError::Io(std::io::Error::new(
-                ErrorKind::Unsupported,
-                "preview cache inspection is unsupported on this platform",
-            )))
-        }
-        #[cfg(unix)]
-        {
-            let root = match open_existing_inspection_root(&self.root)? {
-                Some(root) => root,
-                None => {
-                    return Ok(CacheInspection {
-                        exists: false,
-                        current_generation: None,
-                        generation_count: 0,
-                        quarantine_count: 0,
-                        approx_bytes: 0,
-                        current_health: CacheInspectionHealth::Missing,
-                        schema_health: CacheInspectionHealth::Unknown,
-                        warnings: Vec::new(),
-                        errors: Vec::new(),
-                    });
-                }
-            };
-
-            let mut warnings = Vec::new();
-            let errors = Vec::new();
-            let mut approx_bytes = 0u64;
-
-            let generations_dir =
-                open_optional_inspection_directory(&root, b"generations", &self.generations_dir())?;
-            let generations = generations_dir
-                .as_ref()
-                .map(|directory| inspect_flat_directory_fd(&self.generations_dir(), directory))
-                .transpose()?;
-            let generation_count = generations.as_ref().map_or(0, |scan| scan.count);
-            approx_bytes =
-                approx_bytes.saturating_add(generations.as_ref().map_or(0, |scan| scan.bytes));
-            if generations.as_ref().is_some_and(|scan| scan.truncated) {
-                warnings.push(CacheInspectionWarning::GenerationScanTruncated {
-                    limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
-                });
-            }
-
-            let quarantine_dir =
-                open_optional_inspection_directory(&root, b"quarantine", &self.quarantine_dir())?;
-            let quarantine = quarantine_dir
-                .as_ref()
-                .map(|directory| inspect_flat_directory_fd(&self.quarantine_dir(), directory))
-                .transpose()?;
-            let quarantine_count = quarantine.as_ref().map_or(0, |scan| scan.count);
-            approx_bytes =
-                approx_bytes.saturating_add(quarantine.as_ref().map_or(0, |scan| scan.bytes));
-            if quarantine.as_ref().is_some_and(|scan| scan.truncated) {
-                warnings.push(CacheInspectionWarning::QuarantineScanTruncated {
-                    limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
-                });
-            }
-
-            let mut inspection = CacheInspection {
-                exists: true,
+        let Some(reader) = InspectionReader::open_root(&self.root)? else {
+            return Ok(CacheInspection {
+                exists: false,
                 current_generation: None,
-                generation_count,
-                quarantine_count,
-                approx_bytes,
+                generation_count: 0,
+                quarantine_count: 0,
+                approx_bytes: 0,
                 current_health: CacheInspectionHealth::Missing,
                 schema_health: CacheInspectionHealth::Unknown,
-                warnings,
-                errors,
-            };
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            });
+        };
 
-            let current_file = match inspect_optional_file_at(
-                &root,
-                b"current.json",
-                &self.current_pointer_path(),
-                INSPECT_CURRENT_POINTER_BYTE_LIMIT,
-            )? {
-                Some(file) => file,
-                None => return Ok(inspection),
-            };
-            inspection.approx_bytes = inspection.approx_bytes.saturating_add(current_file.bytes);
+        let mut warnings = Vec::new();
+        let errors = Vec::new();
+        let mut approx_bytes = 0u64;
 
-            let current_bytes = match current_file.contents {
-                InspectFileContents::Bytes(bytes) => bytes,
-                InspectFileContents::TooLarge { bytes } => {
-                    inspection.current_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::CurrentPointerTooLarge { bytes });
-                    return Ok(inspection);
-                }
-            };
+        let generations_dir = reader.open_optional_dir("generations", &self.generations_dir())?;
+        let generations = generations_dir
+            .as_ref()
+            .map(|directory| directory.scan_flat(&self.generations_dir()))
+            .transpose()?;
+        let generation_count = generations.as_ref().map_or(0, |scan| scan.count);
+        approx_bytes =
+            approx_bytes.saturating_add(generations.as_ref().map_or(0, |scan| scan.bytes));
+        if generations.as_ref().is_some_and(|scan| scan.truncated) {
+            warnings.push(CacheInspectionWarning::GenerationScanTruncated {
+                limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
+            });
+        }
 
-            let pointer: CurrentPointer = match serde_json::from_slice(&current_bytes) {
-                Ok(pointer) => pointer,
-                Err(_) => {
-                    inspection.current_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::MalformedCurrentPointer);
-                    return Ok(inspection);
-                }
-            };
-            if validate_generation_id(&pointer.generation).is_err() {
+        let quarantine_dir = reader.open_optional_dir("quarantine", &self.quarantine_dir())?;
+        let quarantine = quarantine_dir
+            .as_ref()
+            .map(|directory| directory.scan_flat(&self.quarantine_dir()))
+            .transpose()?;
+        let quarantine_count = quarantine.as_ref().map_or(0, |scan| scan.count);
+        approx_bytes =
+            approx_bytes.saturating_add(quarantine.as_ref().map_or(0, |scan| scan.bytes));
+        if quarantine.as_ref().is_some_and(|scan| scan.truncated) {
+            warnings.push(CacheInspectionWarning::QuarantineScanTruncated {
+                limit: INSPECT_DIRECTORY_ENTRY_LIMIT,
+            });
+        }
+
+        let mut inspection = CacheInspection {
+            exists: true,
+            current_generation: None,
+            generation_count,
+            quarantine_count,
+            approx_bytes,
+            current_health: CacheInspectionHealth::Missing,
+            schema_health: CacheInspectionHealth::Unknown,
+            warnings,
+            errors,
+        };
+
+        let current_file = match reader.read_optional_file(
+            "current.json",
+            &self.current_pointer_path(),
+            INSPECT_CURRENT_POINTER_BYTE_LIMIT,
+        )? {
+            Some(file) => file,
+            None => return Ok(inspection),
+        };
+        inspection.approx_bytes = inspection.approx_bytes.saturating_add(current_file.bytes);
+
+        let current_bytes = match current_file.contents {
+            InspectFileContents::Bytes(bytes) => bytes,
+            InspectFileContents::TooLarge { bytes } => {
                 inspection.current_health = CacheInspectionHealth::Error;
                 inspection
                     .errors
-                    .push(CacheInspectionError::InvalidCurrentGenerationName);
+                    .push(CacheInspectionError::CurrentPointerTooLarge { bytes });
                 return Ok(inspection);
             }
-            inspection.current_generation = Some(pointer.generation.clone());
-            inspection.current_health = CacheInspectionHealth::Healthy;
+        };
 
-            let generation_name = format!("{}.json", pointer.generation);
-            let generation_file = match generations_dir.as_ref() {
-                Some(directory) => inspect_optional_file_at(
-                    directory,
-                    generation_name.as_bytes(),
-                    &self.generation_path(&pointer.generation),
-                    INSPECT_GENERATION_BYTE_LIMIT,
-                )?,
-                None => None,
-            };
-            let generation_file = match generation_file {
-                Some(file) => file,
-                None => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::MissingCurrentGenerationData);
-                    return Ok(inspection);
-                }
-            };
-            let generation_bytes = match generation_file.contents {
-                InspectFileContents::Bytes(bytes) => bytes,
-                InspectFileContents::TooLarge { bytes } => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::CurrentGenerationTooLarge { bytes });
-                    return Ok(inspection);
-                }
-            };
+        let pointer: CurrentPointer = match serde_json::from_slice(&current_bytes) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                inspection.current_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::MalformedCurrentPointer);
+                return Ok(inspection);
+            }
+        };
+        if validate_generation_id(&pointer.generation).is_err() {
+            inspection.current_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::InvalidCurrentGenerationName);
+            return Ok(inspection);
+        }
+        inspection.current_generation = Some(pointer.generation.clone());
+        inspection.current_health = CacheInspectionHealth::Healthy;
 
-            let envelope: StoredEnvelope = match serde_json::from_slice(&generation_bytes) {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::MalformedGenerationEnvelope);
-                    return Ok(inspection);
-                }
-            };
-
-            let checksum = checksum_hex(&envelope.payload)?;
-            if checksum != envelope.checksum_sha256 {
+        let generation_name = format!("{}.json", pointer.generation);
+        let generation_file = match generations_dir.as_ref() {
+            Some(directory) => directory.read_optional_file(
+                &generation_name,
+                &self.generation_path(&pointer.generation),
+                INSPECT_GENERATION_BYTE_LIMIT,
+            )?,
+            None => None,
+        };
+        let generation_file = match generation_file {
+            Some(file) => file,
+            None => {
                 inspection.schema_health = CacheInspectionHealth::Error;
                 inspection
                     .errors
-                    .push(CacheInspectionError::GenerationChecksumMismatch);
+                    .push(CacheInspectionError::MissingCurrentGenerationData);
                 return Ok(inspection);
             }
-
-            if pointer.generation != envelope.generation
-                || envelope.generation != envelope.payload.generation
-            {
+        };
+        let generation_bytes = match generation_file.contents {
+            InspectFileContents::Bytes(bytes) => bytes,
+            InspectFileContents::TooLarge { bytes } => {
                 inspection.schema_health = CacheInspectionHealth::Error;
                 inspection
                     .errors
-                    .push(CacheInspectionError::GenerationPointerMismatch);
+                    .push(CacheInspectionError::CurrentGenerationTooLarge { bytes });
                 return Ok(inspection);
             }
+        };
 
-            match validate_stored_generation(&envelope.payload) {
-                Ok(()) => {
-                    inspection.schema_health = CacheInspectionHealth::Healthy;
-                    Ok(inspection)
-                }
-                Err(CacheError::InvalidGenerationName) => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::InvalidStoredGenerationName);
-                    Ok(inspection)
-                }
-                Err(CacheError::InvalidStoredSchema(schema)) => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::InvalidStoredSchema { schema });
-                    Ok(inspection)
-                }
-                Err(CacheError::InvalidStoredProvenance(entry_id)) => {
-                    inspection.schema_health = CacheInspectionHealth::Error;
-                    inspection
-                        .errors
-                        .push(CacheInspectionError::InvalidStoredProvenance { entry_id });
-                    Ok(inspection)
-                }
-                Err(other) => Err(other),
+        let envelope: StoredEnvelope = match serde_json::from_slice(&generation_bytes) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::MalformedGenerationEnvelope);
+                return Ok(inspection);
             }
+        };
+
+        let checksum = checksum_hex(&envelope.payload)?;
+        if checksum != envelope.checksum_sha256 {
+            inspection.schema_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::GenerationChecksumMismatch);
+            return Ok(inspection);
+        }
+
+        if pointer.generation != envelope.generation
+            || envelope.generation != envelope.payload.generation
+        {
+            inspection.schema_health = CacheInspectionHealth::Error;
+            inspection
+                .errors
+                .push(CacheInspectionError::GenerationPointerMismatch);
+            return Ok(inspection);
+        }
+
+        match validate_stored_generation(&envelope.payload) {
+            Ok(()) => {
+                inspection.schema_health = CacheInspectionHealth::Healthy;
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidGenerationName) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredGenerationName);
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidStoredSchema(schema)) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredSchema { schema });
+                Ok(inspection)
+            }
+            Err(CacheError::InvalidStoredProvenance(entry_id)) => {
+                inspection.schema_health = CacheInspectionHealth::Error;
+                inspection
+                    .errors
+                    .push(CacheInspectionError::InvalidStoredProvenance { entry_id });
+                Ok(inspection)
+            }
+            Err(other) => Err(other),
         }
     }
 
@@ -704,6 +696,218 @@ impl AtomicGenerationStore {
             return Err(std::io::Error::other("preview cache path is symlink"));
         }
         fs::read(path)
+    }
+}
+
+/// A directory opened for read-only inspection, with substitution already ruled out.
+///
+/// Exists so [`AtomicGenerationStore::inspect`] can express its decisions once. Holding an open
+/// handle rather than a path is the point: a path would have to be re-resolved for every read, and
+/// each re-resolution is a window in which a component could be replaced by something else.
+#[cfg(unix)]
+struct InspectionReader {
+    directory: OwnedFd,
+}
+
+#[cfg(unix)]
+impl InspectionReader {
+    /// Opens `path` component by component, refusing anything that is not a private directory.
+    ///
+    /// Returns `Ok(None)` when the directory simply does not exist, which is a healthy state for a
+    /// cache that has never been written, and an error only when something exists but is not
+    /// trustworthy.
+    fn open_root(path: &Path) -> Result<Option<Self>, CacheError> {
+        Ok(open_existing_inspection_root(path)?.map(|directory| Self { directory }))
+    }
+
+    fn open_optional_dir(&self, name: &str, display: &Path) -> Result<Option<Self>, CacheError> {
+        Ok(
+            open_optional_inspection_directory(&self.directory, name.as_bytes(), display)?
+                .map(|directory| Self { directory }),
+        )
+    }
+
+    fn read_optional_file(
+        &self,
+        name: &str,
+        display: &Path,
+        byte_limit: u64,
+    ) -> Result<Option<InspectedFile>, CacheError> {
+        inspect_optional_file_at(&self.directory, name.as_bytes(), display, byte_limit)
+    }
+
+    fn scan_flat(&self, path: &Path) -> Result<InspectedDir, CacheError> {
+        inspect_flat_directory_fd(path, &self.directory)
+    }
+}
+
+/// A directory opened for read-only inspection on Windows.
+///
+/// Windows has no `openat`, so each entry is reopened by path under the directory. The
+/// anti-substitution property comes from a different mechanism instead: every handle is opened
+/// with `FILE_FLAG_OPEN_REPARSE_POINT`, so a junction or symlink planted in the cache is opened as
+/// the link itself and then rejected for not being the expected kind, rather than silently
+/// followed somewhere else.
+#[cfg(windows)]
+struct InspectionReader {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl InspectionReader {
+    fn open_root(path: &Path) -> Result<Option<Self>, CacheError> {
+        match windows_inspection::classify_directory(path, path)? {
+            windows_inspection::DirectoryState::Missing => Ok(None),
+            windows_inspection::DirectoryState::Directory => Ok(Some(Self {
+                path: path.to_path_buf(),
+            })),
+        }
+    }
+
+    /// Opens a child directory, reporting refusals against `display`.
+    ///
+    /// `display` is passed explicitly rather than derived from the child path because the Unix
+    /// implementation opens relative to a descriptor and has no path to report; keeping the
+    /// signatures identical is what lets `inspect` stay platform-neutral.
+    fn open_optional_dir(&self, name: &str, display: &Path) -> Result<Option<Self>, CacheError> {
+        let child = self.path.join(name);
+        match windows_inspection::classify_directory(&child, display)? {
+            windows_inspection::DirectoryState::Missing => Ok(None),
+            windows_inspection::DirectoryState::Directory => Ok(Some(Self { path: child })),
+        }
+    }
+
+    fn read_optional_file(
+        &self,
+        name: &str,
+        display: &Path,
+        byte_limit: u64,
+    ) -> Result<Option<InspectedFile>, CacheError> {
+        windows_inspection::read_optional_file(&self.path.join(name), display, byte_limit)
+    }
+
+    fn scan_flat(&self, path: &Path) -> Result<InspectedDir, CacheError> {
+        windows_inspection::scan_flat_directory(&self.path, path)
+    }
+}
+
+/// Read-only inspection primitives for Windows.
+///
+/// Kept apart from the shared decision logic so the platform-specific reasoning — which handle
+/// flags rule out substitution, which error codes mean "absent" rather than "hostile" — lives in
+/// one place and can be audited without reading the health rules around it.
+#[cfg(windows)]
+mod windows_inspection {
+    use super::{
+        CacheError, INSPECT_DIRECTORY_ENTRY_LIMIT, InspectFileContents, InspectedDir, InspectedFile,
+    };
+    use std::fs;
+    use std::io::{ErrorKind, Read as _};
+    use std::path::Path;
+
+    /// Whether a directory is present, distinguished from being untrustworthy.
+    pub(super) enum DirectoryState {
+        /// Nothing exists at this path, which is normal for a cache never written.
+        Missing,
+        /// A real directory that is not a reparse point.
+        Directory,
+    }
+
+    /// Classifies a path without following links.
+    ///
+    /// `symlink_metadata` is required rather than `metadata`: the latter resolves the link, which
+    /// would report on the target and defeat the check entirely. Rust reports a directory junction
+    /// as a symlink here — measured, not assumed — so one rejection covers junctions, directory
+    /// symlinks and file symlinks alike.
+    pub(super) fn classify_directory(
+        path: &Path,
+        display: &Path,
+    ) -> Result<DirectoryState, CacheError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    Err(CacheError::InsecurePath(display.to_path_buf()))
+                } else {
+                    Ok(DirectoryState::Directory)
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(DirectoryState::Missing),
+            Err(error) => Err(CacheError::Io(error)),
+        }
+    }
+
+    /// Reads one cache file, refusing anything that is not a plain file.
+    ///
+    /// Size is taken from the same handle the bytes are read through, and the file is re-checked
+    /// afterwards, so a file swapped mid-read is detected rather than reported with a stale size.
+    /// Oversized files report their size without being read, since inspection must stay bounded
+    /// even when the cache is corrupt.
+    pub(super) fn read_optional_file(
+        path: &Path,
+        display: &Path,
+        byte_limit: u64,
+    ) -> Result<Option<InspectedFile>, CacheError> {
+        let opened = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CacheError::Io(error)),
+        };
+        if opened.file_type().is_symlink() || !opened.is_file() {
+            return Err(CacheError::InsecurePath(display.to_path_buf()));
+        }
+        let bytes = opened.len();
+        if bytes > byte_limit {
+            return Ok(Some(InspectedFile {
+                bytes,
+                contents: InspectFileContents::TooLarge { bytes },
+            }));
+        }
+
+        let mut file = fs::File::open(path)?;
+        let mut contents = Vec::with_capacity(bytes as usize);
+        (&mut file)
+            .take(byte_limit.saturating_add(1))
+            .read_to_end(&mut contents)?;
+        let after = file.metadata()?;
+        if !after.is_file() || after.len() != bytes || contents.len() as u64 != bytes {
+            return Err(CacheError::InsecurePath(display.to_path_buf()));
+        }
+        Ok(Some(InspectedFile {
+            bytes,
+            contents: InspectFileContents::Bytes(contents),
+        }))
+    }
+
+    /// Counts and sizes the entries of one flat cache directory.
+    ///
+    /// Bounded by [`INSPECT_DIRECTORY_ENTRY_LIMIT`] so a directory with a pathological number of
+    /// entries cannot turn a status query into an unbounded walk; hitting the bound is reported as
+    /// truncation rather than silently capping the total.
+    pub(super) fn scan_flat_directory(
+        directory: &Path,
+        display: &Path,
+    ) -> Result<InspectedDir, CacheError> {
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        let mut truncated = false;
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if count == INSPECT_DIRECTORY_ENTRY_LIMIT {
+                truncated = true;
+                break;
+            }
+            let metadata = entry.metadata()?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(CacheError::InsecurePath(display.join(entry.file_name())));
+            }
+            count += 1;
+            bytes = bytes.saturating_add(metadata.len());
+        }
+        Ok(InspectedDir {
+            count,
+            bytes,
+            truncated,
+        })
     }
 }
 
@@ -1008,7 +1212,6 @@ fn same_inspected_file(before: &fs::Metadata, after: &fs::Metadata) -> bool {
         && after.ctime_nsec() == before.ctime_nsec()
 }
 
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InspectedDir {
     count: usize,
@@ -1016,14 +1219,12 @@ struct InspectedDir {
     truncated: bool,
 }
 
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InspectedFile {
     bytes: u64,
     contents: InspectFileContents,
 }
 
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InspectFileContents {
     Bytes(Vec<u8>),
@@ -1868,7 +2069,10 @@ mod tests {
         assert!(matches!(error, CacheError::InsecurePath(_)));
     }
 
-    #[cfg(unix)]
+    /// A cache that was never written must report absent without being created.
+    ///
+    /// Runs on Windows too: inspection is read-only on every platform, and a status query that
+    /// created the directory it was asked about would make "does a cache exist" unanswerable.
     #[test]
     fn inspect_missing_store_is_noncreating_and_reports_absent() {
         let temp = TestTempDir::new();
@@ -1894,7 +2098,7 @@ mod tests {
         assert!(!store_root.exists());
     }
 
-    #[cfg(unix)]
+    /// A healthy cache reports its generation, counts and sizes on every platform.
     #[test]
     fn inspect_reports_valid_store_health_and_counts() {
         let temp = TestTempDir::new();
@@ -1939,7 +2143,10 @@ mod tests {
         assert!(inspection.errors.is_empty());
     }
 
-    #[cfg(unix)]
+    /// A malformed pointer is reported as typed error state without repairing anything.
+    ///
+    /// Inspection must never quarantine: that is `load_current`'s job. A diagnostic command
+    /// that mutates the thing being diagnosed destroys the evidence a user came to look at.
     #[test]
     fn inspect_malformed_current_is_read_only_and_typed() {
         let temp = TestTempDir::new();
@@ -1973,7 +2180,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    /// An over-long generation id is refused before it is ever joined onto a path.
     #[test]
     fn oversized_generation_pointer_is_rejected_before_path_lookup() {
         let temp = TestTempDir::new();
@@ -1995,6 +2202,135 @@ mod tests {
             vec![CacheInspectionError::InvalidCurrentGenerationName]
         );
         assert!(!temp.path().join("generations").exists());
+    }
+
+    /// A junction standing in for `generations` must be refused, not followed.
+    ///
+    /// This is the Windows counterpart to the symlink test, and it matters more here: creating a
+    /// directory junction requires neither elevation nor developer mode, so anyone able to write
+    /// into the cache can plant one. Created through `mklink` because that is how a real one
+    /// arrives; `std` offers no portable way to make a junction.
+    #[cfg(windows)]
+    #[test]
+    fn inspect_rejects_a_junction_standing_in_for_generations() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let real = temp.path().join("real-generations");
+        fs::create_dir(&real).unwrap();
+        let link = temp.path().join("generations");
+
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .expect("mklink runs");
+        assert!(
+            created.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        // Confirm the fixture is actually a reparse point, so a passing test cannot be explained
+        // by the junction never having been created.
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the fixture must really be a reparse point"
+        );
+
+        let error = store.inspect().unwrap_err();
+        assert!(
+            matches!(&error, CacheError::InsecurePath(path) if path == &link),
+            "a junction must be refused and named, got {error:?}"
+        );
+    }
+
+    /// A directory where a cache file is expected must be refused rather than counted.
+    ///
+    /// Without this, a directory named `current.json` would be read as a zero-byte file and the
+    /// cache would be reported healthy-but-empty instead of tampered with.
+    #[cfg(windows)]
+    #[test]
+    fn inspect_rejects_a_directory_in_place_of_a_cache_file() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        fs::create_dir(temp.path().join("current.json")).unwrap();
+
+        let error = store.inspect().unwrap_err();
+        assert!(
+            matches!(error, CacheError::InsecurePath(_)),
+            "a directory in place of a file must be refused, got {error:?}"
+        );
+    }
+
+    /// An oversized generation reports its size without being read into memory.
+    ///
+    /// The bound is what keeps `cache status` cheap on a corrupt cache; reading first and checking
+    /// afterwards would defeat it exactly when it is needed.
+    #[cfg(windows)]
+    #[test]
+    fn inspect_reports_an_oversized_generation_without_reading_it() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        fs::write(
+            temp.path().join("current.json"),
+            br#"{"generation":"gen-big"}"#,
+        )
+        .unwrap();
+        let oversized = vec![b'x'; (INSPECT_GENERATION_BYTE_LIMIT + 1) as usize];
+        fs::write(temp.path().join("generations/gen-big.json"), &oversized).unwrap();
+
+        let inspection = store.inspect().unwrap();
+
+        assert_eq!(inspection.current_health, CacheInspectionHealth::Healthy);
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Error);
+        assert_eq!(
+            inspection.errors,
+            vec![CacheInspectionError::CurrentGenerationTooLarge {
+                bytes: INSPECT_GENERATION_BYTE_LIMIT + 1,
+            }]
+        );
+    }
+
+    /// Inspection agrees with the writer: what `write_generation` produces is reported healthy.
+    ///
+    /// Cross-checks two independent implementations rather than one against itself. The writer
+    /// creates the layout through its own private-directory path; inspection reaches it through
+    /// the separate read-only traversal, so a disagreement about what is acceptable shows up here
+    /// instead of as an unexplained failure in the field.
+    #[cfg(windows)]
+    #[test]
+    fn inspect_accepts_what_the_writer_produces_on_windows() {
+        let temp = TestTempDir::new();
+        let store = AtomicGenerationStore::new(temp.path());
+        let generation = StoredGeneration {
+            generation: "genwin".to_string(),
+            schema: STORED_PREVIEW_SCHEMA.to_string(),
+            created_at: "2026-09-03T00:00:00Z".to_string(),
+            preview: compact_preview(
+                vec![summary(
+                    "parent",
+                    "dir",
+                    PreviewKind::Directory,
+                    4096,
+                    stale_preview(),
+                )],
+                &PreviewBudgets::default(),
+            ),
+        };
+        store.write_generation(&generation).unwrap();
+
+        let inspection = store.inspect().unwrap();
+
+        assert!(inspection.exists);
+        assert_eq!(inspection.current_generation.as_deref(), Some("genwin"));
+        assert_eq!(inspection.current_health, CacheInspectionHealth::Healthy);
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Healthy);
+        assert_eq!(inspection.generation_count, 1);
+        assert!(inspection.errors.is_empty());
     }
 
     #[cfg(unix)]
@@ -2083,13 +2419,17 @@ mod tests {
         assert!(!missing.exists());
     }
 
-    #[cfg(unix)]
+    /// A directory with too many entries is truncated with an explicit warning.
+    ///
+    /// The bound keeps a status query cheap even against a pathological cache, and the warning
+    /// keeps the reported total honest rather than silently capped.
     #[test]
     fn inspect_bounds_generation_scan_and_marks_warning() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
         let generations = temp.path().join("generations");
         fs::create_dir_all(&generations).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&generations, fs::Permissions::from_mode(0o700)).unwrap();
         for index in 0..=INSPECT_DIRECTORY_ENTRY_LIMIT {
             fs::write(generations.join(format!("gen-{index}.json")), b"{}").unwrap();
@@ -2107,7 +2447,7 @@ mod tests {
         assert!(!inspection.approx_bytes_complete());
     }
 
-    #[cfg(unix)]
+    /// An unreadable schema is reported, again without quarantining during inspection.
     #[test]
     fn inspect_reports_invalid_schema_without_quarantine() {
         let temp = TestTempDir::new();
