@@ -214,11 +214,25 @@ pub fn is_current_user_private(path: &Path) -> io::Result<bool> {
     verdict
 }
 
-/// Whether the current process token owns `path`.
+/// Whether `path`'s owner is a principal this user controls.
 ///
 /// Separate from the DACL check because they answer different questions: the DACL says who *may*
 /// reach the directory, ownership says whether it is ours to trust. A directory owned by another
-/// account can have its permissions rewritten by that account at any time.
+/// *ordinary* account can have its permissions rewritten by that account at any time.
+///
+/// Accepts the token's user SID, the token's owner SID, and Administrators when the user is a
+/// member of it. The last two are not cosmetic. Measured on this host: unelevated, user and owner
+/// are both `S-1-5-21-…-1001`; elevated, the user is unchanged but the owner becomes
+/// `S-1-5-32-544` (Administrators), so **every directory an elevated run creates is owned by
+/// Administrators and keeps that owner on disk**. Comparing only against the user SID produced two
+/// failures found by running the binary rather than the tests: an elevated run rejected the state
+/// directory it had just created, and afterwards every unelevated run was permanently locked out of
+/// it.
+///
+/// Accepting Administrators concedes nothing new: [`is_current_user_private`] already allows that
+/// group for the same reason, since it can take ownership of any object regardless. Membership is
+/// checked against the token rather than assumed, so a non-member user still rejects an
+/// Administrators-owned directory it genuinely does not control.
 pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
     let target = wide(path.as_os_str());
     let mut owner: PSID = ptr::null_mut();
@@ -239,13 +253,129 @@ pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    let verdict =
-        current_user_sid().map(|user| !owner.is_null() && sid_equals(owner, user.as_ptr() as PSID));
+    let verdict = (|| {
+        if owner.is_null() {
+            return Ok(false);
+        }
+        let user = current_user_sid()?;
+        if sid_equals(owner, user.as_ptr() as PSID) {
+            return Ok(true);
+        }
+        let token_owner = current_token_owner_sid()?;
+        if sid_equals(owner, token_owner.as_ptr() as PSID) {
+            return Ok(true);
+        }
+        // An elevated run leaves Administrators as the owner. The same user unelevated must still
+        // be able to use that directory, otherwise one elevated run bricks durable state.
+        let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
+        if sid_equals(owner, administrators.as_ptr() as PSID) && current_user_is_admin_member()? {
+            return Ok(true);
+        }
+        Ok(false)
+    })();
     // SAFETY: freed exactly once after the borrow above.
     unsafe {
         LocalFree(descriptor as HLOCAL);
     }
     verdict
+}
+
+/// Whether this user is an Administrators member, counting a filtered token's deny-only group.
+///
+/// `CheckTokenMembership` alone is not enough and this was measured, not assumed: on this host an
+/// unelevated admin user returns **false**, because UAC hands the process a *filtered* token in
+/// which Administrators is present but marked deny-only. Trusting that answer left the ordinary
+/// unelevated run locked out of a directory an elevated run had created.
+///
+/// So the group list is read directly and the SID is matched regardless of its deny-only flag: the
+/// question here is "could this user reach the directory by elevating", not "is it elevated right
+/// now". A user genuinely outside the group has no such entry and is still refused.
+fn current_user_is_admin_member() -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::GetTokenInformation;
+    use windows_sys::Win32::Security::{TOKEN_GROUPS, TOKEN_QUERY, TokenGroups};
+
+    let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
+    let mut token = ptr::null_mut();
+    // SAFETY: the pseudo-handle needs no release; `token` is closed below on every path.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut needed = 0u32;
+    // SAFETY: deliberate size query with a zero-length buffer.
+    unsafe {
+        GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &mut needed);
+    }
+    let mut buffer = vec![0u8; needed.max(1) as usize];
+    // SAFETY: `buffer` is at least `needed` bytes and outlives the call.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenGroups,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    // SAFETY: closing the token opened above, exactly once.
+    unsafe {
+        CloseHandle(token);
+    }
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success the buffer begins with TOKEN_GROUPS, whose Groups array of GroupCount
+    // entries is laid out inline immediately after the count.
+    let groups = unsafe { &*(buffer.as_ptr() as *const TOKEN_GROUPS) };
+    let count = groups.GroupCount as usize;
+    // SAFETY: the array has `count` entries inside the buffer just filled by the API.
+    let entries = unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), count) };
+    Ok(entries
+        .iter()
+        .any(|entry| sid_equals(entry.Sid, administrators.as_ptr() as PSID)))
+}
+
+/// Reads the SID this token assigns as owner to objects it creates.
+///
+/// Distinct from [`current_user_sid`] under elevation, where it is the Administrators group. This
+/// is read from the token rather than assumed, so a machine whose token is configured differently
+/// is judged by what it actually reports.
+fn current_token_owner_sid() -> io::Result<Vec<u8>> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::GetTokenInformation;
+    use windows_sys::Win32::Security::{TOKEN_OWNER, TOKEN_QUERY, TokenOwner};
+
+    let mut token = ptr::null_mut();
+    // SAFETY: the pseudo-handle from GetCurrentProcess needs no release; `token` is closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut needed = 0u32;
+    // SAFETY: a deliberate size query; a zero-length buffer is the documented way to ask.
+    unsafe {
+        GetTokenInformation(token, TokenOwner, ptr::null_mut(), 0, &mut needed);
+    }
+    let mut buffer = vec![0u8; needed.max(1) as usize];
+    // SAFETY: `buffer` is at least `needed` bytes and outlives the call.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenOwner,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    // SAFETY: closing the token opened above, exactly once.
+    unsafe {
+        CloseHandle(token);
+    }
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success the buffer starts with a TOKEN_OWNER whose SID points inside it.
+    let owner = unsafe { &*(buffer.as_ptr() as *const TOKEN_OWNER) };
+    Ok(copy_sid(owner.Owner))
 }
 
 /// Reads the current process token's user SID into an owned buffer.
@@ -401,5 +531,160 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("absent");
         assert!(is_current_user_private(&missing).is_err());
+    }
+
+    /// An Administrators-owned directory stays usable for a member of that group.
+    ///
+    /// This is the lockout case, and it is asserted **unelevated**, which is where the damage was:
+    /// an elevated run leaves `S-1-5-32-544` as the owner on disk, and every later ordinary run has
+    /// to keep working against it. Reassigning the owner needs a privilege an ordinary user lacks,
+    /// so the fixture is built with `icacls` under whatever rights are available and the test
+    /// asserts only once the owner really changed — a skip here would hide the regression it exists
+    /// to catch, so the reason is printed.
+    #[test]
+    fn an_administrators_owned_directory_stays_usable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("state");
+        create_private_dir(&dir).unwrap();
+
+        let status = std::process::Command::new("icacls")
+            .arg(&dir)
+            .arg("/setowner")
+            .arg("*S-1-5-32-544")
+            .output()
+            .expect("icacls runs");
+
+        let owner_reassigned = status.status.success()
+            && !is_owner_the_token_user(&dir).expect("owner is readable after icacls");
+        if !owner_reassigned {
+            eprintln!(
+                "SKIP: could not reassign owner to Administrators ({}). \
+                 The elevated end-to-end run covers this case.",
+                String::from_utf8_lossy(&status.stderr).trim()
+            );
+            return;
+        }
+
+        assert!(
+            is_owned_by_current_user(&dir).unwrap(),
+            "an Administrators-owned directory must stay usable for a group member, \
+             or one elevated run permanently locks the user out of durable state"
+        );
+        assert!(
+            is_current_user_private(&dir).unwrap(),
+            "reassigning the owner must not widen the privacy verdict"
+        );
+    }
+
+    /// Whether `path`'s owner is literally the token's user SID, used to confirm a fixture took.
+    fn is_owner_the_token_user(path: &Path) -> io::Result<bool> {
+        let target = wide(path.as_os_str());
+        let mut owner: PSID = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: out-parameters belong to `descriptor`, freed once below.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                target.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let user = current_user_sid()?;
+        let verdict = !owner.is_null() && sid_equals(owner, user.as_ptr() as PSID);
+        // SAFETY: freed exactly once after the read above.
+        unsafe {
+            LocalFree(descriptor as HLOCAL);
+        }
+        Ok(verdict)
+    }
+
+    /// A directory owned by an unrelated account is still refused.
+    ///
+    /// Keeps the Administrators allowance from becoming a blanket pass: the check must reject an
+    /// owner the user genuinely does not control. `S-1-5-18` (SYSTEM) stands in for that, since it
+    /// is a real SID that is neither the user, the token owner, nor Administrators.
+    #[test]
+    fn a_directory_owned_by_an_unrelated_account_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("state");
+        create_private_dir(&dir).unwrap();
+
+        let status = std::process::Command::new("icacls")
+            .arg(&dir)
+            .arg("/setowner")
+            .arg("*S-1-5-18")
+            .output()
+            .expect("icacls runs");
+        if !status.status.success() {
+            eprintln!(
+                "SKIP: could not reassign owner to SYSTEM: {}",
+                String::from_utf8_lossy(&status.stderr).trim()
+            );
+            return;
+        }
+
+        assert!(
+            !is_owned_by_current_user(&dir).unwrap(),
+            "an owner the user does not control must be refused"
+        );
+    }
+
+    /// Administrators membership is detected even from an unelevated filtered token.
+    ///
+    /// Pins the measured behavior that the fix turns on, because the obvious API gets it wrong:
+    /// `CheckTokenMembership` returns **false** for an unelevated admin user, since UAC marks the
+    /// group deny-only in the filtered token. Reading the group list directly returns true. If this
+    /// ever regressed, an elevated run would again lock the user out of durable state, and the
+    /// symptom would look like a permissions bug rather than a membership one.
+    ///
+    /// Cross-checked against the OS's own answer via `whoami /groups`, so the assertion is not this
+    /// code agreeing with itself.
+    #[test]
+    fn administrators_membership_survives_token_filtering() {
+        let ours = current_user_is_admin_member().expect("membership is readable");
+
+        let output = std::process::Command::new("whoami")
+            .arg("/groups")
+            .arg("/fo")
+            .arg("csv")
+            .output()
+            .expect("whoami runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let os_says = text.contains("S-1-5-32-544");
+
+        assert_eq!(
+            ours, os_says,
+            "membership must match what the OS reports, including a deny-only group entry"
+        );
+    }
+
+    /// The token reports both a user and an owner SID, differing only under elevation.
+    ///
+    /// Pins the mechanism the fix depends on: if `TokenOwner` stopped being readable, the elevated
+    /// path would silently fall back to the user comparison and fail again.
+    #[test]
+    fn the_token_reports_both_a_user_and_an_owner_sid() {
+        let user = current_user_sid().expect("token user SID is readable");
+        let owner = current_token_owner_sid().expect("token owner SID is readable");
+        assert!(!user.is_empty() && !owner.is_empty());
+        let elevated = std::process::Command::new("net")
+            .arg("session")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !elevated {
+            assert!(
+                sid_equals(user.as_ptr() as PSID, owner.as_ptr() as PSID),
+                "unelevated, the owner SID is the user's own"
+            );
+        }
     }
 }
