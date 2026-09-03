@@ -3535,9 +3535,18 @@ fn store_stale_preview(
         schema: STORED_PREVIEW_SCHEMA.to_string(),
         created_at: timestamp_now(),
         preview: admission.compacted.clone(),
-        // Captured after the scan rather than before it. A token taken beforehand would also cover
-        // the scan's own duration, so any write racing the walk would be invisible to the next
-        // run; taking it afterwards can only over-invalidate, which is the safe direction.
+        // Captured after the walk rather than before it. A token taken beforehand would also span
+        // the scan's own duration, so a write racing the walk would be invisible to the next run;
+        // taking it afterwards can only over-invalidate, which is the safe direction.
+        //
+        // This deliberately does *not* try to exclude the cache's own write. Measured on this host,
+        // a cache-shaped write advances the volume USN by about 1080, so when the state directory
+        // shares a volume with the scan root the recorded position is stale the moment it lands and
+        // the preview never verifies. Capturing after the write instead does not converge either --
+        // tried and measured -- because that write is itself journalled. Excluding it needs
+        // per-record attribution via FSCTL_READ_USN_JOURNAL, which is not wired up; until then the
+        // honest outcome for a same-volume cache is `stale_preview`, which is exactly the pre-L3
+        // behavior and never a false claim of freshness.
         validity: cache_validity::capture_validity(roots),
     };
     match store.write_generation(&stored) {

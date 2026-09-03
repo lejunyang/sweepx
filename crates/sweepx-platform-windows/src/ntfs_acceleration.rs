@@ -1686,6 +1686,70 @@ mod tests {
         }
     }
 
+    /// Records that writing to a volume advances its own change position.
+    ///
+    /// This is the constraint that stops a same-volume preview cache from ever verifying, and it is
+    /// worth pinning as a measurement because it defeats the obvious workaround: capturing the token
+    /// *after* the cache write does not converge, since that write is journalled too. Four
+    /// consecutive same-volume scans were measured all reporting `changed` before this was
+    /// understood.
+    ///
+    /// Asserts the direction and that idle is quiet, not the magnitude — the byte counts depend on
+    /// the volume and on whatever else the machine is doing. The measured shape on this host was
+    /// idle 0, one small write ~240, a cache-shaped write (two temp files, two renames) ~1080.
+    ///
+    /// Set `SWEEPX_RUN_NATIVE_NTFS_PROBE=1` and run elevated.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "mutates a temporary directory on a real NTFS volume"]
+    fn writing_to_a_volume_advances_its_own_change_position() {
+        if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        let temp = std::env::temp_dir();
+        let volume = match temp.components().next() {
+            Some(std::path::Component::Prefix(prefix)) => {
+                let text = prefix.as_os_str().to_string_lossy().to_string();
+                std::path::PathBuf::from(format!("{text}\\"))
+            }
+            _ => {
+                println!("SKIP: temp dir has no drive prefix");
+                return;
+            }
+        };
+
+        let read = || native::read_journal_bounds(&volume).map(|bounds| bounds.next_usn);
+        let Ok(baseline) = read() else {
+            println!("SKIP: journal unavailable on {volume:?} without elevation");
+            return;
+        };
+
+        // Idle must be quiet, otherwise the token would be useless regardless of our own writes and
+        // the rest of this test would be measuring background noise.
+        let idle = read().expect("second read succeeds");
+        assert_eq!(
+            idle, baseline,
+            "an idle volume must not advance, or a volume-level token cannot mean anything"
+        );
+
+        let dir = temp.join(format!("sweepx-usn-delta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        // Mirror the cache's write shape: payload via temp file and rename, then pointer likewise.
+        std::fs::write(dir.join("gen.tmp"), b"payload").expect("write payload");
+        std::fs::rename(dir.join("gen.tmp"), dir.join("gen.json")).expect("rename payload");
+        std::fs::write(dir.join("ptr.tmp"), b"ptr").expect("write pointer");
+        std::fs::rename(dir.join("ptr.tmp"), dir.join("current.json")).expect("rename pointer");
+        let after = read().expect("read after writing");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        println!("idle_delta=0 cache_write_delta={}", after - idle);
+        assert!(
+            after > idle,
+            "a cache-shaped write must advance the journal of the volume it lands on; \
+             that is why a same-volume cache cannot verify itself"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "requires an explicit native NTFS CI fixture"]

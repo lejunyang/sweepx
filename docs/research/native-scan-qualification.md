@@ -445,8 +445,41 @@ with the accelerated reader rather than sitting behind a cheaper one.
 
 Verified end to end unelevated: two consecutive scans store empty validity and the second reports
 `stale_preview` with `cache.preview.unverified.no_evidence` — the pre-L3 behavior exactly, which is
-the intended degradation. **The elevated upgrade to `verified_preview` has not yet been confirmed
-against a live volume**; the unit tests cover the decision logic, not the privileged read.
+the intended degradation.
+
+Verified end to end **elevated** (2026-09-04, `E:\Projects\sweepx\crates\sweepx-cache`, state
+directory on `C:`): the token is captured (`journal_id=134088063902297767`, `next_usn=837099952`), a
+second scan of a quiescent volume reports `verified_preview`, and writing one file into the tree
+drops the next scan back to `stale_preview` with `cache.preview.unverified.changed`. Both directions
+matter: a token that never matched would also "detect every change" while being useless.
+
+### A same-volume cache cannot verify, and two-phase writing does not fix it
+
+When the state directory shares a volume with the scan root — **the default shape**, since
+`%LOCALAPPDATA%` is on `C:` — the preview never reaches `verified_preview`. The cache's own write is
+journalled on the volume it is recording, so the stored position is stale the instant it lands.
+
+Measured on `C:` with a probe reading the journal directly:
+
+| Activity | USN advance |
+| --- | --- |
+| idle, two reads back to back | 0 |
+| one small file write | 240 |
+| a cache-shaped write (two temp files, two renames) | 1080 |
+| writes to `C:` only, measured on `E:` | 0 |
+
+The idle delta of 0 confirms the volume-level token is not simply too noisy to be useful, and the
+cross-volume 0 confirms volumes are independent — which is why the cross-volume case works.
+
+The obvious fix, capturing the token *after* `write_generation` and rewriting the generation with
+it, was implemented and measured: **it does not converge.** Four consecutive same-volume runs each
+reported `cache.preview.unverified.changed`, because the second write is journalled exactly like the
+first. It was reverted rather than tuned; adding a third write would only move the problem.
+
+Excluding the cache's own records needs per-record attribution via `FSCTL_READ_USN_JOURNAL`, which
+is not wired up. Until it is, a same-volume cache degrades to `stale_preview`, which is the pre-L3
+behavior and never a false claim of freshness. A user who wants verified reuse today can put the
+state directory on a different volume from the trees being scanned.
 
 ## Gate meanings
 
