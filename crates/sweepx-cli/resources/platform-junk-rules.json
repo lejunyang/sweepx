@@ -48,7 +48,7 @@
     "depth": 0,
     "risk": "R2",
     "evidence": "npm documents this directory as a fully recoverable content-addressable cache that is recreated on demand, and reports its effective location through `npm config get cache`. The location is measured rather than assumed because the effective cache is frequently not the platform default. The `_cacache` marker must be present before the directory is reported.",
-    "sourceReviewedAt": "2026-09-01",
+    "sourceReviewedAt": "2026-09-05",
     "references": ["https://docs.npmjs.com/cli/v10/commands/npm-cache", "https://docs.npmjs.com/cli/v10/using-npm/config#cache"]
   },
   {
@@ -60,8 +60,8 @@
     "requiredMarkers": ["files"],
     "depth": 0,
     "risk": "R3",
-    "evidence": "pnpm reports its effective content-addressable store through `pnpm store path`. The store is refetchable, but installed projects hard-link into it, so removing it can require reinstalling dependencies before those projects build again. Reported at a higher risk tier than a plain download cache for that reason, and only when the `files` marker is present.",
-    "sourceReviewedAt": "2026-09-01",
+    "evidence": "pnpm reports its effective content-addressable store through `pnpm store path`. The store is refetchable, but installed projects hard-link into it, so removing it can require reinstalling dependencies before those projects build again. Reported at a higher risk tier than a plain download cache for that reason, and only when the `files` marker and the store's 256 two-hex-digit shard layout are both present. Discovery enumerates documented defaults and `PNPM_STORE_DIR` as well as the reported path, because an abandoned store is never the one pnpm reports: measured on 2026-09-05, the default location held 146.8 MB last written 2024-10-26 while the store actually in use held 127.5 MB elsewhere, so the resolver alone would have missed the larger, inert copy. Each candidate carries an `activity` marker of `live` or `stale`; the live store is the one that must not be reclaimed.",
+    "sourceReviewedAt": "2026-09-05",
     "references": ["https://pnpm.io/cli/store", "https://pnpm.io/npmrc#store-dir"]
   },
   {
@@ -70,11 +70,11 @@
     "rootKind": "pip_reported_cache",
     "matchKind": "verified_tool_root",
     "names": [],
-    "requiredMarkers": ["http-v2"],
+    "requiredMarkers": ["wheels"],
     "depth": 0,
     "risk": "R2",
-    "evidence": "pip documents this directory as a cache of HTTP responses and locally built wheels that is rebuilt by refetching, and reports its effective location through `pip cache dir`. The location is measured rather than assumed because virtual environments and vendored runtimes routinely relocate it. The `http-v2` marker must be present before the directory is reported.",
-    "sourceReviewedAt": "2026-09-01",
+    "evidence": "pip documents this directory as a cache of HTTP responses and locally built wheels that is rebuilt by refetching, and reports its effective location through `pip cache dir`. The location is measured rather than assumed because virtual environments and vendored runtimes routinely relocate it. The `wheels` marker must be present before the directory is reported; it is used instead of a format directory because a cache written by an older pip has only the legacy `http` layout, and requiring `http-v2` would skip exactly those roots. Measured on 2026-09-05: the legacy `http` format held 73.1 MB last written 2023-12-09 beside a current `http-v2` of 0 MB, so the superseded format was 99.9% of the bytes.",
+    "sourceReviewedAt": "2026-09-05",
     "references": ["https://pip.pypa.io/en/stable/topics/caching/", "https://pip.pypa.io/en/stable/cli/pip_cache/"]
   }
 ]

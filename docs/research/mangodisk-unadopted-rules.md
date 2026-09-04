@@ -59,12 +59,33 @@ locations exist on disk.** Each tool was asked through its own supported interfa
 | pnpm | `pnpm store path` | `E:\.pnpm-store\v3` | `%LOCALAPPDATA%\pnpm\store` | no |
 | pip | `pip cache dir` | `…\DoubaoWork\User Data\sandbox_runtime\.cache\python\pip` (C:) | `%LOCALAPPDATA%\pip\Cache` | no |
 
-This is the decisive argument against importing upstream directory lists. A rule keyed to the
-vendor default would, on this host, delete a **stale** cache that no tool is currently using while
-leaving the live cache untouched — the user observes no space reclaimed and a later build is not
-even sped up, because the deleted tree was already inert. Worse, the two roots are
-indistinguishable by path shape alone, so no amount of pattern tightening detects the mistake;
-only asking the tool does. `pnpm` further shows the root can sit on a **different volume** from the
+This was first read as the decisive argument against shipping documented defaults, and that reading
+was **wrong**. Re-measured on 2026-09-05, the inference inverts: a resolver answers *which copy is
+live*, and the live copy is precisely the one that must not be reclaimed. The abandoned copy at the
+default location is the junk, and no resolver will ever name it.
+
+On this host the default location held the *larger* copy: a pnpm store of 146.8 MB last written
+2024-10-26, against 127.5 MB in the store actually in use on another volume. A resolver-only rule
+misses 146.8 MB of inert bytes while correctly identifying the one directory it should leave alone.
+
+Two further facts came out of the same re-measurement, and neither is visible from a path:
+
+- **Format generations age out inside a live root.** pip's cache held the legacy `http` format at
+  73.1 MB last written 2023-12-09 beside the current `http-v2` at 0 MB — 99.9% of the bytes in a
+  format nothing writes to any more. The original `tool.pip-cache` rule required `http-v2` as its
+  marker, which would have skipped a cache written by an older pip entirely: exactly the roots where
+  those bytes sit.
+- **The earlier npm and pip measurements sampled the wrong environment.** Both tools on this host
+  resolve into `sandbox_runtime`, so those two rows describe a vendored runtime rather than a user
+  installation. Only the pnpm row was first-party. The claim that "every tool reports a location
+  differing from its default" therefore rests on a smaller sample than it appeared to.
+
+So admission enumerates the reported path, the environment override, and the documented defaults,
+and verifies each candidate against the cache's own structure — for a pnpm store, `files/` holding
+exactly 256 two-hex-digit shards. The resolver is retained as a *guard*: it marks which candidate is
+`live` so that copy is never presented as reclaimable. When the tool cannot be asked the marker is
+`unknown`, never `stale`, because absence of an answer is not evidence of abandonment — measured
+directly, since npm ships as a `.cmd`/`.ps1` shim and a bare process spawn does not apply `PATHEXT`. `pnpm` further shows the root can sit on a **different volume** from the
 user profile, so a rule may not assume a cache lives under `%LOCALAPPDATA%` or on the system drive.
 
 Admission consequence: a batch-1 rule must carry a resolver step (invoke the tool's own query, or

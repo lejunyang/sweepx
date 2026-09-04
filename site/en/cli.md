@@ -158,6 +158,40 @@ sweepx --format json junk --system
 
 Explicit roots continue to discover clearly rebuildable project artifacts: Rust `target`, Node `node_modules`, Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`, and common `dist/build/out/.next/.turbo` outputs. With no explicit root, `--system` reports individual application-cache children below an absolute `XDG_CACHE_HOME` (or `~/.cache`) on Linux and `~/Library/Caches` on macOS; on Windows it admits only depth-2 `LocalCache` / `TempState` directories below `%LOCALAPPDATA%/Packages`. `--system` conflicts with explicit roots. Every result remains report-only and includes the rule ID, risk, source-review date, first-party references, and reclaimable estimate; Linux `/tmp`/`/var/tmp`, Windows system cleanup, and package-manager/container shared stores are not admitted by directory-name matching.
 
+### Tool caches: every copy, not just the live one
+
+Rules for npm, pnpm and pip do not trust a single location. Discovery enumerates the path the tool
+reports, the tool's environment override, and the documented platform defaults, then admits a
+candidate only if its own contents match that cache's layout — for a pnpm store, a `files/`
+directory holding exactly 256 two-hex-digit shards.
+
+Asking the tool answers *which copy is live*, and the live copy is the one that must **not** be
+reclaimed. The abandoned copy is the junk, and it is never the one the resolver names. Measured on
+2026-09-05: the pnpm store at the documented default held 146.8 MB last written 2024-10-26, while
+the store actually in use held 127.5 MB on another volume — a resolver-only rule misses the larger,
+inert copy entirely.
+
+Two markers are reported. Neither deletes, pre-selects, or reorders anything; classification stays
+report-only.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `activity` | `live` | The tool reports this path. Do not reclaim it. |
+| | `stale` | A verified cache of this tool that the tool is not using. |
+| | `unknown` | The tool could not be asked, so nothing is claimed. Absence of an answer is not evidence of abandonment. |
+| `staleFormats` | e.g. `["http"]` | Superseded format directories inside a root whose current format is also present. |
+
+`unknown` exists because of a measured failure mode: on Windows npm ships as a `.cmd`/`.ps1` shim
+and a direct process spawn does not apply `PATHEXT`, so the resolver returned nothing and the *live*
+cache was briefly labelled stale. Directory identity is likewise resolved through the filesystem
+rather than by comparing path strings, because case sensitivity is a property of the host and
+volume; comparing spellings reported one pip cache three times.
+
+`staleFormats` is reported only when a current generation is present alongside the old one.
+Otherwise the tool is simply an older version whose only format is the one on disk, and calling it
+superseded would be wrong. Measured on 2026-09-05: pip's cache held the legacy `http` format at
+73.1 MB last written 2023-12-09 beside the current `http-v2` at 0 MB — 99.9% of the bytes sat in a
+format nothing writes to any more, inside a root that is otherwise live.
 ## File-manager-style TUI and Trash preview
 
 ```bash

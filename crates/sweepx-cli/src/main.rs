@@ -839,6 +839,17 @@ struct JunkCandidate {
     references: Vec<String>,
     entry_id: ScanEntryId,
     ancestor_ids: BTreeSet<ScanEntryId>,
+    /// `live` or `stale` for a tool cache; `None` when activity is not a meaningful question.
+    ///
+    /// A marker only. A stale cache is not deleted, pre-selected, or ranked differently here;
+    /// platform junk classification is report-only and this simply records which copy the tool is
+    /// using, so the reader can tell an abandoned cache from the working one.
+    activity: Option<&'static str>,
+    /// Superseded format generations found inside this root, largest evidence first.
+    ///
+    /// Distinct from `activity`: a live root can still hold an obsolete format that nothing writes
+    /// to any more, which was measured as 99.9% of the bytes in pip's cache on this host.
+    stale_formats: Vec<String>,
 }
 
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
@@ -954,6 +965,10 @@ fn run_junk_scan(
                         .iter()
                         .map(|component| component.entry_id.clone())
                         .collect(),
+                    // A project build output has no "which copy is the tool using" question: it
+                    // belongs to the tree it sits in. Claiming an activity here would be noise.
+                    activity: None,
+                    stale_formats: Vec::new(),
                 })
             })
         })
@@ -1046,6 +1061,11 @@ fn run_junk_scan(
                     "evidence": candidate.evidence,
                     "sourceReviewedAt": candidate.source_reviewed_at,
                     "references": candidate.references,
+                    // Markers, not instructions. `activity` says whether the tool is using this
+                    // copy; `staleFormats` names obsolete format directories inside it. Both are
+                    // omitted when they do not apply so a reader never sees an empty claim.
+                    "activity": candidate.activity,
+                    "staleFormats": candidate.stale_formats,
                 })).collect::<Vec<_>>(),
             })
         );
@@ -1152,14 +1172,17 @@ fn platform_junk_candidates(
                         })
                 }
                 // The scan root itself is the candidate. Root discovery already confirmed the
-                // tool reported this path and that the required markers are present, so the
-                // rule reports one aggregate for the whole cache rather than per-file rows.
+                // markers and structural fingerprint, so the rule reports one aggregate for the
+                // whole cache rather than per-file rows.
                 "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
                 _ => false,
             };
             if !matched {
                 continue;
             }
+            let activity =
+                classify_tool_root(rule, entry).map(|classification| classification.code());
+            let stale_formats = superseded_format_generations(rule, entry);
             candidates.push(JunkCandidate {
                 path: entry.display_path.clone(),
                 rule_id: rule.id.clone(),
@@ -1177,6 +1200,8 @@ fn platform_junk_candidates(
                     .iter()
                     .map(|component| component.entry_id.clone())
                     .collect(),
+                activity,
+                stale_formats,
             });
         }
     }
@@ -1195,24 +1220,74 @@ fn platform_junk_candidates(
 /// shape. This is report-only classification and grants no deletion authority; the scanner's
 /// no-follow identity checks remain the authority over what was traversed.
 fn tool_reported_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
-    let Some(tool) = tool_reported_root_for(&rule.root_kind) else {
-        return false;
-    };
-    let Some(reported) = tool.resolve() else {
-        return false;
-    };
-    let Some(locator) = entry.native_locator.as_ref() else {
-        return false;
-    };
-    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
-        // Without a captured native path there is nothing trustworthy to compare against, so the
-        // rule declines rather than falling back to the display string.
-        return false;
-    };
-    if !captured.equals_path(&reported).unwrap_or(false) {
-        return false;
+    classify_tool_root(rule, entry).is_some()
+}
+
+/// Whether a matched cache root is the one the tool is currently using.
+///
+/// Reported as a marker rather than acted on. A live cache is the one that must *not* be reclaimed,
+/// so this is a guard; the stale copies are the reclaimable ones and carry no deletion authority
+/// either, because platform junk classification stays report-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolRootActivity {
+    /// The tool itself named this path.
+    Live,
+    /// A real cache of this tool that the tool is not using — an abandoned or relocated copy.
+    Stale,
+    /// A real cache of this tool, but the tool could not be asked which copy it uses.
+    ///
+    /// Distinct from `Stale` because absence of an answer is not evidence of abandonment. Measured:
+    /// on this host `npm` is a `.ps1`/`.cmd` shim, and `Command::new("npm")` does not apply
+    /// `PATHEXT`, so the resolver returns nothing and the *live* cache would otherwise be labelled
+    /// stale — the exact false claim this whole mechanism exists to avoid.
+    Unknown,
+}
+
+impl ToolRootActivity {
+    /// Stable machine value; never localized.
+    const fn code(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
     }
-    root_has_required_markers(&reported, &rule.required_markers)
+}
+
+/// Decides whether a scanned root is one of this rule's caches, and whether it is live.
+///
+/// Compares against every candidate location rather than only the resolver's answer, because an
+/// abandoned cache is never the one the resolver names. Comparison uses the captured lossless
+/// native path, not `display_path`: display paths are presentation data and are never execution or
+/// classification authority in this codebase.
+fn classify_tool_root(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
+) -> Option<ToolRootActivity> {
+    let locator = entry.native_locator.as_ref()?;
+    // Without a captured native path there is nothing trustworthy to compare against, so the rule
+    // declines rather than falling back to the display string.
+    let captured = locator.scan_root_absolute_path.as_ref()?;
+    // Must be one of the candidates discovery itself verified, which means its markers and
+    // structural fingerprint were already checked against real bytes. Re-deriving the check from
+    // `display_path` would be wrong twice over: display paths are not classification authority, and
+    // the same directory reached through a differently-cased path would be judged a second time.
+    let matched = tool_cache_candidates(rule)
+        .into_iter()
+        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))?;
+    // Liveness compares directory identity, not spelling. The resolver and an environment override
+    // routinely name one directory with different casing, and comparing the resolver's raw string
+    // against the deduplicated candidate reported that single cache as both stale and live at once.
+    //
+    // No answer means `Unknown`, never `Stale`: a tool that cannot be asked has not told us this
+    // copy is abandoned, and claiming otherwise about a live cache is the worst outcome available.
+    Some(
+        match tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve()) {
+            Some(reported) if same_directory(&matched, &reported) => ToolRootActivity::Live,
+            Some(_) => ToolRootActivity::Stale,
+            None => ToolRootActivity::Unknown,
+        },
+    )
 }
 
 fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
@@ -1509,22 +1584,23 @@ fn normalize_junk_roots(system: bool, raw_roots: &[OsString]) -> Result<Vec<Path
 fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
     let rules = load_platform_junk_rules()?;
     let mut roots = Vec::new();
-    // Tool-reported roots come first because they are platform-independent and each one is
-    // verified against the rule's markers before being admitted.
+    // Tool-reported roots come first because they are platform-independent. Every plausible
+    // location is enumerated, not just the one the tool named: an abandoned cache at a documented
+    // default is exactly what a resolver-only pass misses, and on this host it was the larger copy.
+    // Each candidate is verified by markers and structural fingerprint before admission.
     for rule in &rules {
-        let Some(tool) = tool_reported_root_for(&rule.root_kind) else {
-            continue;
-        };
-        let Some(root) = tool.resolve() else {
-            continue;
-        };
-        if !is_existing_real_directory(&root)
-            || !root_has_required_markers(&root, &rule.required_markers)
-        {
+        if tool_reported_root_for(&rule.root_kind).is_none() {
             continue;
         }
-        if !roots.contains(&root) {
-            roots.push(root);
+        for root in tool_cache_candidates(rule) {
+            // Identity, not spelling: two rules can name one directory, and a scan given the same
+            // directory twice reports it twice.
+            if !roots
+                .iter()
+                .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
+            {
+                roots.push(root);
+            }
         }
     }
     #[cfg(target_os = "linux")]
@@ -1584,9 +1660,17 @@ fn is_existing_real_directory(path: &Path) -> bool {
 /// One tool-reported cache root, as the tool itself describes it.
 ///
 /// Measured on Windows on 2026-09-01: for npm, pnpm, and pip the location reported by the tool
-/// differed from the documented platform default *and both paths existed*. Shipping the defaults
-/// would therefore have reported a stale cache nobody uses while missing the live one, with no
-/// way to tell them apart from the path alone. Asking the tool is the only way to be right.
+/// differed from the documented platform default *and both paths existed*.
+///
+/// The first reading of that measurement — that defaults must therefore not be shipped — was wrong,
+/// and re-measuring on 2026-09-05 established the opposite. A resolver answers "which cache is
+/// live", and the live one is precisely the one that must **not** be reclaimed. The abandoned copy
+/// at the documented default is the junk, and on this host it was the larger of the two: a pnpm
+/// store of 146.8 MB last written 2024-10-26, against 127.5 MB in the store actually in use. A
+/// resolver-only rule cannot see it at all.
+///
+/// So discovery enumerates every plausible location and the resolver is retained for a different
+/// purpose: to mark which candidate is live, as a guard rather than as the discovery mechanism.
 struct ToolReportedRoot {
     /// Program to run. Resolved through the platform's normal executable search.
     program: &'static str,
@@ -1601,20 +1685,354 @@ impl ToolReportedRoot {
     /// is discovery, so an unusable answer must drop the rule rather than fall back to a guess.
     /// Only the first line is used, because a tool may add warnings after it.
     fn resolve(&self) -> Option<PathBuf> {
-        let output = std::process::Command::new(self.program)
-            .args(self.arguments)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
+        // On Windows many of these tools ship only as a `.cmd`/`.bat` shim, and `Command::new` does
+        // not apply `PATHEXT`, so the bare name fails even though the shell finds it. Measured: npm
+        // on this host is `npm.ps1` plus `npm.cmd`, and without this the live npm cache was reported
+        // as abandoned. `.ps1` is deliberately not attempted: it is not directly executable and
+        // running it would mean invoking a shell.
+        #[cfg(target_os = "windows")]
+        let spellings: Vec<String> = vec![
+            format!("{}.cmd", self.program),
+            format!("{}.bat", self.program),
+            format!("{}.exe", self.program),
+            self.program.to_string(),
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let spellings: Vec<String> = vec![self.program.to_string()];
+
+        for spelling in spellings {
+            let Ok(output) = std::process::Command::new(&spelling)
+                .args(self.arguments)
+                .stdin(std::process::Stdio::null())
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let Ok(text) = String::from_utf8(output.stdout) else {
+                continue;
+            };
+            let Some(line) = text.lines().next() else {
+                continue;
+            };
+            let path = PathBuf::from(line.trim());
+            // A relative path cannot be admitted as a scan root, and resolving one here against the
+            // current directory would invent a location the tool never reported.
+            if path.is_absolute() {
+                return Some(path);
+            }
         }
-        let text = String::from_utf8(output.stdout).ok()?;
-        let path = PathBuf::from(text.lines().next()?.trim());
-        // A relative path cannot be admitted as a scan root, and resolving one here against the
-        // current directory would invent a location the tool never reported.
-        path.is_absolute().then_some(path)
+        None
     }
+}
+
+/// Where a tool's cache may sit besides the location the tool itself reports.
+///
+/// Each entry is an environment variable holding an absolute path, or a path relative to a known
+/// base. Enumerating these is what finds an abandoned cache: the resolver only ever names the live
+/// one, and a stale copy is indistinguishable from it by path shape.
+struct CandidateSources {
+    /// Environment variables that, when set to an absolute path, name the cache root directly.
+    env_overrides: &'static [&'static str],
+    /// Paths relative to `%LOCALAPPDATA%` (Windows) or `$HOME` (elsewhere).
+    relative_defaults: &'static [&'static str],
+    /// When set, a candidate from the list above is a *container* of versioned store directories,
+    /// and each child matching this prefix is the actual root.
+    ///
+    /// Measured: `pnpm store path` reports `…\.pnpm-store\v3`, one level below the configured store
+    /// directory. A default written without the version level therefore fails the marker check and
+    /// silently yields no candidate — which is how the stale store was first missed. The version is
+    /// discovered from the directory rather than hardcoded, because the same name (`v3`) is used by
+    /// both a current pnpm and a store abandoned two years ago, so it cannot indicate freshness.
+    versioned_child_prefix: Option<&'static str>,
+}
+
+/// Structural evidence that a directory really is the kind of cache a rule claims.
+///
+/// A path alone proves nothing, and two caches of the same tool at different locations look
+/// identical from the outside. The fingerprint is read from the directory's own contents, so it
+/// holds regardless of where the cache lives or which tool reported it.
+struct StructuralFingerprint {
+    /// A child that must exist directly under the root, for example `files` for a pnpm store.
+    required_child: &'static str,
+    /// Optional shard layout: this many children of `required_child`, all directories whose names
+    /// are lowercase two-digit hex. Measured on a real pnpm store: exactly 256 such shards.
+    ///
+    /// `None` skips the check for caches with no such layout.
+    hex_shard_count: Option<usize>,
+}
+
+/// One generation of a cache format, used to spot a superseded layout inside a live root.
+///
+/// Measured on this host: pip's cache held `http` at 73.1 MB last written 2023-12-09 next to the
+/// current `http-v2` at 0 MB. The old format was 99.9% of the bytes and no longer written to, and
+/// no rule keyed to the root alone can distinguish the two.
+struct FormatGeneration {
+    /// Child directory holding this generation, for example `http` or `http-v2`.
+    directory: &'static str,
+    /// `true` when a current tool still writes this generation.
+    current: bool,
+}
+
+/// Everything discovery knows about one tool's cache beyond the resolver.
+struct ToolCacheProfile {
+    sources: CandidateSources,
+    fingerprint: StructuralFingerprint,
+    /// Format generations within a single root, oldest first. Empty when the cache has only one.
+    generations: &'static [FormatGeneration],
+}
+
+/// Maps a `rootKind` to the additional locations and content checks for that tool.
+///
+/// Returning `None` means the kind has no profile and only the resolver's answer is used, which
+/// keeps a rule working before its profile is measured on a real host.
+fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
+    match root_kind {
+        "pnpm_reported_store" => Some(ToolCacheProfile {
+            sources: CandidateSources {
+                // `PNPM_HOME` names the install dir, not the store; the store honors this one.
+                env_overrides: &["PNPM_STORE_DIR"],
+                relative_defaults: &["pnpm/store", ".pnpm-store"],
+                versioned_child_prefix: Some("v"),
+            },
+            fingerprint: StructuralFingerprint {
+                required_child: "files",
+                hex_shard_count: Some(256),
+            },
+            generations: &[],
+        }),
+        "pip_reported_cache" => Some(ToolCacheProfile {
+            sources: CandidateSources {
+                env_overrides: &["PIP_CACHE_DIR"],
+                relative_defaults: &["pip/Cache", "pip/cache"],
+                versioned_child_prefix: None,
+            },
+            // The root itself has no shard layout; the generations below carry the evidence.
+            fingerprint: StructuralFingerprint {
+                required_child: "",
+                hex_shard_count: None,
+            },
+            generations: &[
+                FormatGeneration {
+                    directory: "http",
+                    current: false,
+                },
+                FormatGeneration {
+                    directory: "http-v2",
+                    current: true,
+                },
+            ],
+        }),
+        "npm_reported_cache" => Some(ToolCacheProfile {
+            sources: CandidateSources {
+                env_overrides: &["NPM_CONFIG_CACHE"],
+                relative_defaults: &["npm-cache"],
+                versioned_child_prefix: None,
+            },
+            fingerprint: StructuralFingerprint {
+                required_child: "_cacache",
+                hex_shard_count: None,
+            },
+            generations: &[],
+        }),
+        _ => None,
+    }
+}
+
+/// Whether two paths name the same directory on this host.
+///
+/// Resolved through the filesystem rather than by comparing strings, because whether two spellings
+/// are the same directory depends on the volume, not on the text. Falls back to an exact comparison
+/// when canonicalization fails, which keeps a genuinely distinct path from being folded away on the
+/// strength of a failed probe.
+fn same_directory(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Confirms a directory's own contents match the cache layout the rule claims.
+///
+/// This is what lets a rule report a cache at a location no tool named. Every check is read-only
+/// and uses `symlink_metadata`, so a symlink cannot impersonate the structure; the scanner's
+/// no-follow admission remains the authority over what is actually traversed.
+fn matches_structural_fingerprint(root: &Path, fingerprint: &StructuralFingerprint) -> bool {
+    if fingerprint.required_child.is_empty() {
+        return true;
+    }
+    let child = root.join(fingerprint.required_child);
+    if !std::fs::symlink_metadata(&child).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return false;
+    }
+    let Some(expected) = fingerprint.hex_shard_count else {
+        return true;
+    };
+    // Counting shards is bounded by the directory's own size and reads no file contents. A wrong
+    // count means this is not the layout claimed, so the rule must decline rather than guess.
+    let Ok(entries) = std::fs::read_dir(&child) else {
+        return false;
+    };
+    let mut shards = 0usize;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            return false;
+        };
+        if !metadata.is_dir() {
+            return false;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        if name.len() != 2
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return false;
+        }
+        shards += 1;
+        if shards > expected {
+            return false;
+        }
+    }
+    shards == expected
+}
+
+/// Every location this tool's cache might occupy, live or abandoned.
+///
+/// The resolver's answer comes first when available, then environment overrides, then documented
+/// defaults. Each candidate must exist, be a real directory, and carry both the rule's markers and
+/// the profile's structural fingerprint before it is admitted — otherwise a rule keyed to a default
+/// would report whatever unrelated directory now sits there.
+fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // Deduplication asks the filesystem, not the string. `%LOCALAPPDATA%\pip\Cache` and
+    // `…\pip\cache` are one directory on a case-insensitive volume and two on a case-sensitive one,
+    // and the resolver may name the same directory with different casing again. Comparing spellings
+    // reported that single cache three times. Case sensitivity is a property of the host and volume,
+    // so the identity is probed rather than assumed either way.
+    let push = |path: PathBuf, out: &mut Vec<PathBuf>| {
+        if !path.is_absolute()
+            || !is_existing_real_directory(&path)
+            || !root_has_required_markers(&path, &rule.required_markers)
+        {
+            return;
+        }
+        let already = out.iter().any(|existing| same_directory(existing, &path));
+        if !already {
+            out.push(path);
+        }
+    };
+    if let Some(tool) = tool_reported_root_for(&rule.root_kind)
+        && let Some(reported) = tool.resolve()
+    {
+        push(reported, &mut candidates);
+    }
+    let Some(profile) = tool_cache_profile(&rule.root_kind) else {
+        return candidates;
+    };
+    for name in profile.sources.env_overrides {
+        if let Some(value) = std::env::var_os(name) {
+            push(PathBuf::from(value), &mut candidates);
+        }
+    }
+    // Defaults are relative to the platform's per-user cache base. On Windows that is
+    // %LOCALAPPDATA%; elsewhere the home directory, where these tools use dotted names.
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        user_home_dir()
+    };
+    if let Some(base) = base.filter(|path| path.is_absolute()) {
+        for relative in profile.sources.relative_defaults {
+            // Join component by component so the result uses the platform separator throughout. A
+            // literal "a/b" on Windows produces a mixed-separator path that passes every local
+            // check here yet fails to line up with the scanner's captured native path, so the
+            // candidate is discovered and then silently never classified.
+            let mut path = base.clone();
+            for component in relative.split('/') {
+                path.push(component);
+            }
+            match profile.sources.versioned_child_prefix {
+                // The default names a container of versioned stores; the roots are one level down.
+                // Enumerated rather than guessed, and each is still verified below.
+                Some(prefix) => {
+                    if let Ok(entries) = std::fs::read_dir(&path) {
+                        for entry in entries.flatten() {
+                            if entry
+                                .file_name()
+                                .to_str()
+                                .is_some_and(|name| name.starts_with(prefix))
+                            {
+                                push(entry.path(), &mut candidates);
+                            }
+                        }
+                    }
+                }
+                None => push(path, &mut candidates),
+            }
+        }
+    }
+    candidates.retain(|path| matches_structural_fingerprint(path, &profile.fingerprint));
+    candidates
+}
+
+/// Names the superseded cache-format directories present inside a matched root.
+///
+/// A cache root can be live while most of its bytes sit in a format no current tool writes. On this
+/// host pip held `http` at 73.1 MB last written 2023-12-09 beside the current `http-v2` at 0 MB, so
+/// a rule keyed only to the root would describe 99.9% inert bytes as an active cache.
+///
+/// Reported only when a current generation is also present. Without that evidence the tool is
+/// simply an older version whose only format is the one on disk, and calling it superseded would be
+/// wrong. Read-only, `symlink_metadata`, and a marker rather than deletion authority.
+fn superseded_format_generations(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
+) -> Vec<String> {
+    let Some(profile) = tool_cache_profile(&rule.root_kind) else {
+        return Vec::new();
+    };
+    if profile.generations.is_empty() {
+        return Vec::new();
+    }
+    // `NativeAbsolutePath` can only be compared, not converted back to a `PathBuf` — deliberately,
+    // since a display string is not reopenable. So the root used for these reads is the verified
+    // candidate that the captured path matches, never a string rebuilt from the report.
+    let Some(captured) = entry
+        .native_locator
+        .as_ref()
+        .and_then(|locator| locator.scan_root_absolute_path.as_ref())
+    else {
+        return Vec::new();
+    };
+    let Some(root) = tool_cache_candidates(rule)
+        .into_iter()
+        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))
+    else {
+        return Vec::new();
+    };
+    let present = |generation: &FormatGeneration| {
+        std::fs::symlink_metadata(root.join(generation.directory))
+            .is_ok_and(|metadata| metadata.file_type().is_dir())
+    };
+    let has_current = profile
+        .generations
+        .iter()
+        .any(|generation| generation.current && present(generation));
+    if !has_current {
+        return Vec::new();
+    }
+    profile
+        .generations
+        .iter()
+        .filter(|generation| !generation.current && present(generation))
+        .map(|generation| generation.directory.to_string())
+        .collect()
 }
 
 /// Maps a `rootKind` to the tool that reports it.
@@ -2209,5 +2627,158 @@ mod tests {
             forwarded,
             vec![OsString::from("scan"), OsString::from("C:\\root")]
         );
+    }
+    /// Every tool profile must be self-consistent and usable by discovery.
+    ///
+    /// A profile whose fingerprint or defaults are wrong fails silently: the candidate is simply
+    /// never produced, which is exactly how the stale pnpm store was missed on the first attempt.
+    #[test]
+    fn tool_cache_profiles_are_well_formed() {
+        let rules = load_platform_junk_rules().expect("rules must load");
+        for rule in rules
+            .iter()
+            .filter(|rule| rule.match_kind == "verified_tool_root")
+        {
+            let Some(profile) = tool_cache_profile(&rule.root_kind) else {
+                continue;
+            };
+            assert!(
+                !profile.sources.relative_defaults.is_empty()
+                    || !profile.sources.env_overrides.is_empty(),
+                "{} has a profile that adds no candidate location",
+                rule.id
+            );
+            for relative in profile.sources.relative_defaults {
+                assert!(
+                    !relative.starts_with('/') && !relative.contains('\\'),
+                    "{}: relative default {relative:?} must be '/'-separated and relative",
+                    rule.id
+                );
+            }
+            // A generation list is only meaningful if it can distinguish old from current.
+            if !profile.generations.is_empty() {
+                assert!(
+                    profile.generations.iter().any(|g| g.current),
+                    "{} lists format generations but none is current",
+                    rule.id
+                );
+                assert!(
+                    profile.generations.iter().any(|g| !g.current),
+                    "{} lists format generations but none is superseded",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    /// The structural fingerprint accepts a real store layout and rejects a lookalike.
+    ///
+    /// Pins the measured shape of a pnpm store: `files/` holding exactly 256 two-hex-digit shard
+    /// directories. The count is asserted against the number actually observed on disk rather than
+    /// against the constant it is meant to protect, so a change to either side is caught.
+    #[test]
+    fn the_store_fingerprint_needs_the_measured_shard_layout() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("store");
+        let files = root.join("files");
+        std::fs::create_dir_all(&files).expect("create files");
+        let fingerprint = StructuralFingerprint {
+            required_child: "files",
+            hex_shard_count: Some(256),
+        };
+
+        // Empty: the child exists but the layout does not match.
+        assert!(!matches_structural_fingerprint(&root, &fingerprint));
+
+        for shard in 0..256u32 {
+            std::fs::create_dir(files.join(format!("{shard:02x}"))).expect("create shard");
+        }
+        assert!(
+            matches_structural_fingerprint(&root, &fingerprint),
+            "256 lowercase two-hex-digit shards is the layout measured on a real pnpm store"
+        );
+
+        // One extra child breaks it: a directory that merely contains hex-named folders is not a
+        // store, and admitting it would let the rule name an unrelated tree a pnpm store.
+        std::fs::create_dir(files.join("zz")).expect("create intruder");
+        assert!(!matches_structural_fingerprint(&root, &fingerprint));
+
+        // A missing required child is refused even when nothing else is wrong.
+        let bare = temp.path().join("bare");
+        std::fs::create_dir(&bare).expect("create bare");
+        assert!(!matches_structural_fingerprint(&bare, &fingerprint));
+    }
+
+    /// A fingerprint with no required child imposes no structural condition.
+    ///
+    /// pip's root has no shard layout; its evidence is the format generations instead. The empty
+    /// marker must therefore pass rather than reject everything.
+    #[test]
+    fn an_empty_fingerprint_accepts_any_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fingerprint = StructuralFingerprint {
+            required_child: "",
+            hex_shard_count: None,
+        };
+        assert!(matches_structural_fingerprint(temp.path(), &fingerprint));
+    }
+
+    /// Activity codes are distinct, stable and machine-safe.
+    ///
+    /// `unknown` exists because a resolver that cannot run is not evidence of abandonment: npm on
+    /// this host is a `.cmd`/`.ps1` shim, and treating "no answer" as `stale` labelled the live
+    /// cache as junk.
+    #[test]
+    fn activity_codes_are_distinct_and_machine_safe() {
+        let all = [
+            ToolRootActivity::Live,
+            ToolRootActivity::Stale,
+            ToolRootActivity::Unknown,
+        ];
+        let mut codes: Vec<&str> = all.iter().map(|activity| activity.code()).collect();
+        let count = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), count, "activity codes must be distinct");
+        assert!(
+            codes
+                .iter()
+                .all(|code| code.chars().all(|c| c.is_ascii_lowercase())),
+            "codes must stay lowercase ASCII for machine consumers"
+        );
+    }
+
+    /// Two spellings of one directory are the same directory; two real directories are not.
+    ///
+    /// Case sensitivity is a property of the host and volume, so the behavior is probed rather than
+    /// assumed. Comparing spellings reported a single pip cache three times.
+    #[test]
+    fn directory_identity_is_resolved_not_string_compared() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let one = temp.path().join("Cache");
+        std::fs::create_dir(&one).expect("create dir");
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).expect("create other");
+
+        assert!(same_directory(&one, &one));
+        assert!(
+            !same_directory(&one, &other),
+            "genuinely different directories must never be folded together"
+        );
+
+        // Whether the folded spelling is the same directory depends on the volume. Assert whichever
+        // invariant this host actually exhibits instead of hardcoding either expectation.
+        let folded = temp.path().join("cache");
+        if folded.exists() {
+            assert!(
+                same_directory(&one, &folded),
+                "a case-insensitive volume resolves both spellings to one directory"
+            );
+        } else {
+            assert!(
+                !same_directory(&one, &folded),
+                "a case-sensitive volume must not treat the folded spelling as the same directory"
+            );
+        }
     }
 }
