@@ -51,6 +51,11 @@ Three consequences:
    reading: this is not "insufficient rights" but "the function does not exist at that handle
    level". There is therefore no reduced-privilege access level to trade down to, and
    `NtfsAccelerationFallback::NotElevated` is the accurate reason on an unelevated host.
+   Re-confirmed on 2026-09-04 by the in-tree probe
+   `volume_access_masks_behave_the_same_at_both_privilege_levels`, which prints the ladder at
+   whichever privilege level it runs under. The one-off probe that produced the table above was
+   discarded, so the finding had no regression guard and the elevated column was at risk of drifting
+   into an inference; the probe now measures both columns instead.
 2. `FSCTL_QUERY_USN_JOURNAL` is confirmed usable once elevated. The USN-based accelerator has a
    real foundation.
 3. The `87` for `FSCTL_QUERY_FILE_LAYOUT` is **an artifact of the throwaway probe, not a platform

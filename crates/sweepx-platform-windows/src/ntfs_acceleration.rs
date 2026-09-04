@@ -647,6 +647,41 @@ pub(crate) mod native {
         }
     }
 
+    /// Opens the volume with `access` and reports `(open_error, usn_fsctl_error)`.
+    ///
+    /// Bypasses `OwnedVolume::open`, which hardcodes `GENERIC_READ`: the whole point is to vary the
+    /// mask. Test-only, since production has exactly one correct answer for this.
+    #[cfg(test)]
+    pub fn probe_volume_access(root: &Path, access: u32) -> (u32, u32) {
+        let Some((device, _)) = volume_paths(root) else {
+            return (u32::MAX, u32::MAX);
+        };
+        let wide = device.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let handle = unsafe {
+            // SAFETY: the UTF-16 device path is NUL-terminated and every pointer argument stays
+            // valid for this synchronous open.
+            CreateFileW(
+                wide.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return (unsafe { GetLastError() }, 0);
+        }
+        // SAFETY: a validated handle is wrapped once so Drop closes it exactly once.
+        let owned = OwnedVolume(handle);
+        let usn_err = match query_usn_journal(owned.0) {
+            NativeUsnProbe::Available(_) => 0,
+            NativeUsnProbe::Unavailable(code) => code,
+        };
+        (0, usn_err)
+    }
+
     /// Issues one `FSCTL_READ_USN_JOURNAL` at `start` and reports `(win32_error, next_cursor)`.
     ///
     /// Exists only so a probe can record which `StartUsn` values the kernel accepts. The full range
@@ -1459,6 +1494,87 @@ mod tests {
             !verdict.permits_reuse(),
             "a volume that just changed must never permit reuse"
         );
+    }
+
+    /// Records what each requested access mask does to a volume handle, on this privilege level.
+    ///
+    /// Set `SWEEPX_RUN_NATIVE_NTFS_PROBE=1`. Unlike the other probes this one is informative at
+    /// *both* privilege levels and asserts only what it actually observed, because the question it
+    /// answers is whether a lesser-privileged access level exists at all.
+    ///
+    /// The shipped code opens with `GENERIC_READ`, which needs elevation. The documented reason for
+    /// not trading down is that lower masks report the control codes as *absent* rather than
+    /// forbidden — `ERROR_INVALID_FUNCTION (1)`, not `ERROR_ACCESS_DENIED (5)` — so there is nothing
+    /// to trade down *to*. That had been measured unelevated and merely assumed to hold elevated,
+    /// which is exactly the kind of gap that turns into a false claim; this probe closes it by
+    /// printing the elevated column instead of inferring it.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens a raw volume handle on a real NTFS volume"]
+    fn volume_access_masks_behave_the_same_at_both_privilege_levels() {
+        if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        let volume_root = std::env::temp_dir()
+            .components()
+            .take(2)
+            .collect::<std::path::PathBuf>();
+        let observation = sweepx_platform::PrivilegeProvider::observe(
+            &crate::privilege::WindowsPrivilegeProvider,
+        );
+        let elevated = matches!(observation.level, sweepx_platform::PrivilegeLevel::Elevated);
+        println!(
+            "privilege: level={:?} elevated={elevated} volume={volume_root:?}",
+            observation.level
+        );
+
+        // Ordered from least to most access. The interesting boundary is whether anything between
+        // "opens but has no control codes" and "cannot open" exists.
+        use windows_sys::Win32::Foundation::GENERIC_READ;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, SYNCHRONIZE};
+        let ladder: [(&str, u32); 5] = [
+            ("0", 0),
+            ("FILE_READ_ATTRIBUTES", FILE_READ_ATTRIBUTES),
+            ("SYNCHRONIZE", SYNCHRONIZE),
+            (
+                "FILE_READ_ATTRIBUTES|SYNCHRONIZE",
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            ),
+            ("GENERIC_READ", GENERIC_READ),
+        ];
+
+        let mut opened_without_fsctl = 0usize;
+        let mut fully_working = 0usize;
+        for (label, mask) in ladder {
+            let (open_err, usn_err) = native::probe_volume_access(&volume_root, mask);
+            match (open_err, usn_err) {
+                (0, 0) => {
+                    fully_working += 1;
+                    println!("  {label:<32} -> handle opens, FSCTL works");
+                }
+                (0, code) => {
+                    if code == 1 {
+                        opened_without_fsctl += 1;
+                    }
+                    println!("  {label:<32} -> handle opens, FSCTL error {code}");
+                }
+                (code, _) => println!("  {label:<32} -> open refused, error {code}"),
+            }
+        }
+
+        // Only assert the shape that was observed in this run. Claiming the elevated column while
+        // running unelevated is precisely the inference this probe replaces.
+        assert!(
+            opened_without_fsctl > 0,
+            "at least one reduced access mask must open a handle whose control codes are absent; \
+             if this stops holding, the documented reason for requiring GENERIC_READ is wrong"
+        );
+        if elevated {
+            assert!(
+                fully_working > 0,
+                "an elevated run must be able to reach a working FSCTL through some access mask"
+            );
+        }
     }
 
     /// Records the `StartUsn` values `FSCTL_READ_USN_JOURNAL` accepts.

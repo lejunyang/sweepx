@@ -176,14 +176,14 @@ See [MangoDisk adoption decisions](https://github.com/lejunyang/sweepx/blob/main
 
 Windows has an accelerated scan path built on native NTFS metadata. Every scan root is qualified read-only before traversal, and **a refusal never affects correctness**: the portable handle-relative traversal stays authoritative and its totals remain exact.
 
-Acceleration needs a `GENERIC_READ` volume handle. Measured on this host on 2026-09-02, against both `C:` and `E:`:
+Acceleration needs a `GENERIC_READ` volume handle. Measured on this host — the unelevated column on 2026-09-02 against both `C:` and `E:`, the elevated column on 2026-09-04 against `C:`:
 
 | Requested access | Not elevated | Elevated |
 |---|---|---|
-| `0` / `FILE_READ_ATTRIBUTES` / `+SYNCHRONIZE` | handle opens, but both FSCTLs return `ERROR_INVALID_FUNCTION (1)` | **identical; still `1`** |
+| `0` / `FILE_READ_ATTRIBUTES` / `SYNCHRONIZE` / both | handle opens, but the FSCTL returns `ERROR_INVALID_FUNCTION (1)` | **identical; still `1`** |
 | `GENERIC_READ` | open is refused with `ERROR_ACCESS_DENIED (5)` | open succeeds and `FSCTL_QUERY_USN_JOURNAL` works |
 
-The decisive point is that the lower access levels still report the control codes as absent **even when elevated**. That is not "insufficient rights" but "the function does not exist at that handle level", so there is no reduced-privilege access level to trade down to. Acceleration being unavailable without elevation is a platform property, not an implementation gap.
+The decisive point is that the lower access levels still report the control codes as absent **even when elevated**. That is not "insufficient rights" but "the function does not exist at that handle level", so there is no reduced-privilege access level to trade down to. Acceleration being unavailable without elevation is a platform property, not an implementation gap. The whole table is measured at both privilege levels by the `volume_access_masks_behave_the_same_at_both_privilege_levels` probe rather than inferred from the unelevated result.
 
 A refusal appears as one `scan.progress` event carrying `accelerationRefusalReason` (a stable machine code, never localized) and `elevationMightHelp`. Its `coverageEffect` is `observed` rather than `incomplete`: declining an optimization loses no coverage, and an ordinary unelevated scan must not be reported as partial because of it. `elevationMightHelp` is `true` only when privilege is genuinely the cause, so the user is not sent to a UAC prompt that cannot fix the problem — elevation does not help when, for example, the volume is not NTFS.
 
