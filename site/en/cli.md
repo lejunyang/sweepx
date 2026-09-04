@@ -224,8 +224,20 @@ the filesystem as it is now and the scan reports `loadStatus: "verified_preview"
 `stale_preview`.
 
 Verification only ever upgrades a load. No recorded evidence, an unreadable journal, or a volume
-that did move all keep the previous behavior and add a warning naming the reason, for example
-`cache.preview.unverified.no_evidence`. Reuse also requires *every* covered volume to be unchanged,
+that did move all keep the previous behavior and add a warning naming the reason:
+
+| Warning | Meaning |
+|---|---|
+| `cache.preview.unverified.no_evidence` | The stored generation carries no evidence, so there is nothing to re-check. An unelevated run records none. |
+| `cache.preview.unverified.read_failed (N)` | Re-reading the journal failed with OS error `N`. A `5` means run elevated; an `87` means SweepX passed malformed input and is a defect to report. |
+| `cache.preview.unverified.journal_must_rescan` | The journal answered that the stored range is no longer covered. Nothing failed; the evidence simply aged out. |
+| `cache.preview.unverified.malformed_evidence` | The stored evidence is structurally unusable. |
+| `cache.preview.unverified.unknown_kind (K)` | The evidence names mechanism `K`, which this build does not understand — typically a newer SweepX wrote it. |
+| `cache.preview.unverified.no_mechanism` | This build has no change-detection mechanism for the host. |
+| `cache.preview.unverified.changed` | The volume demonstrably changed since capture. |
+
+The code after the prefix is stable and safe to match on; any detail is appended in parentheses and
+is not part of it. Reuse also requires *every* covered volume to be unchanged,
 because a half-valid preview would show correct sizes for one part of a tree and stale sizes for
 another while looking correct.
 

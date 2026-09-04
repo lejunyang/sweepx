@@ -29,24 +29,54 @@ pub enum ReuseRefusal {
     UnknownKind(String),
     /// The evidence is structurally unusable, for example a non-numeric position.
     MalformedEvidence,
-    /// Evidence could not be re-checked, typically because the volume handle was denied.
+    /// Re-reading the evidence failed at the OS level; `code` is that error.
     ///
-    /// `code` is the OS error where one exists and `0` when the refusal came from the journal
-    /// itself rather than from a failed read.
-    Unverifiable { code: u32 },
+    /// Distinct from the two refusals below because it is the only one an operator can act on: a `5`
+    /// means run elevated, an `87` means SweepX passed bad input and is a bug here. Collapsing it
+    /// into a bare "unverifiable" cost a diagnostic round trip when an `87` was mistaken for the
+    /// feature silently doing nothing.
+    ReadFailed { code: u32 },
+    /// The journal itself declared the stored range unusable, so it cannot vouch for stability.
+    ///
+    /// No OS error exists here: the read succeeded and its answer was "rescan".
+    JournalMustRescan,
+    /// This build has no change-detection mechanism for the host, so nothing can be re-checked.
+    ///
+    /// Constructed only by the non-Windows `verify_record`, so a Windows build sees it as unused. It
+    /// is defined unconditionally because the code is part of the reported vocabulary on every
+    /// platform: a consumer must be able to recognize it regardless of where SweepX was built.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    NoMechanism,
     /// The volume demonstrably changed since capture.
     Changed,
 }
 
 impl ReuseRefusal {
     /// A stable machine code, safe to compare across locales.
+    ///
+    /// Deliberately free of the numeric detail: callers match on this, so embedding an OS error
+    /// would make every distinct error a distinct code. `detail` carries the number instead.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoEvidence => "no_evidence",
             Self::UnknownKind(_) => "unknown_kind",
             Self::MalformedEvidence => "malformed_evidence",
-            Self::Unverifiable { .. } => "unverifiable",
+            Self::ReadFailed { .. } => "read_failed",
+            Self::JournalMustRescan => "journal_must_rescan",
+            Self::NoMechanism => "no_mechanism",
             Self::Changed => "changed",
+        }
+    }
+
+    /// The numeric or textual detail behind the code, when one exists.
+    ///
+    /// Reported alongside `code` rather than folded into it so machine consumers keep a small stable
+    /// vocabulary while a human still gets the number that identifies the actual fault.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::ReadFailed { code } => Some(code.to_string()),
+            Self::UnknownKind(kind) => Some(kind.clone()),
+            _ => None,
         }
     }
 }
@@ -145,21 +175,21 @@ fn verify_record(record: &VolumeValidityRecord) -> Result<(), ReuseRefusal> {
     // Re-read the volume's current position; a failure here means the journal cannot vouch for
     // anything, not that the volume is unchanged.
     let current = sweepx_scanner::read_volume_journal_bounds(std::path::Path::new(&record.volume))
-        .map_err(|code| ReuseRefusal::Unverifiable { code })?;
+        .map_err(|code| ReuseRefusal::ReadFailed { code })?;
     match compare_to_current(token, current) {
         ChangeVerdict::Unchanged => Ok(()),
         ChangeVerdict::Changed { .. } => Err(ReuseRefusal::Changed),
         // A rescan directive means the journal itself cannot vouch for the range, which is not
-        // evidence of stability. Treated as unverifiable rather than as "changed" so the two stay
-        // distinguishable in reporting.
-        ChangeVerdict::MustRescan(_) => Err(ReuseRefusal::Unverifiable { code: 0 }),
+        // evidence of stability. Kept apart from both `Changed` and a failed read: nothing went
+        // wrong here, the journal simply answered that the range is no longer covered.
+        ChangeVerdict::MustRescan(_) => Err(ReuseRefusal::JournalMustRescan),
     }
 }
 
 /// Without a change-detection mechanism, no evidence can be re-checked.
 #[cfg(not(target_os = "windows"))]
 fn verify_record(_record: &VolumeValidityRecord) -> Result<(), ReuseRefusal> {
-    Err(ReuseRefusal::Unverifiable { code: 0 })
+    Err(ReuseRefusal::NoMechanism)
 }
 
 #[cfg(test)]
@@ -201,7 +231,9 @@ mod tests {
             ReuseRefusal::NoEvidence,
             ReuseRefusal::UnknownKind(String::new()),
             ReuseRefusal::MalformedEvidence,
-            ReuseRefusal::Unverifiable { code: 5 },
+            ReuseRefusal::ReadFailed { code: 5 },
+            ReuseRefusal::JournalMustRescan,
+            ReuseRefusal::NoMechanism,
             ReuseRefusal::Changed,
         ];
         let mut codes: Vec<&str> = all.iter().map(ReuseRefusal::code).collect();
@@ -215,6 +247,57 @@ mod tests {
                 .all(|code| code.chars().all(|c| c.is_ascii_lowercase() || c == '_')),
             "codes must stay snake_case for machine consumers"
         );
+    }
+
+    /// The OS error survives into the report, and the code itself stays free of it.
+    ///
+    /// This is the whole point of splitting `detail` out. A `5` tells an operator to run elevated
+    /// while an `87` means SweepX passed malformed input and is a defect here; collapsing both into
+    /// one opaque refusal already cost one diagnostic round trip. Folding the number *into* the code
+    /// would be just as wrong, because then every distinct errno would be a distinct code and no
+    /// consumer could match on the category.
+    #[test]
+    fn a_failed_read_reports_its_os_error_without_polluting_the_code() {
+        let denied = ReuseRefusal::ReadFailed { code: 5 };
+        let bad_input = ReuseRefusal::ReadFailed { code: 87 };
+
+        assert_eq!(denied.code(), bad_input.code(), "same category, one code");
+        assert_eq!(denied.detail().as_deref(), Some("5"));
+        assert_eq!(bad_input.detail().as_deref(), Some("87"));
+        assert!(
+            !denied.code().contains('5'),
+            "the numeric detail must not leak into the stable code"
+        );
+    }
+
+    /// Three refusals that used to be one must stay distinguishable.
+    ///
+    /// A denied read, a journal that asked for a rescan, and a host with no mechanism at all were
+    /// previously all reported as `unverifiable`, so the report could not say whether anything had
+    /// actually gone wrong. Only the first is an error; the second is the journal working correctly
+    /// and the third is a platform property.
+    #[test]
+    fn the_three_unverifiable_causes_are_reported_apart() {
+        assert_eq!(ReuseRefusal::ReadFailed { code: 5 }.code(), "read_failed");
+        assert_eq!(
+            ReuseRefusal::JournalMustRescan.code(),
+            "journal_must_rescan"
+        );
+        assert_eq!(ReuseRefusal::NoMechanism.code(), "no_mechanism");
+        assert_eq!(
+            ReuseRefusal::JournalMustRescan.detail(),
+            None,
+            "a rescan directive has no error number to report"
+        );
+        assert_eq!(ReuseRefusal::NoMechanism.detail(), None);
+    }
+
+    /// An unknown mechanism names itself, so a forward-compatibility problem is identifiable.
+    #[test]
+    fn an_unknown_kind_reports_which_kind() {
+        let refusal = ReuseRefusal::UnknownKind("future_mechanism".to_string());
+        assert_eq!(refusal.code(), "unknown_kind");
+        assert_eq!(refusal.detail().as_deref(), Some("future_mechanism"));
     }
 
     /// A non-numeric position is rejected rather than coerced to a default.

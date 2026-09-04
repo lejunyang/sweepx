@@ -3404,6 +3404,23 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+/// Renders a reuse refusal as the warning a caller sees.
+///
+/// The stable prefix and code come first so a consumer can keep matching on
+/// `cache.preview.unverified.<code>`; any detail is appended in parentheses. Without the detail an
+/// operator cannot tell "run elevated" (`5`) from "SweepX passed malformed input" (`87`) — the
+/// second is a defect report, not a configuration issue, and conflating them already cost one
+/// diagnostic round trip.
+///
+/// A free function so the exact format is defined once and can be asserted directly; the caller
+/// that produces it sits behind a private cache load path.
+fn unverified_warning(refusal: &cache_validity::ReuseRefusal) -> String {
+    match refusal.detail() {
+        Some(detail) => format!("cache.preview.unverified.{} ({detail})", refusal.code()),
+        None => format!("cache.preview.unverified.{}", refusal.code()),
+    }
+}
+
 fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
         return CachePreviewLoad {
@@ -3421,10 +3438,7 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
             // nothing beyond the upgrade it could not earn.
             let (status, warnings) = match cache_validity::evaluate_reuse(&generation.validity) {
                 Ok(()) => (CACHE_LOAD_MODE_VERIFIED, Vec::new()),
-                Err(refusal) => (
-                    CACHE_LOAD_MODE_HIT,
-                    vec![format!("cache.preview.unverified.{}", refusal.code())],
-                ),
+                Err(refusal) => (CACHE_LOAD_MODE_HIT, vec![unverified_warning(&refusal)]),
             };
             CachePreviewLoad {
                 status,
@@ -7710,5 +7724,50 @@ mod tests {
             "errors": []
         }))
         .unwrap()
+    }
+    /// The reported warning names the cause and carries the OS error behind it.
+    ///
+    /// Pins the exact string measured on this host: seeding evidence elevated and reading it back
+    /// unelevated produced `cache.preview.unverified.read_failed (5)`. Before the split that same
+    /// situation reported only `unverified.unverifiable`, which cannot distinguish "run elevated"
+    /// from "SweepX passed malformed input" -- an `87` in that position is a defect here, and reading
+    /// it as a platform limitation is exactly the mistake this repository has already made once.
+    #[test]
+    fn an_unverified_warning_carries_the_reason_and_its_detail() {
+        use cache_validity::ReuseRefusal;
+
+        assert_eq!(
+            unverified_warning(&ReuseRefusal::ReadFailed { code: 5 }),
+            "cache.preview.unverified.read_failed (5)"
+        );
+        assert_eq!(
+            unverified_warning(&ReuseRefusal::ReadFailed { code: 87 }),
+            "cache.preview.unverified.read_failed (87)"
+        );
+        // Refusals with nothing numeric behind them must not grow empty parentheses.
+        assert_eq!(
+            unverified_warning(&ReuseRefusal::NoEvidence),
+            "cache.preview.unverified.no_evidence"
+        );
+        assert_eq!(
+            unverified_warning(&ReuseRefusal::JournalMustRescan),
+            "cache.preview.unverified.journal_must_rescan"
+        );
+        // The documented prefix is a compatibility surface: a consumer matching on it must keep
+        // working, which is why the detail is appended rather than folded into the code.
+        for refusal in [
+            ReuseRefusal::NoEvidence,
+            ReuseRefusal::MalformedEvidence,
+            ReuseRefusal::ReadFailed { code: 5 },
+            ReuseRefusal::JournalMustRescan,
+            ReuseRefusal::NoMechanism,
+            ReuseRefusal::Changed,
+        ] {
+            let warning = unverified_warning(&refusal);
+            assert!(
+                warning.starts_with(&format!("cache.preview.unverified.{}", refusal.code())),
+                "the stable code must lead the warning: {warning}"
+            );
+        }
     }
 }

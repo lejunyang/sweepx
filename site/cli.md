@@ -222,7 +222,19 @@ NTFS 变更日志位置。下次运行会重新读取该位置：若卷未发生
 报告 `loadStatus: "verified_preview"` 而不是 `stale_preview`。
 
 校验只会提升加载结果。没有记录证据、日志不可读，或卷确实发生了变化，都会保持原有行为并附带说明原因的
-warning，例如 `cache.preview.unverified.no_evidence`。复用还要求所覆盖的**每一个**卷都未变化，因为
+warning：
+
+| Warning | 含义 |
+|---|---|
+| `cache.preview.unverified.no_evidence` | 存下的 generation 里没有任何证据，无从校验。未提权运行不会记录证据。 |
+| `cache.preview.unverified.read_failed (N)` | 重读变更日志失败，`N` 是操作系统错误码。`5` 表示需要提权；`87` 表示 SweepX 传入了非法参数，属于需要上报的缺陷。 |
+| `cache.preview.unverified.journal_must_rescan` | 日志明确表示所存区间已不再被覆盖。没有发生错误，只是证据过期了。 |
+| `cache.preview.unverified.malformed_evidence` | 存下的证据结构上不可用。 |
+| `cache.preview.unverified.unknown_kind (K)` | 证据声明的机制 `K` 是本次构建不认识的，通常是更新版本的 SweepX 写入的。 |
+| `cache.preview.unverified.no_mechanism` | 本次构建在该平台上没有变更检测机制。 |
+| `cache.preview.unverified.changed` | 卷自证据捕获以来确实发生了变化。 |
+
+前缀之后的 code 是稳定的、可用于程序匹配；括号中的细节是附加信息，不属于 code 本身。复用还要求所覆盖的**每一个**卷都未变化，因为
 半有效的预览会让一部分目录显示正确大小、另一部分显示过期大小，而整体看起来却是正确的。
 
 预览要通过校验需同时满足两个条件。其一，读取日志需要与加速相同的提权卷句柄，因此未提权运行不会记录任何
