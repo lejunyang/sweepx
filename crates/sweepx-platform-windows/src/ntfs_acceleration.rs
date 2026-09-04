@@ -11,12 +11,6 @@ pub const MAX_FILE_LAYOUT_RECORDS: u64 = 10_000_000;
 pub const USN_V2_FIXED_BYTES: usize = 60;
 /// Maximum USN records accepted for one cache-validity check.
 pub const MAX_USN_RECORDS: usize = 10_000_000;
-/// Buffer size for one `FSCTL_READ_USN_JOURNAL` page.
-///
-/// Much smaller than a layout page: the ranges read here describe activity since the last scan,
-/// which is normally a handful of records, and a range large enough to need many pages should end in
-/// a rescan anyway.
-pub const USN_PAGE_BYTES: usize = 64 * 1024;
 /// Maximum pages accepted from either native volume API before falling back.
 pub const MAX_NATIVE_PAGES: usize = 16_384;
 
@@ -493,17 +487,15 @@ pub(crate) mod native {
         INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, GetVolumeInformationW,
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetVolumeInformationW,
         OPEN_EXISTING,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
     use windows_sys::Win32::System::Ioctl::{
-        FSCTL_QUERY_FILE_LAYOUT, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL,
-        QUERY_FILE_LAYOUT_FILTER_TYPE_NONE, QUERY_FILE_LAYOUT_INCLUDE_NAMES,
-        QUERY_FILE_LAYOUT_INCLUDE_STREAMS,
+        FSCTL_QUERY_FILE_LAYOUT, FSCTL_QUERY_USN_JOURNAL, QUERY_FILE_LAYOUT_FILTER_TYPE_NONE,
+        QUERY_FILE_LAYOUT_INCLUDE_NAMES, QUERY_FILE_LAYOUT_INCLUDE_STREAMS,
         QUERY_FILE_LAYOUT_INCLUDE_STREAMS_WITH_NO_CLUSTERS_ALLOCATED, QUERY_FILE_LAYOUT_INPUT,
-        QUERY_FILE_LAYOUT_RESTART, READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
+        QUERY_FILE_LAYOUT_RESTART, USN_JOURNAL_DATA_V0,
     };
 
     use super::*;
@@ -645,156 +637,6 @@ pub(crate) mod native {
             NativeUsnProbe::Available(bounds) => Ok(bounds),
             NativeUsnProbe::Unavailable(code) => Err(code),
         }
-    }
-
-    /// Reads the USN records in the half-open range `from..to` for the volume containing `root`.
-    ///
-    /// This is the control code that turns "the volume changed" into "*these* things changed",
-    /// which is what lets a cache dismiss its own writes. `FSCTL_QUERY_USN_JOURNAL` alone can only
-    /// ever answer the coarser question.
-    ///
-    /// Bounded three ways, because the range comes from a stored token and must not be trusted to
-    /// be small: `MAX_NATIVE_PAGES` caps iterations, `MAX_USN_RECORDS` caps accumulated records, and
-    /// the kernel's own returned cursor must advance or the loop stops. A journal range can span
-    /// millions of records after a long gap, and reading all of them would cost more than the
-    /// rescan this is meant to avoid — hitting a cap returns `ERROR_MORE_DATA` so the caller
-    /// rescans rather than acting on a truncated view.
-    ///
-    /// Needs the same elevated volume handle as every other FSCTL here.
-    pub fn read_journal_range(root: &Path, from: i64, to: i64) -> Result<Vec<UsnV2Record>, u32> {
-        if from < 0 || to < from {
-            return Err(87); // ERROR_INVALID_PARAMETER: our own arguments are wrong.
-        }
-        if from == to {
-            return Ok(Vec::new());
-        }
-        let volume = OwnedVolume::open(root).map_err(|_| unsafe { GetLastError() })?;
-        let bounds = match query_usn_journal(volume.0) {
-            NativeUsnProbe::Available(bounds) => bounds,
-            NativeUsnProbe::Unavailable(code) => return Err(code),
-        };
-
-        let mut input = READ_USN_JOURNAL_DATA_V0 {
-            StartUsn: from,
-            // Zero would filter out every record. Every reason bit is accepted because attribution
-            // decides relevance by parent reference, not by reason: filtering here would silently
-            // hide a foreign write whose reason we forgot to list, turning a refusal into reuse.
-            ReasonMask: u32::MAX,
-            ReturnOnlyOnClose: 0,
-            Timeout: 0,
-            BytesToWaitFor: 0, // Never block waiting for new records.
-            UsnJournalID: bounds.journal_id,
-        };
-        let mut buffer = vec![0u64; USN_PAGE_BYTES.div_ceil(size_of::<u64>())];
-        let mut all = Vec::new();
-        for _ in 0..MAX_NATIVE_PAGES {
-            let mut returned = 0u32;
-            let success = unsafe {
-                // SAFETY: input and output buffers outlive this synchronous call; the output uses
-                // aligned u64 storage and only the prefix the kernel reports is parsed.
-                DeviceIoControl(
-                    volume.0,
-                    FSCTL_READ_USN_JOURNAL,
-                    ptr::from_ref(&input).cast::<c_void>(),
-                    size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
-                    buffer.as_mut_ptr().cast::<c_void>(),
-                    USN_PAGE_BYTES as u32,
-                    &mut returned,
-                    ptr::null_mut(),
-                )
-            };
-            if success == 0 {
-                let code = unsafe { GetLastError() };
-                if code == ERROR_HANDLE_EOF {
-                    return Ok(all);
-                }
-                return Err(code);
-            }
-            // Every page starts with the next cursor. A page containing only that cursor means the
-            // journal has no more records in range.
-            if (returned as usize) < size_of::<i64>() {
-                return Err(13); // ERROR_INVALID_DATA
-            }
-            let bytes = unsafe {
-                // SAFETY: `returned` is bounded by the buffer capacity passed to the kernel.
-                std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize)
-            };
-            let next_cursor = read_i64(bytes, 0).map_err(|_| 13u32)?;
-            let page = parse_usn_v2_page(bytes).map_err(|_| 13u32)?;
-
-            for record in page {
-                // Stop at the requested end: the kernel returns whole pages, so the last one
-                // usually overshoots `to`. Keeping those records would attribute activity that
-                // happened after the snapshot this range describes.
-                if record.usn >= to {
-                    return Ok(all);
-                }
-                all.push(record);
-                if all.len() > MAX_USN_RECORDS {
-                    return Err(234); // ERROR_MORE_DATA: rescan instead of truncating.
-                }
-            }
-
-            // The cursor must advance, or a malformed reply would spin until the page cap.
-            if next_cursor <= input.StartUsn || next_cursor >= to {
-                return Ok(all);
-            }
-            input.StartUsn = next_cursor;
-        }
-        Err(234)
-    }
-
-    /// Reads the NTFS reference number of the directory at `path`.
-    ///
-    /// Used to identify the cache directory for change attribution. Deliberately reads it from a
-    /// live handle rather than deriving it from a name: the reference number is the only identity a
-    /// USN record carries, and a name-based match could be spoofed by any writable location.
-    ///
-    /// Needs no elevation — this opens the directory itself, not the volume.
-    pub fn read_directory_reference(path: &Path) -> Result<u64, u32> {
-        let wide = path
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let handle = unsafe {
-            // SAFETY: the UTF-16 path is NUL-terminated and all arguments stay valid for the call.
-            // BACKUP_SEMANTICS is required to open a directory at all.
-            CreateFileW(
-                wide.as_ptr(),
-                0, // No data access needed; identity comes from metadata.
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err(unsafe { GetLastError() });
-        }
-        // SAFETY: a validated handle is wrapped once so it is closed exactly once on drop.
-        let owned = OwnedVolume(handle);
-        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
-        let ok = unsafe {
-            // SAFETY: the output struct is fully initialized and its declared size matches.
-            GetFileInformationByHandleEx(
-                owned.0,
-                FileIdInfo,
-                ptr::from_mut(&mut info).cast::<c_void>(),
-                size_of::<FILE_ID_INFO>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(unsafe { GetLastError() });
-        }
-        // A USN record carries a 64-bit reference number, which is the low half of the 128-bit
-        // file id on NTFS.
-        Ok(u64::from_le_bytes(
-            info.FileId.Identifier[0..8]
-                .try_into()
-                .expect("checked 8-byte prefix"),
-        ))
     }
 
     /// Reads and validates bounded NTFS layout pages from an already-open volume handle.
@@ -1271,106 +1113,6 @@ mod tests {
             .expect("an ordinary name parses");
         assert_eq!(records[0].names.len(), 1);
         assert_eq!(records[0].names[0].name, [b'a' as u16, b'b' as u16]);
-    }
-
-    /// The reference number of a real directory must match what the OS reports for it.
-    ///
-    /// Runs unprivileged and unconditionally, because it is the one half of change attribution that
-    /// needs no volume handle. That matters: attribution is only safe if the identity it excludes is
-    /// the real one, and an identity read that silently returned zero would make the exclusion set
-    /// match nothing — or, if it returned some shared constant, match everything.
-    ///
-    /// Cross-checked against `GetFileInformationByHandleEx` reached through `std::fs::File` rather
-    /// than against a second call to the same function, so the two paths can disagree.
-    #[cfg(windows)]
-    #[test]
-    fn a_directory_reference_matches_what_the_os_reports() {
-        use std::os::windows::io::AsRawHandle;
-
-        let dir = std::env::temp_dir().join(format!("sweepx-ref-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("probe dir");
-
-        let ours = native::read_directory_reference(&dir).expect("read reference unprivileged");
-
-        // Independent path: open the directory through std and ask Windows again.
-        let opened = {
-            use std::os::windows::fs::OpenOptionsExt as _;
-            std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
-                .open(&dir)
-                .expect("open directory via std")
-        };
-        let mut info: windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO =
-            unsafe { std::mem::zeroed() };
-        let ok = unsafe {
-            windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx(
-                opened.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
-                windows_sys::Win32::Storage::FileSystem::FileIdInfo,
-                std::ptr::from_mut(&mut info).cast::<std::ffi::c_void>(),
-                size_of::<windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO>() as u32,
-            )
-        };
-        assert_ne!(ok, 0, "the oracle read must succeed");
-        let oracle = u64::from_le_bytes(info.FileId.Identifier[0..8].try_into().unwrap());
-
-        // A sibling directory must get a different number, or the exclusion set would match
-        // unrelated directories and dismiss their writes.
-        let sibling = std::env::temp_dir().join(format!("sweepx-ref2-{}", std::process::id()));
-        std::fs::create_dir_all(&sibling).expect("sibling dir");
-        let sibling_ref =
-            native::read_directory_reference(&sibling).expect("read sibling reference");
-
-        drop(opened);
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&sibling);
-
-        assert_eq!(
-            ours, oracle,
-            "our reference number must be the one Windows reports"
-        );
-        assert_ne!(ours, 0, "a real directory must not read as reference zero");
-        assert_ne!(
-            ours, sibling_ref,
-            "two distinct directories must not share a reference number"
-        );
-    }
-
-    /// A path that does not exist must fail rather than yield a usable identity.
-    #[cfg(windows)]
-    #[test]
-    fn an_absent_directory_has_no_reference() {
-        let missing = std::env::temp_dir().join(format!("sweepx-absent-{}", std::process::id()));
-        assert!(
-            native::read_directory_reference(&missing).is_err(),
-            "a missing directory must not resolve to a reference number"
-        );
-    }
-
-    /// An empty or backwards range is our own bug and must be reported, not silently read.
-    ///
-    /// Runs unprivileged: these checks happen before any volume handle is opened, which is exactly
-    /// why they are worth testing here — a caller passing a stale token must not reach the FSCTL
-    /// with nonsense.
-    #[cfg(windows)]
-    #[test]
-    fn a_degenerate_journal_range_is_rejected_before_opening_the_volume() {
-        let volume = std::path::Path::new("C:\\");
-        assert_eq!(
-            native::read_journal_range(volume, 500, 500),
-            Ok(Vec::new()),
-            "an empty range needs no read at all"
-        );
-        assert_eq!(
-            native::read_journal_range(volume, 900, 500),
-            Err(87),
-            "a backwards range is ERROR_INVALID_PARAMETER, not something to attempt"
-        );
-        assert_eq!(
-            native::read_journal_range(volume, -1, 500),
-            Err(87),
-            "a negative start is ERROR_INVALID_PARAMETER"
-        );
     }
 
     /// Compares the accelerated source against an independent directory walk of the same tree.

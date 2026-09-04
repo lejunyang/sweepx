@@ -97,14 +97,7 @@ pub fn capture_validity(roots: &[ScanRoot]) -> Vec<VolumeValidityRecord> {
 /// if neither moved; treating a partially-valid preview as reusable would show correct sizes for
 /// one half of the tree and stale sizes for the other, which is worse than a plain miss because it
 /// looks right.
-///
-/// `state_dir` is the cache's own directory. When a recorded volume also holds the cache, the
-/// changed range is read and checked record by record so the cache's own writes do not invalidate
-/// it. Passing `None` disables that refinement and keeps the coarse volume-level comparison.
-pub fn evaluate_reuse(
-    records: &[VolumeValidityRecord],
-    state_dir: Option<&std::path::Path>,
-) -> Result<(), ReuseRefusal> {
+pub fn evaluate_reuse(records: &[VolumeValidityRecord]) -> Result<(), ReuseRefusal> {
     if records.is_empty() {
         return Err(ReuseRefusal::NoEvidence);
     }
@@ -112,7 +105,7 @@ pub fn evaluate_reuse(
         if record.kind != VALIDITY_KIND_NTFS_USN {
             return Err(ReuseRefusal::UnknownKind(record.kind.clone()));
         }
-        verify_record(record, state_dir)?;
+        verify_record(record)?;
     }
     Ok(())
 }
@@ -136,10 +129,7 @@ fn volume_key(path: &std::path::Path) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn verify_record(
-    record: &VolumeValidityRecord,
-    state_dir: Option<&std::path::Path>,
-) -> Result<(), ReuseRefusal> {
+fn verify_record(record: &VolumeValidityRecord) -> Result<(), ReuseRefusal> {
     use sweepx_scanner::{ChangeVerdict, VolumeChangeToken, compare_to_current};
 
     let (Ok(journal_id), Ok(next_usn)) = (
@@ -152,24 +142,13 @@ fn verify_record(
         journal_id,
         next_usn,
     };
-    let volume = std::path::Path::new(&record.volume);
     // Re-read the volume's current position; a failure here means the journal cannot vouch for
     // anything, not that the volume is unchanged.
-    let current = sweepx_scanner::read_volume_journal_bounds(volume)
+    let current = sweepx_scanner::read_volume_journal_bounds(std::path::Path::new(&record.volume))
         .map_err(|code| ReuseRefusal::Unverifiable { code })?;
     match compare_to_current(token, current) {
         ChangeVerdict::Unchanged => Ok(()),
-        changed @ ChangeVerdict::Changed { .. } => {
-            // The volume moved. If it is the volume holding the cache, the movement may be nothing
-            // but the cache writing itself, which must not count as a change to the scanned tree.
-            match cache_only_change(changed, volume, state_dir) {
-                Some(true) => Ok(()),
-                Some(false) => Err(ReuseRefusal::Changed),
-                // Attribution was impossible: distinguishable from a real change because nothing is
-                // known about what moved.
-                None => Err(ReuseRefusal::Changed),
-            }
-        }
+        ChangeVerdict::Changed { .. } => Err(ReuseRefusal::Changed),
         // A rescan directive means the journal itself cannot vouch for the range, which is not
         // evidence of stability. Treated as unverifiable rather than as "changed" so the two stay
         // distinguishable in reporting.
@@ -177,76 +156,9 @@ fn verify_record(
     }
 }
 
-/// Whether a change on `volume` is entirely attributable to the cache's own directories.
-///
-/// `Some(true)` means every record in the range came from the cache, `Some(false)` that something
-/// else wrote, and `None` that the question could not be answered.
-///
-/// Only applies when the cache actually lives on the volume in question. When it does not, the cache
-/// cannot be the explanation for that volume's activity and the change is real.
-#[cfg(target_os = "windows")]
-fn cache_only_change(
-    verdict: sweepx_scanner::ChangeVerdict,
-    volume: &std::path::Path,
-    state_dir: Option<&std::path::Path>,
-) -> Option<bool> {
-    use sweepx_scanner::{ExcludedWriter, refine_verdict, volume_root_of};
-
-    let state_dir = state_dir?;
-    // The cache can only explain activity on the volume it is stored on. Comparing volume roots
-    // rather than assuming keeps a two-volume setup honest.
-    let state_volume = volume_root_of(state_dir)?;
-    if !state_volume
-        .as_os_str()
-        .eq_ignore_ascii_case(volume.as_os_str())
-    {
-        return Some(false);
-    }
-
-    // Every directory a cache write touches must be excluded, or the write looks partly foreign and
-    // nothing ever verifies. Identity comes from open handles, never from path text: a USN record
-    // carries only a reference number, and matching on names would let any writable location
-    // impersonate the cache.
-    //
-    // A directory that cannot be resolved is skipped rather than guessed. That can only shrink the
-    // exclusion set, which makes attribution stricter, never laxer.
-    let mut references = Vec::new();
-    for directory in cache_write_directories(state_dir) {
-        if let Ok(reference) = sweepx_scanner::read_directory_reference(&directory) {
-            references.push(reference);
-        }
-    }
-    if references.is_empty() {
-        return None;
-    }
-    let refined = refine_verdict(
-        verdict,
-        &ExcludedWriter {
-            directory_references: references,
-        },
-        |from, to| sweepx_scanner::read_volume_journal_range(volume, from, to),
-    );
-    Some(refined.permits_reuse())
-}
-
-/// The directories a preview-cache write actually touches.
-///
-/// Kept next to the attribution logic because it must track [`crate::PREVIEW_GENERATION_POINTER_DIR`]
-/// and the cache's internal `generations` subdirectory: the payload is renamed into the latter and
-/// the pointer into the former, so both advance the journal on every single write.
-#[cfg(target_os = "windows")]
-fn cache_write_directories(state_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let preview_root = state_dir.join(crate::PREVIEW_GENERATION_POINTER_DIR);
-    let generations = preview_root.join("generations");
-    vec![preview_root, generations]
-}
-
 /// Without a change-detection mechanism, no evidence can be re-checked.
 #[cfg(not(target_os = "windows"))]
-fn verify_record(
-    _record: &VolumeValidityRecord,
-    _state_dir: Option<&std::path::Path>,
-) -> Result<(), ReuseRefusal> {
+fn verify_record(_record: &VolumeValidityRecord) -> Result<(), ReuseRefusal> {
     Err(ReuseRefusal::Unverifiable { code: 0 })
 }
 
@@ -266,7 +178,7 @@ mod tests {
     /// A generation written before validity existed must never be reused.
     #[test]
     fn absent_evidence_is_refused() {
-        assert_eq!(evaluate_reuse(&[], None), Err(ReuseRefusal::NoEvidence));
+        assert_eq!(evaluate_reuse(&[]), Err(ReuseRefusal::NoEvidence));
     }
 
     /// Evidence from a mechanism this build does not know is not evidence.
@@ -277,7 +189,7 @@ mod tests {
     fn unknown_evidence_kind_is_refused() {
         let records = vec![record("future_mechanism", r"C:\", "1", "2")];
         assert_eq!(
-            evaluate_reuse(&records, None),
+            evaluate_reuse(&records),
             Err(ReuseRefusal::UnknownKind("future_mechanism".to_string()))
         );
     }
@@ -311,7 +223,7 @@ mod tests {
     fn malformed_position_is_refused() {
         let records = vec![record(VALIDITY_KIND_NTFS_USN, r"C:\", "1", "not-a-number")];
         assert_eq!(
-            evaluate_reuse(&records, None),
+            evaluate_reuse(&records),
             Err(ReuseRefusal::MalformedEvidence)
         );
     }

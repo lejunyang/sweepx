@@ -50,34 +50,7 @@ pub fn read_volume_layout_records(
 // Change detection is pure comparison over journal bounds, so it compiles and is tested on every
 // host; only capturing the bounds needs a real volume.
 mod change_tracking;
-pub use change_tracking::{
-    ChangeAttribution, ChangeVerdict, ExcludedWriter, RefinedVerdict, VolumeChangeToken,
-    attribute_changes, compare_to_current, refine_verdict, volume_root_of,
-};
-
-/// Reads the NTFS reference number of the directory at `path`.
-///
-/// Identifies a directory for change attribution. Unlike the journal reads, this needs no
-/// elevation: it opens the directory itself rather than the volume, so a caller can learn the cache
-/// directory's identity even when it will not be able to read the journal.
-#[cfg(windows)]
-pub fn read_directory_reference(path: &std::path::Path) -> Result<u64, u32> {
-    ntfs_acceleration::native::read_directory_reference(path)
-}
-
-/// Reads the USN records in the half-open range `from..to` for the volume containing `root`.
-///
-/// The expensive half of change attribution, and the reason it stays separate from
-/// [`read_volume_journal_bounds`]: bounds answer "did anything change", this answers "what changed",
-/// and only the second one needs to be paid for when the first says yes.
-#[cfg(windows)]
-pub fn read_volume_journal_range(
-    root: &std::path::Path,
-    from: i64,
-    to: i64,
-) -> Result<Vec<ntfs_acceleration::UsnV2Record>, u32> {
-    ntfs_acceleration::native::read_journal_range(root, from, to)
-}
+pub use change_tracking::{ChangeVerdict, VolumeChangeToken, compare_to_current};
 
 /// Reads the current USN journal bounds for the volume containing `root`.
 ///

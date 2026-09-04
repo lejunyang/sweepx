@@ -3419,18 +3419,13 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
             // Verification only ever upgrades the status. A preview that cannot be verified stays
             // exactly as useful as it was before validity existed, so a denied volume handle costs
             // nothing beyond the upgrade it could not earn.
-            //
-            // The state directory is passed so a change on the volume holding the cache can be
-            // attributed to the cache's own writes; without it, a cache sharing a volume with the
-            // scan root could never verify, which is the default layout on Windows.
-            let (status, warnings) =
-                match cache_validity::evaluate_reuse(&generation.validity, state_dir) {
-                    Ok(()) => (CACHE_LOAD_MODE_VERIFIED, Vec::new()),
-                    Err(refusal) => (
-                        CACHE_LOAD_MODE_HIT,
-                        vec![format!("cache.preview.unverified.{}", refusal.code())],
-                    ),
-                };
+            let (status, warnings) = match cache_validity::evaluate_reuse(&generation.validity) {
+                Ok(()) => (CACHE_LOAD_MODE_VERIFIED, Vec::new()),
+                Err(refusal) => (
+                    CACHE_LOAD_MODE_HIT,
+                    vec![format!("cache.preview.unverified.{}", refusal.code())],
+                ),
+            };
             CachePreviewLoad {
                 status,
                 generation: Some(generation.generation),
@@ -3544,12 +3539,14 @@ fn store_stale_preview(
         // the scan's own duration, so a write racing the walk would be invisible to the next run;
         // taking it afterwards can only over-invalidate, which is the safe direction.
         //
-        // The token is deliberately captured *before* the write below, even though that write
-        // advances the journal of the volume it lands on (measured: about 1080 for a cache-shaped
-        // write). Chasing it by capturing afterwards was tried and does not converge, because that
-        // write is journalled too. Instead the reader attributes the changed range: see
-        // `cache_validity::cache_only_change`, which dismisses records belonging to the cache's own
-        // directories so a same-volume cache can still verify.
+        // This deliberately does *not* try to exclude the cache's own write. Measured on this host,
+        // a cache-shaped write advances the volume USN by about 1080, so when the state directory
+        // shares a volume with the scan root the recorded position is stale the moment it lands and
+        // the preview never verifies. Capturing after the write instead does not converge either --
+        // tried and measured -- because that write is itself journalled. Excluding it needs
+        // per-record attribution via FSCTL_READ_USN_JOURNAL, which is not wired up; until then the
+        // honest outcome for a same-volume cache is `stale_preview`, which is exactly the pre-L3
+        // behavior and never a false claim of freshness.
         validity: cache_validity::capture_validity(roots),
     };
     match store.write_generation(&stored) {

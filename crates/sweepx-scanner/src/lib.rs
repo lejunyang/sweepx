@@ -48,9 +48,8 @@ pub use sweepx_platform_windows::WindowsPlatformScanner as HostPlatformScanner;
 /// scanner rather than taking a second dependency on the platform crate.
 #[cfg(all(target_os = "windows", feature = "platform-windows"))]
 pub use sweepx_platform_windows::{
-    ChangeAttribution, ChangeVerdict, ExcludedWriter, RefinedVerdict, VolumeChangeToken,
-    attribute_changes, compare_to_current, read_directory_reference, read_volume_change_token,
-    read_volume_journal_bounds, read_volume_journal_range, refine_verdict, volume_root_of,
+    ChangeVerdict, VolumeChangeToken, compare_to_current, read_volume_change_token,
+    read_volume_journal_bounds,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
