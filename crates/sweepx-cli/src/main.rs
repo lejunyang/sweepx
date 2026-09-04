@@ -124,6 +124,20 @@ struct Cli {
     /// unprivileged scan running. Elevation never widens what deletion may touch.
     #[arg(long, global = true)]
     elevate: bool,
+    /// Internal: file the elevated child writes its stdout to, for the parent to relay.
+    ///
+    /// An elevated process cannot inherit the parent's console — `ShellExecuteExW` with `runas`
+    /// creates a new one, which closes when the child exits. Measured on Windows: without this,
+    /// `--elevate scan` completed successfully and the user received **zero bytes**, because every
+    /// line went to a console that vanished. A scan tool that reports success and shows no result
+    /// is worse than one that refuses.
+    ///
+    /// Hidden because it is a private protocol between the two processes, not a user-facing
+    /// feature. The parent always generates the path inside its own per-run temporary directory;
+    /// accepting an arbitrary destination would turn an elevated SweepX into a general "write this
+    /// file as administrator" primitive.
+    #[arg(long, global = true, hide = true, value_name = "ABSOLUTE_FILE")]
+    relay_stdout_to: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -203,14 +217,31 @@ enum CacheCommands {
 fn main() -> ProcessExitCode {
     let cli = Cli::parse();
 
+    // An elevated child redirects its own stdout before producing anything, so every existing
+    // `println!` lands in the relay file without each call site having to know about it. Doing
+    // this first is what makes it complete: a later redirect would lose whatever was already
+    // buffered toward the console that is about to disappear.
+    if let Some(destination) = cli.relay_stdout_to.as_deref()
+        && let Err(error) = redirect_stdout_to_file(destination)
+    {
+        // Failing loudly here is deliberate. Continuing would run the whole scan and discard the
+        // result exactly as the unfixed elevation path did, and the parent would report success.
+        eprintln!("could not redirect output for the elevated run: {error}");
+        return ProcessExitCode::from(8);
+    }
+
     // Privilege is settled first, before locale parsing, before any state directory is
     // resolved, and before any scan begins. On Windows elevation is only granted at
     // process creation, so honoring `--elevate` means re-running as a second process;
     // doing that after a state directory existed would leave one run's files owned by a
     // different identity than the process that continues. If an elevated child ran, its
-    // exit code is the whole invocation's answer and this process must add nothing.
+    // exit code is the whole invocation's answer and this process adds nothing of its own --
+    // but it must still relay what the child wrote, or the user sees nothing at all.
     match startup_privilege(cli.elevate) {
-        StartupPrivilege::ElevatedChildCompleted { exit_code } => {
+        StartupPrivilege::ElevatedChildCompleted { exit_code, relayed } => {
+            if let Some(relayed) = relayed {
+                relay_child_output(&relayed);
+            }
             return ProcessExitCode::from(exit_code);
         }
         StartupPrivilege::Continue { notice } => {
@@ -542,12 +573,85 @@ fn main() -> ProcessExitCode {
 /// Long flag that opts in to elevation, and the one argument never forwarded to a child.
 const ELEVATE_FLAG: &str = "--elevate";
 
+/// Internal flag naming the file an elevated child writes its stdout to.
+const RELAY_FLAG: &str = "--relay-stdout-to";
+
+/// Points this process's standard output at `destination`, for the whole process.
+///
+/// Redirecting at the OS handle level rather than at each print site is what makes the fix
+/// complete: `println!`, any library that writes to stdout, and anything already queued all follow
+/// a single `SetStdHandle`. Rewriting 34 call sites would leave every future one to remember.
+#[cfg(windows)]
+fn redirect_stdout_to_file(destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{STD_OUTPUT_HANDLE, SetStdHandle};
+
+    // `create_new` is the guard that makes an attacker-supplied path useless: the parent creates a
+    // fresh private directory per run, so an existing file here means something is wrong and the
+    // run refuses rather than truncating whatever it names.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    // SAFETY: the handle comes from a live `File`; `SetStdHandle` only stores it. The file is
+    // deliberately leaked below so the handle stays valid for the rest of the process.
+    let ok = unsafe { SetStdHandle(STD_OUTPUT_HANDLE, file.as_raw_handle() as _) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Rust's `std::io::stdout` caches its handle on first use, so the `File` must outlive every
+    // later write. Leaking it is the intended lifetime: it is released when the process exits.
+    std::mem::forget(file);
+    Ok(())
+}
+
+/// Non-Windows hosts never relaunch, so a relay request cannot be honored.
+#[cfg(not(windows))]
+fn redirect_stdout_to_file(_destination: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "output relay is only used by the Windows elevation path",
+    ))
+}
+
+/// Copies an elevated child's captured output to this process's stdout, then removes it.
+///
+/// Written through as bytes rather than as text: machine output must reach the caller's pipe
+/// byte-for-byte, and re-encoding could corrupt a path that is not valid Unicode.
+///
+/// A missing or unreadable file is reported on stderr and does not change the exit code. The
+/// child's own code already described the outcome, and overriding it here would report a failure
+/// for a run that succeeded.
+fn relay_child_output(captured: &Path) {
+    use std::io::Write;
+
+    match std::fs::read(captured) {
+        Ok(bytes) => {
+            let mut stdout = std::io::stdout();
+            if let Err(error) = stdout.write_all(&bytes).and_then(|()| stdout.flush()) {
+                eprintln!("could not relay the elevated run's output: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("the elevated run produced no readable output ({error})");
+        }
+    }
+    // Best-effort cleanup of a temporary file; the directory goes with it below.
+    let _ = std::fs::remove_file(captured);
+    if let Some(directory) = captured.parent() {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
 /// Outcome of the startup privilege gate.
 enum StartupPrivilege {
     /// This process performs the work. `notice` reports a failed opt-in, if any.
     Continue { notice: Option<String> },
-    /// An elevated child already did the work; exit with its code and do nothing else.
-    ElevatedChildCompleted { exit_code: u8 },
+    /// An elevated child already did the work; exit with its code after relaying its output.
+    ElevatedChildCompleted {
+        exit_code: u8,
+        /// File the child wrote its stdout to, when a relay was arranged.
+        relayed: Option<PathBuf>,
+    },
 }
 
 /// Settles privilege for this invocation before any work begins.
@@ -561,7 +665,11 @@ fn startup_privilege(opted_in: bool) -> StartupPrivilege {
     } else {
         ElevationPolicy::DetectOnly
     };
-    let Some(relaunch) = current_relaunch_request() else {
+    // Arranged before the request is built so the child can be told where to write. A failure to
+    // prepare it is not fatal: the run still elevates, and the relay is simply absent, which is no
+    // worse than the behavior this replaces.
+    let relay = opted_in.then(prepare_relay_destination).flatten();
+    let Some(relaunch) = current_relaunch_request(relay.as_deref()) else {
         // Without a trustworthy image path there is nothing safe to relaunch, so the run
         // continues unprivileged rather than guessing at what to start elevated.
         return StartupPrivilege::Continue {
@@ -575,12 +683,39 @@ fn startup_privilege(opted_in: bool) -> StartupPrivilege {
     let provider = platform_privilege_provider();
     match decide_startup_privilege(provider.as_ref(), policy, &relaunch) {
         StartupPrivilegeDecision::ElevatedChildCompleted { exit_code } => {
-            StartupPrivilege::ElevatedChildCompleted { exit_code }
+            StartupPrivilege::ElevatedChildCompleted {
+                exit_code,
+                relayed: relay,
+            }
         }
-        StartupPrivilegeDecision::Continue { refusal, .. } => StartupPrivilege::Continue {
-            notice: refusal.map(|refusal| format!("continuing without elevation: {refusal}")),
-        },
+        StartupPrivilegeDecision::Continue { refusal, .. } => {
+            // No child ran, so nothing will ever write the relay file. Removing the directory here
+            // keeps a declined prompt from leaving debris behind on every attempt.
+            if let Some(relay) = relay.as_deref().and_then(Path::parent) {
+                let _ = std::fs::remove_dir(relay);
+            }
+            StartupPrivilege::Continue {
+                notice: refusal.map(|refusal| format!("continuing without elevation: {refusal}")),
+            }
+        }
     }
+}
+
+/// Creates a private directory for this run and names the file the child should write.
+///
+/// The directory is created with a unique name and the file itself is *not* created, so the child's
+/// `create_new` open is the single point that decides the file is new. The path is generated here
+/// rather than accepted from the command line because an elevated process writing to a
+/// caller-chosen path is a privilege-escalation primitive, not a feature.
+fn prepare_relay_destination() -> Option<PathBuf> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let directory =
+        std::env::temp_dir().join(format!("sweepx-relay-{}-{unique}", std::process::id()));
+    std::fs::create_dir(&directory).ok()?;
+    Some(directory.join("stdout"))
 }
 
 /// Builds the relaunch request for this process, dropping the opt-in flag.
@@ -589,16 +724,50 @@ fn startup_privilege(opted_in: bool) -> StartupPrivilege {
 /// same opt-in logic. It is already elevated by then, so detection would stop it, but removing
 /// the flag makes a second relaunch impossible by construction rather than relying on that one
 /// check.
-fn current_relaunch_request() -> Option<ElevatedRelaunch> {
+///
+/// Any inherited `--relay-stdout-to` is dropped for the same reason: the destination must be the
+/// one this process just created, never one an outer caller chose.
+fn current_relaunch_request(relay: Option<&Path>) -> Option<ElevatedRelaunch> {
     let program = std::env::current_exe().ok()?;
     if !program.is_absolute() {
         return None;
     }
-    let arguments = std::env::args_os()
-        .skip(1)
-        .filter(|argument| argument != ELEVATE_FLAG)
-        .collect();
+    let arguments = forwardable_arguments(std::env::args_os().skip(1), relay);
     Some(ElevatedRelaunch::new(program, arguments))
+}
+
+/// Filters this run's arguments into the set the elevated child should receive.
+///
+/// Separated from process state so the stripping rules are testable directly: both are security
+/// properties, and a test that can only observe the current process's real arguments cannot exercise
+/// either of them.
+fn forwardable_arguments(
+    inherited: impl Iterator<Item = OsString>,
+    relay: Option<&Path>,
+) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = Vec::new();
+    let mut inherited = inherited;
+    while let Some(argument) = inherited.next() {
+        if argument == ELEVATE_FLAG {
+            continue;
+        }
+        if argument == RELAY_FLAG {
+            // Consume its value too, or the path would survive as a stray positional root.
+            inherited.next();
+            continue;
+        }
+        if let Some(text) = argument.to_str()
+            && text.starts_with(&format!("{RELAY_FLAG}="))
+        {
+            continue;
+        }
+        arguments.push(argument);
+    }
+    if let Some(relay) = relay {
+        arguments.push(OsString::from(RELAY_FLAG));
+        arguments.push(relay.as_os_str().to_os_string());
+    }
+    arguments
 }
 
 /// Selects the privilege backend for this host.
@@ -1958,7 +2127,7 @@ mod tests {
     /// different image and start *that* elevated.
     #[test]
     fn the_relaunch_request_drops_the_opt_in_flag() {
-        let request = current_relaunch_request().expect("the test binary has a path");
+        let request = current_relaunch_request(None).expect("the test binary has a path");
 
         assert!(
             request.program.is_absolute(),
@@ -1971,6 +2140,74 @@ mod tests {
                 .any(|argument| argument == ELEVATE_FLAG),
             "forwarding {ELEVATE_FLAG} would let the child evaluate the opt-in again: {:?}",
             request.arguments
+        );
+    }
+
+    /// A relay destination requested by an outer caller must never be forwarded.
+    ///
+    /// The destination has to be the one this process just created inside its own private
+    /// directory. Forwarding an inherited value would let a caller choose where an *elevated*
+    /// SweepX writes, which is a privilege-escalation primitive rather than a feature. Both spellings
+    /// are stripped, and the separated form must not leave its value behind as a stray positional
+    /// argument — that would silently turn a path into an extra scan root.
+    #[test]
+    fn an_inherited_relay_destination_is_never_forwarded() {
+        let chosen = Path::new("C:\\sweepx-chosen\\stdout");
+
+        for inherited in [
+            vec![
+                OsString::from("scan"),
+                OsString::from(RELAY_FLAG),
+                OsString::from("C:\\attacker\\target"),
+                OsString::from("C:\\real\\root"),
+            ],
+            vec![
+                OsString::from("scan"),
+                OsString::from(format!("{RELAY_FLAG}=C:\\attacker\\target")),
+                OsString::from("C:\\real\\root"),
+            ],
+        ] {
+            let forwarded = forwardable_arguments(inherited.into_iter(), Some(chosen));
+
+            assert!(
+                !forwarded
+                    .iter()
+                    .any(|argument| argument.to_string_lossy().contains("attacker")),
+                "an inherited relay destination survived: {forwarded:?}"
+            );
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|argument| argument == "C:\\real\\root"),
+                "stripping the flag must not consume a real argument: {forwarded:?}"
+            );
+            let relay_positions = forwarded
+                .iter()
+                .filter(|argument| *argument == RELAY_FLAG)
+                .count();
+            assert_eq!(
+                relay_positions, 1,
+                "exactly one relay flag, the one we chose: {forwarded:?}"
+            );
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|argument| argument == chosen.as_os_str()),
+                "our own destination must be passed: {forwarded:?}"
+            );
+        }
+    }
+
+    /// Without a relay the child is told nothing about one, so it writes to its own console.
+    #[test]
+    fn no_relay_means_no_relay_flag() {
+        let forwarded = forwardable_arguments(
+            vec![OsString::from("scan"), OsString::from("C:\\root")].into_iter(),
+            None,
+        );
+        assert_eq!(
+            forwarded,
+            vec![OsString::from("scan"), OsString::from("C:\\root")]
         );
     }
 }

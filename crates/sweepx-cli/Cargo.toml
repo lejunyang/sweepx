@@ -32,6 +32,9 @@ libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
 sweepx-platform-windows = { version = "0.1.0", path = "../sweepx-platform-windows" }
+# `SetStdHandle` only, so an elevated child's output can reach the parent's pipe: a relaunched
+# process gets a new console that closes with it, taking every result line along.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
