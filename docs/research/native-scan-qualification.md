@@ -476,10 +476,57 @@ it, was implemented and measured: **it does not converge.** Four consecutive sam
 reported `cache.preview.unverified.changed`, because the second write is journalled exactly like the
 first. It was reverted rather than tuned; adding a third write would only move the problem.
 
-Excluding the cache's own records needs per-record attribution via `FSCTL_READ_USN_JOURNAL`, which
-is not wired up. Until it is, a same-volume cache degrades to `stale_preview`, which is the pre-L3
-behavior and never a false claim of freshness. A user who wants verified reuse today can put the
-state directory on a different volume from the trees being scanned.
+### Per-record attribution was built, measured, and rejected (2026-09-04)
+
+The natural next step is to stop asking "did the volume change" and ask "did *anything but us*
+change": read the changed range with `FSCTL_READ_USN_JOURNAL` and accept it as quiet when every
+record belongs to the cache's own directories. This was fully implemented — attribution keyed on
+parent reference numbers read from live handles, never on filenames, failing closed in every
+ambiguous direction — and then abandoned on measurement. Recording it in full so the next reader does
+not spend an elevated session rediscovering the same numbers.
+
+Two independent findings each sink it:
+
+**A busy system volume is never quiet.** A 20 000-USN window on `C:` contained 182 records and
+**none of them were the cache's**. The writers were Chrome `.tmp` files, `ai_database1.db-journal`,
+`Amcache.hve`, `LOG`/`LOG.old` — Windows and ordinary applications write to the system volume
+continuously. Attribution therefore returns `foreign_change` and reuse is refused anyway. Widening the
+window only finds more foreign writers: 1 710 records at 200 000 USNs, 18 005 at 2 000 000.
+
+**It costs more than it saves.** The range read measured **1.9–2.6 s**, against roughly **1.06 s**
+for the full accelerated preview it exists to avoid. Even a perfectly working attribution would be a
+pessimisation on the one volume that needs it.
+
+The premise was the error, not the implementation. The cache's own write was never the main source of
+journal traffic on a system volume — only the most visible one in a quiet test. Cross-volume
+verification works and remains the supported route to verified reuse; a same-volume cache degrades to
+`stale_preview`, which is the pre-L3 behavior and never a false claim of freshness.
+
+### `FSCTL_READ_USN_JOURNAL` requires `StartUsn` to be a record boundary
+
+Found while implementing the above, and worth keeping independently of it: any future incremental work
+will hit this. `StartUsn` must be **exactly a record USN**, or one of `0` / `FirstUsn` / `NextUsn`.
+Measured on `C:`:
+
+| `StartUsn` | Result |
+| --- | --- |
+| `0`, `FirstUsn`, `LowestValidUsn`, `NextUsn` | accepted |
+| any real record USN | accepted |
+| any cursor the kernel returned from a previous page | accepted |
+| a real record USN ±1, ±2, ±4, ±8, ±16, ±64 | `ERROR_INVALID_PARAMETER (87)` |
+| `NextUsn - 20000`, an arbitrary in-range value | `ERROR_INVALID_PARAMETER (87)` |
+| a valid value with the wrong `UsnJournalID` | `ERROR_INVALID_PARAMETER (87)` |
+
+Input struct size, output buffer size and `ReasonMask` were each swept across five or six values and
+none of them produced the 87; only `StartUsn` did. An output buffer of exactly 8 bytes succeeds and
+returns just the cursor.
+
+This matters because **a stored token is exactly such an in-between value**. It was a boundary when
+captured, but once later records land it names a position mid-record and the call fails. The symptom
+is indistinguishable from "the feature silently does nothing", which is how it first presented. Per
+this repo's standing rule the 87 was treated as our own bug and swept rather than filed as a platform
+limit — correctly, as it turned out. Reading from a stored token requires entering at `FirstUsn` and
+narrowing client-side, which is a large part of why the range read was so expensive.
 
 ## Gate meanings
 

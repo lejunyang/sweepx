@@ -221,11 +221,11 @@ jobs:
         shell: pwsh
         run: |
           $env:SWEEPX_RUN_NATIVE_NTFS_PROBE = "1"
-          # Both probes are named explicitly because libtest ORs its filters. `native_ntfs_probe`
+          # Every probe is named explicitly because libtest ORs its filters. `native_ntfs_probe`
           # alone silently skipped the change-token probe, which carries an unrelated name. The
           # remaining ignored probes are deliberately excluded: they panic rather than skip when
           # the volume handle is denied, and one is pinned to a drive letter that no runner has.
-          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows -- --ignored --nocapture --test-threads=1 native_ntfs_probe the_change_token_notices_a_real_write writing_to_a_volume_advances_its_own_change_position
+          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows -- --ignored --nocapture --test-threads=1 native_ntfs_probe the_change_token_notices_a_real_write a_journal_range_read_only_accepts_record_boundaries
       - name: Exercise macOS bulk directory enumeration
         if: matrix.capability_os == 'macos'
         run: >-

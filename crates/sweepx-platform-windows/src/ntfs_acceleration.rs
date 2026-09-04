@@ -15,6 +15,10 @@ pub const MAX_USN_RECORDS: usize = 10_000_000;
 pub const MAX_NATIVE_PAGES: usize = 16_384;
 
 const FILE_LAYOUT_OUTPUT_BYTES: usize = 16;
+/// Output buffer for the single-call `StartUsn` probe. Only the leading cursor is read, so this is
+/// sized for one ordinary page rather than for bulk reading.
+#[cfg(test)]
+const USN_PROBE_PAGE_BYTES: usize = 64 * 1024;
 const FILE_LAYOUT_ENTRY_BYTES: usize = 40;
 const FILE_LAYOUT_NAME_HEADER_BYTES: usize = 24;
 const STREAM_LAYOUT_HEADER_BYTES: usize = 48;
@@ -497,6 +501,10 @@ pub(crate) mod native {
         QUERY_FILE_LAYOUT_INCLUDE_STREAMS_WITH_NO_CLUSTERS_ALLOCATED, QUERY_FILE_LAYOUT_INPUT,
         QUERY_FILE_LAYOUT_RESTART, USN_JOURNAL_DATA_V0,
     };
+    // Only the off-boundary `StartUsn` probe issues a journal *read*; the shipped code path queries
+    // bounds alone.
+    #[cfg(test)]
+    use windows_sys::Win32::System::Ioctl::{FSCTL_READ_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0};
 
     use super::*;
 
@@ -637,6 +645,59 @@ pub(crate) mod native {
             NativeUsnProbe::Available(bounds) => Ok(bounds),
             NativeUsnProbe::Unavailable(code) => Err(code),
         }
+    }
+
+    /// Issues one `FSCTL_READ_USN_JOURNAL` at `start` and reports `(win32_error, next_cursor)`.
+    ///
+    /// Exists only so a probe can record which `StartUsn` values the kernel accepts. The full range
+    /// reader was implemented and rejected on measurement (see the qualification doc), so this
+    /// deliberately does not page, filter, or bound anything — it is a single call whose *error code*
+    /// is the result. Test-only, because shipping an entry point to a withdrawn feature would invite
+    /// re-wiring it without re-reading why it was withdrawn.
+    #[cfg(test)]
+    pub fn probe_journal_start(root: &Path, start: i64) -> (u32, i64) {
+        let Ok(volume) = OwnedVolume::open(root) else {
+            return (unsafe { GetLastError() }, 0);
+        };
+        let bounds = match query_usn_journal(volume.0) {
+            NativeUsnProbe::Available(bounds) => bounds,
+            NativeUsnProbe::Unavailable(code) => return (code, 0),
+        };
+        let input = READ_USN_JOURNAL_DATA_V0 {
+            StartUsn: start,
+            ReasonMask: u32::MAX,
+            ReturnOnlyOnClose: 0,
+            Timeout: 0,
+            BytesToWaitFor: 0,
+            UsnJournalID: bounds.journal_id,
+        };
+        let mut buffer = vec![0u64; USN_PROBE_PAGE_BYTES.div_ceil(size_of::<u64>())];
+        let mut returned = 0u32;
+        let ok = unsafe {
+            // SAFETY: both buffers outlive this synchronous call; the output is aligned u64 storage
+            // and only the prefix the kernel reports as written is read back.
+            DeviceIoControl(
+                volume.0,
+                FSCTL_READ_USN_JOURNAL,
+                ptr::from_ref(&input).cast::<c_void>(),
+                size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                USN_PROBE_PAGE_BYTES as u32,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return (unsafe { GetLastError() }, 0);
+        }
+        if (returned as usize) < size_of::<i64>() {
+            return (13, 0); // ERROR_INVALID_DATA: a reply too short to hold the cursor.
+        }
+        let bytes = unsafe {
+            // SAFETY: `returned` is bounded by the capacity handed to the kernel.
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize)
+        };
+        (0, read_i64(bytes, 0).unwrap_or(0))
     }
 
     /// Reads and validates bounded NTFS layout pages from an already-open volume handle.
@@ -1397,6 +1458,69 @@ mod tests {
         assert!(
             !verdict.permits_reuse(),
             "a volume that just changed must never permit reuse"
+        );
+    }
+
+    /// Records the `StartUsn` values `FSCTL_READ_USN_JOURNAL` accepts.
+    ///
+    /// Set `SWEEPX_RUN_NATIVE_NTFS_PROBE=1` and run elevated. This documents a platform constraint
+    /// that is not in the API reference and that silently defeats any attempt to read a journal
+    /// range starting from a stored token: `StartUsn` must be **exactly a record boundary**, or one
+    /// of `0` / `FirstUsn` / `NextUsn`. An arbitrary in-range value fails with
+    /// `ERROR_INVALID_PARAMETER (87)`.
+    ///
+    /// This matters because a stored token *is* such a value. It was a boundary when captured, but
+    /// once later records land it names a position mid-record. The failure looks exactly like "the
+    /// feature does nothing", which is how it first presented; per this crate's rule an 87 is our own
+    /// input being wrong, so it was swept rather than filed as a limitation.
+    ///
+    /// The assertions pin the *measured* asymmetry rather than the constant they protect: an
+    /// unrelated offset must be rejected while the kernel's own cursor must be accepted. Nothing here
+    /// asserts a record count, since the volume is shared with the rest of the system.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an elevated run on a real NTFS volume"]
+    fn a_journal_range_read_only_accepts_record_boundaries() {
+        if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
+            return;
+        }
+        let volume_root = std::env::temp_dir()
+            .components()
+            .take(2)
+            .collect::<std::path::PathBuf>();
+        let bounds = match native::read_journal_bounds(&volume_root) {
+            Ok(bounds) => bounds,
+            Err(code) => {
+                println!("SKIP: journal unavailable on {volume_root:?}, error {code}");
+                return;
+            }
+        };
+
+        // `FirstUsn` is always a legal entry point, and the cursor the kernel hands back from it is
+        // by construction a real boundary. Both must be accepted or the constraint is not what was
+        // measured.
+        let (first_err, cursor) = native::probe_journal_start(&volume_root, bounds.first_usn);
+        println!("start=FirstUsn -> err={first_err} next_cursor={cursor}");
+        assert_eq!(
+            first_err, 0,
+            "FirstUsn must be accepted as a starting point"
+        );
+
+        let (cursor_err, _) = native::probe_journal_start(&volume_root, cursor);
+        println!("start=kernel cursor -> err={cursor_err}");
+        assert_eq!(
+            cursor_err, 0,
+            "a cursor the kernel returned must be accepted, or paging forward is impossible"
+        );
+
+        // An offset from that cursor is not a boundary. This is the case a stored token degenerates
+        // into once the volume moves on.
+        let (offset_err, _) = native::probe_journal_start(&volume_root, cursor + 1);
+        println!("start=cursor+1 -> err={offset_err}");
+        assert_eq!(
+            offset_err, 87,
+            "an off-boundary StartUsn must be rejected with ERROR_INVALID_PARAMETER; if this ever \
+             starts succeeding, reading a range straight from a stored token becomes possible"
         );
     }
 
