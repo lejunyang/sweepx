@@ -270,18 +270,47 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
+
+          # Every stage prints what it observed before asserting on it. A previous run of this
+          # step failed with exit 1 and no output whatsoever, which made it impossible to tell
+          # which assertion tripped or what value it saw. `throw` does reach stderr, so the
+          # silence was never explained -- the response is to stop relying on the failure
+          # message alone and record the evidence as the step goes.
+          # Write-Host, not Write-Output: a function's output stream becomes its return value, so
+          # diagnostics written with Write-Output are handed back to the caller and lost. Measured
+          # -- with Write-Output not one stage label reached the transcript.
+          function Invoke-Sweepx {
+            param([string]$Label, [string[]]$Arguments)
+            Write-Host "== $Label =="
+            Write-Host "   args: $($Arguments -join ' ')"
+            # 2>&1 is deliberate: without it a diagnostic written to stderr is discarded and the
+            # JSON parse fails with no trace of the cause.
+            $text = & $env:BIN @Arguments 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host "   exit: $code"
+            if ($text.Trim().Length -eq 0) {
+              Write-Host "   output: (empty)"
+            } else {
+              $head = $text.Trim()
+              if ($head.Length -gt 600) { $head = $head.Substring(0, 600) + " ...(truncated)" }
+              Write-Host "   output: $head"
+            }
+            return [pscustomobject]@{ Text = $text; Exit = $code }
+          }
+
           $fixture = Join-Path $env:RUNNER_TEMP ("sweepx-ci-" + [guid]::NewGuid().ToString("N"))
           $scanRoot = Join-Path $fixture "scan-root"
           $stateDir = Join-Path $fixture "state"
-          New-Item -ItemType Directory -Path $scanRoot | Out-Null
+          New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
           Set-Content -LiteralPath (Join-Path $scanRoot "sample.txt") -Value "sweepx"
+          Write-Host "fixture: $fixture"
+          Write-Host "binary : $env:BIN (exists: $(Test-Path -LiteralPath $env:BIN))"
 
-          $scanText = & $env:BIN --format json scan $scanRoot | Out-String
-          $scanExit = $LASTEXITCODE
-          if ($scanExit -ne 0) {
-            throw "Windows scan must complete successfully, got exit code $scanExit"
+          $plain = Invoke-Sweepx "plain scan" @("--format", "json", "scan", $scanRoot)
+          if ($plain.Exit -ne 0) {
+            throw "Windows scan must complete successfully, got exit code $($plain.Exit)"
           }
-          $scan = $scanText | ConvertFrom-Json
+          $scan = $plain.Text | ConvertFrom-Json
           if ($scan.kind -ne "scan.result") {
             throw "unexpected scan output kind: $($scan.kind)"
           }
@@ -301,15 +330,19 @@ jobs:
           # Durable state is enabled on Windows, so the smoke test asserts the property it exists
           # for: a preview written by one run is loaded back by the next. Checking only that the
           # directory appears would pass even if nothing were ever read from it again.
-          $firstText = & $env:BIN --format json --state-dir $stateDir scan $scanRoot | Out-String
-          if ($LASTEXITCODE -ne 0) {
-            throw "explicit Windows state directory must be accepted, got exit code $LASTEXITCODE"
+          $first = Invoke-Sweepx "first run with --state-dir" `
+            @("--format", "json", "--state-dir", $stateDir, "scan", $scanRoot)
+          if ($first.Exit -ne 0) {
+            throw "explicit Windows state directory must be accepted, got exit code $($first.Exit)"
           }
-          $first = $firstText | ConvertFrom-Json
-          if ($first.summary.cachePreview.storeStatus -ne "written") {
-            throw "expected the first run to persist a preview, got $($first.summary.cachePreview.storeStatus)"
+          $firstJson = $first.Text | ConvertFrom-Json
+          $storeStatus = $firstJson.summary.cachePreview.storeStatus
+          Write-Host "   storeStatus: $storeStatus"
+          if ($storeStatus -ne "written") {
+            throw "expected the first run to persist a preview, got $storeStatus"
           }
-          $writtenGeneration = $first.summary.cachePreview.writtenGeneration
+          $writtenGeneration = $firstJson.summary.cachePreview.writtenGeneration
+          Write-Host "   writtenGeneration: $writtenGeneration"
           if (-not $writtenGeneration) {
             throw "expected a generation id for the persisted preview"
           }
@@ -317,32 +350,43 @@ jobs:
             throw "an accepted state directory must exist after the run"
           }
 
-          $secondText = & $env:BIN --format json --state-dir $stateDir scan $scanRoot | Out-String
-          if ($LASTEXITCODE -ne 0) {
-            throw "the second Windows scan must succeed, got exit code $LASTEXITCODE"
+          $second = Invoke-Sweepx "second run, should load the preview" `
+            @("--format", "json", "--state-dir", $stateDir, "scan", $scanRoot)
+          if ($second.Exit -ne 0) {
+            throw "the second Windows scan must succeed, got exit code $($second.Exit)"
           }
-          $second = $secondText | ConvertFrom-Json
-          if ($second.summary.cachePreview.loadStatus -ne "stale_preview") {
-            throw "expected the second run to load the persisted preview, got $($second.summary.cachePreview.loadStatus)"
+          $secondJson = $second.Text | ConvertFrom-Json
+          $loadStatus = $secondJson.summary.cachePreview.loadStatus
+          $loadedGeneration = $secondJson.summary.cachePreview.loadedGeneration
+          Write-Host "   loadStatus: $loadStatus"
+          Write-Host "   loadedGeneration: $loadedGeneration"
+          if ($loadStatus -ne "stale_preview") {
+            throw "expected the second run to load the persisted preview, got $loadStatus"
           }
-          if ($second.summary.cachePreview.loadedGeneration -ne $writtenGeneration) {
-            throw "expected generation $writtenGeneration to be loaded, got $($second.summary.cachePreview.loadedGeneration)"
+          if ($loadedGeneration -ne $writtenGeneration) {
+            throw "expected generation $writtenGeneration to be loaded, got $loadedGeneration"
           }
 
           # The guard that makes durable state defensible here: a directory other accounts can
           # reach must be refused rather than used. Widened through the OS's own tool so the
           # test exercises a real misconfiguration and not a synthetic one.
           $sharedDir = Join-Path $fixture "shared-state"
-          New-Item -ItemType Directory -Path $sharedDir | Out-Null
-          icacls $sharedDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
-          $sharedError = & $env:BIN --format json --state-dir $sharedDir scan $scanRoot 2>&1 | Out-String
-          $sharedExit = $LASTEXITCODE
-          if ($sharedExit -eq 0) {
+          New-Item -ItemType Directory -Path $sharedDir -Force | Out-Null
+          $icacls = icacls $sharedDir /grant "*S-1-1-0:(OI)(CI)F" 2>&1 | Out-String
+          Write-Host "== widen the shared state directory =="
+          Write-Host "   icacls exit: $LASTEXITCODE"
+          Write-Host "   icacls out : $($icacls.Trim())"
+
+          $shared = Invoke-Sweepx "world-reachable state dir must be refused" `
+            @("--format", "json", "--state-dir", $sharedDir, "scan", $scanRoot)
+          if ($shared.Exit -eq 0) {
             throw "a state directory reachable by other users must be refused"
           }
-          if ($sharedError -notmatch "accessible only to them") {
-            throw "the refusal did not explain the privacy requirement: $sharedError"
+          if ($shared.Text -notmatch "accessible only to them") {
+            throw "the refusal did not explain the privacy requirement: $($shared.Text)"
           }
+
+          Write-Host "all Windows durable-state assertions passed"
       - name: Smoke-test binary and capability truthfulness
         shell: bash
         env:
