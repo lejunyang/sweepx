@@ -502,3 +502,90 @@ https://www.googletagmanager.com/^0https://codacy.com_default
 
 验证方式：与独立目录遍历交叉核对，Edge 12/12 桶、Edge Dev 6/6 桶全部解析，四个子系统的归因之和与遍历总量
 差额均为 0；IndexedDB 的 `.leveldb`/`.blob` 正确合并（43 个来源对应 52 个目录）。
+
+## 11. Edge 遥测数据库（2026-09-05 实测）
+
+用户提问「浏览器历史记录或其他缓存现在能否识别」后，对本机 Edge / Edge Dev / Chrome 的 profile
+做了一次「未覆盖项」普查，发现体量最大的单文件并不是历史记录，而是一组 Edge 独有的遥测数据库。
+
+### 11.1 未覆盖清单（Edge Default，>= 1 MB，排除已覆盖目录）
+
+| 体量 | 对象 | 性质 |
+| --- | --- | --- |
+| 572.0 MB | `Extensions/` | 扩展本体，不是垃圾（删除等于卸载） |
+| 108.6 MB | `ExtensionActivityEdge` | 扩展 API 调用遥测，SQLite |
+| 55.2 MB | `Local Extension Settings/` | 扩展自身数据 |
+| 50.5 MB | `load_statistics.db` | 25,798 行加载统计 |
+| 28.4 MB | `WebAssistDatabase` | 30,459 行导航记录 |
+| 20.7 MB | `Local Storage/` | 已能按域报告（§8.5.2），不可切分 |
+| 19.6 MB | `History` | 浏览历史 + 下载 + 标注，非纯缓存 |
+| 11.2 MB | `Favicons` | 169 图标 / 472 映射，可重新抓取 |
+
+三个大项是 **Edge 独有**：`ExtensionActivityEdge`、`load_statistics.db`、`WebAssistDatabase`
+在 Chrome 的 `Default` 下完全不存在。因此不能写成通用 `chromium.*` 规则，与 R2 那三条渲染缓存规则
+的适用面不同。
+
+同一份代码在两个安装间差两个数量级（`ExtensionActivityEdge`：Edge 108.6 MB vs Edge Dev 0.0 MB），
+说明规则不能依据「典型体积」预判，必须逐机实测。
+
+### 11.2 关键发现：89% 是 SQLite freelist，不是日志内容
+
+`ExtensionActivityEdge` 的实测构成：
+
+```
+page_size=4096  page_count=27789  freelist=24730
+file       : 108.6 MB
+live pages :  11.9 MB
+free pages :  96.6 MB   (89.0%)
+```
+
+**Edge 自己在删旧行，但从不 VACUUM。** 因此文件里 89% 是已释放但未归还操作系统的空页。这修正了
+公开资料的因果描述——它们普遍称此文件「不清理旧条目所以无限增长」，而实测是「清理了但不回收空间」。
+
+保留窗口同样是实测值，与「无限增长」不符：
+
+```
+oldest row : 2026-09-02 16:00:00 UTC
+newest row : 2026-09-05 11:08:15 UTC
+span       : 2 天 19 小时
+rows       : 445,178  ->  约 6,631 行/小时
+```
+
+即存在约 3 天的滚动保留。真正的膨胀来源是**写入速率 x 页面不回收**，而非无限累积。这一点决定了
+清理口径：删除文件回收的是 108.6 MB，而其中仅 11.9 MB 对应「真实数据」。
+
+### 11.3 内容是用户可识别的
+
+`string_ids` / `url_ids` 两张映射表把整数外键还原为明文：
+
+```
+string_ids[1]  = 'kagpabjoboikccfdghpdlaaopmgpgfdc'   扩展 ID
+string_ids[2]  = 'windows.getAll'                     被调用的 API
+string_ids[50] = 'storage.set'
+url_ids (557)  = edge://newtab/ , https://cn.bing.com/search , ...
+```
+
+所以它同时记录「哪个扩展、调了什么 API、在哪个页面上」。归类为纯技术遥测是不准确的：其中含浏览过的
+URL，属于用户可识别数据。这影响风险分级——它不是 R2「可重建」，删除不会被任何机制补回。
+
+### 11.4 外部资料与本机实测的差异
+
+公开资料一致认为删除安全、Edge 会自动重建、微软未提供关闭开关（微软论坛 Moderator 明确答复
+「by design，目前无法阻止」），并有用户报告涨到 196 GB。但这些均为三方博客与论坛，微软**未正式
+文档化**该文件。可采信的是「删除安全 + 会重建 + 无开关」；不可照搬的是「不清理旧条目」这一因果解释，
+本机实测与之矛盾（见 §11.2）。
+
+来源：
+- https://www.thewindowsclub.com/what-is-extensionactivityedge-file
+- https://learn.microsoft.com/en-sg/answers/questions/2282536/how-extensionactivityedge-cant-be-create-after-del
+
+### 11.5 尚未决定的口径问题
+
+1. **体积怎么报**：删除整个文件回收 108.6 MB，但 live 数据仅 11.9 MB。是否需要类似
+   `sizeIsLogical` 的标注，说明「其中 X MB 为数据库空洞」？
+2. **风险等级**：含浏览过的 URL 与扩展 ID，删除不可逆且无法重建，按 §CLEANER-CATALOG 分级应为 R3
+   （默认仅报告，允许逐项选中 Trash），而非 R2。
+3. **是否需要关进程**：文件被运行中的 Edge 独占，与 §8.5 逐域 Trash 遇到的 LevelDB `LOCK` 情形同类，
+   需要同样的 holder 证据而不是直接移动。
+4. `load_statistics.db` / `WebAssistDatabase` 的内部构成尚未做同等深度的探查，不应假定与
+   `ExtensionActivityEdge` 相同。
