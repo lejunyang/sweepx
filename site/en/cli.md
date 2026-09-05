@@ -158,6 +158,42 @@ sweepx --format json junk --system
 
 Explicit roots continue to discover clearly rebuildable project artifacts: Rust `target`, Node `node_modules`, Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`, and common `dist/build/out/.next/.turbo` outputs. With no explicit root, `--system` reports individual application-cache children below an absolute `XDG_CACHE_HOME` (or `~/.cache`) on Linux and `~/Library/Caches` on macOS; on Windows it admits only depth-2 `LocalCache` / `TempState` directories below `%LOCALAPPDATA%/Packages`. `--system` conflicts with explicit roots. Every result remains report-only and includes the rule ID, risk, source-review date, first-party references, and reclaimable estimate; Linux `/tmp`/`/var/tmp`, Windows system cleanup, and package-manager/container shared stores are not admitted by directory-name matching.
 
+### How a candidate's size is reported
+
+`reclaimable` prefers the filesystem's allocated size. When the platform will not claim allocation,
+the apparent logical size is reported instead and `sizeIsLogical` is `true`.
+
+This matters on Windows, where the adapter deliberately refuses to claim allocation:
+`FILE_STANDARD_INFO` describes only the unnamed `$DATA` stream, so an exact figure would be a guess
+wherever alternate streams, sparse ranges or compression are involved. That refusal is correct, but
+taken literally it left every candidate sizeless — measured 2026-09-05, 30 of 30, including 1.8 GB
+of browser caches. A tool that cannot say how large anything is has not answered the question.
+
+The two quantities are not interchangeable, so the substitution is always visible rather than
+silent. An allocation that is merely a lower bound does not win by being the nominally correct
+field: an exactly known logical size carries more information. When neither is exact, the
+allocation-derived evidence is kept, because its reason code explains why the size is missing.
+### Browser render caches
+
+`--system` reports the rebuildable caches of every Chromium-family installation it finds: the HTTP
+cache, the compiled JavaScript and WebAssembly cache, and the GPU and shader caches. Discovery
+enumerates profiles from disk rather than assuming `Default`, and also covers the shader caches that
+sit beside the profiles rather than inside one.
+
+Each of the three backends has a different layout, so each rule is guarded by its own marker —
+`Cache_Data`, `js`, and `data_1` respectively. An index file cannot be used as a common marker:
+measured 2026-09-05, two of the three carry none at their root.
+
+What is deliberately **not** matched: Service Worker `CacheStorage`, `IndexedDB`, `Local Storage`,
+cookies, and extension state. `CacheStorage` is named cache but holds PWA offline state, not
+responses the network can fetch again.
+
+Measured on Windows 2026-09-05 across Edge, Edge Dev, and Chrome: 1.8 GB total, the largest single
+directory being 611.7 MB of Edge Dev code cache. Assuming a single browser installation would have
+missed it.
+
+Sizes for a blockfile-backed shader cache include scaffolding — `data_0` through `data_3` and
+`index` are written even when the cache is empty, so an empty one still occupies about 0.5 MB.
 ### Tool caches: every copy, not just the live one
 
 Rules for npm, pnpm and pip do not trust a single location. Discovery enumerates the path the tool

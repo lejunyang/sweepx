@@ -39,6 +39,53 @@
     "references": ["https://learn.microsoft.com/windows/apps/develop/data/store-and-retrieve-app-data"]
   },
   {
+    "id": "windows.chromium-http-cache",
+    "platform": "windows",
+    "rootKind": "chromium_render_cache",
+    "matchKind": "verified_cache_root",
+    "names": [],
+    "requiredMarkers": ["Cache_Data"],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "The HTTP cache holds only responses the network stack can fetch again; Chromium documents the disk cache as recreated whenever its files are missing or corrupt. Measured on Windows 2026-09-05: Edge Default 345.4 MB over 1257 files, Chrome Default 315.7 MB over 3256 files. The marker is the Cache_Data child rather than an index file, because this backend keeps entries one level below the root and carries no index at the root itself. Service Worker CacheStorage is deliberately not matched here: it holds PWA offline state, not refetchable responses, despite also being named cache.",
+    "sourceReviewedAt": "2026-09-05",
+    "references": [
+      "https://www.chromium.org/developers/design-documents/network-stack/disk-cache/",
+      "https://www.chromium.org/developers/design-documents/network-stack/disk-cache/very-simple-backend/"
+    ]
+  },
+  {
+    "id": "windows.chromium-code-cache",
+    "platform": "windows",
+    "rootKind": "chromium_render_cache",
+    "matchKind": "verified_cache_root",
+    "names": [],
+    "requiredMarkers": ["js"],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Compiled JavaScript and WebAssembly caches are derived from script the site serves again; discarding them costs one recompilation. Measured on Windows 2026-09-05: Edge Dev Default 611.7 MB over 21636 files, Edge Default 308.0 MB, Chrome Default 197.9 MB. Edge Dev held the single largest reclaimable directory on this host, which is why per-installation discovery matters rather than assuming one browser. The marker is the js child, present in both the js and wasm layout.",
+    "sourceReviewedAt": "2026-09-05",
+    "references": [
+      "https://www.chromium.org/developers/design-documents/network-stack/disk-cache/",
+      "https://developer.chrome.com/docs/devtools/javascript/v8/code-caching"
+    ]
+  },
+  {
+    "id": "windows.chromium-shader-cache",
+    "platform": "windows",
+    "rootKind": "chromium_render_cache",
+    "matchKind": "verified_cache_root",
+    "names": [],
+    "requiredMarkers": ["data_1"],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "GPU program and shader caches are rebuilt by the driver on next use. Measured on Windows 2026-09-05: Edge GrShaderCache 10.7 MB, Edge Dev GrShaderCache 11.1 MB, Chrome GrShaderCache 9.8 MB, Edge Default GPUCache 1.6 MB. These use the blockfile backend, whose data_0 through data_3 and index files are written even when the cache is empty, so an empty one still occupies about 0.5 MB and is reported with a near-zero reclaimable estimate rather than being treated as a find. data_1 is the marker because data_0 also appears in unrelated layouts.",
+    "sourceReviewedAt": "2026-09-05",
+    "references": [
+      "https://www.chromium.org/developers/design-documents/network-stack/disk-cache/",
+      "https://source.chromium.org/chromium/chromium/src/+/main:gpu/ipc/host/gpu_disk_cache.cc"
+    ]
+  },  {
     "id": "tool.npm-cache",
     "platform": "any",
     "rootKind": "npm_reported_cache",

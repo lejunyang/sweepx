@@ -850,6 +850,12 @@ struct JunkCandidate {
     /// Distinct from `activity`: a live root can still hold an obsolete format that nothing writes
     /// to any more, which was measured as 99.9% of the bytes in pip's cache on this host.
     stale_formats: Vec<String>,
+    /// True when `reclaimable` carries apparent logical size because allocation is unavailable.
+    ///
+    /// Reported rather than hidden: the two quantities differ on compressed, sparse and
+    /// multi-stream files, and a consumer that needs allocation must be able to tell that it did
+    /// not get it. Windows never claims allocation by design, so on Windows this is normally true.
+    size_is_logical: bool,
 }
 
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
@@ -946,29 +952,28 @@ fn run_junk_scan(
                     .iter()
                     .any(|candidate| normalized_rule_name(candidate) == name)
                     && junk_rule_applies(rule, identity, &markers_by_parent))
-                .then(|| JunkCandidate {
-                    path: entry.display_path.clone(),
-                    rule_id: rule.id.clone(),
-                    risk: rule.risk.clone(),
-                    reclaimable: aggregates
-                        .get(identity.entry_id.as_str())
-                        .map(|aggregate| aggregate.potentially_reclaimable_bytes.clone())
-                        .unwrap_or(EvidenceValue::NotChecked {
-                            reason: ReasonCode::ResourceLimit,
-                        }),
-                    evidence: rule.evidence.clone(),
-                    source_reviewed_at: rule.source_reviewed_at.clone(),
-                    references: rule.references.clone(),
-                    entry_id: identity.entry_id.clone(),
-                    ancestor_ids: locator
-                        .parent_reopen_recipe
-                        .iter()
-                        .map(|component| component.entry_id.clone())
-                        .collect(),
-                    // A project build output has no "which copy is the tool using" question: it
-                    // belongs to the tree it sits in. Claiming an activity here would be noise.
-                    activity: None,
-                    stale_formats: Vec::new(),
+                .then(|| {
+                    let size = junk_size_for(aggregates.get(identity.entry_id.as_str()).copied());
+                    JunkCandidate {
+                        path: entry.display_path.clone(),
+                        rule_id: rule.id.clone(),
+                        risk: rule.risk.clone(),
+                        reclaimable: size.value,
+                        evidence: rule.evidence.clone(),
+                        source_reviewed_at: rule.source_reviewed_at.clone(),
+                        references: rule.references.clone(),
+                        entry_id: identity.entry_id.clone(),
+                        ancestor_ids: locator
+                            .parent_reopen_recipe
+                            .iter()
+                            .map(|component| component.entry_id.clone())
+                            .collect(),
+                        // A project build output has no "which copy is the tool using" question: it
+                        // belongs to the tree it sits in. Claiming an activity here would be noise.
+                        activity: None,
+                        stale_formats: Vec::new(),
+                        size_is_logical: size.is_logical_fallback,
+                    }
                 })
             })
         })
@@ -1066,6 +1071,11 @@ fn run_junk_scan(
                     // omitted when they do not apply so a reader never sees an empty claim.
                     "activity": candidate.activity,
                     "staleFormats": candidate.stale_formats,
+                    // Names the quantity in `reclaimable`. True means apparent logical size,
+                    // because this platform declined to claim filesystem allocation; the two
+                    // differ on compressed, sparse and multi-stream files, so a consumer that
+                    // needs allocation must be able to see that it did not get it.
+                    "sizeIsLogical": candidate.size_is_logical,
                 })).collect::<Vec<_>>(),
             })
         );
@@ -1175,6 +1185,10 @@ fn platform_junk_candidates(
                 // markers and structural fingerprint, so the rule reports one aggregate for the
                 // whole cache rather than per-file rows.
                 "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
+                // Also the scan root itself, but discovered by walking a known browser layout
+                // instead of by asking a tool. The marker is rechecked here because discovery
+                // and classification see the path through different readers.
+                "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
                 _ => false,
             };
             if !matched {
@@ -1183,14 +1197,23 @@ fn platform_junk_candidates(
             let activity =
                 classify_tool_root(rule, entry).map(|classification| classification.code());
             let stale_formats = superseded_format_generations(rule, entry);
+            // Same allocation-versus-logical problem as the project rules, with one extra source:
+            // the entry's own estimate, which is kept ahead of the logical fallback because it is
+            // the scanner's own claim about this specific entry.
+            let aggregate = aggregates.get(identity.entry_id.as_str()).copied();
+            let size = if aggregate.is_some() {
+                junk_size_for(aggregate)
+            } else {
+                JunkSize {
+                    value: entry.reclaimable_estimate.clone(),
+                    is_logical_fallback: false,
+                }
+            };
             candidates.push(JunkCandidate {
                 path: entry.display_path.clone(),
                 rule_id: rule.id.clone(),
                 risk: rule.risk.clone(),
-                reclaimable: aggregates
-                    .get(identity.entry_id.as_str())
-                    .map(|aggregate| aggregate.potentially_reclaimable_bytes.clone())
-                    .unwrap_or_else(|| entry.reclaimable_estimate.clone()),
+                reclaimable: size.value,
                 evidence: rule.evidence.clone(),
                 source_reviewed_at: rule.source_reviewed_at.clone(),
                 references: rule.references.clone(),
@@ -1202,6 +1225,7 @@ fn platform_junk_candidates(
                     .collect(),
                 activity,
                 stale_formats,
+                size_is_logical: size.is_logical_fallback,
             });
         }
     }
@@ -1290,6 +1314,207 @@ fn classify_tool_root(
     )
 }
 
+/// One Chromium-family browser installation whose caches SweepX knows how to find.
+///
+/// Listed explicitly rather than by scanning for anything resembling a browser: a directory named
+/// `User Data` is not authority to treat its contents as disposable.
+struct ChromiumInstall {
+    /// Path below `%LOCALAPPDATA%`, `/`-separated so the platform separator is applied once, by
+    /// `push`. Writing a `\`-containing literal produced a mixed-separator path that passed every
+    /// local check yet never matched the native path the scanner captured.
+    relative_user_data: &'static str,
+}
+
+/// The installations probed on Windows.
+///
+/// Measured on this host 2026-09-05: all three exist, and Edge Dev held the single largest
+/// reclaimable directory (611.7 MB of code cache). Assuming one browser would have missed it.
+const CHROMIUM_INSTALLS: &[ChromiumInstall] = &[
+    ChromiumInstall {
+        relative_user_data: "Microsoft/Edge/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Microsoft/Edge Dev/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Microsoft/Edge Beta/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Google/Chrome/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Google/Chrome Beta/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Google/Chrome Dev/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "BraveSoftware/Brave-Browser/User Data",
+    },
+    ChromiumInstall {
+        relative_user_data: "Vivaldi/User Data",
+    },
+];
+
+/// Cache directories that live inside a profile, and so exist once per profile.
+const PROFILE_RENDER_CACHES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "Media Cache",
+];
+
+/// Cache directories that live beside the profiles, shared by the whole installation.
+///
+/// Easy to miss: they are not under any profile, so a profile-only walk finds none of them. They
+/// held about 40 MB across three installations here.
+const INSTALL_RENDER_CACHES: &[&str] = &[
+    "ShaderCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "GraphiteCache",
+];
+
+/// Every render-cache directory of every discovered Chromium installation.
+///
+/// Returns scan roots, not candidates: which rule claims each one is decided by that rule's marker,
+/// because the three backends have three different layouts. Nothing is filtered on size here — an
+/// empty blockfile cache still occupies its scaffolding, and hiding it would misreport the disk.
+fn chromium_render_cache_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    else {
+        return roots;
+    };
+    for install in CHROMIUM_INSTALLS {
+        let mut user_data = local_app_data.clone();
+        for component in install.relative_user_data.split('/') {
+            user_data.push(component);
+        }
+        if !is_existing_real_directory(&user_data) {
+            continue;
+        }
+        for name in INSTALL_RENDER_CACHES {
+            let candidate = user_data.join(name);
+            if is_existing_real_directory(&candidate) {
+                roots.push(candidate);
+            }
+        }
+        // Profiles are enumerated from disk. Their names are a user-facing product concept
+        // (`Default`, `Profile 1`, …) and a hardcoded list would silently skip the rest.
+        let Ok(entries) = std::fs::read_dir(&user_data) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name != "Default" && !name.starts_with("Profile ") {
+                continue;
+            }
+            let profile = user_data.join(name);
+            if !is_existing_real_directory(&profile) {
+                continue;
+            }
+            for cache in PROFILE_RENDER_CACHES {
+                let candidate = profile.join(cache);
+                if is_existing_real_directory(&candidate) {
+                    roots.push(candidate);
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// Whether this scan root is the cache the rule describes.
+///
+/// Discovery yields every render cache of every installation, so a root reaching this point is some
+/// browser cache but not necessarily *this* rule's. The marker decides, and the three backends are
+/// told apart by it: the HTTP cache keeps entries under `Cache_Data`, the code cache under `js`, and
+/// the shader caches are blockfile roots holding `data_1`. An index file is not a usable
+/// discriminator — measured 2026-09-05, two of the three carry none at the root.
+fn render_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+    let Some(locator) = entry.native_locator.as_ref() else {
+        return false;
+    };
+    // Same rule as everywhere else in this file: the captured native path is authority, the display
+    // path is presentation.
+    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
+        return false;
+    };
+    let Some(root) = chromium_render_cache_roots()
+        .into_iter()
+        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))
+    else {
+        return false;
+    };
+    rule.required_markers
+        .iter()
+        .all(|marker| root.join(marker).exists())
+}
+/// The size to report for a junk candidate, and which quantity it actually is.
+///
+/// `potentially_reclaimable_bytes` is derived from filesystem allocation, and the Windows adapter
+/// deliberately refuses to claim allocation: `FILE_STANDARD_INFO` describes only the unnamed `$DATA`
+/// stream, so an exact figure would be a guess wherever alternate streams, sparse ranges or
+/// compression are in play. That refusal is correct and is not worked around here.
+///
+/// The consequence was that on Windows *every* candidate reported an unknown size — measured
+/// 2026-09-05, 30 of 30, including 1.8 GB of browser caches. A cleaning tool that cannot say how
+/// large anything is has not answered the user's question.
+///
+/// So when allocation is unavailable, the apparent logical size is reported instead, since it is
+/// known exactly and is the quantity a user means by "how big is this cache". The two are not
+/// interchangeable, so the caller is told which one it received rather than being left to assume
+/// allocation.
+struct JunkSize {
+    value: ByteValue,
+    /// True when `value` is logical size standing in for unavailable allocation.
+    is_logical_fallback: bool,
+}
+
+/// Picks the reportable size for one aggregate, preferring allocation and falling back to logical.
+fn junk_size_for(aggregate: Option<&sweepx_model::DirectoryAggregate>) -> JunkSize {
+    let Some(aggregate) = aggregate else {
+        return JunkSize {
+            value: ByteValue::NotChecked {
+                reason: ReasonCode::ResourceLimit,
+            },
+            is_logical_fallback: false,
+        };
+    };
+    // Only an exactly known allocation is preferred. A lower bound or unknown allocation carries
+    // less information than an exactly known logical size, so it does not win by being the
+    // nominally correct field.
+    if matches!(
+        aggregate.potentially_reclaimable_bytes,
+        ByteValue::Known { .. }
+    ) {
+        return JunkSize {
+            value: aggregate.potentially_reclaimable_bytes.clone(),
+            is_logical_fallback: false,
+        };
+    }
+    match &aggregate.apparent_logical_bytes {
+        known @ ByteValue::Known { .. } => JunkSize {
+            value: known.clone(),
+            is_logical_fallback: true,
+        },
+        // Neither is exact: keep the allocation-derived evidence, because its reason code explains
+        // why the size is missing. Substituting an equally inexact logical value would discard that
+        // explanation without adding anything.
+        _ => JunkSize {
+            value: aggregate.potentially_reclaimable_bytes.clone(),
+            is_logical_fallback: false,
+        },
+    }
+}
 fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
     match name {
         sweepx_model::NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
@@ -1646,6 +1871,22 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
             && is_existing_real_directory(&packages)
         {
             roots.push(packages);
+        }
+        // Browser render caches are separate roots, one per cache directory, because each is an
+        // independent aggregate the user may keep or reclaim on its own. They are added only when a
+        // rule asks for them, so an installation nobody has a rule for is never walked.
+        if rules
+            .iter()
+            .any(|rule| rule.root_kind == "chromium_render_cache")
+        {
+            for root in chromium_render_cache_roots() {
+                if !roots
+                    .iter()
+                    .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
+                {
+                    roots.push(root);
+                }
+            }
         }
     }
     Ok(roots)
@@ -2079,7 +2320,17 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
         let expected = match rule.platform.as_str() {
             "linux" => ("xdg_cache_home", "direct_children", 1),
             "macos" => ("macos_user_caches", "direct_children", 1),
-            "windows" => ("windows_packages", "named_descendant", 2),
+            // A platform can host more than one root kind, so the shape is keyed on the root
+            // kind rather than on the platform. Keying it on the platform alone made the first
+            // root kind the only one that platform could ever express.
+            "windows" => match rule.root_kind.as_str() {
+                "windows_packages" => ("windows_packages", "named_descendant", 2),
+                // Browser render caches sit one level below a profile directory, and the
+                // browser-level shader caches sit directly below the user-data root. Discovery
+                // yields both as scan roots, so the rule matches the root itself.
+                "chromium_render_cache" => ("chromium_render_cache", "verified_cache_root", 0),
+                _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
+            },
             // A tool-reported root is the scan root itself, so its depth is 0 and its
             // `rootKind` must be one the discovery table actually knows how to resolve.
             // Otherwise a rule could name a root that is silently never produced.
@@ -2125,6 +2376,12 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
             // least one structural marker; without one the rule would report whatever now
             // occupies that path.
             || (rule.match_kind == "verified_tool_root"
+                && (!rule.names.is_empty() || rule.required_markers.is_empty()))
+            // A cache root is admitted because discovery walked a known browser layout, but the
+            // directory still has to prove it is a cache. Chromium writes a backend marker into
+            // every one; requiring it keeps the rule from reporting a same-named directory that
+            // happens to sit at that path.
+            || (rule.match_kind == "verified_cache_root"
                 && (!rule.names.is_empty() || rule.required_markers.is_empty()))
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
@@ -2392,7 +2649,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 6);
+        assert_eq!(rules.len(), 9);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -2402,9 +2659,11 @@ mod tests {
         let linux = rules.iter().find(|rule| rule.platform == "linux").unwrap();
         assert_eq!(linux.root_kind, "xdg_cache_home");
         assert_eq!(linux.match_kind, "direct_children");
+        // Found by id, not by platform: Windows now carries browser cache rules too, and matching
+        // on the platform alone silently returned whichever rule happened to be first.
         let windows = rules
             .iter()
-            .find(|rule| rule.platform == "windows")
+            .find(|rule| rule.id == "windows.packaged-app-cache")
             .unwrap();
         assert_eq!(windows.names, ["LocalCache", "TempState"]);
         assert_eq!(windows.depth, 2);
@@ -2780,5 +3039,201 @@ mod tests {
                 "a case-sensitive volume must not treat the folded spelling as the same directory"
             );
         }
+    }
+    /// Every browser cache rule must be shaped so discovery can actually produce it.
+    #[test]
+    fn render_cache_rules_are_marker_guarded() {
+        let rules = load_platform_junk_rules().expect("rules must load");
+        let render: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.root_kind == "chromium_render_cache")
+            .collect();
+        assert!(
+            !render.is_empty(),
+            "the browser cache rules must survive in the shipped catalog"
+        );
+        for rule in render {
+            assert_eq!(rule.match_kind, "verified_cache_root");
+            assert_eq!(rule.depth, 0);
+            assert_eq!(
+                rule.risk, "R2",
+                "{}: render caches are rebuildable",
+                rule.id
+            );
+            assert!(
+                rule.names.is_empty(),
+                "{}: the root itself matches",
+                rule.id
+            );
+            // Without a marker the rule would claim whatever now sits at that path.
+            assert!(
+                !rule.required_markers.is_empty(),
+                "{}: a cache root must prove it is a cache",
+                rule.id
+            );
+        }
+        // The markers must tell the three backends apart. If two rules shared a marker set they
+        // would both claim the same directory, and the same cache would be reported twice.
+        let mut marker_sets: Vec<&Vec<String>> = render_cache_marker_sets(&rules);
+        let total = marker_sets.len();
+        marker_sets.sort();
+        marker_sets.dedup();
+        assert_eq!(
+            marker_sets.len(),
+            total,
+            "two render cache rules share a marker set and would both claim one directory"
+        );
+    }
+
+    /// A minimal aggregate carrying just the two byte fields `junk_size_for` reads.
+    ///
+    /// The remaining fields are filled with complete, exact values so they cannot influence the
+    /// outcome: the test is about which of the two sizes is chosen, nothing else.
+    fn aggregate_with(
+        reclaimable: ByteValue,
+        apparent: ByteValue,
+    ) -> sweepx_model::DirectoryAggregate {
+        sweepx_model::DirectoryAggregate {
+            scan_id: sweepx_model::ScanId::new("scan-size-fallback".to_string()),
+            directory_identity: "scan-entry:v1:dGVzdA:1".to_string(),
+            revision: sweepx_model::DecimalU128::new(1),
+            apparent_logical_bytes: apparent,
+            unique_logical_bytes: ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(0),
+            },
+            filesystem_reported_allocated_bytes: ByteValue::Unknown {
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+            potentially_reclaimable_bytes: reclaimable,
+            direct_child_count: sweepx_model::CountValue::Known {
+                value: sweepx_model::DecimalU128::new(0),
+            },
+            recursive_entry_count: sweepx_model::CountValue::Known {
+                value: sweepx_model::DecimalU128::new(0),
+            },
+            coverage: sweepx_model::Coverage {
+                state: sweepx_model::CoverageState::Complete,
+                complete: true,
+                incomplete_reasons: Vec::new(),
+                details_lost: false,
+                provenance: sweepx_model::FieldProvenance::LiveObservation {
+                    observed_at: "2026-09-05T00:00:00Z".to_string(),
+                    method: sweepx_model::MethodId::NativeApi,
+                },
+            },
+            arithmetic_state: sweepx_model::ArithmeticState::Exact,
+        }
+    }
+    fn render_cache_marker_sets(rules: &[PlatformJunkRule]) -> Vec<&Vec<String>> {
+        rules
+            .iter()
+            .filter(|rule| rule.root_kind == "chromium_render_cache")
+            .map(|rule| &rule.required_markers)
+            .collect()
+    }
+
+    /// Discovery must not invent roots, and must produce only real directories.
+    ///
+    /// Deliberately tolerant about *which* browsers exist: that is a property of the host. What is
+    /// asserted is that whatever comes back is a real directory reachable below LOCALAPPDATA.
+    #[test]
+    fn render_cache_discovery_yields_only_real_directories() {
+        for root in chromium_render_cache_roots() {
+            assert!(
+                root.is_absolute(),
+                "{root:?} must be absolute to be a scan root"
+            );
+            assert!(
+                is_existing_real_directory(&root),
+                "{root:?} was reported but is not a directory"
+            );
+            // A mixed-separator path passes local checks yet never matches the native path the
+            // scanner captures, so the candidate is found and then silently never classified.
+            if cfg!(windows) {
+                assert!(
+                    !root.to_string_lossy().contains('/'),
+                    "{root:?} mixes separators and would never match a captured native path"
+                );
+            }
+        }
+    }
+
+    /// Discovery must not report one directory twice.
+    #[test]
+    fn render_cache_discovery_does_not_repeat_a_directory() {
+        let roots = chromium_render_cache_roots();
+        for (index, root) in roots.iter().enumerate() {
+            for other in &roots[index + 1..] {
+                assert!(
+                    !same_directory(root, other),
+                    "{root:?} and {other:?} are the same directory reported twice"
+                );
+            }
+        }
+    }
+
+    /// An exactly known allocation is preferred; logical size stands in when it is not available.
+    ///
+    /// This is the difference between reporting 1.8 GB of browser caches and reporting nothing:
+    /// Windows declines to claim allocation because `FILE_STANDARD_INFO` covers only the unnamed
+    /// stream, and measured 2026-09-05 that left 30 of 30 candidates sizeless.
+    #[test]
+    fn a_missing_allocation_falls_back_to_logical_size_and_says_so() {
+        let exact = junk_size_for(Some(&aggregate_with(
+            ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(64),
+            },
+            ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(99),
+            },
+        )));
+        assert!(
+            !exact.is_logical_fallback,
+            "a known allocation must be used as-is"
+        );
+        assert_eq!(
+            exact.value,
+            ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(64)
+            }
+        );
+
+        let fell_back = junk_size_for(Some(&aggregate_with(
+            ByteValue::Unknown {
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+            ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(99),
+            },
+        )));
+        assert!(
+            fell_back.is_logical_fallback,
+            "the substitution must be visible to the caller, not silent"
+        );
+        assert_eq!(
+            fell_back.value,
+            ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(99)
+            }
+        );
+
+        // Neither exact: keep the allocation evidence, whose reason explains the absence. Swapping
+        // in an equally inexact logical value would discard that explanation for nothing.
+        let neither = junk_size_for(Some(&aggregate_with(
+            ByteValue::Unknown {
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+            ByteValue::LowerBound {
+                value: sweepx_model::DecimalU128::new(5),
+                reason: ReasonCode::IncompleteStreamCoverage,
+            },
+        )));
+        assert!(!neither.is_logical_fallback);
+        assert!(matches!(neither.value, ByteValue::Unknown { .. }));
+
+        // No aggregate at all is not a size of zero.
+        let missing = junk_size_for(None);
+        assert!(!missing.is_logical_fallback);
+        assert!(matches!(missing.value, ByteValue::NotChecked { .. }));
     }
 }

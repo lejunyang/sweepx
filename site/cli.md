@@ -158,6 +158,37 @@ sweepx --format json junk --system
 
 显式根继续识别明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。不传显式根并加 `--system` 时，Linux 在绝对 `XDG_CACHE_HOME`（否则 `~/.cache`）下逐个报告应用缓存，macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。`--system` 与显式根互斥。所有结果都只报告候选、规则 ID、风险、来源审阅日期、第一方依据和可回收估算，不自动删除；Linux 的 `/tmp`/`/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未按目录名纳入。
 
+### 候选的体积是怎么报的
+
+`reclaimable` 优先使用文件系统的已分配大小。当平台拒绝给出分配量时，改报表观逻辑大小，并把
+`sizeIsLogical` 置为 `true`。
+
+这一点在 Windows 上很关键：适配器**有意**不声称分配量 —— `FILE_STANDARD_INFO` 只描述未命名 `$DATA`
+流，因此在存在备用流、稀疏区间或压缩时，给出精确值就是猜测。这个拒绝是对的，但照字面执行会让所有候选
+都没有体积：2026-09-05 实测 30 条候选全部如此，其中包含 1.8 GB 的浏览器缓存。一个说不出任何东西有多大
+的清理工具，并没有回答用户的问题。
+
+两个量不可互换，所以这种替换始终显式可见、不静默。仅为下限的分配量不会因为"字段名义正确"而胜出 ——
+精确已知的逻辑大小信息量更大。当两者都不精确时，保留由分配量派生的证据，因为它的 reason code 说明了
+体积为何缺失。
+
+### 浏览器渲染缓存
+
+`--system` 会报告所发现的每一个 Chromium 系安装中可重建的缓存：HTTP 缓存、已编译的 JavaScript 与
+WebAssembly 缓存，以及 GPU 和着色器缓存。发现阶段从磁盘枚举 profile，而不是假定只有 `Default`；同时也
+覆盖位于 profile **之外**、与其并列的着色器缓存。
+
+三种后端布局各不相同，因此每条规则由各自的标记守卫 —— 分别是 `Cache_Data`、`js` 和 `data_1`。索引文件
+不能作为通用标记：2026-09-05 实测，三者中有两者的根目录下根本没有索引文件。
+
+**刻意不纳入**的部分：Service Worker `CacheStorage`、`IndexedDB`、`Local Storage`、cookies 以及扩展
+状态。`CacheStorage` 名字里有 cache，但它保存的是 PWA 离线状态，而不是网络可以再次取回的响应。
+
+2026-09-05 在 Windows 上跨 Edge、Edge Dev、Chrome 实测：合计 1.8 GB，其中最大的单个目录是 Edge Dev 的
+611.7 MB 代码缓存。若假定只有一个浏览器安装，就会漏掉它。
+
+blockfile 后端的着色器缓存体积包含固定骨架 —— 即使缓存为空，`data_0` 到 `data_3` 和 `index` 也会被写入，
+因此空缓存仍占约 0.5 MB。
 ### 工具缓存：识别每一份副本，而不只是在用的那份
 
 npm、pnpm、pip 的规则不依赖单一位置。发现阶段会枚举工具报告的路径、工具自身的环境变量覆盖，以及
