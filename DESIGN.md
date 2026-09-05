@@ -1,6 +1,8 @@
 # SweepX 总体设计
 
-状态：设计基线与部分开发实现。设计与外部证据截点：2026-08-26；实现快照：2026-08-29。
+状态：设计基线与部分开发实现。设计与外部证据截点：2026-08-26；实现快照：2026-09-05。
+
+§12.2 的 Cleaner 包签名与 trust store 设计已标记 **[弃用]**：内嵌包的自签自验不构成来源证明，却使规则不可编辑，故在首次发布前移除；授权绑定改由内容 digest 承担。恢复签名需新 ADR。
 
 本文把扫描、专项 Cleaner、CLI/TUI、人工审批和跨平台删除收束为一个安全核心。当前仓库已有开发级只读 CLI/TUI：Linux、macOS 与 Windows live scan 均为 `degraded`；macOS traversal 为 handle-bound，Windows traversal 为 handle-relative，三者统一通过 `sweepx scan` / `sweepx scan --tui` 暴露。TUI 在 root admission 后立即进入，先枚举当前层，再由 single-flight 后台任务递归聚合直接子目录大小而不保留后代行；query deadline 为 30 s，导航与退出不会等待非协作 worker，late result 会被丢弃，并由 process-wide 32 stuck-worker cap 限制脱落线程。另有只读解释、preview cache 只读诊断与 Cleaner 元数据，以及 library-only 的不可变计划、simulation-only 授权、Unix 审计/恢复和确定性 fake execution。durable event envelope/stream validator、opaque durable cursor 约束与 schema/golden 覆盖已完成；Linux 还具备 bounded SQLite journal、单事务完整流与 terminal snapshot 持久化、Core journal-first status，以及对已完成且已持久化 journal stream 的 degraded `status --watch` completed replay。该 replay 只覆盖 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`，先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required`，malformed cursor/usage 返回 usage error。Linux/macOS 还公开了 `cache status` 只读 preview cache 诊断：只读检查 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构与健康，缺失时返回 `absent` 且不创建目录；`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实；warning/error 或 quarantine presence 使其降为 `degraded`。Windows 上该能力保持 `disabled`，而 `cache status --format ndjson` 在创建或读取任何状态目录之前即以 usage error 拒绝。由于事件仍在 scan 结束后批量构造，completed replay 不是 live sink，不等待新事件，也不创建后台 operation，且尚未 runtime-qualified。`scan --format ndjson` 继续 disabled；macOS 保留 legacy snapshot，Windows durable state 保持 `disabled`。这些实现不代表阶段、发布或 mutation qualification；当前没有 native Trash/Permanent adapter、mutation CLI 或审批 UI，所有 native mutation capability 仍为 `disabled`。v1 只以当前普通用户身份工作，未通过真实平台发布门槛的能力必须保持 `report-only` 或只提供扫描、解释和计划导出。
 
@@ -15,6 +17,7 @@
 - **[建议]**：SweepX 的规范性产品/架构选择；实现必须遵守，除非用新 ADR 显式替代。
 - **[待实测]**：只有真实 OS/文件系统/版本测试通过后才能开放的能力。
 - **[缺口]**：当前没有足够证据；默认 `unknown`、降级、跳过或阻断。
+- **[弃用]**：曾是 `[建议]`，已由后续决定显式替代。原文保留以说明当初的意图，但实现不得据此编码；每条必须注明替代它的决定与日期。
 
 文案中的 `logical size`、`filesystem-reported allocated size`、`potentially reclaimable` 和动作后的 `caller-visible capacity delta` 是四种不同口径。`unknown`、`unsupported`、`not_checked`、`incomplete`、`lower_bound` 与数值 `0` 永远不同。
 
@@ -672,6 +675,8 @@ sweepx [global-options] <command>
   audit show --batch-id ID | verify [--batch-id ID] | export --batch-id ID --output FILE
 ```
 
+**[弃用]（2026-09-05）** `trust list | import | revoke` 整组随 §12.2 的 trust store 移除，不再是目标契约。`cleaner verify | install | remove` 依赖外部包分发，同样待新 ADR 决定。实测（2026-09-05，`sweepx 0.0.1`）当前二进制无 `trust` 顶层子命令，`cleaner` 只有 `list`、`show`、`cargo-detect`；其余行仍是未实现的目标契约。
+
 全局 `--format human|json|ndjson`、`--output`、`--locale zh-CN|en-US`、`--no-color`、`--quiet`、`--request-id`、`--state-dir`；`--after` 只用于目标合同中的 `status --watch --format ndjson`。当前 `scan --no-state` 是显式只读 opt-out：不需要后续 status/operation state 或 state filesystem 不支持 journal 时跳过 operation state 写入，并与 `--state-dir` 冲突。scan 的 `--strict-z0` 默认开启，Z1 只能逐 command ID opt-in；`--memory-budget 64MiB..128MiB` 只能收紧；`--max-depth`/`--deadline`/native exclude 只缩小 coverage；cache 只有 `off|preview`。
 
 不存在 `--yes/-y`、`--force`、`--recursive`、`--follow-links`、`--cross-mount`、`--ignore-protection`、`--delete-any-path`、non-interactive HumanApproval 或 Trash-to-Permanent fallback。唯一非交互 destructive authorization 是字面量 `--dangerously-delete`，且只绑定已有 Permanent R4 plan。shell glob 只能在 shell 展开后成为多个显式 scan roots，planner/executor 不接收 glob。
@@ -720,8 +725,9 @@ cleaner-package/
   rules/*.json          # sweepx.cleaner-rule/v1
   probes/<platform>/*   # 可选；仅 first-party、allowlisted
   evidence/*.md         # 解释/来源，不授权
-  SIGNATURE
 ```
+
+**[弃用]（2026-09-05）** 包根曾有 `SIGNATURE` 信封，已随 §12.2 的签名机制一并移除。
 
 manifest 声明 package/publisher/digest、core/scanner/candidate/rule/probe ABI ranges、OS/arch/tool/browser tested ranges、分阶段 capabilities、typed root/config decoder、rules/probes/official commands、risk floor、supported actions、references、expiry 和 unknown-version behavior。规则含 artifact class、exact selector、required/optional/exclusion evidence、grouping、typed AST predicate、monotonic risk raise、proposal、recovery/activity/sharing/explanation。
 
@@ -729,11 +735,21 @@ typed AST 只支持有界布尔/集合/版本/tagged-value 操作；无脚本、
 
 ### 12.2 信任与能力
 
-- 包不可变、内容寻址并由 Ed25519 签名；签名证明来源/完整性，不证明安全。manifest/file table 按 RFC 8785 canonicalize；拒绝 duplicate JSON keys、path traversal、绝对路径、symlink/hardlink/device、NFC/case-fold collision、archive duplicate 和压缩炸弹。
-- 第三方只能声明式规则。native probe 必须同时满足 first-party probe key、artifact digest allowlist 和发布期沙箱测试；导入 publisher key 不能获得 probe/action authority。
-- capability 按 discover/query/analyze/proposal/mutation/postcheck 分段，与平台和 host policy 取交集；省略即 deny。probe 输入是 admitted read-only handle/typed snapshot，不是 arbitrary path；无网络/写入/child process，CPU/RSS/handle/stdout/stderr/timeout 有硬限。
-- revocation 可按 publisher/package/probe/version；命中立即 report-only 并使计划 stale。trust metadata 超过 7 天未刷新：声明式规则仅 report-only，probe/official command/new plan 禁用。没有 force bypass。
-- `cleaner install/remove` 与 `trust import/revoke` 会修改配置/信任，只允许人类 foreground 管理，不属于 Agent allowlist，也不是 cleanup approval。
+**[弃用]（2026-09-05，被 `refactor(catalog)!` 替代）** 本节描述的包签名与 trust store 设计已从实现中移除，本条以下四点不再作为实现约束。原因不是工作量，而是这套机制在单一 artifact 内自签自验：仓库同时持有私钥、验签代码、trust anchor 与签名工具，验签的二进制与被验的包由同一次构建产出。能改动已发布规则的攻击者同样能改动验签器，因此它无法证明来源；它确实做到的是让没有私钥的贡献者完全无法采纳规则。
+
+签名机制的独立价值需要发布基础设施先存在（离线密钥、独立于代码仓的密钥分发、可验证的构建）。这些条件出现之前，签名只增加贡献摩擦。第三方包分发若要落地，需要新 ADR 重新论证信任模型，不能直接复用本节。
+
+实现现状（`crates/sweepx-catalog`）：包随二进制以 `include_bytes!` 内嵌，规则 JSON 可直接编辑，无需刷新任何 digest。保留的校验是 strict JSON 解析（拒绝 duplicate key 与尾随字节）、schema 校验、包内路径校验，以及 manifest 与 rule 文件清单的双向一致性 —— 这些拦截的是作者笔误，不是攻击者。授权绑定由 `LoadedCleanerPackage::content_digest` 承担：它对实际加载的 manifest 与规则字节取哈希，使编辑规则必然改变 `cleaner_set_digest`，从而阻止"扫描后规则已变却仍执行删除"。详见 [docs/research/mangodisk-unadopted-rules.md](docs/research/mangodisk-unadopted-rules.md)。
+
+`cleaner list` 输出中的 `catalogTrust` 字段作为稳定机器字段保留，不因本次移除而改名或删除。实测（2026-09-05，`sweepx 0.0.1`）两个内置包一律为 `{source: "legacy_builtin", snapshotDigest: null, epoch: null, freshness: "legacy_builtin", disposition: "trusted"}`；`production_snapshot` 分支在生产已无构造路径。读取方不应把该字段解释为密码学验证结果，它现在只表明"包与读取它的代码来自同一 artifact"。
+
+以下为被替代的原设计，仅作意图留档：
+
+- ~~包不可变、内容寻址并由 Ed25519 签名；签名证明来源/完整性，不证明安全。manifest/file table 按 RFC 8785 canonicalize；拒绝 duplicate JSON keys、path traversal、绝对路径、symlink/hardlink/device、NFC/case-fold collision、archive duplicate 和压缩炸弹。~~ 其中 canonicalize 与结构性拒绝规则在包来自可执行文件之外时仍然必要。
+- ~~第三方只能声明式规则。native probe 必须同时满足 first-party probe key、artifact digest allowlist 和发布期沙箱测试；导入 publisher key 不能获得 probe/action authority。~~ native probe 载荷至今未实现，加载器对声明了 probe 的包直接拒绝。
+- capability 按 discover/query/analyze/proposal/mutation/postcheck 分段，与平台和 host policy 取交集；省略即 deny。probe 输入是 admitted read-only handle/typed snapshot，不是 arbitrary path；无网络/写入/child process，CPU/RSS/handle/stdout/stderr/timeout 有硬限。（**仍有效**：与签名无关。）
+- ~~revocation 可按 publisher/package/probe/version；命中立即 report-only 并使计划 stale。trust metadata 超过 7 天未刷新：声明式规则仅 report-only，probe/official command/new plan 禁用。没有 force bypass。~~ 内嵌包没有可吊销的外部主体，也没有需要刷新的 trust metadata。
+- ~~`cleaner install/remove` 与 `trust import/revoke` 会修改配置/信任，只允许人类 foreground 管理，不属于 Agent allowlist，也不是 cleanup approval。~~ 这些子命令均未实现；若将来支持包安装，此约束应随新 ADR 一并恢复。
 
 ### 12.3 两个规范示例
 
@@ -796,7 +812,7 @@ Z0 解析已扫描的 `Cargo.toml` 与 `.cargo/config*`，只把已 admission、
 
 规则绑定 product/channel/full version/profile 和真实 cache root；browser running/unknown、layout unknown、manifest change 全部 skip/stale。只纳入 HTTP/Code Cache，明确排除 Cache Storage、IndexedDB、Local Storage、cookies、history、extensions 和 Service Worker application state。不提供 hostname-level HTTP cache 删除。
 
-发布示例中的 digest 必须由构建工具生成并验签；任何全 `0/1/2...` placeholder digest 都由 release lint 拒绝。
+发布示例中的 digest 必须由构建工具生成并验签；任何全 `0/1/2...` placeholder digest 都由 release lint 拒绝。**[弃用]（2026-09-05）** "由构建工具生成并验签"部分随 §12.2 移除：manifest 的 `packageDigest` 与逐规则 `sha256` 现为作者声明的元数据，不再与字节比对。拒绝 placeholder digest 的意图仍然成立，但当前无 release lint 实现该检查。
 
 ## 13. AI Skill 与自动化边界
 
@@ -863,7 +879,7 @@ xtask/                      # schema generation、source/date lint、fixtures、
 | 有界 channel | `crossbeam-channel` 或 Tokio bounded `mpsc`，外包 byte semaphore | count + bytes 双门、固定 worker | `flume` 可替代；拒绝 unbounded channel |
 | errors | `thiserror` 库 + `anyhow` 仅 binary 边界 | 保留稳定 enum/native code | 不向 wire 暴露 debug string 作为唯一错误 |
 | serialization/schema | `serde`、`serde_json`、`schemars`，自有严格 duplicate-key loader/JCS wrapper | wire/schema 生态成熟 | `simd-json` 需证明无语义差异后再引入 |
-| digest/signature | `sha2`、`ed25519-dalek`、`subtle`/`zeroize` | 成熟、可审计、constant-time primitives | OS crypto 可作 FIPS profile；算法变更升 schema/domain |
+| digest/signature | `sha2`；~~`ed25519-dalek`、`subtle`/`zeroize`~~ | 成熟、可审计、constant-time primitives | **[弃用]（2026-09-05）** 签名依赖随 §12.2 移除，`sweepx-catalog` 已不再声明；`sha2` 仍用于 canonical digest 与 `content_digest`。恢复签名需新 ADR |
 | durable state | SQLite bundled + WAL，`rusqlite` 单 writer，`mmap` disabled | transaction/CAS/index/integrity check 适合 cache/audit | `redb`/`sled` 只有在 crash/fdatasync 跨平台证据更强时替换；audit 与 disposable cache 分离 DB |
 | TUI | `ratatui` + `crossterm` | 跨平台、虚拟视图可控 | `termwiz` 可替代；不得把全树建成 widget |
 | time/IDs | `time`、`uuid` | RFC3339 UTC 和随机 IDs | monotonic 时间仍来自 `std::time::Instant`，不可持久化为 wall time 替代 |
@@ -898,7 +914,7 @@ scanner 正常只使用有界内存；仅当实际 charged memory 达到 75% 高
 | Authorization | HumanApproval 的 pipe/stdin/env/config/JSON/TUI automation、cross-user/host/session、broker restart、expiry、nonce replay、copied ID 全部失败；ExplicitDangerousDelete 仅绑定已有 Permanent plan，不能隐式启用/扩 scope/绕保护，Agent evaluation 必须拒绝该 flag |
 | Crash/recovery | fault injection 于 intent 前、intent sync 后、submit 后、outcome sync 前、reconcile 中；missing 不成功、reserved 不重发、old fence 不执行 |
 | Platform Trash | Windows per-item sink/aborted/undo flags；macOS trashItem no remove fallback；Linux GIO unsupported/EXDEV no unlink；权限/空间/取消/partial/unknown |
-| Cleaner supply chain | signature/digest/revocation/rollback、zip-slip/collision/link/device/bomb、typed AST fuzz、probe escape/network/write/fork/output bomb、official argv/env drift |
+| Cleaner supply chain | ~~signature/revocation/rollback~~、内容 digest 身份、zip-slip/collision/link/device/bomb、typed AST fuzz、probe escape/network/write/fork/output bomb、official argv/env drift。**[弃用]（2026-09-05）** 签名与吊销用例随 §12.2 移除；现由 `editing_a_rule_changes_the_content_digest_but_still_loads` 与 CI 中"编辑规则必须改变 `cleanerSetDigest`"覆盖身份绑定 |
 | Protocol/TUI/Agent | CLI/TUI/Agent 同 fixture 得相同 Candidate/Plan digest；event replay/gap/reset/terminal once；48 MiB TUI budget；Agent 必须停在 HumanApproval 且拒绝 `--dangerously-delete` |
 | Copy/language lint | 禁止无条件 `exact disk usage`、`will free`、`unused`、`safe to delete`、`guaranteed recoverable/unrecoverable` |
 
@@ -1007,12 +1023,12 @@ scanner 正常只使用有界内存；仅当实际 charged memory 达到 75% 高
 | R-16 | Approval TTL/fingerprint | 上游只固定 approval <=5 min、permit <=2 s，plan/fingerprint 未定 | 本文定 plan 10 min、`SX1-`+12 hex；实现/UX 测试可用新 ADR 调整，不降低绑定 |
 | R-17 | `PARTIAL` 定义 | 状态段与简表可能被读成仅“混合成功失败” | 本文定：只要 destructive batch 有明确 fail/skip 且无 ambiguity，包括全失败/全 skip，均 PARTIAL/exit 4；一般未成批失败才 exit 8 |
 | R-18 | Approval events | public `approve` 禁 JSON，但 event vocab 含 approval event | 事件仅 core/TUI broker 内部/受权 watch；不泄露 record/challenge input |
-| R-19 | Trust commands | Agent allowlist不含 install/remove/import/revoke | 明确为 human foreground 配置 mutation，不属于 cleanup approval |
+| R-19 | Trust commands | Agent allowlist不含 install/remove/import/revoke | 明确为 human foreground 配置 mutation，不属于 cleanup approval。**[弃用]（2026-09-05）** trust 命令随 §12.2 移除且从未实现；若恢复包安装需新 ADR 一并恢复本约束 |
 | R-20 | Canonical/store | 上游未选 JCS/digest/DB | 本文选择 RFC 8785 + domain-separated SHA-256 + SQLite 分库；必须 golden/fault test |
 | R-21 | State disk bound | scanner spill、cache、selection、manifest 原先分别给 quota | 改为内存优先和稀疏摘要：preview 64 MiB、spill 192 MiB/op 与 256 MiB global、selection 16 MiB、manifest 64 MiB，默认总 quota 512 MiB；满则降级/阻断 |
 | R-22 | 性能事实 | 无可信跨产品同条件 benchmark | 只发布自有可复现数据，不宣称行业最快 |
 | R-23 | 提权边界 | 用户可能在 admin/root 会话启动程序 | read-only capability 可报告；destructive mode 硬拒绝，不自动降权后继续 |
-| R-24 | 插件 digest 示例 | 上游规则示例使用占位 digest | release lint 拒绝占位；构建生成真实 file table/digest/signature |
+| R-24 | 插件 digest 示例 | 上游规则示例使用占位 digest | ~~release lint 拒绝占位；构建生成真实 file table/digest/signature~~。**[弃用]（2026-09-05）** 随 §12.2 移除签名后，内嵌包的身份由 `content_digest` 从加载字节现算，不再要求 manifest digest 字段为真哈希 |
 
 ### 18.1 尚需平台证据的发布问题
 
