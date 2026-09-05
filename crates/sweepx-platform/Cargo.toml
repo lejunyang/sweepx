@@ -13,5 +13,5 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 thiserror = "2.0.16"

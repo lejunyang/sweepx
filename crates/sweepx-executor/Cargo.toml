@@ -12,9 +12,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-sweepx-audit = { version = "0.1.0", path = "../sweepx-audit" }
-sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
-sweepx-safety = { version = "0.1.0", path = "../sweepx-safety" }
+sweepx-audit = { version = "0.0.1", path = "../sweepx-audit" }
+sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
+sweepx-safety = { version = "0.0.1", path = "../sweepx-safety" }
 thiserror = "2.0.16"
 
 [dev-dependencies]

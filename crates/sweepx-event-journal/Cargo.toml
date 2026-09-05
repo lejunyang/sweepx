@@ -20,10 +20,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_jcs.workspace = true
 sha2 = "0.10.9"
-sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
+sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
 thiserror = "2.0.16"
 time.workspace = true
 
 [dev-dependencies]
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 tempfile = "3.21.0"

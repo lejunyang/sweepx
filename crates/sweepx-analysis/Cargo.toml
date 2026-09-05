@@ -12,9 +12,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-sweepx-canonical = { version = "0.1.0", path = "../sweepx-canonical" }
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
-sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false }
+sweepx-canonical = { version = "0.0.1", path = "../sweepx-canonical" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
+sweepx-scanner = { version = "0.0.1", path = "../sweepx-scanner", default-features = false }
 schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"

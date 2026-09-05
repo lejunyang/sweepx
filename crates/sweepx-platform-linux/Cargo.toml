@@ -12,8 +12,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
-sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
+sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
 
 # The Linux backend body compiles only for Linux hosts, so `libc` and the Linux-only
 # dev dependencies are target-gated. Without this, a Windows or macOS `--workspace`
@@ -25,5 +25,5 @@ libc = "0.2.189"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libloading = "0.8.9"
 sha2 = "0.10.9"
-sweepx-fixtures = { version = "0.1.0", path = "../sweepx-fixtures" }
+sweepx-fixtures = { version = "0.0.1", path = "../sweepx-fixtures" }
 tempfile = "3.21.0"

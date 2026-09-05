@@ -1294,7 +1294,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sweepx-analysis"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "schemars",
  "serde",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-audit"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fs2",
  "libc",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-cache"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "serde",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-canonical"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_jcs",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-catalog"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-cleaner-schema"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "schemars",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-cleaner-sign"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-cleaner-vm"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "semver",
  "serde_json",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "semver",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-event-journal"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fs2",
  "getrandom 0.4.3",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-executor"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "sweepx-audit",
  "sweepx-platform",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-fixtures"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1501,14 +1501,14 @@ dependencies = [
 
 [[package]]
 name = "sweepx-i18n"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "sys-locale",
 ]
 
 [[package]]
 name = "sweepx-model"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "schemars",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-platform"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "sweepx-model",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-platform-linux"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "libloading",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-platform-macos"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "sweepx-model",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-platform-windows"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "sweepx-model",
  "sweepx-platform",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-protocol"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "schemars",
  "serde",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-safety"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "serde",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-scanner"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "sweepx-fixtures",
  "sweepx-model",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "sweepx-tui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "crossterm",
  "libc",

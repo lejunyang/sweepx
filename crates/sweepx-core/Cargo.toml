@@ -20,28 +20,28 @@ sha2 = "0.10.9"
 thiserror = "2.0.16"
 time.workspace = true
 toml.workspace = true
-sweepx-analysis = { version = "0.1.0", path = "../sweepx-analysis" }
-sweepx-audit = { version = "0.1.0", path = "../sweepx-audit" }
-sweepx-canonical = { version = "0.1.0", path = "../sweepx-canonical" }
-sweepx-cache = { version = "0.1.0", path = "../sweepx-cache" }
-sweepx-catalog = { version = "0.1.0", path = "../sweepx-catalog" }
-sweepx-cleaner-schema = { version = "0.1.0", path = "../sweepx-cleaner-schema" }
-sweepx-cleaner-vm = { version = "0.1.0", path = "../sweepx-cleaner-vm" }
-sweepx-i18n = { version = "0.1.0", path = "../sweepx-i18n" }
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
-sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
-sweepx-protocol = { version = "0.1.0", path = "../sweepx-protocol" }
-sweepx-tui = { version = "0.1.0", path = "../sweepx-tui" }
+sweepx-analysis = { version = "0.0.1", path = "../sweepx-analysis" }
+sweepx-audit = { version = "0.0.1", path = "../sweepx-audit" }
+sweepx-canonical = { version = "0.0.1", path = "../sweepx-canonical" }
+sweepx-cache = { version = "0.0.1", path = "../sweepx-cache" }
+sweepx-catalog = { version = "0.0.1", path = "../sweepx-catalog" }
+sweepx-cleaner-schema = { version = "0.0.1", path = "../sweepx-cleaner-schema" }
+sweepx-cleaner-vm = { version = "0.0.1", path = "../sweepx-cleaner-vm" }
+sweepx-i18n = { version = "0.0.1", path = "../sweepx-i18n" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
+sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
+sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
+sweepx-tui = { version = "0.0.1", path = "../sweepx-tui" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sweepx-event-journal = { version = "0.1.0", path = "../sweepx-event-journal" }
-sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-linux"] }
+sweepx-event-journal = { version = "0.0.1", path = "../sweepx-event-journal" }
+sweepx-scanner = { version = "0.0.1", path = "../sweepx-scanner", default-features = false, features = ["platform-linux"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-macos"] }
+sweepx-scanner = { version = "0.0.1", path = "../sweepx-scanner", default-features = false, features = ["platform-macos"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sweepx-scanner = { version = "0.1.0", path = "../sweepx-scanner", default-features = false, features = ["platform-windows"] }
+sweepx-scanner = { version = "0.0.1", path = "../sweepx-scanner", default-features = false, features = ["platform-windows"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",

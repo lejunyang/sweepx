@@ -12,8 +12,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-sweepx-platform = { version = "0.1.0", path = "../sweepx-platform" }
-sweepx-model = { version = "0.1.0", path = "../sweepx-model" }
+sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
+sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
