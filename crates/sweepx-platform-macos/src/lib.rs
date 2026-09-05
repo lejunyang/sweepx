@@ -1209,6 +1209,15 @@ mod tests {
                     .as_nanos()
             ));
             fs::create_dir(&path).unwrap();
+            // Resolve the fixture path before handing it to the scanner.
+            //
+            // `admit_root` opens with `O_NOFOLLOW_ANY`, which refuses a symlink in *any* component
+            // — the guard that keeps root admission from being redirected. On macOS `TMPDIR` is
+            // `/var/folders/...` and `/var` is a symlink to `/private/var`, so an unresolved
+            // fixture path is rejected before any test logic runs. Canonicalizing here keeps the
+            // guard intact and gives the test a real directory; asserting on the unresolved path
+            // would mean weakening the very check these tests exist to cover.
+            let path = path.canonicalize().unwrap();
             Self { path }
         }
 
