@@ -1,5 +1,6 @@
 import csv
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,7 +40,11 @@ references = []
             )
             output = Path(directory) / "audit.csv"
             result = subprocess.run(
-                [str(SCRIPT), str(root), "--csv", str(output), "--redact-urls"],
+                # Invoke through the running interpreter rather than executing the script path.
+                # A bare path relies on the shebang, which Windows does not honor -- it raised
+                # WinError 193 there while passing on Linux, so the suite could only be run on
+                # one platform.
+                [sys.executable, str(SCRIPT), str(root), "--csv", str(output), "--redact-urls"],
                 check=True,
                 capture_output=True,
                 text=True,

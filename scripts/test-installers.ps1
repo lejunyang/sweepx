@@ -187,11 +187,35 @@ foreach ($name in $environmentNames) {
 }
 $processPathBefore = $env:Path
 $canReadUserPath = $true
+
+# Read the *unexpanded* user PATH.
+#
+# [Environment]::GetEnvironmentVariable(..., User) expands a REG_EXPAND_SZ value against the
+# calling process's environment. This test later redirects USERPROFILE to an isolated home, so an
+# expanded snapshot taken here would not match one taken afterwards: every %USERPROFILE% entry
+# would appear rewritten, and the comparison would report that the installer changed PATH when it
+# never touched it. Measured on Windows: a REG_EXPAND_SZ value holding %USERPROFILE%\.cargo\bin
+# read back as the isolated home once USERPROFILE had been redirected in-process. The raw registry
+# value is the only reading stable across that redirection, and it is also the value an installer
+# would have to write to in order to change PATH at all.
+function Get-UnexpandedUserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+    if ($null -eq $key) {
+        return $null
+    }
+    try {
+        return $key.GetValue(
+            "Path",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    } finally {
+        $key.Close()
+    }
+}
+
 try {
-    $userPathBefore = [Environment]::GetEnvironmentVariable(
-        "Path",
-        [EnvironmentVariableTarget]::User
-    )
+    $userPathBefore = Get-UnexpandedUserPath
 } catch {
     $canReadUserPath = $false
     $userPathBefore = $null
@@ -390,10 +414,7 @@ try {
     Assert-Equal $tempLeaks.Count 0 "installer left temporary directories behind"
     Assert-Equal $env:Path $processPathBefore "-NoModifyPath changed the process PATH"
     if ($canReadUserPath) {
-        $userPathAfter = [Environment]::GetEnvironmentVariable(
-            "Path",
-            [EnvironmentVariableTarget]::User
-        )
+        $userPathAfter = Get-UnexpandedUserPath
         Assert-Equal $userPathAfter $userPathBefore "-NoModifyPath changed the user PATH"
     }
     Assert-Equal `
