@@ -29,6 +29,24 @@ jobs:
       - name: Lint repository documentation
         run: python3 scripts/lint_docs.py
 
+  release-preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      # The publish workflow only runs on a [publish] commit to main, so without this job a
+      # release-blocking mistake stays invisible until the moment it blocks a release. Two
+      # contradictory gates shipped unnoticed exactly that way: one required every workspace
+      # crate in publish_order while the other rejected any publish=false crate, which made
+      # publishing impossible for as long as the signing tool existed.
+      - name: Validate release metadata
+        run: scripts/check-release-metadata.sh --skip-tag-check
+      - name: Validate crate packaging and dependency order
+        run: scripts/publish-crates.sh --check
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest

@@ -120,10 +120,23 @@ with open(metadata_path, encoding="utf-8") as handle:
     metadata = json.load(handle)
 
 members = set(metadata["workspace_members"])
-packages = {
+all_packages = {
     package["name"]: package
     for package in metadata["packages"]
     if package["id"] in members
+}
+# A publish=false crate is intentionally not a release artifact: sweepx-cleaner-sign
+# carries signing authority and must stay off crates.io. Coverage is therefore asserted
+# against the publishable set, so such a crate belongs in neither publish_order nor the
+# missing list. Leaving it in the comparison made the two release gates unsatisfiable:
+# this script demanded its presence while check-release-metadata.sh rejected it.
+unpublishable = sorted(
+    name for name, package in all_packages.items() if package.get("publish") == []
+)
+packages = {
+    name: package
+    for name, package in all_packages.items()
+    if package.get("publish") != []
 }
 resolved_by_id = {
     node["id"]: set(node["dependencies"])
@@ -134,8 +147,9 @@ missing = sorted(set(packages) - set(order))
 extra = sorted(set(order) - set(packages))
 if missing or extra or len(order) != len(set(order)):
     raise SystemExit(
-        "publish order does not exactly cover the workspace; "
-        f"missing={missing}, extra={extra}, duplicates={len(order) != len(set(order))}"
+        "publish order does not exactly cover the publishable workspace; "
+        f"missing={missing}, extra={extra}, duplicates={len(order) != len(set(order))}, "
+        f"excluded_unpublishable={unpublishable}"
     )
 
 position = {name: index for index, name in enumerate(order)}
@@ -145,7 +159,17 @@ for name in order:
         raise SystemExit(f"{name} has publish=false")
     for dependency in package["dependencies"]:
         dependency_name = dependency["name"]
-        if not dependency.get("path") or dependency_name not in packages:
+        if not dependency.get("path"):
+            continue
+        # Narrowing `packages` to the publishable set would otherwise silently skip a
+        # path dependency on an unpublishable crate, which cannot resolve from crates.io
+        # and would fail mid-publish after earlier crates were already uploaded.
+        if dependency_name in unpublishable:
+            raise SystemExit(
+                f"{name} depends on publish=false crate {dependency_name}; "
+                "it could never be published from crates.io"
+            )
+        if dependency_name not in packages:
             continue
         if dependency.get("req") in (None, "", "*"):
             raise SystemExit(
