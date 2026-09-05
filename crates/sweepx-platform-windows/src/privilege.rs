@@ -6,12 +6,18 @@
 //! see [`WindowsPrivilegeProvider::request_elevation`] for why, and
 //! [`WindowsPrivilegeProvider::relaunch_elevated`] for the mechanism.
 
+#[cfg(windows)]
 use std::mem;
+#[cfg(windows)]
 use std::ptr;
 
-use sweepx_platform::{
-    ElevatedRelaunch, ElevationPolicy, ElevationRefusal, PrivilegeObservation, PrivilegeProvider,
-};
+use sweepx_platform::{ElevationPolicy, ElevationRefusal, PrivilegeObservation, PrivilegeProvider};
+
+// `relaunch_elevated` and the tests that exercise it are both Windows-only, so this type has no
+// non-Windows use. The crate is still compiled as a workspace member on other hosts, where an
+// ungated import fails `-D warnings`.
+#[cfg(windows)]
+use sweepx_platform::ElevatedRelaunch;
 
 #[cfg(windows)]
 use std::ffi::{OsStr, OsString};

@@ -9,7 +9,7 @@
 //! behavior can be verified on an ordinary developer machine.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sweepx_platform::CancellationToken;
 
@@ -132,6 +132,9 @@ pub fn read_accelerated_preview(
     use sweepx_platform_windows::{
         read_volume_layout_records, root_file_reference, select_subtree,
     };
+    // Imported here rather than at module scope: the fallback below does not time anything, so a
+    // top-level import is unused on every non-Windows target and fails `-D warnings` there.
+    use std::time::Instant;
 
     let started = Instant::now();
     if cancel.is_cancelled() {

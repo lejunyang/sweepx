@@ -17,7 +17,10 @@ pub const MAX_NATIVE_PAGES: usize = 16_384;
 const FILE_LAYOUT_OUTPUT_BYTES: usize = 16;
 /// Output buffer for the single-call `StartUsn` probe. Only the leading cursor is read, so this is
 /// sized for one ordinary page rather than for bulk reading.
-#[cfg(test)]
+///
+/// Gated on `windows` as well as `test`: its only consumer issues `DeviceIoControl`, so on another
+/// host the constant would be defined with nothing to use it.
+#[cfg(all(test, windows))]
 const USN_PROBE_PAGE_BYTES: usize = 64 * 1024;
 const FILE_LAYOUT_ENTRY_BYTES: usize = 40;
 const FILE_LAYOUT_NAME_HEADER_BYTES: usize = 24;
@@ -689,7 +692,7 @@ pub(crate) mod native {
     /// deliberately does not page, filter, or bound anything — it is a single call whose *error code*
     /// is the result. Test-only, because shipping an entry point to a withdrawn feature would invite
     /// re-wiring it without re-reading why it was withdrawn.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn probe_journal_start(root: &Path, start: i64) -> (u32, i64) {
         let Ok(volume) = OwnedVolume::open(root) else {
             return (unsafe { GetLastError() }, 0);

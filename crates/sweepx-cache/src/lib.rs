@@ -1213,6 +1213,24 @@ unsafe fn inspection_errno_location() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }
 
+/// Fallback for the remaining unix targets.
+///
+/// The caller is gated on `unix`, but the accessor above only covers linux and macos, so any other
+/// unix host failed to compile rather than failing to inspect. `libc::errno` is not a portable
+/// symbol — each platform exposes its own thread-local accessor — so this reports the location as
+/// unavailable instead of guessing one. A caller writing through this pointer would fault, which is
+/// why the sentinel is only ever read back as "no errno reported".
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+unsafe fn inspection_errno_location() -> *mut libc::c_int {
+    // A dedicated cell, so clearing and reading errno stay well-defined operations on memory this
+    // process owns. It just never reflects a real kernel error on this platform.
+    use std::cell::UnsafeCell;
+    thread_local! {
+        static UNSUPPORTED_ERRNO: UnsafeCell<libc::c_int> = const { UnsafeCell::new(0) };
+    }
+    UNSUPPORTED_ERRNO.with(|cell| cell.get())
+}
+
 #[cfg(unix)]
 fn is_private_owned_directory_stat(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFDIR

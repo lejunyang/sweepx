@@ -44,6 +44,20 @@
   reintroduce a check that compares a hand-maintained digest field against the bytes.
 - Case sensitivity is a property of the host and volume, not of the code. Probe the actual
   behavior and assert the matching invariant instead of hardcoding either expectation.
+- A green Windows tree does not mean a green CI. `cargo clippy` only lints the `cfg` branches
+  selected for the host, so a `use` that serves a `cfg(windows)` block alone is invisible here and
+  fails `-D warnings` on the linux runner. Before pushing, lint at least one non-Windows
+  configuration:
+
+  ```pwsh
+  cargo clippy -p <crate> --all-features --target aarch64-linux-android -- -D warnings
+  ```
+
+  Read its output with the target's limits in mind. `sweepx-scanner` and `trash` are declared only
+  for linux/macos/windows, so on Android their absence cascades into unresolved-import and
+  unused-variable reports that CI never sees. Findings inside a `cfg(any(linux, macos, windows))`
+  block are artefacts of the probe; unconditional ones are real. `x86_64-unknown-linux-gnu` is the
+  honest target for this, but the configured mirror returned 404 for it.
 
 ## Evidence before claims
 
