@@ -21,7 +21,7 @@ use crossterm::terminal::{
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell as TableCell, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 use sweepx_i18n::Locale;
 use sweepx_model::{
@@ -31,6 +31,7 @@ use sweepx_model::{
 };
 use sweepx_protocol::OutputStatus;
 use thiserror::Error;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     MAX_PAGE_ROWS, byte_value_label_with_unit, coverage_label, object_type_label,
@@ -223,6 +224,134 @@ impl DetailRescanState {
     }
 }
 
+/// How long one marquee step lasts.
+///
+/// The event loop already wakes every `BROWSER_EVENT_POLL_INTERVAL` (100 ms) and repaints
+/// unconditionally, so scrolling needs no timer of its own - only a phase derived from elapsed
+/// time. Three ticks per cell is slow enough to read a path while it moves.
+const MARQUEE_TICK: Duration = Duration::from_millis(300);
+
+/// Cells of blank run between the end of the text and its repetition.
+///
+/// Without a gap the tail runs straight into the head and a path looks like it contains its own
+/// prefix, which is actively misleading for a path.
+const MARQUEE_GAP: usize = 4;
+
+/// The display width of `value` in terminal cells.
+///
+/// Not the character count: CJK path components occupy two cells each, so a byte- or char-based
+/// measure would under-report the width of exactly the paths most likely to overflow.
+fn text_cells(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+/// Whether `value` cannot be shown in full within `width` cells.
+fn overflows(value: &str, width: usize) -> bool {
+    width > 0 && text_cells(value) > width
+}
+
+/// Takes exactly `width` cells starting at cell offset `skip`, never splitting a wide character.
+///
+/// A double-width character straddling an edge cannot be halved: terminals render a split wide
+/// character as a stray blank or a replacement glyph, which shifts every following column by one
+/// cell. So a straddling character contributes blanks for the cells it still owes, and the result is
+/// padded to `width` when the source runs out.
+///
+/// Both of those matter beyond tidiness. Dropping a straddling character outright made an
+/// odd-numbered offset render identically to the even one before it, which is why CJK paths stuttered
+/// every second scroll step. Returning a short window let the columns to the right shift as the text
+/// moved.
+fn cell_window(value: &str, skip: usize, width: usize) -> String {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let mut used = 0usize;
+    for character in value.chars() {
+        if used >= width {
+            break;
+        }
+        let cells = char_cells(character);
+        if cursor + cells <= skip {
+            cursor += cells;
+            continue;
+        }
+        if cursor < skip {
+            // Partly scrolled off the left edge: keep the cells that remain visible as blanks.
+            let visible = (cursor + cells).saturating_sub(skip).min(width - used);
+            out.push_str(&" ".repeat(visible));
+            used += visible;
+            cursor += cells;
+            continue;
+        }
+        if used + cells > width {
+            // Does not fit the right edge; blanks keep the window exactly `width` cells wide.
+            out.push_str(&" ".repeat(width - used));
+            used = width;
+            break;
+        }
+        out.push(character);
+        used += cells;
+        cursor += cells;
+    }
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
+    }
+    out
+}
+
+/// The display width of one character in terminal cells, treating unknown control cases as one cell.
+fn char_cells(character: char) -> usize {
+    UnicodeWidthStr::width(character.to_string().as_str()).max(1)
+}
+
+/// The visible slice of a row label for one frame, always exactly `width` cells wide.
+///
+/// Rows that fit are returned unchanged. Overflowing rows are scrolled: the text advances by one
+/// cell per phase, runs off the left edge, and reappears after a short gap.
+///
+/// Two properties are load-bearing and were both wrong in the first version:
+///
+/// * The result is padded to exactly `width` cells. A double-width character that does not fit the
+///   last cell has to be dropped, which leaves the window one cell short; letting that through makes
+///   the columns to the right jitter left and right as the text scrolls.
+/// * The phase advances in cells, not in characters. Skipping a partially-scrolled wide character
+///   made two consecutive phases render identically, so CJK paths visibly stuttered.
+fn marquee_window(value: &str, width: usize, phase: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if !overflows(value, width) {
+        return value.to_string();
+    }
+    let cells = text_cells(value);
+    let span = cells + MARQUEE_GAP;
+    let skip = phase % span.max(1);
+
+    // Render the text, then the gap, then the text again, and read one window out of that. Building
+    // the strip explicitly is what keeps the wrap-around seam correct; computing it from offsets is
+    // where the earlier version went wrong.
+    let mut strip = String::with_capacity(value.len() * 2 + MARQUEE_GAP);
+    strip.push_str(value);
+    strip.push_str(&" ".repeat(MARQUEE_GAP));
+    strip.push_str(value);
+
+    // cell_window guarantees the full width, including the blanks a straddling wide character owes.
+    cell_window(&strip, skip, width)
+}
+
+/// Truncates to `width` cells, marking the elision with a trailing ellipsis.
+fn truncate_with_ellipsis(value: &str, width: usize) -> String {
+    if !overflows(value, width) {
+        return value.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    // Trim the padding cell_window guarantees; the ellipsis occupies the final cell instead.
+    format!(
+        "{}…",
+        cell_window(value, 0, width.saturating_sub(1)).trim_end()
+    )
+}
 /// The fewest trailing path components that still tell every root apart.
 ///
 /// A fixed component count cannot work: `…\Default\IndexedDB` and
@@ -524,6 +653,12 @@ pub struct BrowserModel {
     size_unit: HumanSizeUnit,
     sort: ScanSort,
     progressive_navigation: bool,
+    /// Whether the selected row's full path is currently pinned open.
+    ///
+    /// Marquee phase is deliberately *not* stored here: the model derives `PartialEq`/`Eq`, and a
+    /// clock reading inside it would make two otherwise identical models compare unequal. The phase
+    /// is supplied to the renderer instead, which also keeps painting a pure function of its inputs.
+    show_path_detail: bool,
 }
 
 impl BrowserModel {
@@ -823,6 +958,7 @@ impl BrowserModel {
             size_unit: HumanSizeUnit::Auto,
             sort: ScanSort::Path,
             progressive_navigation: false,
+            show_path_detail: false,
         };
         model.sort_rows();
         model.reload_loaded_level();
@@ -839,6 +975,15 @@ impl BrowserModel {
 
     pub fn scan_id(&self) -> Option<&str> {
         self.scan_id.as_deref()
+    }
+
+    /// Pins or unpins the full path of the selected row.
+    pub const fn toggle_path_detail(&mut self) {
+        self.show_path_detail = !self.show_path_detail;
+    }
+
+    pub const fn path_detail_shown(&self) -> bool {
+        self.show_path_detail
     }
 
     pub fn visible_rows(&self) -> &[BrowserRow] {
@@ -1916,6 +2061,12 @@ pub enum BrowserAction {
     EnterDirectory,
     ReturnToParent,
     TrashSelected,
+    /// Shows the selected row's full, untruncated path.
+    ///
+    /// The list is width-constrained by design, so a long path is either shortened or scrolling. This
+    /// gives a way to read it verbatim without leaving the row - which matters because the next key
+    /// the user might press moves that row to the Trash.
+    TogglePathDetail,
     Quit,
 }
 
@@ -1968,6 +2119,7 @@ impl BrowserKeyMapper for DefaultBrowserKeyMapper {
                 Some(BrowserAction::ReturnToParent)
             }
             KeyCode::Delete | KeyCode::Char('d') => Some(BrowserAction::TrashSelected),
+            KeyCode::Char('p') => Some(BrowserAction::TogglePathDetail),
             KeyCode::Char('q') => Some(BrowserAction::Quit),
             _ => None,
         }
@@ -1992,6 +2144,7 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
             BrowserAction::MoveDown => model.move_down(),
             BrowserAction::EnterDirectory => model.enter_selected(),
             BrowserAction::ReturnToParent => model.return_to_parent(),
+            BrowserAction::TogglePathDetail => model.toggle_path_detail(),
             BrowserAction::TrashSelected => return BrowserControl::TrashSelected,
             BrowserAction::Quit => return BrowserControl::Quit,
         }
@@ -2564,6 +2717,7 @@ where
     R: BrowserReducer,
     T: TerminationFlag + ?Sized,
 {
+    let started_at = Instant::now();
     loop {
         if let Some(signal) = termination.termination_signal() {
             reducer.cancel_background();
@@ -2572,7 +2726,10 @@ where
             });
         }
         reducer.poll_background(model);
-        terminal.draw(|frame| render_live_browser(frame, frame.area(), model))?;
+        // One cell per MARQUEE_TICK of elapsed time. Derived from the clock rather than counted in
+        // frames so the scroll speed does not change when the poll interval or redraw rate does.
+        let phase = (started_at.elapsed().as_millis() / MARQUEE_TICK.as_millis()) as usize;
+        terminal.draw(|frame| render_live_browser_at_phase(frame, frame.area(), model, phase))?;
 
         let event = match events.poll_event(BROWSER_EVENT_POLL_INTERVAL) {
             Ok(event) => event,
@@ -2610,13 +2767,30 @@ where
 }
 
 pub fn render_live_browser(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) {
+    render_live_browser_at_phase(frame, area, model, 0);
+}
+
+/// Paints one frame with an explicit marquee phase.
+///
+/// `phase` advances one cell per `MARQUEE_TICK`. Taking it as a parameter rather than reading a clock
+/// keeps painting a pure function of its inputs, so a test can assert on any frame of the animation
+/// without sleeping.
+pub fn render_live_browser_at_phase(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &BrowserModel,
+    phase: usize,
+) {
+    // The footer grows when a full path is pinned, because a path long enough to need this feature is
+    // usually long enough to wrap. Taking the space from the list keeps the layout total unchanged.
+    let footer_height = if model.path_detail_shown() { 6 } else { 3 };
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
@@ -2651,19 +2825,61 @@ pub fn render_live_browser(frame: &mut Frame<'_>, area: Rect, model: &BrowserMod
         sections[1],
     );
 
-    render_browser_rows(frame, sections[2], model);
+    render_browser_rows(frame, sections[2], model, phase);
 
     frame.render_widget(
-        Paragraph::new(browser_footer_text(model)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(read_only_label(model.locale())),
-        ),
+        Paragraph::new(browser_footer_text(model))
+            // Wrapping is what makes a pinned path readable in full; without it the footer would clip
+            // the path exactly like the name column already does.
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(read_only_label(model.locale())),
+            ),
         sections[3],
     );
 }
 
-fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) {
+/// The browser table's column constraints.
+///
+/// Shared between layout and overflow detection on purpose. The name column is a percentage of what
+/// the fixed columns leave over, so its real width is not obvious: on an 80-column terminal the five
+/// fixed columns take 67 cells and the name column resolves to 11, not to 42% of 80. Measuring
+/// overflow against an independently re-derived guess would therefore be wrong on exactly the narrow
+/// terminals where overflow matters most.
+const BROWSER_COLUMNS: [Constraint; 6] = [
+    Constraint::Percentage(42),
+    Constraint::Length(11),
+    Constraint::Length(13),
+    Constraint::Length(13),
+    Constraint::Length(10),
+    Constraint::Length(20),
+];
+
+/// The column gap `Table` inserts between columns.
+///
+/// `Table::default()` sets `column_spacing: 1` and passes it to the layout as `.spacing(...)`, so the
+/// six columns lose five cells that a plain constraint split does not account for. Leaving this out
+/// made the computed name width 11 while the rendered one was 6 - and overflow detection that is five
+/// cells too generous truncates nothing on exactly the terminals that need it.
+const BROWSER_COLUMN_SPACING: u16 = 1;
+
+/// The cells the name column actually gets inside `area`.
+///
+/// Resolved through the same layout the table uses - same constraints, same spacing, minus the block
+/// borders - so it matches what the widget will really do rather than an approximation of it.
+fn name_column_cells(area: Rect) -> usize {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(BROWSER_COLUMNS)
+        .spacing(BROWSER_COLUMN_SPACING)
+        .split(inner);
+    usize::from(columns[0].width)
+}
+
+fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, phase: usize) {
     let rows = model.visible_rows();
     let visible_count = usize::from(area.height.saturating_sub(3)).max(1);
     let start = model
@@ -2681,8 +2897,10 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
+    let name_cells = name_column_cells(area);
     let table_rows = rows[start..end].iter().enumerate().map(|(offset, row)| {
         let index = start + offset;
+        let selected = index == model.selected_index();
         let aggregate = row.aggregate();
         let logical = aggregate
             .map(|value| byte_value_label_with_unit(&value.apparent_logical_bytes, model.size_unit))
@@ -2705,9 +2923,16 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
         } else {
             Style::default()
         };
+        // Only the selected row scrolls. Animating every overflowing row at once would make the whole
+        // list move while the user is trying to read one line of it.
+        let name = if selected {
+            marquee_window(row.label(), name_cells, phase)
+        } else {
+            truncate_with_ellipsis(row.label(), name_cells)
+        };
 
         Row::new([
-            TableCell::from(row.label().to_string()),
+            TableCell::from(name),
             TableCell::from(object_type_label(row.object_type().clone())),
             TableCell::from(logical),
             TableCell::from(reclaimable),
@@ -2734,19 +2959,9 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
             model.max_level_rows(),
         )
     };
-    let table = Table::new(
-        table_rows,
-        [
-            Constraint::Percentage(42),
-            Constraint::Length(11),
-            Constraint::Length(13),
-            Constraint::Length(13),
-            Constraint::Length(10),
-            Constraint::Length(20),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(empty_title));
+    let table = Table::new(table_rows, BROWSER_COLUMNS)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(empty_title));
     frame.render_widget(table, area);
 }
 
@@ -2792,9 +3007,14 @@ fn browser_row_coverage_label(row: &BrowserRow) -> String {
     }
 }
 
+/// The footer text, including the pinned full path when the user asked for it.
+///
+/// The path goes in the footer rather than in the row because the footer spans the whole width and can
+/// wrap, while the name column is the very thing that was too narrow. It is wrapped in an explicit
+/// marker so a path that itself ends in whitespace, or that is empty, still reads unambiguously.
 fn browser_footer_text(model: &BrowserModel) -> String {
     let help = help_text(model.locale());
-    match model.current_detail_rescan_state() {
+    let detail = match model.current_detail_rescan_state() {
         Some(DetailRescanState::Stale { revision, failure }) => {
             format!(
                 "{help} | detail: incomplete/stale ({}, revision {revision})",
@@ -2808,6 +3028,26 @@ fn browser_footer_text(model: &BrowserModel) -> String {
             format!("{help} | detail: refreshing (revision {revision})")
         }
         _ => help.to_string(),
+    };
+    if !model.path_detail_shown() {
+        return detail;
+    }
+    // The displayed path is not authority for anything; it is shown so the user can read what the
+    // shortened or scrolling label refers to before pressing a key that moves it to the Trash.
+    match model.selected_row() {
+        Some(row) => format!(
+            "{detail}\n{}: [{}]",
+            full_path_label(model.locale()),
+            sanitize_terminal_text(row.display_path())
+        ),
+        None => detail,
+    }
+}
+
+fn full_path_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => "完整路径",
+        Locale::EnUs => "full path",
     }
 }
 
@@ -2893,10 +3133,10 @@ fn read_only_label(locale: Locale) -> &'static str {
 fn help_text(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhCn => {
-            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  d/Delete 移到回收站  q/Ctrl-C 退出"
+            "↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出"
         }
         Locale::EnUs => {
-            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  d/Delete move to Trash  q/Ctrl-C quit"
+            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit"
         }
     }
 }
@@ -3498,6 +3738,185 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_row_scrolls_in_the_real_render() {
+        // Asserted against the widget's own output buffer, not against the helper that produced the
+        // string. A helper agreeing with itself proves nothing about what reaches the terminal.
+        use ratatui::backend::TestBackend;
+        let model = BrowserModel::from_owned_scan_parts(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".to_string()),
+            vec![entry(
+                r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB",
+                ObjectType::Directory,
+                1,
+                1,
+                None,
+            )],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let render_at = |phase: usize| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+            terminal
+                .draw(|frame| render_live_browser_at_phase(frame, frame.area(), &model, phase))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..80u16)
+                .map(|x| buffer[(x, 8)].symbol().to_string())
+                .collect()
+        };
+
+        let first = render_at(0);
+        let later = render_at(3);
+        assert_ne!(first, later, "the selected row must advance between phases");
+        // The columns after the name must not move as the label scrolls.
+        let type_column_at = |row: &str| row.find("directory");
+        assert_eq!(
+            type_column_at(&first),
+            type_column_at(&later),
+            "scrolling must not shift the following columns: {first:?} vs {later:?}"
+        );
+    }
+
+    #[test]
+    fn a_scrolling_window_is_always_exactly_the_column_width() {
+        // A short window would let the columns to the right shift as the text scrolls. Wide characters
+        // are where this breaks, because one may not fit the last cell and has to become a blank.
+        for value in ["ABCDEFGH", "扫描根目录ABC", "a扫b描c根d"] {
+            for width in 1..=12usize {
+                for phase in 0..24usize {
+                    let window = marquee_window(value, width, phase);
+                    let cells = text_cells(&window);
+                    if overflows(value, width) {
+                        assert_eq!(
+                            cells, width,
+                            "value={value:?} width={width} phase={phase} window={window:?}"
+                        );
+                    } else {
+                        assert_eq!(window, value, "a fitting value must not be altered");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_advances_every_step_and_returns_to_the_start() {
+        // Two consecutive phases rendering the same text is a visible stutter. It happened for CJK
+        // when a partially-scrolled wide character was dropped instead of replaced by a blank.
+        let value = "扫描根目录ABC";
+        let width = 6;
+        let span = text_cells(value) + MARQUEE_GAP;
+        let frames: Vec<String> = (0..span)
+            .map(|phase| marquee_window(value, width, phase))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "consecutive frames must differ: {frames:?}"
+            );
+        }
+        assert_eq!(
+            marquee_window(value, width, 0),
+            marquee_window(value, width, span),
+            "the animation must be periodic in span"
+        );
+    }
+
+    #[test]
+    fn an_unselected_overflowing_row_is_marked_as_elided() {
+        // The ellipsis is the signal that text is missing; without it a truncated path looks complete.
+        let long = r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB";
+        let shown = truncate_with_ellipsis(long, 20);
+        assert_eq!(text_cells(&shown), 20);
+        assert!(shown.ends_with('…'), "got {shown}");
+        assert_eq!(
+            truncate_with_ellipsis("short", 20),
+            "short",
+            "a fitting value gets no ellipsis"
+        );
+    }
+
+    #[test]
+    fn a_split_wide_character_never_reaches_the_terminal() {
+        // Half a double-width character shifts every following column by one cell. The window must
+        // substitute a blank instead of emitting the character.
+        let value = "扫描";
+        // Skipping into the middle of a wide character yields a blank for the half-cell it still owes.
+        assert_eq!(cell_window(value, 0, 1), " ");
+        // Width 2 cannot hold that blank plus a 2-cell character, so the remainder is blank too.
+        assert_eq!(cell_window(value, 1, 2), "  ");
+        // Width 3 fits the owed blank and the next character exactly.
+        assert_eq!(cell_window(value, 1, 3), " 描");
+        // Every window is exactly the requested width, even when the source runs out.
+        assert_eq!(text_cells(&cell_window(value, 1, 4)), 4);
+    }
+
+    #[test]
+    fn the_computed_name_width_matches_what_the_table_really_renders() {
+        // Cross-checked against an actual render rather than against a second copy of the same
+        // arithmetic. This is what caught the missing column_spacing: the computation said 11 cells on
+        // an 80-column terminal while the widget painted 6, and an overflow threshold five cells too
+        // generous truncates nothing on precisely the terminals that need it most.
+        use ratatui::backend::TestBackend;
+        for width in [80u16, 100, 120] {
+            let model = BrowserModel::from_owned_scan_parts(
+                Locale::EnUs,
+                OutputStatus::Ok,
+                Some("scan-live".to_string()),
+                // One 'X' per cell, longer than any column can hold, so the painted run reveals the
+                // column's true width.
+                vec![entry(&"X".repeat(160), ObjectType::Directory, 1, 1, None)],
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+            terminal
+                .draw(|frame| render_live_browser_at_phase(frame, frame.area(), &model, 0))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (0..width)
+                .map(|x| buffer[(x, 8)].symbol().to_string())
+                .collect();
+            let painted = row.chars().filter(|character| *character == 'X').count();
+            assert_eq!(
+                painted,
+                name_column_cells(Rect::new(0, 0, width, 14)),
+                "terminal width {width}: computed name width disagrees with the rendered row {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinning_the_path_shows_it_in_full_and_can_be_switched_off() {
+        let mut model = model();
+        assert!(!model.path_detail_shown());
+        assert!(!browser_footer_text(&model).contains("full path: ["));
+
+        ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::TogglePathDetail);
+        assert!(model.path_detail_shown());
+        let footer = browser_footer_text(&model);
+        assert!(footer.contains("full path: [/root]"), "got {footer}");
+
+        ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::TogglePathDetail);
+        assert!(!model.path_detail_shown());
+        assert!(!browser_footer_text(&model).contains("full path: ["));
+    }
+
+    #[test]
+    fn showing_a_path_is_not_a_destructive_action() {
+        assert!(!BrowserAction::TogglePathDetail.is_destructive());
+        assert_eq!(
+            DefaultBrowserKeyMapper.map_key(&key(KeyCode::Char('p'))),
+            Some(BrowserAction::TogglePathDetail)
+        );
+    }
+
+    #[test]
     fn root_labels_grow_until_no_two_roots_read_alike() {
         // The exact case that a fixed component count got wrong: IndexedDB sits one level shallower
         // than Service Worker\CacheStorage, so four components kept the browser name for the former
@@ -3900,9 +4319,16 @@ mod tests {
                 failure: DetailRescanFailure::Cancelled,
             })
         );
-        assert_eq!(
-            browser_footer_text(&model),
-            "↑/↓ select  Enter/→ open  Esc/Backspace/← back  d/Delete move to Trash  q/Ctrl-C quit | detail: incomplete/stale (cancelled, revision 2)"
+        // Assert on the part this test is about. Pinning the whole help string made an unrelated
+        // keybinding change fail here, which says nothing about rescan staleness.
+        let footer = browser_footer_text(&model);
+        assert!(
+            footer.starts_with(help_text(Locale::EnUs)),
+            "footer must lead with the help line: {footer}"
+        );
+        assert!(
+            footer.ends_with("| detail: incomplete/stale (cancelled, revision 2)"),
+            "footer must report the stale detail state: {footer}"
         );
     }
 

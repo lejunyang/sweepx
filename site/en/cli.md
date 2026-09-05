@@ -418,3 +418,26 @@ The rows come from an ordinary scan rather than from the report: the interactive
 The first screen lists each browser's subsystem roots (`IndexedDB`, `Service Worker\CacheStorage`); the per-origin directories under them are listed on demand once a root is entered. Root rows keep only as many trailing path components as it takes to stay distinct — the four subsystems do not sit at the same depth, so a fixed cut renders Edge and Edge Dev `CacheStorage` as the very same text.
 
 `--browse` requires terminal stdin and stdout, and cannot be combined with `--format json` / `--format ndjson` or `--trash-origin`.
+
+### Name-column overflow, full paths, and scrolling
+
+The name column is much narrower than it looks: the five fixed columns take 67 cells first, and only
+the remainder is split by percentage. On an 80-column terminal the name column is 6 cells, not 42% of
+80. Long paths therefore always overflow, and the browser handles that three ways:
+
+- an unselected overflowing row ends in an ellipsis, marking that text was elided;
+- the selected row scrolls instead, advancing one cell every 300 ms and repeating after a four-cell
+  gap;
+- `p` pins the selected row's full path in the footer, which wraps rather than truncates.
+
+Only the selected row scrolls. Animating every overflowing row at once would move the whole list while
+the user is trying to read one line of it.
+
+The scrolling window is always exactly the column width. Wide characters occupy two cells, and one
+that does not fit the final cell becomes a blank rather than being dropped - otherwise the columns to
+the right shift back and forth as the text moves. A character scrolled half off the left edge is
+padded for the same reason: dropping it made two consecutive frames render identically, so CJK paths
+stuttered every second step.
+
+The pinned path is for reading only. It is not execution authority; native identity is still
+revalidated immediately before any Trash operation.
