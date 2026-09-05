@@ -313,6 +313,84 @@ discover
 - HTTP/code/startup cache 可单列为“可重建”；Cache Storage、IndexedDB、Local Storage、Service Worker 列为“应用状态”。
 - 删除后若浏览器仍允许组件或站点重新生成，应明确标注“可重建/可能重下”，不能承诺永久释放空间。
 
+## 8.5 Windows 真机实测：按域归因的可行性与边界（2026-09-05）
+
+本节是本机 Edge / Edge Dev / Chrome 的直接测量，用于回答“能否把站点存储按域呈现给用户、由用户自行选择清理”。
+测量对象是本人日常使用的 Profile，不是新建的干净 Profile。
+
+### 8.5.1 体量分布：不可清理的部分才是大头
+
+Edge `Default`（Edge 运行中，33 个进程）：
+
+| 子系统 | 体积 | 官方定位 |
+| --- | --- | --- |
+| Service Worker / CacheStorage | **458.0 MB** | PWA 离线状态，**不是** HTTP cache |
+| Cache（HTTP） | 345.7 MB | 可重建 |
+| Code Cache | 305.3 MB | 可重建 |
+| IndexedDB | 277.7 MB | 站点应用数据 |
+| Local Extension Settings | 52.3 MB | 扩展状态 |
+| Local Storage | 20.7 MB | 站点应用数据 |
+
+`CacheStorage + IndexedDB = 735.7 MB`，**超过** `Cache + Code Cache = 651.0 MB`。这证实了只清可重建缓存
+会放过一多半占用；而这部分恰恰是第 1 节要求整体保留、不能按 HTTP cache 处理的内容。结论不是“可以清”，
+而是“必须能按域告知用户，由用户自己决定”。
+
+### 8.5.2 归因可行性：三类子系统的结论完全不同
+
+| 子系统 | origin 从何而来 | 能否得到**每域体积** | 是否需读被锁文件 |
+| --- | --- | --- | --- |
+| CacheStorage | 每个哈希目录下的 `index.txt` | **能**，一目录一 origin，体积=目录体积 | 否 |
+| IndexedDB | **目录名本身**（`https_www.bilibili.com_0.indexeddb.*`） | **能**，同上 | 否 |
+| Local Storage | 共享 LevelDB 的记录键 | **不能**，仅能得到域清单 | 是（`.log` 被独占） |
+
+CacheStorage 的哈希目录名不可逆（上游 README 明确为 origin 的哈希），因此 `index.txt` 是唯一途径；
+origin 在其中以 UTF-16LE 存于 protobuf。实测 Edge 12/12、Edge Dev 6/6 全部解析成功，**0 未解析**。
+
+交叉验证（归因求和 vs 独立目录遍历）：Edge `458.2 MB = 458.2 MB`，Edge Dev `36.8 MB = 36.8 MB`，两者一致。
+这条对照是必要的：只统计已解析目录会在解析失败时静默少报，而少报看起来和精确值一样。
+
+按域归因后的实际分布（Edge CacheStorage）：`onedrive.live.com` 200.35 MB、`www.yuque.com` 105.69 MB、
+`www.msn.cn` 79.74 MB（新标签页内容）。IndexedDB 侧 `www.bilibili.com` 单域 236.08 MB，占该子系统 85%。
+这正是按域呈现的价值：用户可以清掉 `msn.cn` 而保留 OneDrive 和飞书，而“清空站点数据”会一起毁掉登录态。
+
+Local Storage 是反例：319 个域共处一个 LevelDB，键里有域但**体积不可切分**。对它只能报告“存在哪些域”，
+不能报告每域占用；把总量按域均摊或按键数比例估算都是编造，不做。
+
+### 8.5.3 两套布局并存，且 bucket-id 不是域名
+
+本机同时存在 legacy 路径与 `WebStorage/<bucket-id>/` bucket 布局（第 4.1 节 M154 行所述）。Edge 有 2 个
+bucket、合计 0.2 MB，主体仍在 legacy；Chrome 只有 `WebStorage/QuotaManager` 而无 legacy 子目录。
+枚举必须同时覆盖两套，否则要么漏算要么重复计算。
+
+`WebStorage/QuotaManager`（SQLite，160 KB）是 bucket-id → 存储键的唯一映射。它在浏览器运行时**可读**：
+以 `FileShare.ReadWrite | Delete` 共享打开即可，独占打开则失败。第 6.1 节“锁不是一致性快照”仍然成立 ——
+可读不等于可信，读到的是运行中状态，只应作为**报告**依据，不作为删除授权。
+
+### 8.5.4 归因单位必须是完整存储键，不能是 hostname
+
+`QuotaManager` 中的键形如：
+
+```text
+https://www.googletagmanager.com/^0https://codacy.com_default
+    └─ 嵌入 origin ─┘        └分区┘└─ 顶层站点 ─┘└bucket┘
+```
+
+实测到 3 组分区键：`googletagmanager.com` under `codacy.com`、`doubao.com` under `larkoffice.com`、
+`doubleclick.net` under `nexusmods.com`。这印证第 1 节第 2 条：同一 host 既可作为第一方 origin 存在，
+也可作为第三方在多个顶层站点下各存一份互不可见的数据。**按 hostname 合并会删掉用户并未选择清理的隔离数据。**
+
+首次用正则抓取时漏掉了 `^0` 分隔符，把上述键读成了一个名为 `codacy.comwww.googletagmanager.com` 的域。
+这不是显示瑕疵：若以此为单位归因，两个不同主体的数据会被并成一条呈现给用户。分区分隔符必须显式解析。
+
+### 8.5.5 由此得出的实现边界
+
+1. 归因单位是**完整存储键**（origin + 顶层站点分区 + bucket），呈现时可按顶层站点分组，但内部不得合并。
+2. 只报告**能独立求和**的子系统的每域体积（CacheStorage、IndexedDB）；Local Storage 只报告域清单，
+   并显式标注体积不可分。
+3. 每次归因都必须与独立目录遍历对账；不一致时先查原因，不得调整对照口径。
+4. 浏览器运行中只做报告。任何删除都需要第 6.2 节的进程停止证据，与本节的可读性无关。
+5. CacheStorage 与 IndexedDB 属站点应用状态，即使按域呈现，也应与可重建的 HTTP/Code Cache 分开标注，
+   不能因为目录名含 cache 就归为可弃。
 ## 9. 来源索引
 
 ### Chromium / Chrome
