@@ -404,3 +404,17 @@ and modification time; a directory's length is zero and its timestamps are writa
 deleted and recreated at the same path satisfied all three while being a different object. Identity
 now comes from `FILE_ID_INFO`, the same source the scanner records, and is re-read immediately before
 each move.
+
+### Browsing origins in the TUI
+
+`--browse` hands the discovered storage subsystem directories to the existing interactive browser, so origins can be inspected one at a time and moved to the Trash with `d` / `Delete`.
+
+```
+sweepx site-storage --browse
+```
+
+The rows come from an ordinary scan rather than from the report: the interactive Trash draws its authority from the scanner's native identity and locator, and the model explicitly forbids deriving either from a display path.
+
+The first screen lists each browser's subsystem roots (`IndexedDB`, `Service Worker\CacheStorage`); the per-origin directories under them are listed on demand once a root is entered. Root rows keep only as many trailing path components as it takes to stay distinct — the four subsystems do not sit at the same depth, so a fixed cut renders Edge and Edge Dev `CacheStorage` as the very same text.
+
+`--browse` requires terminal stdin and stdout, and cannot be combined with `--format json` / `--format ndjson` or `--trash-origin`.

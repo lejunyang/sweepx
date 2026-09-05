@@ -203,6 +203,14 @@ enum Commands {
         /// choose.
         #[arg(long, value_name = "STORAGE_KEY")]
         trash_origin: Option<String>,
+        /// Browse the storage directories interactively, with per-origin labels.
+        ///
+        /// Scans the storage roots for real, so every row carries the identity and native locator
+        /// the Trash path requires. The alternative — synthesizing entries from the report — is
+        /// forbidden by the model itself: `identity` and `native_locator` must not be derived from a
+        /// display path, and the interactive Trash takes its authority from exactly those fields.
+        #[arg(long, conflicts_with = "trash_origin")]
+        browse: bool,
     },
     /// Move one file or directory to the operating system Trash/Recycle Bin.
     Trash {
@@ -532,7 +540,40 @@ fn main() -> ProcessExitCode {
             };
             return run_junk_scan(&context, format, size_unit, roots, system);
         }
-        Commands::SiteStorage { trash_origin } => {
+        Commands::SiteStorage {
+            trash_origin,
+            browse,
+        } => {
+            if browse {
+                if let Err(message) = validate_tui_environment(
+                    format,
+                    std::io::stdin().is_terminal(),
+                    std::io::stdout().is_terminal(),
+                ) {
+                    // The shared validator names `--tui`, which is not the flag the user typed here.
+                    // Reporting a flag that does not appear in their command sends them looking for
+                    // the wrong thing, so the actual one is named alongside it.
+                    eprintln!("--browse: {message}");
+                    return ProcessExitCode::from(2);
+                }
+                let roots = site_storage_roots();
+                if roots.is_empty() {
+                    eprintln!("no browser site storage was found to browse");
+                    return ProcessExitCode::from(3);
+                }
+                // Deliberately routed through the ordinary scan and the existing browser: the
+                // interactive Trash reads its authority from the scanner's identity and native
+                // locator, so the rows have to come from a real scan rather than from the report.
+                let scan = scan_for_tui_with_store(
+                    &context,
+                    &ScanRequest {
+                        roots,
+                        state_dir: None,
+                    },
+                    Option::<&sweepx_core::MemorySnapshotStore>::None,
+                );
+                return finish_tui_scan(&context, scan, size_unit, sort);
+            }
             return run_site_storage(
                 &context,
                 format,
@@ -1865,6 +1906,33 @@ fn storage_directory_is_held(directory: &Path) -> bool {
         }
         Err(_) => true,
     }
+}
+/// The storage subsystem directories worth browsing, deduplicated.
+///
+/// Derived from the same discovery the report uses, so the two views cannot disagree about which
+/// profiles exist. Empty subsystems are excluded: a root with nothing under it adds a row the user
+/// cannot act on.
+fn site_storage_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for report in collect_site_storage() {
+        if report.origins.is_empty() {
+            continue;
+        }
+        for usage in &report.origins {
+            for directory in &usage.directories {
+                // The subsystem directory is the parent of each origin directory; browsing the
+                // subsystem lets the user compare origins side by side rather than one at a time.
+                if let Some(parent) = directory.parent()
+                    && !roots
+                        .iter()
+                        .any(|existing| same_directory(existing, parent))
+                {
+                    roots.push(parent.to_path_buf());
+                }
+            }
+        }
+    }
+    roots
 }
 /// Moves every directory belonging to one storage key to the Trash.
 ///
@@ -3739,6 +3807,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads the real browser profiles on this host"]
+    fn browse_roots_are_scannable_subsystems_with_trash_authority() {
+        // The browser is progressive: the scan returns roots and the TUI expands children on demand
+        // through the detail-rescan provider. So the invariant to hold here is that each root is a
+        // real scanned object carrying identity and native locator - the fields the interactive Trash
+        // takes its authority from, and the ones the model forbids synthesizing from a display path.
+        let roots = site_storage_roots();
+        assert!(
+            !roots.is_empty(),
+            "this host has browser storage, so discovery must find it"
+        );
+        let context = CoreContext::new(detect_locale(None));
+        let parts = scan_for_tui_with_store(
+            &context,
+            &ScanRequest {
+                roots: roots.clone(),
+                state_dir: None,
+            },
+            Option::<&sweepx_core::MemorySnapshotStore>::None,
+        )
+        .expect("the storage roots are scannable")
+        .into_tui_parts();
+
+        assert_eq!(
+            parts.summary.roots.len(),
+            roots.len(),
+            "every discovered subsystem must appear as a scanned root"
+        );
+        for entry in &parts.summary.roots {
+            assert!(
+                entry.identity.is_some(),
+                "{} has no identity, so the Trash path could not revalidate it",
+                entry.display_path
+            );
+            assert!(
+                entry.native_locator.is_some(),
+                "{} has no native locator, so it carries no execution authority",
+                entry.display_path
+            );
+        }
+    }
     #[test]
     fn a_directory_without_a_lock_file_is_not_held() {
         // CacheStorage buckets carry no LevelDB lock; absence must not read as "held" or every one

@@ -371,3 +371,17 @@ tombstone。在那里给出任何按来源的体积都是编造，因此一律�
 为此加强了 Windows 上的身份复校。原先 `same_file` 比较的是类型、长度和修改时间；而目录长度为 0、时间戳可写，
 因此在同一路径上删除并重建的目录能同时满足这三项，却是另一个对象。现在身份取自 `FILE_ID_INFO`（与扫描器记录
 身份的来源相同），并在每次移动前立即重新读取。
+
+### 在 TUI 中按域浏览
+
+`--browse` 把发现到的存储子系统目录交给已有的交互式浏览器，用户可以逐个域查看体积、并用 `d` / `Delete` 键把单个域移入回收站。
+
+```
+sweepx site-storage --browse
+```
+
+行走的是普通扫描，而不是把报告里的条目重新拼成表格：交互式回收站的执行凭据来自扫描器提供的 native identity 与 locator，而数据模型明确禁止从展示路径反推这两个字段。
+
+首屏列出的是各浏览器的子系统根目录（如 `IndexedDB`、`Service Worker\CacheStorage`），进入后才按需列出其下的各域目录。根目录行只保留足以互相区分的尾部路径段——四个子系统的深度并不相同，固定截取会让 Edge 与 Edge Dev 的 `CacheStorage` 渲染成同一行文本。
+
+`--browse` 需要终端 stdin 与 stdout，且不能与 `--format json` / `--format ndjson` 或 `--trash-origin` 同时使用。
