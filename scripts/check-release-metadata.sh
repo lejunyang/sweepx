@@ -98,10 +98,10 @@ resolved_by_id = {node["id"]: set(node["dependencies"]) for node in resolve["nod
 
 blocked = sorted(package["name"] for package in packages if package.get("publish") == [])
 unpublishable = set(blocked)
-# publish=false is a deliberate state, not an error: sweepx-cleaner-sign holds signing
-# authority and must never reach crates.io. Such a crate is excluded from the release
-# version contract rather than rejecting the whole workspace, but it still has to build
-# and test, which the CI workflow covers separately.
+# publish=false is a deliberate state, not an error. Such a crate is excluded from the
+# release version contract rather than rejecting the whole workspace, but it still has to
+# build and test, which the CI workflow covers separately. No workspace member is currently
+# publish=false; this stays so the gate does not deadlock when one is added.
 packages = [package for package in packages if package.get("publish") != []]
 if not packages:
     raise SystemExit("workspace contains no publishable packages")

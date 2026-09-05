@@ -41,7 +41,8 @@ jobs:
       # release-blocking mistake stays invisible until the moment it blocks a release. Two
       # contradictory gates shipped unnoticed exactly that way: one required every workspace
       # crate in publish_order while the other rejected any publish=false crate, which made
-      # publishing impossible for as long as the signing tool existed.
+      # publishing impossible for as long as the signing tool existed. That crate is gone, but
+      # the deadlock was a property of the gates, not of the crate, so both still run here.
       - name: Validate release metadata
         run: scripts/check-release-metadata.sh --skip-tag-check
       - name: Validate crate packaging and dependency order
@@ -61,44 +62,40 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test full workspace
         run: cargo test --workspace --all-features --locked
-      # `built_ins_load_and_validate` proves the shipped packages verify, but it cannot prove the
-      # signing tool still produces signatures that verifier accepts: it reads bytes committed long
-      # ago. Only round-tripping a package through `sign` exercises that, and without it the tool
-      # can rot undetected until someone needs to edit a rule and finds they cannot.
-      - name: Verify the signing tool round-trips a package
+      # Rule packages ship unsigned and are meant to be editable. What still has to hold is that an
+      # edit is never silent: `content_digest` binds a clean authorization to the rule bytes that
+      # produced the scan. `editing_a_rule_changes_the_content_digest_but_still_loads` covers this
+      # in-process; this step re-checks it through the built binary, because the value that actually
+      # gates a clean is the one the CLI reports, not the one a unit test computes.
+      - name: An edited rule loads and changes the reported cleaner set digest
         run: |
           set -euo pipefail
-          key_dir="$(mktemp -d)"
-          pkg_dir="$(mktemp -d)/org.sweepx.cargo-target"
-          cp -R crates/sweepx-catalog/resources/cleaners/org.sweepx.cargo-target "$pkg_dir"
+          rule='crates/sweepx-catalog/resources/cleaners/org.sweepx.cargo-target/rules/cargo-target.json'
+          cp "$rule" "$rule.orig"
+          restore() { mv "$rule.orig" "$rule"; }
+          trap restore EXIT
 
-          # A development key is deliberately not in BUILTIN_TRUST_STORE, so the tool must be told
-          # which key to verify against; that path is what contributors actually use.
-          cargo run --locked --package sweepx-cleaner-sign -- keygen \
-            --key "$key_dir/dev.key" --key-id ci-dev-key --publisher org.sweepx
-          cargo run --locked --package sweepx-cleaner-sign -- sign \
-            --package "$pkg_dir" --key "$key_dir/dev.key"
+          read_digest() {
+            cargo run --locked --quiet --package sweepx-cli -- \
+              --format json cleaner list | python3 -c \
+              'import json,sys; print(json.load(sys.stdin)["summary"]["cleanerSetDigest"])'
+          }
 
-          # Signing an unmodified package must be idempotent, otherwise re-signing would churn the
-          # SIGNATURE file on every build and make real changes unreviewable.
-          second="$(cargo run --locked --quiet --package sweepx-cleaner-sign -- sign \
-            --package "$pkg_dir" --key "$key_dir/dev.key")"
-          echo "$second"
-          if ! grep -q 'unchanged' <<<"$second"; then
-            echo 'signing an unmodified package must report it as unchanged' >&2
+          before="$(read_digest)"
+
+          # Perturb a non-identity field: `id` is cross-referenced by the manifest and would be
+          # rejected as an inventory mismatch rather than accepted as an edit.
+          sed -i 's/"zeroWriteVerified": true/"zeroWriteVerified": false/' "$rule"
+          if cmp -s "$rule" "$rule.orig"; then
+            echo 'the test edit did not change the rule file' >&2
             exit 1
           fi
 
-          # An edited rule must produce a different digest; if it did not, tampering would be
-          # invisible to the loader. `id` is cross-referenced by the manifest and is rejected as an
-          # identity mismatch, so perturb a non-identity field instead.
-          before="$(sha256sum "$pkg_dir/SIGNATURE" | cut -d' ' -f1)"
-          sed -i 's/"zeroWriteVerified": true/"zeroWriteVerified": false/' "$pkg_dir/rules/cargo-target.json"
-          cargo run --locked --quiet --package sweepx-cleaner-sign -- sign \
-            --package "$pkg_dir" --key "$key_dir/dev.key"
-          after="$(sha256sum "$pkg_dir/SIGNATURE" | cut -d' ' -f1)"
+          after="$(read_digest)"
+          echo "before=$before"
+          echo "after =$after"
           if [[ "$before" == "$after" ]]; then
-            echo 'editing a rule must change the package signature' >&2
+            echo 'editing a rule must change the cleaner set digest' >&2
             exit 1
           fi
 

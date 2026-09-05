@@ -36,10 +36,12 @@
 
 - The pinned toolchain may be unavailable from the configured mirror. Set
   `$env:RUSTUP_TOOLCHAIN="stable"` for the session rather than editing `rust-toolchain.toml`.
-- `.gitattributes` normalizes to LF. Cleaner packages are digest-verified over exact bytes, so a
-  CRLF checkout silently breaks signature validation.
-- Editing any rule JSON changes its package digest; re-sign with `sweepx-cleaner-sign` in the same
-  commit or `built_ins_load_and_validate` fails.
+- `.gitattributes` normalizes to LF. Keep it that way: line endings leaking into a commit make the
+  real change unreviewable.
+- Cleaner rule JSON is freely editable — packages ship unsigned, and no digest has to be refreshed
+  by hand. What must stay true is that an edit is never silent: `content_digest` is computed from
+  the loaded bytes and binds a clean authorization to the rules that produced the scan. Do not
+  reintroduce a check that compares a hand-maintained digest field against the bytes.
 - Case sensitivity is a property of the host and volume, not of the code. Probe the actual
   behavior and assert the matching invariant instead of hardcoding either expectation.
 

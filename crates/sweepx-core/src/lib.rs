@@ -2,14 +2,6 @@ mod cache_validity;
 mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;
-mod catalog_trust;
-
-pub use catalog_trust::{
-    MAX_PRODUCTION_TRUST_ROOT_ANCHORS, MAX_PRODUCTION_TRUST_SNAPSHOT_BYTES,
-    ProductionCatalogDisposition, ProductionCleanerCatalogTrust, ProductionTrustDisposition,
-    ProductionTrustFreshness, resolve_production_catalog_trust,
-};
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -5016,7 +5008,10 @@ fn cleaner_set_digest_with_trust(
             json!({
                 "id": cleaner.package.manifest.id,
                 "version": cleaner.package.manifest.version,
-                "packageDigest": cleaner.package.manifest.package_digest,
+                // The digest of the bytes actually loaded, so that editing a rule changes the
+                // authorization identity. The manifest's own packageDigest field is
+                // author-declared and no longer verified, so it cannot serve this purpose.
+                "packageDigest": cleaner.package.content_digest,
                 "catalogTrust": cleaner_catalog_trust_json(trust),
             })
         })

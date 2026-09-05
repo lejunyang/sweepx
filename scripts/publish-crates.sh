@@ -125,11 +125,12 @@ all_packages = {
     for package in metadata["packages"]
     if package["id"] in members
 }
-# A publish=false crate is intentionally not a release artifact: sweepx-cleaner-sign
-# carries signing authority and must stay off crates.io. Coverage is therefore asserted
-# against the publishable set, so such a crate belongs in neither publish_order nor the
+# A publish=false crate is intentionally not a release artifact, so coverage is asserted
+# against the publishable set and such a crate belongs in neither publish_order nor the
 # missing list. Leaving it in the comparison made the two release gates unsatisfiable:
-# this script demanded its presence while check-release-metadata.sh rejected it.
+# this script demanded its presence while check-release-metadata.sh rejected it. The
+# workspace currently has no such crate, but the handling stays: the alternative is a gate
+# that deadlocks again the first time one is added.
 unpublishable = sorted(
     name for name, package in all_packages.items() if package.get("publish") == []
 )

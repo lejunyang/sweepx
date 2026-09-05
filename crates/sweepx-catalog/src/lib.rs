@@ -1,68 +1,17 @@
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, VerifyingKey};
-use semver::{Version, VersionReq};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Deserializer;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use sweepx_cleaner_schema::{
-    CLEANER_MANIFEST_SCHEMA, CleanerManifest, CleanerRevocationTarget, CleanerRule,
-    CleanerSignatureEnvelope, CleanerTrustSnapshot, PackageDigestEntry, TrustKeyUsage,
-    TrustedPublisherKey, ValidationError, canonical_signature_payload,
-    canonical_trust_snapshot_payload, compute_package_digest,
-};
+use sweepx_cleaner_schema::{CleanerManifest, CleanerRule, ValidationError};
 use thiserror::Error;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use unicode_normalization::UnicodeNormalization;
 
-const MAX_BUILTIN_PACKAGE_FILES: usize = 4_096;
-const MAX_BUILTIN_SINGLE_FILE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_BUILTIN_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
-const TRUST_SNAPSHOT_MAX_AGE: time::Duration = time::Duration::days(7);
-const TRUST_SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"SweepX cleaner trust snapshot digest v1\0";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustRootAnchor {
-    pub key_id: String,
-    pub public_key_b64u: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TrustedKey {
-    key_id: &'static str,
-    publisher_id: &'static str,
-    public_key_b64u: &'static str,
-    valid_from: &'static str,
-    valid_until: &'static str,
-    revoked: bool,
-}
-
-const BUILTIN_TRUST_STORE: &[TrustedKey] = &[
-    TrustedKey {
-        key_id: "builtin-cleaner-key-2026",
-        publisher_id: "org.sweepx",
-        public_key_b64u: "bqB4tpOIibLAwawWg455kwXbfGIsbgj7X6gotTL1S_w",
-        valid_from: "2026-08-27T00:00:00Z",
-        valid_until: "2027-08-27T00:00:00Z",
-        revoked: false,
-    },
-    TrustedKey {
-        key_id: "builtin-cargo-cleaner-key-2026-08",
-        publisher_id: "org.sweepx",
-        public_key_b64u: "4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk",
-        valid_from: "2026-08-29T00:00:00Z",
-        valid_until: "2027-08-26T00:00:00Z",
-        revoked: false,
-    },
-];
-
+/// A cleaner package compiled into the executable.
+///
+/// The bytes are `include_bytes!` of the files under `resources/cleaners/`, so the package and the
+/// code that reads it ship as one artifact and share one trust boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltInCleaner {
     pub package_dir: &'static str,
     pub manifest_bytes: &'static [u8],
-    pub signature_bytes: &'static [u8],
     pub rule_files: &'static [(&'static str, &'static [u8])],
     pub evidence_files: &'static [(&'static str, &'static [u8])],
 }
@@ -70,7 +19,6 @@ pub struct BuiltInCleaner {
 pub const CARGO_TARGET: BuiltInCleaner = BuiltInCleaner {
     package_dir: "org.sweepx.cargo-target",
     manifest_bytes: include_bytes!("../resources/cleaners/org.sweepx.cargo-target/cleaner.json"),
-    signature_bytes: include_bytes!("../resources/cleaners/org.sweepx.cargo-target/SIGNATURE"),
     rule_files: &[(
         "rules/cargo-target.json",
         include_bytes!("../resources/cleaners/org.sweepx.cargo-target/rules/cargo-target.json"),
@@ -85,9 +33,6 @@ pub const CHROMIUM_CACHE: BuiltInCleaner = BuiltInCleaner {
     package_dir: "org.sweepx.chromium-rebuildable-cache",
     manifest_bytes: include_bytes!(
         "../resources/cleaners/org.sweepx.chromium-rebuildable-cache/cleaner.json"
-    ),
-    signature_bytes: include_bytes!(
-        "../resources/cleaners/org.sweepx.chromium-rebuildable-cache/SIGNATURE"
     ),
     rule_files: &[(
         "rules/chromium-cache.json",
@@ -108,1038 +53,150 @@ pub const BUILT_INS: &[BuiltInCleaner] = &[CARGO_TARGET, CHROMIUM_CACHE];
 #[derive(Debug, Clone)]
 pub struct LoadedCleanerPackage {
     pub manifest: CleanerManifest,
-    pub signature: CleanerSignatureEnvelope,
     pub rules: Vec<(String, CleanerRule)>,
+    /// Digest of the manifest and rule bytes as loaded.
+    ///
+    /// Use this, not `manifest.package_digest`, whenever the question is "did the rules change".
+    /// The manifest field is author-declared text that no longer has to match anything.
+    pub content_digest: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustFreshness {
-    Current,
-    Stale,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageTrustDisposition {
-    Trusted,
-    ReportOnly,
-    Disabled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageTrustDecision {
-    pub epoch: u64,
-    pub snapshot_digest: String,
-    pub freshness: TrustFreshness,
-    pub disposition: PackageTrustDisposition,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifiedTrustSnapshot {
-    snapshot: CleanerTrustSnapshot,
-    digest: String,
-    freshness: TrustFreshness,
-}
-
-impl VerifiedTrustSnapshot {
-    pub fn epoch(&self) -> u64 {
-        self.snapshot.epoch
-    }
-
-    pub fn digest(&self) -> &str {
-        &self.digest
-    }
-
-    pub fn freshness(&self) -> TrustFreshness {
-        self.freshness
-    }
-
-    fn publisher_key(&self, key_id: &str) -> Option<&TrustedPublisherKey> {
-        self.snapshot.keys.iter().find(|key| key.key_id == key_id)
-    }
-}
-
-pub fn verify_trust_snapshot(
-    snapshot_bytes: &[u8],
-    root_keys: &[TrustRootAnchor],
-    now: OffsetDateTime,
-    history: &mut TrustHistory,
-) -> Result<VerifiedTrustSnapshot, CatalogError> {
-    reject_duplicate_keys_and_trailing_bytes(snapshot_bytes)?;
-    let snapshot: CleanerTrustSnapshot =
-        deserialize_rejecting_unknown_fields(snapshot_bytes, "trust-snapshot.json")?;
-    snapshot
-        .validate()
-        .map_err(CatalogError::InvalidTrustSnapshot)?;
-
-    let generated_at = parse_trust_time(&snapshot.generated_at)?;
-    let expires_at = parse_trust_time(&snapshot.expires_at)?;
-    if generated_at > now {
-        return Err(CatalogError::TrustSnapshotFromFuture);
-    }
-    if generated_at >= expires_at {
-        return Err(CatalogError::InvalidTrustSnapshotTimeOrder);
-    }
-    if now >= expires_at {
-        return Err(CatalogError::TrustSnapshotExpired);
-    }
-    for key in &snapshot.keys {
-        let valid_from = parse_trust_time(&key.valid_from)?;
-        let valid_until = parse_trust_time(&key.valid_until)?;
-        if valid_from >= valid_until {
-            return Err(CatalogError::InvalidTrustedKeyWindow {
-                key_id: key.key_id.clone(),
-            });
-        }
-    }
-    for revocation in &snapshot.revocations {
-        if parse_trust_time(&revocation.revoked_at)? > generated_at {
-            return Err(CatalogError::RevocationFromFuture);
-        }
-    }
-
-    let root = root_keys
-        .iter()
-        .find(|root| root.key_id == snapshot.root_key_id)
-        .ok_or_else(|| CatalogError::UnknownTrustRoot(snapshot.root_key_id.clone()))?;
-    verify_ed25519(
-        &root.public_key_b64u,
-        &canonical_trust_snapshot_payload(&snapshot).map_err(CatalogError::InvalidTrustSnapshot)?,
-        &snapshot.signature,
-    )
-    .map_err(|_| CatalogError::TrustSnapshotSignatureVerificationFailed)?;
-
-    let payload =
-        canonical_trust_snapshot_payload(&snapshot).map_err(CatalogError::InvalidTrustSnapshot)?;
-    let mut hasher = Sha256::new();
-    hasher.update(TRUST_SNAPSHOT_DIGEST_DOMAIN);
-    hasher.update(payload);
-    let freshness = if now - generated_at <= TRUST_SNAPSHOT_MAX_AGE {
-        TrustFreshness::Current
-    } else {
-        TrustFreshness::Stale
-    };
-    let verified = VerifiedTrustSnapshot {
-        snapshot,
-        digest: format!("sha256:{:x}", hasher.finalize()),
-        freshness,
-    };
-    history.check_snapshot(&verified)?;
-    history.record_snapshot(&verified);
-    Ok(verified)
-}
-
-pub fn evaluate_package_trust(
-    manifest: &CleanerManifest,
-    signature: &CleanerSignatureEnvelope,
-    file_table: &[PackageDigestEntry],
-    trust: &VerifiedTrustSnapshot,
-    now: OffsetDateTime,
-    history: &mut TrustHistory,
-) -> Result<PackageTrustDecision, CatalogError> {
-    history.check_snapshot(trust)?;
-    history.check_package(manifest)?;
-    let trusted =
-        trust
-            .publisher_key(&signature.key_id)
-            .ok_or_else(|| CatalogError::UnknownKey {
-                key_id: signature.key_id.clone(),
-            })?;
-    verify_package_signature(manifest, signature, file_table, trusted, now)?;
-    enforce_revocations(manifest, trusted, trust)?;
-
-    let disposition = package_disposition(manifest, trusted, trust.freshness)?;
-
-    history.record_snapshot(trust);
-    history.record_package(manifest)?;
-    Ok(PackageTrustDecision {
-        epoch: trust.epoch(),
-        snapshot_digest: trust.digest().to_owned(),
-        freshness: trust.freshness(),
-        disposition,
-    })
-}
-
-fn package_disposition(
-    manifest: &CleanerManifest,
-    trusted: &TrustedPublisherKey,
-    freshness: TrustFreshness,
-) -> Result<PackageTrustDisposition, CatalogError> {
-    let has_native_probe = !manifest.probes.is_empty();
-    let has_official_command = !manifest.official_commands.is_empty();
-    if !trusted.usages.contains(&TrustKeyUsage::DeclarativePackage) {
-        return Err(CatalogError::KeyUsageDenied("declarative_package"));
-    }
-    if has_native_probe && !trusted.usages.contains(&TrustKeyUsage::NativeProbe) {
-        return Err(CatalogError::KeyUsageDenied("native_probe"));
-    }
-    if has_official_command && !trusted.usages.contains(&TrustKeyUsage::OfficialCommand) {
-        return Err(CatalogError::KeyUsageDenied("official_command"));
-    }
-    let disposition = if freshness == TrustFreshness::Current {
-        PackageTrustDisposition::Trusted
-    } else if has_native_probe || has_official_command {
-        PackageTrustDisposition::Disabled
-    } else {
-        PackageTrustDisposition::ReportOnly
-    };
-
-    Ok(disposition)
-}
-
-fn enforce_revocations(
-    manifest: &CleanerManifest,
-    key: &TrustedPublisherKey,
-    trust: &VerifiedTrustSnapshot,
-) -> Result<(), CatalogError> {
-    let version = Version::parse(&manifest.version)
-        .map_err(|_| CatalogError::InvalidPackageVersion(manifest.version.clone()))?;
-    let probe_digests = manifest
-        .probes
-        .iter()
-        .flat_map(|probe| probe.artifacts.iter())
-        .map(|artifact| format!("sha256:{}", artifact.sha256))
-        .collect::<BTreeSet<_>>();
-    for revocation in &trust.snapshot.revocations {
-        let matches = match &revocation.target {
-            CleanerRevocationTarget::PublisherKey {
-                publisher_id,
-                key_id,
-            } => publisher_id == &key.publisher_id && key_id == &key.key_id,
-            CleanerRevocationTarget::PackageDigest { package_digest } => {
-                package_digest == &manifest.package_digest
-            }
-            CleanerRevocationTarget::PackageVersion {
-                publisher_id,
-                package_id,
-                version_req,
-            } => {
-                publisher_id == &manifest.publisher.id
-                    && package_id == &manifest.id
-                    && VersionReq::parse(version_req)
-                        .map_err(|_| {
-                            CatalogError::InvalidRevocationVersionReq(version_req.clone())
-                        })?
-                        .matches(&version)
-            }
-            CleanerRevocationTarget::ProbeDigest { probe_digest } => {
-                probe_digests.contains(probe_digest)
-            }
-        };
-        if matches {
-            return Err(CatalogError::RevokedPackage {
-                reason: revocation.reason.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrustHistory {
-    highest_epoch: Option<u64>,
-    snapshot_digest: Option<String>,
-    package_digests: BTreeMap<(String, semver::Version), String>,
-    highest_versions: BTreeMap<String, semver::Version>,
-    package_publishers: BTreeMap<String, String>,
-}
-
-impl TrustHistory {
-    pub fn highest_epoch(&self) -> Option<u64> {
-        self.highest_epoch
-    }
-
-    /// Applies the monotonic package identity rules to a previously authenticated package.
-    /// The caller must invoke this only after package digest and signature verification.
-    pub fn observe_package_identity(
-        &mut self,
-        publisher_id: &str,
-        package_id: &str,
-        package_version: &str,
-        package_digest: &str,
-    ) -> Result<(), CatalogError> {
-        let manifest = PackageHistoryIdentity {
-            publisher_id,
-            package_id,
-            package_version,
-            package_digest,
-        };
-        self.check_package_identity(&manifest)?;
-        self.record_package_identity(&manifest)
-    }
-
-    fn check_snapshot(&self, snapshot: &VerifiedTrustSnapshot) -> Result<(), CatalogError> {
-        if let Some(highest_epoch) = self.highest_epoch {
-            if snapshot.epoch() < highest_epoch {
-                return Err(CatalogError::TrustSnapshotRollback {
-                    highest_epoch,
-                    candidate_epoch: snapshot.epoch(),
-                });
-            }
-            if snapshot.epoch() == highest_epoch
-                && self.snapshot_digest.as_deref() != Some(snapshot.digest())
-            {
-                return Err(CatalogError::TrustSnapshotEpochCollision {
-                    epoch: snapshot.epoch(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn record_snapshot(&mut self, snapshot: &VerifiedTrustSnapshot) {
-        if self
-            .highest_epoch
-            .is_none_or(|epoch| snapshot.epoch() >= epoch)
-        {
-            self.highest_epoch = Some(snapshot.epoch());
-            self.snapshot_digest = Some(snapshot.digest().to_owned());
-        }
-    }
-
-    fn check_package(&self, manifest: &CleanerManifest) -> Result<(), CatalogError> {
-        self.check_package_identity(&PackageHistoryIdentity {
-            publisher_id: &manifest.publisher.id,
-            package_id: &manifest.id,
-            package_version: &manifest.version,
-            package_digest: &manifest.package_digest,
-        })
-    }
-
-    fn check_package_identity(
-        &self,
-        identity: &PackageHistoryIdentity<'_>,
-    ) -> Result<(), CatalogError> {
-        if let Some(known_publisher) = self.package_publishers.get(identity.package_id)
-            && known_publisher != identity.publisher_id
-        {
-            return Err(CatalogError::PackagePublisherSubstitution {
-                package_id: identity.package_id.into(),
-                known_publisher: known_publisher.clone(),
-                candidate_publisher: identity.publisher_id.into(),
-            });
-        }
-        let version = Version::parse(identity.package_version)
-            .map_err(|_| CatalogError::InvalidPackageVersion(identity.package_version.into()))?;
-        if let Some(highest) = self.highest_versions.get(identity.package_id)
-            && &version < highest
-        {
-            return Err(CatalogError::PackageVersionRollback {
-                publisher_id: identity.publisher_id.into(),
-                package_id: identity.package_id.into(),
-                highest_version: highest.to_string(),
-                candidate_version: version.to_string(),
-            });
-        }
-        let version_key = (identity.package_id.into(), version);
-        if let Some(known_digest) = self.package_digests.get(&version_key)
-            && known_digest != identity.package_digest
-        {
-            return Err(CatalogError::SameVersionDigestCollision {
-                publisher_id: identity.publisher_id.into(),
-                package_id: identity.package_id.into(),
-                version: identity.package_version.into(),
-                known_digest: known_digest.clone(),
-                candidate_digest: identity.package_digest.into(),
-            });
-        }
-        Ok(())
-    }
-
-    fn record_package(&mut self, manifest: &CleanerManifest) -> Result<(), CatalogError> {
-        self.record_package_identity(&PackageHistoryIdentity {
-            publisher_id: &manifest.publisher.id,
-            package_id: &manifest.id,
-            package_version: &manifest.version,
-            package_digest: &manifest.package_digest,
-        })
-    }
-
-    fn record_package_identity(
-        &mut self,
-        identity: &PackageHistoryIdentity<'_>,
-    ) -> Result<(), CatalogError> {
-        let version = Version::parse(identity.package_version)
-            .map_err(|_| CatalogError::InvalidPackageVersion(identity.package_version.into()))?;
-        self.highest_versions
-            .entry(identity.package_id.into())
-            .and_modify(|highest| {
-                if version > *highest {
-                    *highest = version.clone();
-                }
-            })
-            .or_insert_with(|| version.clone());
-        self.package_publishers
-            .entry(identity.package_id.into())
-            .or_insert_with(|| identity.publisher_id.into());
-        self.package_digests.insert(
-            (identity.package_id.into(), version),
-            identity.package_digest.into(),
-        );
-        Ok(())
-    }
-}
-
-struct PackageHistoryIdentity<'a> {
-    publisher_id: &'a str,
-    package_id: &'a str,
-    package_version: &'a str,
-    package_digest: &'a str,
-}
-
-/// Computes the signed file table for a package exactly as loading does.
+/// Runs the complete package admission path over caller-supplied bytes.
 ///
-/// Exposed so signing tooling cannot drift from verification: a tool that rebuilt
-/// this table itself would eventually disagree with the loader about canonical form,
-/// path ordering, or which bytes of the manifest are covered, and would then emit
-/// packages that fail to load for reasons no one can see by reading the JSON.
-pub fn package_file_table(
-    manifest_bytes: &[u8],
-    rule_files: &[(&str, &[u8])],
-    evidence_files: &[(&str, &[u8])],
-) -> Result<Vec<PackageDigestEntry>, CatalogError> {
-    let manifest_value = parse_strict_json_value(manifest_bytes)?;
-    build_file_table(&manifest_value, rule_files, evidence_files)
-}
-
-/// A publisher key supplied by the caller instead of taken from the built-in store.
-///
-/// Exists for development tooling that must verify a package signed by a key which is,
-/// by definition, not yet a shipped trust anchor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExplicitPublisherKey {
-    /// Key identifier; must equal the manifest's `publisher.keyId`.
-    pub key_id: String,
-    /// Publisher identifier; must equal the manifest's `publisher.id`.
-    pub publisher_id: String,
-    /// Base64url (unpadded) ed25519 public key.
-    pub public_key_b64u: String,
-    /// Start of the key's validity window, RFC 3339.
-    pub valid_from: String,
-    /// End of the key's validity window, RFC 3339.
-    pub valid_until: String,
-}
-
-/// Runs the complete package admission path against the built-in trust store.
-///
-/// This is the same code the built-in loader uses, so tooling can prove a package it
-/// just produced actually loads instead of asserting that it should.
+/// This is the same code the built-in loader uses, so tooling can prove a package it just
+/// produced actually loads instead of asserting that it should.
 pub fn load_package_bytes(
     manifest_bytes: &[u8],
-    signature_bytes: &[u8],
     rule_files: &[(&str, &[u8])],
     evidence_files: &[(&str, &[u8])],
 ) -> Result<LoadedCleanerPackage, CatalogError> {
-    load_package_inner(
-        manifest_bytes,
-        signature_bytes,
-        rule_files,
-        evidence_files,
-        &TrustSource::Builtin,
-        OffsetDateTime::now_utc(),
-    )
-}
-
-/// Runs the complete package admission path against one caller-supplied key.
-///
-/// Every structural check is identical to [`load_package_bytes`]; only the source of the
-/// publisher key differs. This is a verification primitive, **not** a way to widen what
-/// the application trusts: it adds nothing to the built-in store, and the shipped
-/// loader never calls it. Development signing tooling needs it because a freshly
-/// generated key cannot already be a shipped trust anchor, and verifying with the
-/// signer's own key is what proves the bytes and the signature agree.
-pub fn load_package_bytes_with_key(
-    manifest_bytes: &[u8],
-    signature_bytes: &[u8],
-    rule_files: &[(&str, &[u8])],
-    evidence_files: &[(&str, &[u8])],
-    key: &ExplicitPublisherKey,
-    now: OffsetDateTime,
-) -> Result<LoadedCleanerPackage, CatalogError> {
-    load_package_inner(
-        manifest_bytes,
-        signature_bytes,
-        rule_files,
-        evidence_files,
-        &TrustSource::Explicit(key),
-        now,
-    )
-}
-
-/// Reports whether a key id is a shipped trust anchor.
-///
-/// Lets tooling tell a contributor that a locally signed package will not be accepted
-/// by the shipped binary until the key is added to the store, rather than leaving them
-/// to discover it as an opaque load failure later.
-pub fn is_builtin_trusted_key(key_id: &str) -> bool {
-    BUILTIN_TRUST_STORE
-        .iter()
-        .any(|entry| entry.key_id == key_id && !entry.revoked)
-}
-
-/// Where a package's publisher key comes from during verification.
-enum TrustSource<'a> {
-    /// The compiled-in trust store: the only source the shipped loader uses.
-    Builtin,
-    /// A key named by the caller, used by development signing tooling.
-    Explicit(&'a ExplicitPublisherKey),
+    load_package_inner(manifest_bytes, rule_files, evidence_files)
 }
 
 impl BuiltInCleaner {
     pub fn load(&self) -> Result<LoadedCleanerPackage, CatalogError> {
-        self.load_with(
-            self.manifest_bytes,
-            self.signature_bytes,
-            self.rule_files,
-            self.evidence_files,
-        )
+        self.load_with(self.manifest_bytes, self.rule_files, self.evidence_files)
     }
 
     fn load_with(
         &self,
         manifest_bytes: &[u8],
-        signature_bytes: &[u8],
         rule_files: &[(&str, &[u8])],
         evidence_files: &[(&str, &[u8])],
     ) -> Result<LoadedCleanerPackage, CatalogError> {
-        load_package_inner(
-            manifest_bytes,
-            signature_bytes,
-            rule_files,
-            evidence_files,
-            &TrustSource::Builtin,
-            OffsetDateTime::now_utc(),
-        )
+        load_package_inner(manifest_bytes, rule_files, evidence_files)
     }
 }
 
+/// Loads and schema-validates a built-in cleaner package.
+///
+/// Rule bytes are compiled into the binary next to this code, so there is no boundary here for a
+/// signature to protect: anyone able to alter the rules can equally alter a signature, the trust
+/// store, or this function. Cryptographic admission becomes meaningful only if packages ever
+/// arrive separately from the executable - over the network, from a user directory, or from a
+/// third-party publisher - and the design note for that day is in `docs/research/`.
+///
+/// Schema validation, path validation and manifest/rule inventory agreement are kept, because
+/// those catch genuine authoring mistakes rather than an adversary.
 fn load_package_inner(
     manifest_bytes: &[u8],
-    signature_bytes: &[u8],
     rule_files: &[(&str, &[u8])],
     evidence_files: &[(&str, &[u8])],
-    trust: &TrustSource<'_>,
-    now: OffsetDateTime,
 ) -> Result<LoadedCleanerPackage, CatalogError> {
-    {
-        let manifest_value = parse_strict_json_value(manifest_bytes)?;
-        let manifest: CleanerManifest =
-            deserialize_rejecting_unknown_fields(manifest_bytes, "cleaner.json")?;
-        manifest.validate().map_err(CatalogError::Schema)?;
-        if !manifest.probes.is_empty() {
-            return Err(CatalogError::UnsupportedPayloadInventory(
-                "native probe payload inventory is not implemented".into(),
-            ));
-        }
-
-        let signature: CleanerSignatureEnvelope =
-            deserialize_rejecting_unknown_fields(signature_bytes, "SIGNATURE")?;
-        signature
-            .validate()
-            .map_err(CatalogError::InvalidSignatureStatement)?;
-
-        let mut rules = Vec::with_capacity(rule_files.len());
-        for (path, bytes) in rule_files {
-            validate_package_path(path)?;
-            let rule: CleanerRule = deserialize_rejecting_unknown_fields(bytes, path)?;
-            rule.validate().map_err(CatalogError::Schema)?;
-            rules.push(((*path).to_owned(), rule));
-        }
-        for (path, _) in evidence_files {
-            validate_package_path(path)?;
-        }
-
-        let file_table = build_file_table(&manifest_value, rule_files, evidence_files)?;
-        validate_manifest_inventory(&manifest, &file_table, &rules)?;
-
-        for manifest_rule in &manifest.rules {
-            let Some((_, bytes)) = rule_files
-                .iter()
-                .find(|(path, _)| path == &manifest_rule.path.as_str())
-            else {
-                return Err(CatalogError::MissingRule(manifest_rule.path.clone()));
-            };
-
-            let actual = sha256_hex(bytes);
-            if actual != manifest_rule.sha256 {
-                return Err(CatalogError::DigestMismatch {
-                    path: manifest_rule.path.clone(),
-                    expected: manifest_rule.sha256.clone(),
-                    actual,
-                });
-            }
-        }
-
-        let actual_package_digest =
-            compute_package_digest(&file_table).map_err(CatalogError::Schema)?;
-        if actual_package_digest != manifest.package_digest {
-            return Err(CatalogError::PackageDigestMismatch {
-                expected: manifest.package_digest.clone(),
-                actual: actual_package_digest,
-            });
-        }
-
-        match trust {
-            TrustSource::Builtin => verify_signature_with_store(
-                &manifest,
-                &signature,
-                &file_table,
-                BUILTIN_TRUST_STORE,
-                now,
-            )?,
-            TrustSource::Explicit(key) => verify_signature_bindings_and_times(
-                &manifest,
-                &signature,
-                &file_table,
-                &key.key_id,
-                &key.publisher_id,
-                &key.public_key_b64u,
-                &key.valid_from,
-                &key.valid_until,
-                now,
-            )?,
-        }
-
-        Ok(LoadedCleanerPackage {
-            manifest,
-            signature,
-            rules,
-        })
-    }
-}
-
-fn verify_signature_with_store(
-    manifest: &CleanerManifest,
-    signature: &CleanerSignatureEnvelope,
-    file_table: &[PackageDigestEntry],
-    trust_store: &[TrustedKey],
-    now: OffsetDateTime,
-) -> Result<(), CatalogError> {
-    let trusted = trust_store
-        .iter()
-        .find(|entry| entry.key_id == signature.key_id)
-        .ok_or_else(|| CatalogError::UnknownKey {
-            key_id: signature.key_id.clone(),
-        })?;
-
-    if trusted.revoked {
-        return Err(CatalogError::RevokedKey {
-            key_id: trusted.key_id.to_owned(),
-        });
-    }
-    if trusted.publisher_id != signature.publisher_id {
-        return Err(CatalogError::KeyPublisherMismatch {
-            key_id: trusted.key_id.to_owned(),
-        });
-    }
-    if signature.publisher_id != manifest.publisher.id {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "publisherId does not match manifest.publisher.id".into(),
+    let manifest: CleanerManifest =
+        deserialize_rejecting_unknown_fields(manifest_bytes, "cleaner.json")?;
+    manifest.validate().map_err(CatalogError::Schema)?;
+    if !manifest.probes.is_empty() {
+        return Err(CatalogError::UnsupportedPayloadInventory(
+            "native probe payload inventory is not implemented".into(),
         ));
     }
-    if signature.key_id != manifest.publisher.key_id {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "keyId does not match manifest.publisher.keyId".into(),
-        ));
+
+    let mut rules = Vec::with_capacity(rule_files.len());
+    for (path, bytes) in rule_files {
+        validate_package_path(path)?;
+        let rule: CleanerRule = deserialize_rejecting_unknown_fields(bytes, path)?;
+        rule.validate().map_err(CatalogError::Schema)?;
+        rules.push(((*path).to_owned(), rule));
     }
-    if signature.package_id != manifest.id {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "packageId does not match manifest.id".into(),
-        ));
-    }
-    if signature.package_version != manifest.version {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "packageVersion does not match manifest.version".into(),
-        ));
-    }
-    if signature.manifest_schema != CLEANER_MANIFEST_SCHEMA {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "manifestSchema does not match cleaner manifest schema".into(),
-        ));
-    }
-    let actual_package_digest =
-        compute_package_digest(file_table).map_err(CatalogError::InvalidSignatureStatement)?;
-    if signature.package_digest != actual_package_digest
-        || manifest.package_digest != actual_package_digest
-    {
-        return Err(CatalogError::PackageDigestMismatch {
-            expected: manifest.package_digest.clone(),
-            actual: actual_package_digest,
-        });
+    for (path, _) in evidence_files {
+        validate_package_path(path)?;
     }
 
-    let signed_at = OffsetDateTime::parse(&signature.signed_at, &Rfc3339).map_err(|_| {
-        CatalogError::InvalidSignatureStatement(ValidationError::UnsupportedFeature(
-            "invalid signature signedAt".into(),
-        ))
-    })?;
-    if signed_at > now {
-        return Err(CatalogError::SignatureFromFuture {
-            signed_at: signature.signed_at.clone(),
-        });
-    }
-    let manifest_expires_at =
-        OffsetDateTime::parse(&manifest.expires_at, &Rfc3339).map_err(|_| {
-            CatalogError::InvalidSignatureStatement(ValidationError::UnsupportedFeature(
-                "invalid manifest expiresAt".into(),
-            ))
-        })?;
-    if manifest_expires_at <= now {
-        return Err(CatalogError::ManifestExpired {
-            expires_at: manifest.expires_at.clone(),
-        });
-    }
-    if signed_at >= manifest_expires_at {
-        return Err(CatalogError::InvalidSignatureTimeOrder);
-    }
-    let key_valid_from = OffsetDateTime::parse(trusted.valid_from, &Rfc3339).map_err(|_| {
-        CatalogError::InvalidTrustedKey {
-            key_id: trusted.key_id.to_owned(),
-        }
-    })?;
-    let key_valid_until = OffsetDateTime::parse(trusted.valid_until, &Rfc3339).map_err(|_| {
-        CatalogError::InvalidTrustedKey {
-            key_id: trusted.key_id.to_owned(),
-        }
-    })?;
-    if signed_at < key_valid_from || signed_at >= key_valid_until {
-        return Err(CatalogError::SignatureOutsideKeyValidity {
-            key_id: trusted.key_id.to_owned(),
-        });
-    }
+    // Every rule the manifest claims must exist, and every shipped rule must be claimed. This is
+    // an authoring check, not an integrity one: a rule file added without a manifest entry would
+    // silently never load, which is the mistake this actually prevents.
+    validate_manifest_rule_inventory(&manifest, rule_files)?;
 
-    if let Some(expires_at_value) = &signature.expires_at {
-        let expires_at = OffsetDateTime::parse(expires_at_value, &Rfc3339).map_err(|_| {
-            CatalogError::InvalidSignatureStatement(ValidationError::UnsupportedFeature(
-                "invalid signature expiresAt".into(),
-            ))
-        })?;
-        if signed_at >= expires_at {
-            return Err(CatalogError::InvalidSignatureTimeOrder);
-        }
-        if expires_at <= now {
-            return Err(CatalogError::SignatureExpired {
-                expires_at: expires_at_value.clone(),
-            });
-        }
-    }
+    // Identity is derived from the rule bytes actually loaded, never from a field an author has
+    // to remember to update. `cleaner_set_digest` binds a clean authorization to the rule set
+    // that produced the scan; if this were the manifest's `packageDigest` string, editing a rule
+    // would leave the authorization identity unchanged and a stale authorization could execute
+    // against rules it never saw.
+    let content_digest = compute_content_digest(manifest_bytes, rule_files);
 
-    let public_key_bytes = URL_SAFE_NO_PAD
-        .decode(trusted.public_key_b64u)
-        .map_err(|_| CatalogError::InvalidTrustedKey {
-            key_id: trusted.key_id.to_owned(),
-        })?;
-    let public_key =
-        VerifyingKey::from_bytes(public_key_bytes.as_slice().try_into().map_err(|_| {
-            CatalogError::InvalidTrustedKey {
-                key_id: trusted.key_id.to_owned(),
-            }
-        })?)
-        .map_err(|_| CatalogError::InvalidTrustedKey {
-            key_id: trusted.key_id.to_owned(),
-        })?;
-    if public_key.is_weak() {
-        return Err(CatalogError::InvalidTrustedKey {
-            key_id: trusted.key_id.to_owned(),
-        });
-    }
-
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(&signature.signature)
-        .map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    let ed25519_signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    let payload =
-        canonical_signature_payload(signature).map_err(CatalogError::InvalidSignatureStatement)?;
-    public_key
-        .verify_strict(&payload, &ed25519_signature)
-        .map_err(|_| CatalogError::SignatureVerificationFailed)
-}
-
-fn verify_package_signature(
-    manifest: &CleanerManifest,
-    signature: &CleanerSignatureEnvelope,
-    file_table: &[PackageDigestEntry],
-    trusted: &TrustedPublisherKey,
-    now: OffsetDateTime,
-) -> Result<(), CatalogError> {
-    if trusted.publisher_id != signature.publisher_id {
-        return Err(CatalogError::KeyPublisherMismatch {
-            key_id: trusted.key_id.clone(),
-        });
-    }
-    verify_signature_bindings_and_times(
+    Ok(LoadedCleanerPackage {
         manifest,
-        signature,
-        file_table,
-        &trusted.key_id,
-        &trusted.publisher_id,
-        &trusted.public_key_b64u,
-        &trusted.valid_from,
-        &trusted.valid_until,
-        now,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn verify_signature_bindings_and_times(
-    manifest: &CleanerManifest,
-    signature: &CleanerSignatureEnvelope,
-    file_table: &[PackageDigestEntry],
-    key_id: &str,
-    publisher_id: &str,
-    public_key_b64u: &str,
-    valid_from: &str,
-    valid_until: &str,
-    now: OffsetDateTime,
-) -> Result<(), CatalogError> {
-    if publisher_id != signature.publisher_id {
-        return Err(CatalogError::KeyPublisherMismatch {
-            key_id: key_id.to_owned(),
-        });
-    }
-    if signature.publisher_id != manifest.publisher.id
-        || signature.key_id != manifest.publisher.key_id
-        || signature.package_id != manifest.id
-        || signature.package_version != manifest.version
-        || signature.manifest_schema != CLEANER_MANIFEST_SCHEMA
-    {
-        return Err(CatalogError::SignatureBindingMismatch(
-            "signature does not bind the exact manifest tuple".into(),
-        ));
-    }
-    let actual_package_digest =
-        compute_package_digest(file_table).map_err(CatalogError::InvalidSignatureStatement)?;
-    if signature.package_digest != actual_package_digest
-        || manifest.package_digest != actual_package_digest
-    {
-        return Err(CatalogError::PackageDigestMismatch {
-            expected: manifest.package_digest.clone(),
-            actual: actual_package_digest,
-        });
-    }
-    let signed_at = parse_signature_time(&signature.signed_at)?;
-    let manifest_expires_at = parse_signature_time(&manifest.expires_at)?;
-    if signed_at > now {
-        return Err(CatalogError::SignatureFromFuture {
-            signed_at: signature.signed_at.clone(),
-        });
-    }
-    if manifest_expires_at <= now {
-        return Err(CatalogError::ManifestExpired {
-            expires_at: manifest.expires_at.clone(),
-        });
-    }
-    if signed_at >= manifest_expires_at {
-        return Err(CatalogError::InvalidSignatureTimeOrder);
-    }
-    let key_valid_from = parse_signature_time(valid_from)?;
-    let key_valid_until = parse_signature_time(valid_until)?;
-    if signed_at < key_valid_from || signed_at >= key_valid_until {
-        return Err(CatalogError::SignatureOutsideKeyValidity {
-            key_id: key_id.to_owned(),
-        });
-    }
-    if let Some(expires_at_value) = &signature.expires_at {
-        let expires_at = parse_signature_time(expires_at_value)?;
-        if signed_at >= expires_at {
-            return Err(CatalogError::InvalidSignatureTimeOrder);
-        }
-        if expires_at <= now {
-            return Err(CatalogError::SignatureExpired {
-                expires_at: expires_at_value.clone(),
-            });
-        }
-    }
-    let payload =
-        canonical_signature_payload(signature).map_err(CatalogError::InvalidSignatureStatement)?;
-    verify_ed25519(public_key_b64u, &payload, &signature.signature)
-}
-
-fn verify_ed25519(
-    public_key_b64u: &str,
-    payload: &[u8],
-    signature: &str,
-) -> Result<(), CatalogError> {
-    let public_key_bytes = URL_SAFE_NO_PAD
-        .decode(public_key_b64u)
-        .map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    let public_key = VerifyingKey::from_bytes(
-        public_key_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| CatalogError::InvalidSignatureBytes)?,
-    )
-    .map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    if public_key.is_weak() {
-        return Err(CatalogError::InvalidSignatureBytes);
-    }
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(signature)
-        .map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    let signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| CatalogError::InvalidSignatureBytes)?;
-    public_key
-        .verify_strict(payload, &signature)
-        .map_err(|_| CatalogError::SignatureVerificationFailed)
-}
-
-fn parse_signature_time(value: &str) -> Result<OffsetDateTime, CatalogError> {
-    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
-        CatalogError::InvalidSignatureStatement(ValidationError::UnsupportedFeature(
-            "invalid RFC 3339 timestamp".into(),
-        ))
+        rules,
+        content_digest,
     })
 }
 
-fn parse_trust_time(value: &str) -> Result<OffsetDateTime, CatalogError> {
-    OffsetDateTime::parse(value, &Rfc3339)
-        .map_err(|_| CatalogError::InvalidTrustSnapshotTime(value.to_owned()))
+/// Hashes the manifest and rule bytes that were actually admitted.
+///
+/// Rule files are sorted by path so the digest depends on package content rather than on the
+/// order the caller happened to pass them in. This is an identity function, not an integrity
+/// check: it answers "are these the same rules as before", which is what authorization binding
+/// needs. It cannot detect tampering, because a package edited on disk simply produces a
+/// different, equally valid identity.
+fn compute_content_digest(manifest_bytes: &[u8], rule_files: &[(&str, &[u8])]) -> String {
+    let mut sorted = rule_files.to_vec();
+    sorted.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"sweepx.cleaner-package-content.v1\0");
+    hasher.update((manifest_bytes.len() as u64).to_le_bytes());
+    hasher.update(manifest_bytes);
+    for (path, bytes) in sorted {
+        // Length-prefix each field so that concatenation cannot be ambiguous between packages.
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
-fn build_file_table(
-    manifest_value: &serde_json::Value,
-    rule_files: &[(&str, &[u8])],
-    evidence_files: &[(&str, &[u8])],
-) -> Result<Vec<PackageDigestEntry>, CatalogError> {
-    let payload_file_count = 1usize
-        .checked_add(rule_files.len())
-        .and_then(|count| count.checked_add(evidence_files.len()))
-        .ok_or(CatalogError::PackageResourceLimit)?;
-    if payload_file_count > MAX_BUILTIN_PACKAGE_FILES {
-        return Err(CatalogError::PackageResourceLimit);
-    }
-    let manifest_without_digest = canonical_manifest_without_digest(manifest_value)?;
-    let mut total_bytes = manifest_without_digest.len();
-    if total_bytes > MAX_BUILTIN_SINGLE_FILE_BYTES {
-        return Err(CatalogError::PackageResourceLimit);
-    }
-    let mut entries = Vec::with_capacity(rule_files.len() + evidence_files.len() + 1);
-    entries.push(PackageDigestEntry {
-        path: "cleaner.json".to_owned(),
-        bytes: manifest_without_digest.len().to_string(),
-        sha256: sha256_hex(&manifest_without_digest),
-    });
-    for (path, bytes) in rule_files {
-        if bytes.len() > MAX_BUILTIN_SINGLE_FILE_BYTES {
-            return Err(CatalogError::PackageResourceLimit);
-        }
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or(CatalogError::PackageResourceLimit)?;
-        entries.push(PackageDigestEntry {
-            path: (*path).to_owned(),
-            bytes: bytes.len().to_string(),
-            sha256: sha256_hex(bytes),
-        });
-    }
-    for (path, bytes) in evidence_files {
-        if bytes.len() > MAX_BUILTIN_SINGLE_FILE_BYTES {
-            return Err(CatalogError::PackageResourceLimit);
-        }
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or(CatalogError::PackageResourceLimit)?;
-        entries.push(PackageDigestEntry {
-            path: (*path).to_owned(),
-            bytes: bytes.len().to_string(),
-            sha256: sha256_hex(bytes),
-        });
-    }
-    if total_bytes > MAX_BUILTIN_PACKAGE_BYTES {
-        return Err(CatalogError::PackageResourceLimit);
-    }
-    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
-    validate_file_table(&entries)?;
-    Ok(entries)
-}
-
-fn validate_file_table(entries: &[PackageDigestEntry]) -> Result<(), CatalogError> {
-    let mut seen_exact = std::collections::BTreeSet::new();
-    let mut seen_nfc = std::collections::BTreeSet::new();
-    let mut seen_casefold = std::collections::BTreeSet::new();
-    let mut previous_path: Option<&str> = None;
-    for entry in entries {
-        validate_package_path(&entry.path)?;
-        sweepx_cleaner_schema::validate_decimal_string(&entry.bytes, "fileTable[].bytes")
-            .map_err(CatalogError::Schema)?;
-        if entry.path == "SIGNATURE" {
-            return Err(CatalogError::ReservedPath("SIGNATURE".into()));
-        }
-        if !seen_exact.insert(entry.path.clone()) {
-            return Err(CatalogError::DuplicatePath(entry.path.clone()));
-        }
-        let nfc = entry.path.nfc().collect::<String>();
-        if nfc != entry.path {
-            return Err(CatalogError::PathNotNfc(entry.path.clone()));
-        }
-        if !seen_nfc.insert(nfc.clone()) {
-            return Err(CatalogError::PathNfcCollision(entry.path.clone()));
-        }
-        // Built-in v1 package paths are ASCII-only, so this exactly covers the admitted
-        // Windows case-insensitive namespace. Widening to Unicode requires a versioned Windows
-        // upcase-table implementation in the future archive loader.
-        let casefold = nfc.to_ascii_uppercase();
-        if !seen_casefold.insert(casefold) {
-            return Err(CatalogError::PathCasefoldCollision(entry.path.clone()));
-        }
-        if let Some(previous) = previous_path {
-            let out_of_order = previous.as_bytes() >= entry.path.as_bytes();
-            if out_of_order {
-                return Err(CatalogError::FileTableNotSorted);
-            }
-        }
-        previous_path = Some(&entry.path);
-    }
-    Ok(())
-}
-
-fn validate_manifest_inventory(
+/// Cross-checks the manifest's rule list against the rule files present in the package.
+///
+/// This is an authoring check: it catches a rule file added without a manifest entry, which
+/// would otherwise silently never load. It deliberately does not verify digests. The manifest's
+/// `packageDigest` and per-rule `sha256` fields are retained only as declared metadata, and
+/// nothing derives trust or identity from them — requiring them to be true hashes is what
+/// previously made editing a validated rule impossible without a signing key.
+fn validate_manifest_rule_inventory(
     manifest: &CleanerManifest,
-    file_table: &[PackageDigestEntry],
-    loaded_rules: &[(String, CleanerRule)],
+    rule_files: &[(&str, &[u8])],
 ) -> Result<(), CatalogError> {
-    let manifest_rule_paths = manifest
-        .rules
-        .iter()
-        .map(|rule| rule.path.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let rule_paths = file_table
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .path
-                .strip_prefix("rules/")
-                .map(|_| entry.path.as_str())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if manifest_rule_paths != rule_paths {
-        return Err(CatalogError::ManifestInventoryMismatch);
-    }
     for manifest_rule in &manifest.rules {
-        let loaded = loaded_rules
+        if !rule_files
             .iter()
-            .find(|(path, _)| path == &manifest_rule.path)
-            .ok_or(CatalogError::ManifestInventoryMismatch)?;
-        if loaded.1.id != manifest_rule.id {
-            return Err(CatalogError::ManifestRuleIdentityMismatch {
-                path: manifest_rule.path.clone(),
-                expected: manifest_rule.id.clone(),
-                actual: loaded.1.id.clone(),
-            });
+            .any(|(path, _)| path == &manifest_rule.path.as_str())
+        {
+            return Err(CatalogError::MissingRule(manifest_rule.path.clone()));
         }
     }
-    let mut manifest_ids = std::collections::BTreeSet::new();
-    for rule in &manifest.rules {
-        if !manifest_ids.insert(rule.id.as_str()) {
-            return Err(CatalogError::DuplicateRuleId(rule.id.clone()));
+
+    for (path, _) in rule_files {
+        if !manifest
+            .rules
+            .iter()
+            .any(|manifest_rule| manifest_rule.path.as_str() == *path)
+        {
+            return Err(CatalogError::ManifestInventoryMismatch);
         }
     }
-    let mut loaded_ids = std::collections::BTreeSet::new();
-    for (_, rule) in loaded_rules {
-        if !loaded_ids.insert(rule.id.as_str()) {
-            return Err(CatalogError::DuplicateRuleId(rule.id.clone()));
-        }
-    }
+
     Ok(())
 }
 
@@ -1155,25 +212,6 @@ fn validate_package_path(path: &str) -> Result<(), CatalogError> {
         return Err(CatalogError::InvalidPackagePath(path.into()));
     }
     Ok(())
-}
-
-fn canonical_manifest_without_digest(
-    manifest_value: &serde_json::Value,
-) -> Result<Vec<u8>, CatalogError> {
-    let mut object = manifest_value
-        .as_object()
-        .cloned()
-        .ok_or(CatalogError::ManifestRootNotObject)?;
-    if object.remove("packageDigest").is_none() {
-        return Err(CatalogError::ManifestPackageDigestMissing);
-    }
-    sweepx_canonical::canonicalize_value(&serde_json::Value::Object(object))
-        .map_err(CatalogError::Canonical)
-}
-
-fn parse_strict_json_value(bytes: &[u8]) -> Result<serde_json::Value, CatalogError> {
-    reject_duplicate_keys_and_trailing_bytes(bytes)?;
-    serde_json::from_slice(bytes).map_err(CatalogError::Json)
 }
 
 fn deserialize_rejecting_unknown_fields<T>(bytes: &[u8], path: &str) -> Result<T, CatalogError>
@@ -1194,19 +232,6 @@ where
         )));
     }
     Ok(value)
-}
-
-#[cfg(test)]
-fn built_in_manifest_and_table(
-    cleaner: &BuiltInCleaner,
-) -> (CleanerManifest, Vec<PackageDigestEntry>) {
-    let value = parse_strict_json_value(cleaner.manifest_bytes).expect("manifest value");
-    let manifest: CleanerManifest =
-        deserialize_rejecting_unknown_fields(cleaner.manifest_bytes, "cleaner.json")
-            .expect("manifest model");
-    let table =
-        build_file_table(&value, cleaner.rule_files, cleaner.evidence_files).expect("file table");
-    (manifest, table)
 }
 
 fn reject_duplicate_keys_and_trailing_bytes(bytes: &[u8]) -> Result<(), CatalogError> {
@@ -1316,12 +341,6 @@ impl<'de> Visitor<'de> for NoDuplicateVisitor {
     fn visit_byte_buf<E>(self, _: Vec<u8>) -> Result<Self::Value, E> {
         Ok(())
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Error)]
@@ -1466,373 +485,7 @@ pub enum CatalogError {
 
 #[cfg(test)]
 mod tests {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use ed25519_dalek::{Signer, SigningKey};
-    use serde_json::{Value, from_slice, to_vec};
-
     use super::*;
-    use sweepx_cleaner_schema::CleanerRevocation;
-
-    const TEST_ROOT_SEED: [u8; 32] = [7; 32];
-
-    fn trust_time(value: &str) -> OffsetDateTime {
-        OffsetDateTime::parse(value, &Rfc3339).unwrap()
-    }
-
-    fn signed_trust_snapshot(
-        epoch: u64,
-        generated_at: &str,
-        expires_at: &str,
-        revocations: Vec<CleanerRevocation>,
-    ) -> (Vec<u8>, TrustRootAnchor) {
-        let root = SigningKey::from_bytes(&TEST_ROOT_SEED);
-        let mut snapshot = CleanerTrustSnapshot {
-            schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
-            epoch,
-            generated_at: generated_at.into(),
-            expires_at: expires_at.into(),
-            root_key_id: "test-root".into(),
-            algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
-            keys: BUILTIN_TRUST_STORE
-                .iter()
-                .map(|package_key| TrustedPublisherKey {
-                    key_id: package_key.key_id.into(),
-                    publisher_id: package_key.publisher_id.into(),
-                    public_key_b64u: package_key.public_key_b64u.into(),
-                    usages: vec![TrustKeyUsage::DeclarativePackage],
-                    valid_from: package_key.valid_from.into(),
-                    valid_until: package_key.valid_until.into(),
-                })
-                .collect(),
-            revocations,
-            signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
-        };
-        let payload = canonical_trust_snapshot_payload(&snapshot).unwrap();
-        snapshot.signature = URL_SAFE_NO_PAD.encode(root.sign(&payload).to_bytes());
-        let anchor = TrustRootAnchor {
-            key_id: "test-root".into(),
-            public_key_b64u: URL_SAFE_NO_PAD.encode(root.verifying_key().as_bytes()),
-        };
-        (serde_json::to_vec(&snapshot).unwrap(), anchor)
-    }
-
-    #[test]
-    fn trust_snapshot_signature_and_freshness_are_verified() {
-        let (bytes, root) =
-            signed_trust_snapshot(1, "2026-08-22T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
-        let mut history = TrustHistory::default();
-        let current = verify_trust_snapshot(
-            &bytes,
-            std::slice::from_ref(&root),
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        assert_eq!(current.freshness(), TrustFreshness::Current);
-        assert_eq!(history.highest_epoch(), Some(1));
-
-        let (stale_bytes, _) =
-            signed_trust_snapshot(2, "2026-08-19T23:59:59Z", "2026-09-20T00:00:00Z", vec![]);
-        let stale = verify_trust_snapshot(
-            &stale_bytes,
-            &[root],
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        assert_eq!(stale.freshness(), TrustFreshness::Stale);
-    }
-
-    #[test]
-    fn verified_snapshot_drives_package_signature_and_stale_declarative_policy() {
-        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
-        let signature: CleanerSignatureEnvelope = from_slice(CARGO_TARGET.signature_bytes).unwrap();
-        let (bytes, root) =
-            signed_trust_snapshot(1, "2026-08-22T00:00:00Z", "2026-09-20T00:00:00Z", vec![]);
-        let mut history = TrustHistory::default();
-        let trust = verify_trust_snapshot(
-            &bytes,
-            &[root],
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        let decision = evaluate_package_trust(
-            &manifest,
-            &signature,
-            &file_table,
-            &trust,
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        assert_eq!(decision.disposition, PackageTrustDisposition::Trusted);
-
-        let (stale_bytes, stale_root) =
-            signed_trust_snapshot(2, "2026-08-19T23:59:59Z", "2026-09-20T00:00:00Z", vec![]);
-        let stale = verify_trust_snapshot(
-            &stale_bytes,
-            &[stale_root],
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        let decision = evaluate_package_trust(
-            &manifest,
-            &signature,
-            &file_table,
-            &stale,
-            trust_time("2026-08-29T00:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-        assert_eq!(decision.disposition, PackageTrustDisposition::ReportOnly);
-    }
-
-    #[test]
-    fn every_revocation_target_matches_its_exact_subject() {
-        let (manifest, _) = built_in_manifest_and_table(&CARGO_TARGET);
-        let key = TrustedPublisherKey {
-            key_id: manifest.publisher.key_id.clone(),
-            publisher_id: manifest.publisher.id.clone(),
-            public_key_b64u: BUILTIN_TRUST_STORE[0].public_key_b64u.into(),
-            usages: vec![TrustKeyUsage::DeclarativePackage],
-            valid_from: BUILTIN_TRUST_STORE[0].valid_from.into(),
-            valid_until: BUILTIN_TRUST_STORE[0].valid_until.into(),
-        };
-        let targets = [
-            CleanerRevocationTarget::PublisherKey {
-                publisher_id: manifest.publisher.id.clone(),
-                key_id: manifest.publisher.key_id.clone(),
-            },
-            CleanerRevocationTarget::PackageDigest {
-                package_digest: manifest.package_digest.clone(),
-            },
-            CleanerRevocationTarget::PackageVersion {
-                publisher_id: manifest.publisher.id.clone(),
-                package_id: manifest.id.clone(),
-                version_req: format!("={}", manifest.version),
-            },
-        ];
-        for target in targets {
-            let snapshot = VerifiedTrustSnapshot {
-                snapshot: CleanerTrustSnapshot {
-                    schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
-                    epoch: 1,
-                    generated_at: "2026-08-27T00:00:00Z".into(),
-                    expires_at: "2026-09-27T00:00:00Z".into(),
-                    root_key_id: "root".into(),
-                    algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
-                    keys: vec![key.clone()],
-                    revocations: vec![CleanerRevocation {
-                        revoked_at: "2026-08-27T00:00:00Z".into(),
-                        reason: "test revocation".into(),
-                        target,
-                    }],
-                    signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
-                },
-                digest: "sha256:test".into(),
-                freshness: TrustFreshness::Current,
-            };
-            assert!(matches!(
-                enforce_revocations(&manifest, &key, &snapshot),
-                Err(CatalogError::RevokedPackage { .. })
-            ));
-        }
-
-        let mut probe_manifest = manifest.clone();
-        probe_manifest
-            .probes
-            .push(sweepx_cleaner_schema::NativeProbeDescriptor {
-                schema: "sweepx.native-probe/v1".into(),
-                id: "probe".into(),
-                abi_version: 1,
-                artifacts: vec![sweepx_cleaner_schema::ProbeArtifact {
-                    os: sweepx_cleaner_schema::Os::Linux,
-                    arch: sweepx_cleaner_schema::Arch::X86_64,
-                    min_os: None,
-                    max_tested_os: None,
-                    package_relative_path: "probes/helper".into(),
-                    sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                        .into(),
-                }],
-                input_schema: "in/v1".into(),
-                output_schema: "out/v1".into(),
-                capabilities: vec![],
-                sandbox_profile: "strict".into(),
-                network: sweepx_cleaner_schema::DenyPolicy::Deny,
-                filesystem_read_scopes: vec![],
-                cpu_millis: 1,
-                rss_bytes: 1,
-                handle_count: 1,
-                timeout_millis: 1,
-                stdout_bytes: 1,
-                stderr_bytes: 1,
-            });
-        let snapshot = VerifiedTrustSnapshot {
-            snapshot: CleanerTrustSnapshot {
-                schema: sweepx_cleaner_schema::CLEANER_TRUST_SNAPSHOT_SCHEMA.into(),
-                epoch: 1,
-                generated_at: "2026-08-27T00:00:00Z".into(),
-                expires_at: "2026-09-27T00:00:00Z".into(),
-                root_key_id: "root".into(),
-                algorithm: sweepx_cleaner_schema::SignatureAlgorithm::Ed25519,
-                keys: vec![key.clone()],
-                revocations: vec![CleanerRevocation {
-                    revoked_at: "2026-08-27T00:00:00Z".into(),
-                    reason: "probe revoked".into(),
-                    target: CleanerRevocationTarget::ProbeDigest {
-                        probe_digest:
-                            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                                .into(),
-                    },
-                }],
-                signature: URL_SAFE_NO_PAD.encode([0_u8; 64]),
-            },
-            digest: "sha256:test".into(),
-            freshness: TrustFreshness::Current,
-        };
-        assert!(matches!(
-            enforce_revocations(&probe_manifest, &key, &snapshot),
-            Err(CatalogError::RevokedPackage { .. })
-        ));
-    }
-
-    #[test]
-    fn trust_snapshot_tamper_epoch_rollback_and_epoch_reuse_fail_closed() {
-        let (bytes, root) =
-            signed_trust_snapshot(5, "2026-08-27T00:00:00Z", "2026-09-27T00:00:00Z", vec![]);
-        let mut history = TrustHistory::default();
-        verify_trust_snapshot(
-            &bytes,
-            std::slice::from_ref(&root),
-            trust_time("2026-08-27T12:00:00Z"),
-            &mut history,
-        )
-        .unwrap();
-
-        let (rollback, _) =
-            signed_trust_snapshot(4, "2026-08-27T00:00:00Z", "2026-09-27T00:00:00Z", vec![]);
-        assert!(matches!(
-            verify_trust_snapshot(
-                &rollback,
-                std::slice::from_ref(&root),
-                trust_time("2026-08-27T12:00:00Z"),
-                &mut history
-            ),
-            Err(CatalogError::TrustSnapshotRollback { .. })
-        ));
-
-        let revocation = CleanerRevocation {
-            revoked_at: "2026-08-27T00:00:00Z".into(),
-            reason: "test".into(),
-            target: CleanerRevocationTarget::PackageDigest {
-                package_digest:
-                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
-            },
-        };
-        let (reused, _) = signed_trust_snapshot(
-            5,
-            "2026-08-27T00:00:00Z",
-            "2026-09-27T00:00:00Z",
-            vec![revocation],
-        );
-        assert!(matches!(
-            verify_trust_snapshot(
-                &reused,
-                &[root],
-                trust_time("2026-08-27T12:00:00Z"),
-                &mut history
-            ),
-            Err(CatalogError::TrustSnapshotEpochCollision { epoch: 5 })
-        ));
-
-        let mut tampered: Value = from_slice(&bytes).unwrap();
-        tampered["generatedAt"] = Value::String("2026-08-26T00:00:00Z".into());
-        let mut fresh_history = TrustHistory::default();
-        assert!(matches!(
-            verify_trust_snapshot(
-                &to_vec(&tampered).unwrap(),
-                &[TrustRootAnchor {
-                    key_id: "test-root".into(),
-                    public_key_b64u: URL_SAFE_NO_PAD.encode(
-                        SigningKey::from_bytes(&TEST_ROOT_SEED)
-                            .verifying_key()
-                            .as_bytes()
-                    ),
-                }],
-                trust_time("2026-08-27T12:00:00Z"),
-                &mut fresh_history
-            ),
-            Err(CatalogError::TrustSnapshotSignatureVerificationFailed)
-        ));
-    }
-
-    #[test]
-    fn package_history_rejects_same_version_substitution_and_rollback() {
-        let mut history = TrustHistory::default();
-        let first = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let other = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        history
-            .observe_package_identity("org.sweepx", "org.sweepx.test", "2.0.0", first)
-            .unwrap();
-        assert!(matches!(
-            history.observe_package_identity("org.sweepx", "org.sweepx.test", "2.0.0", other),
-            Err(CatalogError::SameVersionDigestCollision { .. })
-        ));
-        assert!(matches!(
-            history.observe_package_identity("org.sweepx", "org.sweepx.test", "1.9.9", first),
-            Err(CatalogError::PackageVersionRollback { .. })
-        ));
-        assert!(matches!(
-            history.observe_package_identity("other.publisher", "org.sweepx.test", "3.0.0", first),
-            Err(CatalogError::PackagePublisherSubstitution { .. })
-        ));
-    }
-
-    #[test]
-    fn stale_policy_is_report_only_for_declarative_and_disabled_for_executable_payloads() {
-        let mut manifest = built_in_manifest_and_table(&CARGO_TARGET).0;
-        let key = TrustedPublisherKey {
-            key_id: "key".into(),
-            publisher_id: "org.sweepx".into(),
-            public_key_b64u: URL_SAFE_NO_PAD.encode([9_u8; 32]),
-            usages: vec![
-                TrustKeyUsage::DeclarativePackage,
-                TrustKeyUsage::NativeProbe,
-            ],
-            valid_from: "2026-01-01T00:00:00Z".into(),
-            valid_until: "2027-01-01T00:00:00Z".into(),
-        };
-        assert_eq!(
-            package_disposition(&manifest, &key, TrustFreshness::Stale).unwrap(),
-            PackageTrustDisposition::ReportOnly
-        );
-        manifest
-            .probes
-            .push(sweepx_cleaner_schema::NativeProbeDescriptor {
-                schema: "sweepx.native-probe/v1".into(),
-                id: "probe".into(),
-                abi_version: 1,
-                artifacts: vec![],
-                input_schema: "in/v1".into(),
-                output_schema: "out/v1".into(),
-                capabilities: vec![],
-                sandbox_profile: "strict".into(),
-                network: sweepx_cleaner_schema::DenyPolicy::Deny,
-                filesystem_read_scopes: vec![],
-                cpu_millis: 1,
-                rss_bytes: 1,
-                handle_count: 1,
-                timeout_millis: 1,
-                stdout_bytes: 1,
-                stderr_bytes: 1,
-            });
-        assert_eq!(
-            package_disposition(&manifest, &key, TrustFreshness::Stale).unwrap(),
-            PackageTrustDisposition::Disabled
-        );
-    }
 
     #[test]
     fn built_ins_load_and_validate() {
@@ -1842,6 +495,48 @@ mod tests {
         }
     }
 
+    /// Editing a rule must not be blocked, but it must not go unnoticed either.
+    ///
+    /// Removing package signing made rules freely editable; the risk that introduced is that a
+    /// clean authorized against one rule set could execute against another. `content_digest` is
+    /// what prevents that, so it has to move when the bytes move. The manifest's declared
+    /// `packageDigest` is held fixed here on purpose: that is exactly the situation an author who
+    /// edits a rule and updates nothing else produces.
+    #[test]
+    fn editing_a_rule_changes_the_content_digest_but_still_loads() {
+        let manifest = CHROMIUM_CACHE.manifest_bytes;
+        let original = CHROMIUM_CACHE.load().expect("baseline package loads");
+
+        let (rule_path, rule_bytes) = CHROMIUM_CACHE.rule_files[0];
+        // Rename a selector component rather than matching the file's exact indentation: the edit
+        // only has to change the bytes and stay schema-valid, and "Cache" is present regardless of
+        // how the JSON happens to be formatted.
+        let edited_text = String::from_utf8(rule_bytes.to_vec())
+            .expect("rule is utf-8")
+            .replace("\"Code Cache\"", "\"GPUCache\"");
+        assert_ne!(
+            edited_text.as_bytes(),
+            rule_bytes,
+            "the edit must actually change the bytes"
+        );
+
+        let edited = load_package_bytes(
+            manifest,
+            &[(rule_path, edited_text.as_bytes())],
+            CHROMIUM_CACHE.evidence_files,
+        )
+        .expect("an edited rule loads without any signature or digest refresh");
+
+        assert_eq!(
+            edited.manifest.package_digest, original.manifest.package_digest,
+            "the declared manifest digest is untouched, as an author would leave it"
+        );
+        assert_ne!(
+            edited.content_digest, original.content_digest,
+            "authorization identity must follow the rule bytes"
+        );
+    }
+
     #[test]
     fn chromium_manifest_is_report_only_on_unknown_version() {
         let loaded = CHROMIUM_CACHE.load().expect("chromium cleaner loads");
@@ -1849,117 +544,6 @@ mod tests {
             loaded.manifest.target_versions.unknown,
             sweepx_cleaner_schema::UnknownVersionBehavior::ReportOnly
         );
-    }
-
-    #[test]
-    fn tampered_rule_fails_load() {
-        let mut bytes = CARGO_TARGET.rule_files[0].1.to_vec();
-        bytes[10] ^= 1;
-        let err = CARGO_TARGET
-            .load_with(
-                CARGO_TARGET.manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                &[("rules/cargo-target.json", &bytes)],
-                CARGO_TARGET.evidence_files,
-            )
-            .expect_err("tampered rule must fail");
-        assert!(matches!(
-            err,
-            CatalogError::DigestMismatch { .. } | CatalogError::Json(_)
-        ));
-    }
-
-    #[test]
-    fn tampered_evidence_fails_load() {
-        let mut evidence = CARGO_TARGET.evidence_files[0].1.to_vec();
-        evidence.extend_from_slice(b"\nTAMPER\n");
-        let err = CARGO_TARGET
-            .load_with(
-                CARGO_TARGET.manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                CARGO_TARGET.rule_files,
-                &[("evidence/README.md", &evidence)],
-            )
-            .expect_err("tampered evidence must fail");
-        assert!(matches!(err, CatalogError::PackageDigestMismatch { .. }));
-    }
-
-    #[test]
-    fn tampered_manifest_fails_load() {
-        let mut manifest: Value = from_slice(CARGO_TARGET.manifest_bytes).expect("manifest json");
-        manifest["description"] = Value::String("tampered".into());
-        let manifest_bytes = to_vec(&manifest).expect("serialize manifest");
-        let err = CARGO_TARGET
-            .load_with(
-                &manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                CARGO_TARGET.rule_files,
-                CARGO_TARGET.evidence_files,
-            )
-            .expect_err("tampered manifest must fail");
-        assert!(matches!(err, CatalogError::PackageDigestMismatch { .. }));
-    }
-
-    #[test]
-    fn unknown_key_fails_closed() {
-        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
-        let mut signature: CleanerSignatureEnvelope =
-            from_slice(CARGO_TARGET.signature_bytes).expect("signature json");
-        signature.key_id = "unknown-key".into();
-
-        let err = verify_signature_with_store(
-            &manifest,
-            &signature,
-            &file_table,
-            BUILTIN_TRUST_STORE,
-            OffsetDateTime::parse("2026-08-27T12:00:00Z", &Rfc3339).expect("time"),
-        )
-        .expect_err("unknown key must fail");
-        assert!(matches!(err, CatalogError::UnknownKey { .. }));
-    }
-
-    #[test]
-    fn expired_signature_fails_closed() {
-        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
-        let signature: CleanerSignatureEnvelope =
-            from_slice(CARGO_TARGET.signature_bytes).expect("signature json");
-
-        let err = verify_signature_with_store(
-            &manifest,
-            &signature,
-            &file_table,
-            BUILTIN_TRUST_STORE,
-            OffsetDateTime::parse("2028-08-27T12:00:00Z", &Rfc3339).expect("time"),
-        )
-        .expect_err("expired manifest/signature must fail");
-        assert!(matches!(
-            err,
-            CatalogError::ManifestExpired { .. } | CatalogError::SignatureExpired { .. }
-        ));
-    }
-
-    #[test]
-    fn revoked_key_fails_closed() {
-        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
-        let signature: CleanerSignatureEnvelope =
-            from_slice(CARGO_TARGET.signature_bytes).expect("signature json");
-        let revoked_store = [TrustedKey {
-            key_id: "builtin-cargo-cleaner-key-2026-08",
-            publisher_id: "org.sweepx",
-            public_key_b64u: "4t2uqdFY4Umyb2rKnunpw4NS0Y34ywPtEM9v1XS97Dk",
-            valid_from: "2026-08-29T00:00:00Z",
-            valid_until: "2027-08-26T00:00:00Z",
-            revoked: true,
-        }];
-        let err = verify_signature_with_store(
-            &manifest,
-            &signature,
-            &file_table,
-            &revoked_store,
-            OffsetDateTime::parse("2026-08-29T12:00:00Z", &Rfc3339).expect("time"),
-        )
-        .expect_err("revoked key must fail");
-        assert!(matches!(err, CatalogError::RevokedKey { .. }));
     }
 
     #[test]
@@ -1974,145 +558,5 @@ mod tests {
         let error = reject_duplicate_keys_and_trailing_bytes(br#"{} {}"#)
             .expect_err("trailing JSON must fail");
         assert!(matches!(error, CatalogError::Json(_)));
-    }
-
-    #[test]
-    fn unknown_manifest_fields_are_rejected() {
-        let mut manifest: Value = from_slice(CARGO_TARGET.manifest_bytes).unwrap();
-        manifest["unexpectedField"] = Value::Bool(true);
-        let manifest_bytes = to_vec(&manifest).unwrap();
-        assert!(matches!(
-            CARGO_TARGET.load_with(
-                &manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                CARGO_TARGET.rule_files,
-                CARGO_TARGET.evidence_files
-            ),
-            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
-        ));
-    }
-
-    #[test]
-    fn unknown_top_level_rule_field_is_rejected() {
-        let mut rule: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
-        rule["unexpectedField"] = Value::Bool(true);
-        let rule_bytes = to_vec(&rule).unwrap();
-        assert!(matches!(
-            CARGO_TARGET.load_with(
-                CARGO_TARGET.manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                &[("rules/cargo-target.json", &rule_bytes)],
-                CARGO_TARGET.evidence_files
-            ),
-            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
-        ));
-    }
-
-    #[test]
-    fn unknown_nested_rule_and_signature_fields_are_rejected() {
-        let mut rule: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
-        rule["analysis"]["unexpectedField"] = Value::Bool(true);
-        let rule_bytes = to_vec(&rule).unwrap();
-        assert!(matches!(
-            CARGO_TARGET.load_with(
-                CARGO_TARGET.manifest_bytes,
-                CARGO_TARGET.signature_bytes,
-                &[("rules/cargo-target.json", &rule_bytes)],
-                CARGO_TARGET.evidence_files
-            ),
-            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
-        ));
-
-        let mut signature: Value = from_slice(CARGO_TARGET.signature_bytes).unwrap();
-        signature["unexpectedField"] = Value::Bool(true);
-        let signature_bytes = to_vec(&signature).unwrap();
-        assert!(matches!(
-            CARGO_TARGET.load_with(
-                CARGO_TARGET.manifest_bytes,
-                &signature_bytes,
-                CARGO_TARGET.rule_files,
-                CARGO_TARGET.evidence_files
-            ),
-            Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
-        ));
-    }
-
-    #[test]
-    fn unknown_nested_ast_fields_are_rejected_by_catalog_loader() {
-        let mut call: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
-        call["analysis"]["factPredicates"][0]["unexpectedField"] = Value::Bool(true);
-
-        let mut field_ref: Value = from_slice(CARGO_TARGET.rule_files[0].1).unwrap();
-        field_ref["analysis"]["factPredicates"][0]["args"][0]["unexpectedField"] =
-            Value::Bool(true);
-
-        for rule in [call, field_ref] {
-            let rule_bytes = to_vec(&rule).unwrap();
-            assert!(matches!(
-                CARGO_TARGET.load_with(
-                    CARGO_TARGET.manifest_bytes,
-                    CARGO_TARGET.signature_bytes,
-                    &[("rules/cargo-target.json", &rule_bytes)],
-                    CARGO_TARGET.evidence_files
-                ),
-                Err(CatalogError::Json(_)) | Err(CatalogError::UnknownOrDefaultedField(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn file_table_includes_canonical_manifest_and_excludes_signature() {
-        let (manifest, table) = built_in_manifest_and_table(&CARGO_TARGET);
-
-        assert_eq!(table.first().unwrap().path, "cleaner.json");
-        assert!(table.iter().all(|entry| entry.path != "SIGNATURE"));
-        assert_eq!(
-            table
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "cleaner.json",
-                "evidence/README.md",
-                "rules/cargo-target.json"
-            ]
-        );
-        assert_eq!(
-            compute_package_digest(&table).unwrap(),
-            manifest.package_digest
-        );
-    }
-
-    #[test]
-    fn signature_time_rules_fail_closed_before_crypto() {
-        let (manifest, file_table) = built_in_manifest_and_table(&CARGO_TARGET);
-        let signature: CleanerSignatureEnvelope =
-            from_slice(CARGO_TARGET.signature_bytes).expect("signature json");
-
-        let future_now = OffsetDateTime::parse("2026-08-26T00:00:00Z", &Rfc3339).expect("time");
-        assert!(matches!(
-            verify_signature_with_store(
-                &manifest,
-                &signature,
-                &file_table,
-                BUILTIN_TRUST_STORE,
-                future_now
-            ),
-            Err(CatalogError::SignatureFromFuture { .. })
-        ));
-
-        let mut invalid_order = signature;
-        invalid_order.expires_at = Some(invalid_order.signed_at.clone());
-        let now = OffsetDateTime::parse("2026-08-29T00:00:00Z", &Rfc3339).expect("time");
-        assert!(matches!(
-            verify_signature_with_store(
-                &manifest,
-                &invalid_order,
-                &file_table,
-                BUILTIN_TRUST_STORE,
-                now
-            ),
-            Err(CatalogError::InvalidSignatureTimeOrder)
-        ));
     }
 }

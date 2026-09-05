@@ -115,37 +115,45 @@ rather than to coverage, and the two are now distinguished: per-entry rows and p
 folded into their directory aggregate before being dropped, so truncating them makes the listing
 partial without making any total wrong. On that tree all 12,001 aggregates are exact.
 
-### Admission blocker resolved: signing now exists in this repository
+### Admission blocker resolved: rule packages are no longer signed
 
-**Superseded (2026-09-02).** The blocker described below was real: adopting a rule is not an
-editing task, because `BuiltInCleaner::load` recomputes each package's digest and verifies the
-`SIGNATURE` envelope against `BUILTIN_TRUST_STORE`, so an edited rule file fails
-`built_ins_load_and_validate` unless the package is re-signed. At the time the repository held only
-the ed25519 **public** keys (`builtin-cleaner-key-2026`, `builtin-cargo-cleaner-key-2026-08`), no
-private key, and no signing binary — which also meant a contributor on a different machine could
-not modify a rule at all.
+**Superseded twice. Current state (2026-09-05): packages ship unsigned and rule JSON is directly
+editable.** Signing was removed before the first publish. It was self-signed — the same repository
+held the key, the verifier and the trust anchor, and the binary that checked a signature was built
+from the same artifact as the package it checked. An attacker able to modify the shipped rules could
+equally modify the verifier, so the check could not establish provenance; what it did establish was
+that a contributor without the private key could not adopt a rule at all.
 
-`DESIGN.md` R-24 already required build-time signature generation, so the gap was a missing tool,
-not a missing design. The `sweepx-cleaner-sign` crate now provides `keygen` and `sign`. Two
-decisions matter for anyone using it:
+Removed with it: `BUILTIN_TRUST_STORE`, the ed25519 verification path, key revocation and
+epoch-rollback machinery, the `SIGNATURE` envelopes, the `sweepx-cleaner-sign` crate, and the
+byte-recomputation of `packageDigest` and per-rule `sha256`. Those manifest fields remain as declared
+metadata and are no longer compared against anything.
 
-- It **reuses the verifier's own functions** (`package_file_table`, `load_package_bytes`) rather
-  than reimplementing them. A second implementation would drift on canonical form, path ordering,
-  or digest coverage, and the drift would only appear as a verification failure much later.
-- A development key is by definition absent from the built-in trust store, so the tool's final
-  self-check would always fail against the shipped loader. `load_package_bytes_with_key` accepts an
-  explicit publisher key and applies structurally identical checks, differing only in key source.
-  The tool deliberately prints the trust-anchor entry instead of editing `BUILTIN_TRUST_STORE`, so
-  a new anchor always appears in a reviewed diff.
+What replaced it, and why it is not merely a deletion: authorization binding needed a real answer.
+`cleaner_set_digest` binds a clean authorization to the rule set that produced the scan, so that a
+stale authorization cannot execute against rules it never saw. It previously read
+`manifest.package_digest` — a hand-maintained string. Once that string stopped being verified,
+**editing a rule left the authorization identity unchanged**, which was measured on this host: the
+same `sha256:b8ceb19e…` before and after adding a selector. `LoadedCleanerPackage::content_digest`
+now hashes the manifest and rule bytes as loaded, and the same edit moves the reported digest
+(`0e9b8853…` → `629b9888…`). Verified through the built binary, not only in-process:
+`cleaner list` reports `errors: []` with both packages loaded and no digest refreshed by hand.
 
-Verified on this host: editing a rule moved the package digest from `5edda6…` to `30b339…`;
-re-signing unchanged content reports `unchanged` and reproduces the same digest, so signing
-produces no diff noise. Acceptance tests cover both directions, including that a development
-signature is rejected by the built-in trust store as `UnknownKey`.
+Retained checks, none of which need a key: JSON strict parsing (duplicate keys, trailing bytes),
+schema validation, package-path validation, and manifest/rule inventory agreement in both
+directions. These catch authoring mistakes — a rule file added without a manifest entry would
+otherwise silently never load.
 
-Rule JSON edits still change the package digest, so the `SIGNATURE` must be regenerated in the
-same change, and the files must stay LF-normalized: the digest is computed over exact bytes, which
-is why `.gitattributes` pins these paths.
+The historical detail below is kept because it explains why adopting a rule was once impossible.
+At that time the repository held only the ed25519 **public** keys
+(`builtin-cleaner-key-2026`, `builtin-cargo-cleaner-key-2026-08`), no private key and no signing
+binary, so `BuiltInCleaner::load` rejected any edited rule via `built_ins_load_and_validate`. A
+signing tool was added in response (2026-09-02), which made rules editable *if* you re-signed;
+removing the mechanism outright is what made them editable without ceremony.
+
+Note that the digest gate, not the signature, was the binding constraint: refreshing a rule's
+`sha256` but leaving `SIGNATURE` untouched failed with `PackageDigestMismatch`
+(`3f15fdee…` vs `1bedef76…`), never with a signature error.
 
 ### Batch 1 admission outcome (2026-09-02)
 
