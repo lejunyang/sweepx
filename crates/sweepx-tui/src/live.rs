@@ -223,6 +223,64 @@ impl DetailRescanState {
     }
 }
 
+/// The fewest trailing path components that still tell every root apart.
+///
+/// A fixed component count cannot work: `…\Default\IndexedDB` and
+/// `…\Default\Service Worker\CacheStorage` sit at different depths, so taking the last four
+/// components keeps the browser name for one and drops it for the other - rendering Edge and Edge
+/// Dev CacheStorage as the very same string. In a view that can delete data, two rows that read
+/// identically are not a cosmetic problem.
+///
+/// So the count is chosen from the paths actually on screen: grow it until no two labels collide, or
+/// until the paths are exhausted (identical paths cannot be separated, and duplicates are not
+/// produced by root discovery anyway).
+const MIN_ROOT_LABEL_COMPONENTS: usize = 2;
+
+fn path_components(path: &str) -> Option<(char, Vec<&str>)> {
+    let separator = separator_for(path)?;
+    Some((
+        separator,
+        path.split(separator)
+            .filter(|part| !part.is_empty())
+            .collect(),
+    ))
+}
+
+/// Renders one path as its trailing `components` segments, marking any elision.
+fn root_label_with_components(path: &str, components: usize) -> String {
+    let cleaned = hierarchy_key(path);
+    let Some((separator, parts)) = path_components(&cleaned) else {
+        return cleaned;
+    };
+    if parts.len() <= components {
+        return cleaned;
+    }
+    let tail = parts[parts.len() - components..].join(&separator.to_string());
+    format!("…{separator}{tail}")
+}
+
+/// Chooses the shared component count that keeps every root label distinct.
+fn root_label_components(paths: &[String]) -> usize {
+    let deepest = paths
+        .iter()
+        .filter_map(|path| path_components(&hierarchy_key(path)).map(|(_, parts)| parts.len()))
+        .max()
+        .unwrap_or(MIN_ROOT_LABEL_COMPONENTS);
+    for components in MIN_ROOT_LABEL_COMPONENTS..=deepest.max(MIN_ROOT_LABEL_COMPONENTS) {
+        let mut rendered: Vec<String> = paths
+            .iter()
+            .map(|path| root_label_with_components(path, components))
+            .collect();
+        rendered.sort();
+        let before = rendered.len();
+        rendered.dedup();
+        if rendered.len() == before {
+            return components;
+        }
+    }
+    deepest.max(MIN_ROOT_LABEL_COMPONENTS)
+}
+
 /// One row in the in-memory scan snapshot browser.
 ///
 /// Aggregate evidence is attached to its matching directory row. Aggregates are
@@ -243,6 +301,8 @@ impl BrowserRow {
         detail_rescan_state: DetailRescanState,
         root: bool,
     ) -> Self {
+        // Root rows are relabelled together once the level is assembled, because how short a label
+        // can safely be depends on the other roots beside it. A single root keeps its full path.
         let label = if root {
             sanitize_terminal_text(&entry.display_path)
         } else {
@@ -1376,10 +1436,11 @@ impl BrowserModel {
         };
         let page_end = total_rows.min(page_start + max_level_rows);
         let row_indices = self.current_level_rows()[page_start..page_end].to_vec();
-        let rows = row_indices
+        let mut rows: Vec<BrowserRow> = row_indices
             .iter()
             .map(|index| self.nodes[*index].to_row())
             .collect();
+        shorten_root_labels(&mut rows);
         self.loaded_level = LoadedLevel {
             total_rows,
             page_start,
@@ -2689,6 +2750,30 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel) 
     frame.render_widget(table, area);
 }
 
+/// Shortens the root labels of one rendered level so they stay distinct but fit the name column.
+///
+/// Applied to the level actually on screen rather than at row construction, since the shortest safe
+/// label depends on the other roots visible beside it. Non-root rows already show a basename and are
+/// left untouched. A single root keeps its full path: there is nothing to disambiguate, and the whole
+/// path is the more useful text.
+fn shorten_root_labels(rows: &mut [BrowserRow]) {
+    let root_paths: Vec<String> = rows
+        .iter()
+        .filter(|row| row.root)
+        .map(|row| row.entry.display_path.clone())
+        .collect();
+    if root_paths.len() < 2 {
+        return;
+    }
+    let components = root_label_components(&root_paths);
+    for row in rows.iter_mut().filter(|row| row.root) {
+        row.label = sanitize_terminal_text(&root_label_with_components(
+            &row.entry.display_path,
+            components,
+        ));
+    }
+}
+
 fn count_value_label(value: &sweepx_model::CountValue) -> String {
     match value {
         sweepx_model::EvidenceValue::Known { value } => value.to_string(),
@@ -3391,6 +3476,18 @@ mod tests {
         .unwrap()
     }
 
+    /// A root row for label tests, built from the shared entry fixture so it carries real identity.
+    fn root_row_for(path: &str) -> BrowserRow {
+        BrowserRow::from_owned(
+            entry(path, ObjectType::Directory, 1, 1, None),
+            None,
+            DetailRescanState::Snapshot {
+                revision: DecimalU128::ZERO,
+            },
+            true,
+        )
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
             code,
@@ -3398,6 +3495,66 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn root_labels_grow_until_no_two_roots_read_alike() {
+        // The exact case that a fixed component count got wrong: IndexedDB sits one level shallower
+        // than Service Worker\CacheStorage, so four components kept the browser name for the former
+        // and dropped it for the latter - Edge and Edge Dev CacheStorage rendered identically.
+        let paths: Vec<String> = vec![
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB".to_string(),
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\Service Worker\CacheStorage".to_string(),
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge Dev\User Data\Default\IndexedDB".to_string(),
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge Dev\User Data\Default\Service Worker\CacheStorage".to_string(),
+        ];
+        let components = root_label_components(&paths);
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|path| root_label_with_components(path, components))
+            .collect();
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            rendered.len(),
+            "no two roots may render the same text in a view that can delete: {rendered:?}"
+        );
+        for label in &rendered {
+            assert!(
+                label.contains("Edge Dev") || label.contains(r"Edge\"),
+                "each label must still name its browser: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_root_keeps_its_full_path() {
+        // Nothing to disambiguate, and the complete path is the more useful text.
+        let mut rows = vec![root_row_for(
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB",
+        )];
+        shorten_root_labels(&mut rows);
+        assert_eq!(
+            rows[0].label(),
+            r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB"
+        );
+    }
+
+    #[test]
+    fn shortened_root_labels_stay_distinct_and_name_the_browser() {
+        let mut rows = vec![
+            root_row_for(
+                r"C:\Users\LJY\AppData\Local\Microsoft\Edge\User Data\Default\Service Worker\CacheStorage",
+            ),
+            root_row_for(
+                r"C:\Users\LJY\AppData\Local\Microsoft\Edge Dev\User Data\Default\Service Worker\CacheStorage",
+            ),
+        ];
+        shorten_root_labels(&mut rows);
+        assert_ne!(rows[0].label(), rows[1].label());
+        assert!(rows[0].label().starts_with('…'), "got {}", rows[0].label());
     }
 
     #[test]
