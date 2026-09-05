@@ -189,6 +189,12 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+    /// Report browser site storage per origin. Never deletes and never pre-selects.
+    ///
+    /// Separate from `junk` on purpose. Junk means "rebuildable"; this is R3 site application
+    /// state — PWA offline data and structured site data — which the browser itself only ever
+    /// removes one site at a time and which is not safe to treat as disposable in bulk.
+    SiteStorage,
     /// Move one file or directory to the operating system Trash/Recycle Bin.
     Trash {
         #[arg(required = true, value_name = "ABSOLUTE_PATH")]
@@ -516,6 +522,9 @@ fn main() -> ProcessExitCode {
                 }
             };
             return run_junk_scan(&context, format, size_unit, roots, system);
+        }
+        Commands::SiteStorage => {
+            return run_site_storage(&context, format, size_unit);
         }
         Commands::Cache { command } => match command {
             CacheCommands::Status => {
@@ -1457,6 +1466,421 @@ fn render_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::Scan
     rule.required_markers
         .iter()
         .all(|marker| root.join(marker).exists())
+}
+/// One origin's share of a browser storage subsystem, with the bytes it holds.
+///
+/// The unit is the **full storage key**, not a hostname. Chromium partitions third-party storage by
+/// top-level site, so one host can hold several mutually invisible sets of data — measured on this
+/// host, `googletagmanager.com` under `codacy.com` is distinct from the same host elsewhere.
+/// Merging on hostname would present unrelated parties as one row and, if ever acted on, clear
+/// isolated data the user never selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OriginUsage {
+    /// The storage key as the browser recorded it, partition included.
+    key: String,
+    bytes: u64,
+    /// Directories that make up this key's usage. One origin routinely owns several: IndexedDB
+    /// keeps `.leveldb` and `.blob` apart, and counting them as separate origins would report the
+    /// same site twice.
+    directories: Vec<PathBuf>,
+}
+
+/// Reads the origin out of one `CacheStorage` bucket directory.
+///
+/// The directory name is a one-way hash of the origin — upstream documents the layout as
+/// `CacheStorage/<hash of origin>/<GUID>/` — so `index.txt` is the only route from a directory back
+/// to the site that owns it.
+///
+/// Measured 2026-09-05: the origin is stored as **plain UTF-8**. The file does contain UTF-16
+/// stretches, but those hold the hash's hex string, not the origin; an early note recording the
+/// origin as UTF-16LE was wrong. The pattern is scheme-agnostic because this host has a
+/// `chrome-extension://` key that an `https?`-only match silently drops.
+fn cache_storage_origin(bucket: &Path) -> Option<String> {
+    let raw = std::fs::read(bucket.join("index.txt")).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    extract_storage_key(&text)
+}
+
+/// Pulls the origin out of decoded `index.txt` text.
+///
+/// The origin is a length-delimited protobuf field, so the byte before it is that string's own
+/// length. That is what distinguishes it from a URL embedded in a neighbouring field: measured across
+/// all 18 buckets on this host, every real origin is preceded by exactly its own length — 19 for
+/// `https://www.msn.cn`, 52 for a `chrome-extension://` key — while a Workbox cache name
+/// (`workbox-precache-v2-https://gamemap.app/`) is preceded by the length of the whole name, which
+/// does not match the URL that starts partway into it.
+///
+/// A character-class boundary was tried first and rejected: the length prefix is itself often a
+/// digit or a letter, so treating "preceded by an alphanumeric" as disqualifying silently dropped the
+/// extension origin whose prefix byte is `0x34`.
+fn extract_storage_key(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut found = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        // A scheme is [a-z][a-z0-9+-.]* immediately followed by "://".
+        if !bytes[index].is_ascii_lowercase() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut cursor = index;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_lowercase()
+                || bytes[cursor].is_ascii_digit()
+                || matches!(bytes[cursor], b'+' | b'-' | b'.'))
+        {
+            cursor += 1;
+        }
+        if cursor == start || !bytes[cursor..].starts_with(b"://") {
+            index = start + 1;
+            continue;
+        }
+        cursor += 3;
+        let host_start = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric()
+                || matches!(bytes[cursor], b'.' | b'-' | b'_'))
+        {
+            cursor += 1;
+        }
+        if cursor == host_start {
+            index = start + 1;
+            continue;
+        }
+        let mut end = cursor;
+        // A partitioned key continues as "/^0" followed by the top-level site. The separator must
+        // be parsed explicitly: eliding it once produced a single fused pseudo-origin named
+        // `codacy.comwww.googletagmanager.com` out of two unrelated parties.
+        if bytes[cursor..].starts_with(b"/^0") {
+            let mut partition = cursor + 3;
+            let scheme_start = partition;
+            while partition < bytes.len()
+                && (bytes[partition].is_ascii_lowercase()
+                    || bytes[partition].is_ascii_digit()
+                    || matches!(bytes[partition], b'+' | b'-' | b'.'))
+            {
+                partition += 1;
+            }
+            if partition > scheme_start && bytes[partition..].starts_with(b"://") {
+                partition += 3;
+                let site_start = partition;
+                while partition < bytes.len()
+                    && (bytes[partition].is_ascii_alphanumeric()
+                        || matches!(bytes[partition], b'.' | b'-' | b'_'))
+                {
+                    partition += 1;
+                }
+                if partition > site_start {
+                    end = partition;
+                }
+            }
+        }
+        // The stored origin ends with a trailing "/" on every bucket measured here. Accept the run
+        // only if the preceding byte equals the field's own length, including that slash.
+        let with_slash = bytes.get(end) == Some(&b'/');
+        let field_length = end - start + usize::from(with_slash);
+        let self_describing = start > 0
+            && usize::from(bytes[start - 1]) == field_length
+            && field_length <= u8::MAX as usize;
+        if self_describing {
+            found = Some(text[start..end].to_string());
+        }
+        index = end;
+    }
+    found
+}
+
+/// Reads the origin out of an IndexedDB directory name.
+///
+/// Unlike `CacheStorage`, the origin is in the name itself, so no file is read. Measured
+/// 2026-09-05, all 52 directories on this host follow `<scheme>_<host>_<n>.indexeddb.<leveldb|blob>`
+/// with no exceptions; the two suffixes belong to one origin and must be summed, not counted twice.
+fn indexed_db_origin(name: &str) -> Option<String> {
+    let stem = name
+        .strip_suffix(".indexeddb.leveldb")
+        .or_else(|| name.strip_suffix(".indexeddb.blob"))?;
+    // Trailing `_<n>` is the origin's serial number, not part of its identity.
+    let (head, serial) = stem.rsplit_once('_')?;
+    if serial.is_empty() || !serial.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (scheme, host) = head.split_once('_')?;
+    if scheme.is_empty() || host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
+}
+/// Recursive logical size of a directory, never following a link out of it.
+///
+/// `symlink_metadata` is used at every step so a reparse point contributes its own size and not its
+/// target's. Following one would attribute another site's — or another volume's — bytes to this
+/// origin, and could walk outside the profile entirely.
+///
+/// Returns a lower bound alongside the total: an unreadable subtree means the real figure is larger,
+/// and that has to stay visible rather than being rendered as exact.
+fn directory_logical_bytes(root: &Path) -> (u64, bool) {
+    let mut total = 0u64;
+    let mut complete = true;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            complete = false;
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                complete = false;
+                continue;
+            };
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+            // A symlink or reparse point is counted as neither: its target's bytes are not this
+            // origin's, and its own entry size is not meaningful storage usage.
+        }
+    }
+    (total, complete)
+}
+
+/// Attributes one browser storage subsystem to the origins that own it.
+///
+/// Both subsystems keep one directory per origin, which is what makes per-origin bytes obtainable at
+/// all. Local Storage deliberately has no equivalent here: measured 2026-09-05, its 303 origins
+/// share twelve LevelDB files many-to-many — one 2.3 MB file held 61 origins while
+/// `cn.bing.com` spanned four files — so no file boundary lines up with an origin boundary. Summing
+/// an origin's record bytes would not fix it either, because LevelDB retains superseded revisions
+/// and tombstones until compaction, so record bytes and disk bytes differ by an unknown factor.
+/// Reporting a per-origin figure there would be invention, so nothing is reported.
+fn attribute_storage_origins(subsystem: &Path, kind: StorageSubsystem) -> Vec<OriginUsage> {
+    let Ok(entries) = std::fs::read_dir(subsystem) else {
+        return Vec::new();
+    };
+    let mut by_key: BTreeMap<String, OriginUsage> = BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_existing_real_directory(&path) {
+            continue;
+        }
+        let key = match kind {
+            StorageSubsystem::CacheStorage => cache_storage_origin(&path),
+            StorageSubsystem::IndexedDb => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(indexed_db_origin),
+        };
+        // An unattributable directory is skipped rather than lumped into an "other" bucket: naming
+        // an origin is the whole point, and a row the user cannot act on is noise. The caller
+        // cross-checks the attributed total against a full walk, which is what makes such a skip
+        // visible instead of silent.
+        let Some(key) = key else {
+            continue;
+        };
+        let (bytes, _) = directory_logical_bytes(&path);
+        let usage = by_key.entry(key.clone()).or_insert_with(|| OriginUsage {
+            key,
+            bytes: 0,
+            directories: Vec::new(),
+        });
+        usage.bytes = usage.bytes.saturating_add(bytes);
+        usage.directories.push(path);
+    }
+    let mut usages: Vec<_> = by_key.into_values().collect();
+    // Largest first: the user's question is which site is using the space.
+    usages.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    usages
+}
+
+/// Which per-origin storage subsystem is being attributed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageSubsystem {
+    /// `Service Worker/CacheStorage`: PWA offline state. Named cache, but not refetchable.
+    CacheStorage,
+    /// `IndexedDB`: structured site data.
+    IndexedDb,
+}
+/// One browser profile's per-origin storage, as reported to the user.
+struct SiteStorageReport {
+    /// `<installation>/<profile>`, for example `Microsoft/Edge/Default`.
+    profile: String,
+    subsystem: &'static str,
+    origins: Vec<OriginUsage>,
+    /// Total bytes below the subsystem directory, walked independently of attribution.
+    ///
+    /// Kept so attribution can be checked against it rather than trusted. Counting only the
+    /// directories that resolved would under-report silently, and an under-report is
+    /// indistinguishable from an exact total.
+    subsystem_bytes: u64,
+    /// True when every byte below the subsystem was attributed to some origin.
+    fully_attributed: bool,
+}
+
+/// Reports per-origin site storage for every discovered Chromium profile.
+///
+/// Read-only by construction: nothing is deleted, pre-selected, or ranked as reclaimable. The
+/// browsers' own settings UI offers exactly this — per-site removal — but without size ranking and
+/// only while the browser runs.
+fn collect_site_storage() -> Vec<SiteStorageReport> {
+    let mut reports = Vec::new();
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    else {
+        return reports;
+    };
+    for install in CHROMIUM_INSTALLS {
+        let mut user_data = local_app_data.clone();
+        for component in install.relative_user_data.split('/') {
+            user_data.push(component);
+        }
+        if !is_existing_real_directory(&user_data) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&user_data) else {
+            continue;
+        };
+        let mut profiles: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                (name == "Default" || name.starts_with("Profile ")).then_some(name)
+            })
+            .collect();
+        profiles.sort();
+        for profile in profiles {
+            let profile_dir = user_data.join(&profile);
+            // `Service Worker/CacheStorage` is pushed segment by segment: a `/`-containing literal
+            // yields a mixed-separator path on Windows, which passes local checks and then never
+            // matches a natively captured path.
+            let mut cache_storage = profile_dir.clone();
+            cache_storage.push("Service Worker");
+            cache_storage.push("CacheStorage");
+            for (subsystem, kind, dir) in [
+                (
+                    "service_worker_cache_storage",
+                    StorageSubsystem::CacheStorage,
+                    cache_storage,
+                ),
+                (
+                    "indexed_db",
+                    StorageSubsystem::IndexedDb,
+                    profile_dir.join("IndexedDB"),
+                ),
+            ] {
+                if !is_existing_real_directory(&dir) {
+                    continue;
+                }
+                let origins = attribute_storage_origins(&dir, kind);
+                let (subsystem_bytes, _) = directory_logical_bytes(&dir);
+                let attributed: u64 = origins.iter().map(|usage| usage.bytes).sum();
+                // Exact equality on purpose. A 367-byte shortfall here was first explained away as a
+                // live browser writing between the two walks and covered with a tolerance; it was in
+                // fact an entire origin being dropped by the parser. The tolerance hid the defect
+                // rather than absorbing noise, so the check is strict and any drift shows up as
+                // `fullyAttributed: false` for inspection instead of being silently forgiven.
+                reports.push(SiteStorageReport {
+                    profile: format!("{}/{profile}", install.relative_user_data),
+                    subsystem,
+                    origins,
+                    subsystem_bytes,
+                    fully_attributed: attributed == subsystem_bytes,
+                });
+            }
+        }
+    }
+    reports
+}
+/// Runs the `site-storage` command.
+///
+/// Report-only, and deliberately not part of `junk`: this is R3 browser application state, which the
+/// risk taxonomy places at "default skip/report, policy may allow an individually selected item".
+/// The per-origin breakdown is what makes such a selection possible at all — without it the only
+/// available choice is to clear everything and lose every login.
+fn run_site_storage(
+    context: &CoreContext,
+    format: OutputFormat,
+    size_unit: HumanSizeUnit,
+) -> ProcessExitCode {
+    let reports = collect_site_storage();
+    if format == OutputFormat::Human {
+        for report in &reports {
+            println!(
+                "{}",
+                match context.locale() {
+                    sweepx_i18n::Locale::ZhCn => format!(
+                        "{} / {}：{} 个来源，合计 {}{}",
+                        report.profile,
+                        report.subsystem,
+                        report.origins.len(),
+                        if report.fully_attributed { "" } else { ">= " },
+                        size_unit.format(u128::from(report.subsystem_bytes)),
+                    ),
+                    sweepx_i18n::Locale::EnUs => format!(
+                        "{} / {}: {} origins, {}{} total",
+                        report.profile,
+                        report.subsystem,
+                        report.origins.len(),
+                        if report.fully_attributed { "" } else { ">= " },
+                        size_unit.format(u128::from(report.subsystem_bytes)),
+                    ),
+                }
+            );
+            for usage in &report.origins {
+                println!(
+                    "  {:>12}  {}",
+                    size_unit.format(u128::from(usage.bytes)),
+                    usage.key
+                );
+            }
+        }
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    "以上仅为报告：未删除任何内容，也未预选任何条目。".to_string(),
+                sweepx_i18n::Locale::EnUs =>
+                    "Report only: nothing was deleted and nothing was pre-selected.".to_string(),
+            }
+        );
+    } else {
+        println!(
+            "{}",
+            json!({
+                "schema": "sweepx.site_storage.result/v1",
+                "readOnly": true,
+                "profiles": reports.iter().map(|report| json!({
+                    "profile": report.profile,
+                    "subsystem": report.subsystem,
+                    // The independently walked total. `fullyAttributed` false means some bytes
+                    // below the subsystem belong to no named origin, so the per-origin rows are a
+                    // lower bound on the subsystem rather than a partition of it.
+                    "subsystemBytes": report.subsystem_bytes.to_string(),
+                    "fullyAttributed": report.fully_attributed,
+                    "origins": report.origins.iter().map(|usage| json!({
+                        // The full storage key, partition included. Not a hostname: one host can
+                        // hold several mutually invisible partitioned sets.
+                        "storageKey": usage.key,
+                        "bytes": usage.bytes.to_string(),
+                        "directoryCount": usage.directories.len(),
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
+        );
+    }
+    ProcessExitCode::from(0)
 }
 /// The size to report for a junk candidate, and which quantity it actually is.
 ///
@@ -3041,6 +3465,88 @@ mod tests {
         }
     }
     /// Every browser cache rule must be shaped so discovery can actually produce it.
+    #[test]
+    fn a_link_inside_a_storage_directory_is_not_counted_as_its_bytes() {
+        // A reparse point must contribute neither its own nor its target's size: following one would
+        // bill another site — or another volume — to this origin.
+        let temp = std::env::temp_dir().join(format!("sweepx-origin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(temp.join("real")).expect("temp dir");
+        std::fs::write(temp.join("real").join("payload"), vec![7u8; 4096]).expect("payload");
+        let (bytes, complete) = directory_logical_bytes(&temp);
+        assert_eq!(bytes, 4096, "only the real file counts");
+        assert!(complete, "a readable tree is complete");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    #[test]
+    fn a_cache_name_chosen_by_the_page_is_not_mistaken_for_the_origin() {
+        // Byte-for-byte shape of a real Workbox bucket on this host: the cache name field carries a
+        // URL of its own, ahead of the two occurrences of the actual origin.
+        // Prefix bytes are the real ones: 40 (0x28) counts the whole cache name, so the URL inside
+        // it is not self-describing; 20 (0x14) counts "https://gamemap.app/" exactly.
+        let text = "\u{1}Y\u{2}\u{28}workbox-precache-v2-https://gamemap.app/\u{1}x\u{0}\
+                    \u{14}https://gamemap.app/\u{0}\u{14}https://gamemap.app/ ";
+        assert_eq!(
+            extract_storage_key(text).as_deref(),
+            Some("https://gamemap.app"),
+            "the origin must win over an application-chosen cache name that embeds a URL"
+        );
+    }
+
+    #[test]
+    fn a_partitioned_key_keeps_both_sites_apart() {
+        // Shape recorded from the QuotaManager database, where partitioned keys do appear. Measured
+        // 2026-09-05, none of this host's 18 CacheStorage buckets is partitioned, so this case is
+        // pinned from the documented form rather than from an index.txt.
+        // 54 (0x36) is the length of the full partitioned key including its trailing slash.
+        let text = "\u{36}https://www.googletagmanager.com/^0https://codacy.com/";
+        assert_eq!(
+            extract_storage_key(text).as_deref(),
+            Some("https://www.googletagmanager.com/^0https://codacy.com"),
+            "dropping the ^0 separator fuses two unrelated parties into one pseudo-origin"
+        );
+    }
+
+    #[test]
+    fn every_index_txt_origin_ends_at_its_trailing_slash() {
+        // Measured across all 18 buckets on this host: index.txt always terminates the origin with
+        // "/" and carries no bucket suffix. The `_default` suffix belongs to QuotaManager keys, not
+        // here; an earlier version of this test wrongly applied that shape to index.txt.
+        assert_eq!(
+            extract_storage_key("\u{13}https://www.msn.cn/\u{0}\u{13}https://www.msn.cn/ ")
+                .as_deref(),
+            Some("https://www.msn.cn")
+        );
+    }
+    #[test]
+    fn a_non_http_scheme_is_still_an_origin() {
+        // This host stores a chrome-extension key; an https-only pattern drops it silently.
+        assert_eq!(
+            // 52 (0x34) is this key's own length, exactly as the real bucket stores it.
+            extract_storage_key("\u{34}chrome-extension://clngdbkpkpeebahjckkjfobafhncgmne/")
+                .as_deref(),
+            Some("chrome-extension://clngdbkpkpeebahjckkjfobafhncgmne")
+        );
+    }
+
+    #[test]
+    fn indexed_db_pairs_leveldb_and_blob_under_one_origin() {
+        // Measured: 52 of 52 directories on this host follow this shape, and the two suffixes of one
+        // origin must resolve identically or the site is reported twice at half its size each.
+        let leveldb = indexed_db_origin("https_www.bilibili.com_0.indexeddb.leveldb");
+        let blob = indexed_db_origin("https_www.bilibili.com_0.indexeddb.blob");
+        assert_eq!(leveldb.as_deref(), Some("https://www.bilibili.com"));
+        assert_eq!(leveldb, blob, "both suffixes belong to one origin");
+    }
+
+    #[test]
+    fn indexed_db_rejects_a_name_that_is_not_an_origin_directory() {
+        assert_eq!(indexed_db_origin("LOCK"), None);
+        assert_eq!(
+            indexed_db_origin("https_example.com_x.indexeddb.leveldb"),
+            None
+        );
+    }
     #[test]
     fn render_cache_rules_are_marker_guarded() {
         let rules = load_platform_junk_rules().expect("rules must load");

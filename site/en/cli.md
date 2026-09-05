@@ -332,3 +332,42 @@ sweepx execute ... --dangerously-delete
 ```
 
 P3 has library models and fake-execution tests for related concepts, but there is still no plan/approve/execute CLI or Permanent mutation.
+
+## `site-storage`
+
+Reports browser site storage per origin, so a user can decide site by site. Read-only: it never
+deletes and never pre-selects.
+
+Separate from `junk` on purpose. Junk means rebuildable; this is R3 browser application state, which
+the risk taxonomy places at *default skip/report, policy may allow an individually selected item*.
+The per-origin breakdown is what makes such a selection possible — without it the only available
+choice is to clear everything and lose every login.
+
+Two subsystems are attributed, because each keeps one directory per origin:
+
+- `service_worker_cache_storage` — the origin lives in each bucket's `index.txt`, since the directory
+  name is a one-way hash. It is stored as plain UTF-8 and is preceded by its own length, which is how
+  it is told apart from a URL embedded in a neighbouring field: a Workbox site stores the cache name
+  `workbox-precache-v2-https://gamemap.app/`, whose leading length counts the whole name rather than
+  the URL inside it.
+- `indexed_db` — the origin is in the directory name. `.leveldb` and `.blob` belong to one origin and
+  are summed, not counted twice.
+
+The reported unit is the **full storage key**, not a hostname. Chromium partitions third-party
+storage by top-level site, so one host can hold several mutually invisible sets of data; merging on
+hostname would present unrelated parties as one row.
+
+`fullyAttributed` says whether every byte below the subsystem was attributed to some named origin.
+It is an exact comparison. A 367-byte shortfall was once explained away as a live browser writing
+between two walks and covered with a tolerance — it was in fact an entire origin the parser was
+dropping, so the check stays strict.
+
+**Local Storage is deliberately absent.** Measured 2026-09-05, its 303 origins share twelve LevelDB
+files many-to-many: one 2.3 MB file held 61 origins, `cn.bing.com` spanned four files, and 47 origins
+crossed file boundaries. No file boundary lines up with an origin boundary, and summing an origin's
+record bytes would not fix it, because LevelDB keeps superseded revisions and tombstones until
+compaction. Any per-origin figure there would be invented, so none is reported.
+
+Measured 2026-09-05 on this host: Edge `Default` holds 458.6 MB of CacheStorage across 12 origins
+(`onedrive.live.com` alone 200.4 MB) and 276.6 MB of IndexedDB across 43 (`www.bilibili.com` 236.1 MB,
+85% of the subsystem).

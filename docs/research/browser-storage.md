@@ -344,7 +344,10 @@ Edge `Default`（Edge 运行中，33 个进程）：
 | Local Storage | 共享 LevelDB 的记录键 | **不能**，仅能得到域清单 | 是（`.log` 被独占） |
 
 CacheStorage 的哈希目录名不可逆（上游 README 明确为 origin 的哈希），因此 `index.txt` 是唯一途径；
-origin 在其中以 UTF-16LE 存于 protobuf。实测 Edge 12/12、Edge Dev 6/6 全部解析成功，**0 未解析**。
+origin 在其中以 **UTF-8** 明文存储（首次记录为 UTF-16LE 是错的：文件里确实有 UTF-16 片段，但那是哈希的
+十六进制字符串，不是 origin）。每个 `index.txt` 中 origin 恰好出现 2 次、且只有 1 个唯一值，无分区后缀。
+匹配模式必须 scheme 无关：本机有一个 `chrome-extension://` 的键，只匹配 `https?` 会漏掉它。
+实测 Edge 12/12、Edge Dev 6/6 全部解析成功，**0 未解析**。
 
 交叉验证（归因求和 vs 独立目录遍历）：Edge `458.2 MB = 458.2 MB`，Edge Dev `36.8 MB = 36.8 MB`，两者一致。
 这条对照是必要的：只统计已解析目录会在解析失败时静默少报，而少报看起来和精确值一样。
@@ -475,3 +478,27 @@ https://www.googletagmanager.com/^0https://codacy.com_default
 | hostname 命中 | 覆盖该站全部数据且不会误删 | 解码完整 StorageKey/OriginAttributes/top-client origin，并预览所有分区 |
 
 这套降级原则的核心是：**能验证才归因，能一致才迁移，能由浏览器支持接口完成就不直接改内部文件；其余一律报告并跳过。**
+
+## 9. 实现落地（2026-09-05）
+
+`sweepx site-storage` 已实现 §8.5 的归因结论，作为独立只读命令，不并入 `junk`：`docs/CLEANER-CATALOG.md`
+的风险分级把"browser application state"逐字归为 **R3 —— 默认跳过/仅报告，策略可允许逐项选中**，而 R4 专指
+不可逆动作。因此本命令只报告、不预选、不删除。
+
+实现过程中修正了两处调研阶段的错误认识：
+
+1. **origin 是 UTF-8，不是 UTF-16LE**（§8.5.2 已就地更正）。文件里确有 UTF-16 片段，但那是哈希的十六进制
+   字符串。
+2. **不能取"第一个 URL"，也不能靠字符类边界**。最终判据是 protobuf 的**长度前缀自校验**：真实 origin 前一
+   个字节恰好等于其自身长度（含尾部 `/`）。18 个桶全部符合。
+   - 反例一：Workbox 站点把缓存名存为 `workbox-precache-v2-https://gamemap.app/`，其前置长度计的是整个名
+     字（40），不等于其中 URL 的长度，因此被正确排除。
+   - 反例二：先尝试的"scheme 前不得紧跟字母数字"规则**漏掉了一整个来源** —— 扩展 origin 的长度前缀是
+     `0x34`（数字 `4`），被误判为"更长 token 的延续"。
+
+第 2 条错误一度表现为 480 MB 中 367 字节的差额，我最初解释为"Edge 运行中边扫边写"并加了容差 —— 这是错的：
+那 367 字节**正是**被漏掉的扩展 origin。修正解析后差额归零，容差随即收回为精确比较。**容差掩盖了缺陷，而不
+是吸收了噪声。**
+
+验证方式：与独立目录遍历交叉核对，Edge 12/12 桶、Edge Dev 6/6 桶全部解析，四个子系统的归因之和与遍历总量
+差额均为 0；IndexedDB 的 `.leveldb`/`.blob` 正确合并（43 个来源对应 52 个目录）。

@@ -314,3 +314,33 @@ sweepx execute ... --dangerously-delete
 ```
 
 P3 中有对应概念的 library model 与 fake execution tests，但仍没有 plan/approve/execute CLI 或 Permanent mutation。
+
+## `site-storage`
+
+按来源报告浏览器站点存储，让用户可以逐站点决定。只读：不删除任何内容，也不预选任何条目。
+
+**刻意与 `junk` 分开**。junk 表示"可重建"；而这里是 R3 浏览器应用状态，风险分级将其归入*默认跳过/仅报告，
+策略可允许逐项选中*。正是这份按来源的拆分让"逐项选中"成为可能 —— 没有它，用户唯一的选择就是全部清空、
+丢掉所有登录态。
+
+归因两个子系统，因为它们都是一个来源一个目录：
+
+- `service_worker_cache_storage` —— 目录名是单向哈希，因此来源取自每个桶的 `index.txt`。它以纯 UTF-8
+  存储，且前面紧跟自身长度；这正是把它与相邻字段中内嵌的 URL 区分开的依据：某个使用 Workbox 的站点会存入
+  缓存名 `workbox-precache-v2-https://gamemap.app/`，其前置长度计的是整个名字，而不是其中那段 URL。
+- `indexed_db` —— 来源就在目录名里。`.leveldb` 与 `.blob` 属于同一个来源，需要相加而不是分别计为两个。
+
+报告的单位是**完整存储键**，不是主机名。Chromium 会按顶层站点对第三方存储分区，因此同一个主机可以持有多份
+互不可见的数据；按主机名合并会把互不相关的各方呈现为同一行。
+
+`fullyAttributed` 表示子系统之下的每一个字节是否都归属到了某个具名来源，采用精确比较。曾有 367 字节的差额
+被解释为"浏览器运行中在两次遍历之间写入"并用容差掩盖过去 —— 而它实际上是解析器漏掉了一整个来源，因此这项
+检查保持严格。
+
+**Local Storage 被刻意排除在外。** 2026-09-05 实测，它的 303 个来源以多对多的方式共享 12 个 LevelDB 文件：
+单个 2.3 MB 文件里有 61 个来源，`cn.bing.com` 跨 4 个文件，47 个来源跨越文件边界。没有任何文件边界与来源
+边界对齐；把某个来源的记录字节相加也无法解决，因为 LevelDB 在 compaction 之前会保留被覆盖的旧版本与
+tombstone。在那里给出任何按来源的体积都是编造，因此一律不报。
+
+2026-09-05 在本机实测：Edge `Default` 的 CacheStorage 为 458.6 MB、12 个来源（仅 `onedrive.live.com`
+就占 200.4 MB）；IndexedDB 为 276.6 MB、43 个来源（`www.bilibili.com` 236.1 MB，占该子系统 85%）。
