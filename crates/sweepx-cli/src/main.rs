@@ -194,7 +194,16 @@ enum Commands {
     /// Separate from `junk` on purpose. Junk means "rebuildable"; this is R3 site application
     /// state — PWA offline data and structured site data — which the browser itself only ever
     /// removes one site at a time and which is not safe to treat as disposable in bulk.
-    SiteStorage,
+    SiteStorage {
+        /// Move one named origin's storage to the Trash. Requires an exact storage key.
+        ///
+        /// One origin at a time by design: R3 permits an individually selected item, not a batch.
+        /// The key must match exactly, partition included, because a hostname can name several
+        /// mutually isolated partitions and clearing the wrong one destroys data the user did not
+        /// choose.
+        #[arg(long, value_name = "STORAGE_KEY")]
+        trash_origin: Option<String>,
+    },
     /// Move one file or directory to the operating system Trash/Recycle Bin.
     Trash {
         #[arg(required = true, value_name = "ABSOLUTE_PATH")]
@@ -523,8 +532,14 @@ fn main() -> ProcessExitCode {
             };
             return run_junk_scan(&context, format, size_unit, roots, system);
         }
-        Commands::SiteStorage => {
-            return run_site_storage(&context, format, size_unit);
+        Commands::SiteStorage { trash_origin } => {
+            return run_site_storage(
+                &context,
+                format,
+                size_unit,
+                trash_origin.as_deref(),
+                std::io::stdin().is_terminal(),
+            );
         }
         Commands::Cache { command } => match command {
             CacheCommands::Status => {
@@ -1803,6 +1818,222 @@ fn collect_site_storage() -> Vec<SiteStorageReport> {
     }
     reports
 }
+/// Whether a LevelDB-backed storage directory is currently held open by its browser.
+///
+/// LevelDB guards a database with an exclusive lock on its `LOCK` file, so failing to take that lock
+/// means the browser has the database open. This matters because the filesystem will *not* stop the
+/// move: measured 2026-09-05 with 35 Edge processes running, an IndexedDB directory renamed
+/// successfully. A Trash operation would likewise succeed and the browser would keep writing against
+/// a handle whose directory is gone — losing data without reporting an error.
+///
+/// The check is per directory, not per browser. Chromium opens a database only when a site needs it:
+/// on this host 2 of 43 Edge directories were locked while the rest were free. A single probe would
+/// have suggested the whole browser was idle, which is how an early version of this guard was nearly
+/// dismissed as unworkable.
+///
+/// An absent `LOCK` means there is no LevelDB database to hold — `CacheStorage` buckets have none —
+/// and is reported as not held. A lock that cannot be evaluated is reported as **held**: refusing a
+/// removable directory costs the user nothing, while proceeding against a live database is
+/// unrecoverable.
+fn storage_directory_is_held(directory: &Path) -> bool {
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let lock = directory.join("LOCK");
+    match std::fs::symlink_metadata(&lock) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    }
+    // The share mode is the whole check. Rust's default allows FILE_SHARE_WRITE, and measured
+    // 2026-09-05 against the same 43 Edge directories that mode reported 0 held while an exclusive
+    // open reported 2 — the default silently succeeds alongside the browser's own writer, which is
+    // exactly the case that must be refused. share_mode(0) is what LevelDB itself contends for.
+    // The handle is dropped immediately and never written to.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(windows)]
+    options.share_mode(0);
+    // On Unix an advisory flock is not observable through open(2), so a write open cannot prove the
+    // database is idle. Nothing here claims otherwise: this command is Windows-only today, and a
+    // Unix implementation needs its own holder evidence rather than this probe.
+    match options.open(&lock) {
+        Ok(handle) => {
+            drop(handle);
+            false
+        }
+        Err(_) => true,
+    }
+}
+/// Moves every directory belonging to one storage key to the Trash.
+///
+/// The key must be given in full and is matched exactly. A hostname is not accepted as a shorthand
+/// because Chromium partitions third-party storage by top-level site: `googletagmanager.com` under
+/// one site is not the same data as under another, and treating a hostname as the unit would clear
+/// isolated storage the user never named.
+///
+/// All-or-nothing at the directory level is deliberate but not achievable atomically: one origin can
+/// own several directories — IndexedDB keeps `.leveldb` and `.blob` apart — and the Trash exposes no
+/// transaction. So every directory is checked *before* any is moved, and if a later move fails the
+/// earlier ones are reported as already moved rather than silently forgotten. Partial success is
+/// stated, never rounded to success or failure.
+fn trash_one_origin(
+    context: &CoreContext,
+    format: OutputFormat,
+    reports: &[SiteStorageReport],
+    key: &str,
+    stdin_is_terminal: bool,
+) -> ProcessExitCode {
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for report in reports {
+        for usage in &report.origins {
+            if usage.key == key {
+                targets.extend(usage.directories.iter().cloned());
+            }
+        }
+    }
+    if targets.is_empty() {
+        let message = match context.locale() {
+            sweepx_i18n::Locale::ZhCn => format!(
+                "未找到存储键 {key}。存储键必须完整、精确匹配（含分区），可先运行 site-storage 查看。"
+            ),
+            sweepx_i18n::Locale::EnUs => format!(
+                "no storage key matched {key}. Keys are matched exactly, partition included; run site-storage to list them."
+            ),
+        };
+        eprintln!("{message}");
+        return ProcessExitCode::from(2);
+    }
+
+    // Refuse before touching anything. A held database is not a recoverable failure after the fact:
+    // the filesystem allows the move, so the browser would go on writing to a directory that is no
+    // longer there.
+    let held: Vec<&PathBuf> = targets
+        .iter()
+        .filter(|directory| storage_directory_is_held(directory))
+        .collect();
+    if !held.is_empty() {
+        let message = match context.locale() {
+            sweepx_i18n::Locale::ZhCn => format!(
+                "{key} 的 {} 个目录正被浏览器占用；请关闭浏览器后重试。未做任何改动。",
+                held.len()
+            ),
+            sweepx_i18n::Locale::EnUs => format!(
+                "{} directory/directories of {key} are open in the browser; close it and retry. Nothing was changed.",
+                held.len()
+            ),
+        };
+        eprintln!("{message}");
+        return ProcessExitCode::from(3);
+    }
+
+    if format == OutputFormat::Human && stdin_is_terminal {
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    format!("即将把 {key} 的 {} 个存储目录移入回收站。", targets.len()),
+                sweepx_i18n::Locale::EnUs => format!(
+                    "About to move {} storage directory/directories of {key} to the Trash.",
+                    targets.len()
+                ),
+            }
+        );
+        for target in &targets {
+            println!("  {}", target.display());
+        }
+        if !trash_command::confirm(Path::new(key), context.locale()) {
+            let message = match context.locale() {
+                sweepx_i18n::Locale::ZhCn => "已取消，未做任何改动。",
+                sweepx_i18n::Locale::EnUs => "Cancelled; nothing was changed.",
+            };
+            println!("{message}");
+            return ProcessExitCode::from(0);
+        }
+    } else if format == OutputFormat::Human {
+        let message = match context.locale() {
+            sweepx_i18n::Locale::ZhCn => "需要交互式终端确认；未做任何改动。",
+            sweepx_i18n::Locale::EnUs => {
+                "an interactive terminal is required to confirm; nothing was changed."
+            }
+        };
+        eprintln!("{message}");
+        return ProcessExitCode::from(2);
+    }
+
+    let mut moved: Vec<PathBuf> = Vec::new();
+    let mut failure: Option<(PathBuf, String)> = None;
+    for target in targets {
+        // Captured and revalidated per directory: identity is re-read immediately before each move,
+        // so a directory substituted between the listing and this moment is refused rather than
+        // acted on under a stale name.
+        let candidate = match trash_command::TrashCandidate::capture(target.clone(), None) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                failure = Some((target, error.to_string()));
+                break;
+            }
+        };
+        match candidate.submit() {
+            Ok(()) => moved.push(target),
+            Err(error) => {
+                failure = Some((target, error.to_string()));
+                break;
+            }
+        }
+    }
+
+    let all_moved = failure.is_none();
+    if format == OutputFormat::Human {
+        for path in &moved {
+            println!("  moved: {}", path.display());
+        }
+        if let Some((path, reason)) = &failure {
+            eprintln!("  refused: {} ({reason})", path.display());
+        }
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn => format!(
+                    "{key}：已移入回收站 {} 个目录{}。",
+                    moved.len(),
+                    if all_moved {
+                        String::new()
+                    } else {
+                        "，其余因校验失败未处理".to_string()
+                    }
+                ),
+                sweepx_i18n::Locale::EnUs => format!(
+                    "{key}: {} directory/directories moved to the Trash{}.",
+                    moved.len(),
+                    if all_moved {
+                        String::new()
+                    } else {
+                        ", the rest left in place after a failed check".to_string()
+                    }
+                ),
+            }
+        );
+    } else {
+        println!(
+            "{}",
+            json!({
+                "schema": "sweepx.site_storage.trash/v1",
+                "storageKey": key,
+                // "partial" is a real outcome, not a rounding of success: some directories of this
+                // origin were moved and others were not.
+                "status": if all_moved { "ok" } else { "partial" },
+                "movedPaths": moved.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                "refused": failure.as_ref().map(|(path, reason)| json!({
+                    "path": path.display().to_string(),
+                    "reason": reason,
+                })),
+            })
+        );
+    }
+    ProcessExitCode::from(if all_moved { 0 } else { 4 })
+}
 /// Runs the `site-storage` command.
 ///
 /// Report-only, and deliberately not part of `junk`: this is R3 browser application state, which the
@@ -1813,8 +2044,13 @@ fn run_site_storage(
     context: &CoreContext,
     format: OutputFormat,
     size_unit: HumanSizeUnit,
+    trash_origin: Option<&str>,
+    stdin_is_terminal: bool,
 ) -> ProcessExitCode {
     let reports = collect_site_storage();
+    if let Some(key) = trash_origin {
+        return trash_one_origin(context, format, &reports, key, stdin_is_terminal);
+    }
     if format == OutputFormat::Human {
         for report in &reports {
             println!(
@@ -3465,6 +3701,54 @@ mod tests {
         }
     }
     /// Every browser cache rule must be shaped so discovery can actually produce it.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_storage_database_is_reported_as_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = std::env::temp_dir().join(format!("sweepx-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let lock = dir.join("LOCK");
+        std::fs::write(&lock, b"").expect("lock file");
+
+        assert!(
+            !storage_directory_is_held(&dir),
+            "an unheld database must not be refused"
+        );
+
+        // Hold it the way LevelDB does. share_mode(1) permits readers but not another writer, so an
+        // exclusive probe must fail; Rust's default share mode would succeed here, which is the
+        // defect this test exists to pin.
+        let holder = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(1)
+            .open(&lock)
+            .expect("the test can hold the lock");
+        assert!(
+            storage_directory_is_held(&dir),
+            "a held database must be refused: the filesystem would allow the move and the browser \
+             would keep writing to a directory that is gone"
+        );
+        drop(holder);
+        assert!(
+            !storage_directory_is_held(&dir),
+            "releasing the lock makes the database removable again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_without_a_lock_file_is_not_held() {
+        // CacheStorage buckets carry no LevelDB lock; absence must not read as "held" or every one
+        // of them would be permanently unremovable.
+        let dir = std::env::temp_dir().join(format!("sweepx-nolock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        assert!(!storage_directory_is_held(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn a_link_inside_a_storage_directory_is_not_counted_as_its_bytes() {
         // A reparse point must contribute neither its own nor its target's size: following one would

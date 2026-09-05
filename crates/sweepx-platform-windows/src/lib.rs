@@ -8,6 +8,13 @@ use sweepx_platform::{
 mod privilege;
 pub use privilege::WindowsPrivilegeProvider;
 
+// Reading a live identity needs no privilege and no acceleration, so it is available wherever this
+// crate is compiled: a destructive action must be able to revalidate its target unconditionally.
+#[cfg(windows)]
+mod live_identity;
+#[cfg(windows)]
+pub use live_identity::read_live_identity;
+
 // Verification of accelerated records is Windows-only but privilege-free, so it is compiled
 // wherever this crate is compiled rather than gated behind the acceleration feature: the
 // scanner needs it to be able to reject an unverified record even when the reader is disabled.

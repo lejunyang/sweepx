@@ -50,13 +50,23 @@ pub(crate) fn run_tui_trash(entry: &ScannedEntry, locale: Locale) -> ProcessExit
 }
 
 #[derive(Debug)]
-struct TrashCandidate {
+pub(crate) struct TrashCandidate {
     path: PathBuf,
     metadata: Metadata,
+    /// Native identity observed at capture time, revalidated immediately before the Trash call.
+    ///
+    /// Held separately from `metadata` because `std::fs::Metadata` cannot express a Windows file id
+    /// on stable Rust, and identity — not size or timestamp — is what makes the target the same
+    /// object.
+    #[cfg(windows)]
+    identity: Option<sweepx_platform::EntryIdentity>,
 }
 
 impl TrashCandidate {
-    fn capture(path: PathBuf, expected: Option<&ScannedEntry>) -> Result<Self, TrashError> {
+    pub(crate) fn capture(
+        path: PathBuf,
+        expected: Option<&ScannedEntry>,
+    ) -> Result<Self, TrashError> {
         #[cfg(unix)]
         // SAFETY: geteuid has no preconditions and does not mutate process state.
         if unsafe { libc::geteuid() } == 0 {
@@ -80,7 +90,19 @@ impl TrashCandidate {
         if let Some(entry) = expected {
             verify_scanned_identity(entry, &metadata)?;
         }
-        Ok(Self { path, metadata })
+        #[cfg(windows)]
+        let identity = sweepx_platform_windows::read_live_identity(&path)
+            .map_err(TrashError::Inspect)?
+            .map(Some)
+            // A path that resolved a moment ago but has no readable identity is refused below
+            // rather than treated as identifiable.
+            .unwrap_or(None);
+        Ok(Self {
+            path,
+            metadata,
+            #[cfg(windows)]
+            identity,
+        })
     }
 
     fn from_scanned_entry(entry: &ScannedEntry) -> Result<Self, TrashError> {
@@ -92,9 +114,15 @@ impl TrashCandidate {
         &self.path
     }
 
-    fn submit(self) -> Result<(), TrashError> {
+    pub(crate) fn submit(self) -> Result<(), TrashError> {
         let current = std::fs::symlink_metadata(&self.path).map_err(TrashError::Inspect)?;
         if !same_file(&self.metadata, &current) {
+            return Err(TrashError::Changed);
+        }
+        // Identity is checked last and closest to the mutation: the window between this check and
+        // `trash::delete` is the only one left, and no cheaper comparison can stand in for it.
+        #[cfg(windows)]
+        if !same_object(self.identity.as_ref(), &self.path) {
             return Err(TrashError::Changed);
         }
         trash::delete(&self.path).map_err(|error| TrashError::Backend(error.to_string()))?;
@@ -106,7 +134,7 @@ impl TrashCandidate {
 }
 
 #[derive(Debug)]
-enum TrashError {
+pub(crate) enum TrashError {
     InvalidPath,
     #[cfg(unix)]
     ElevatedRuntime,
@@ -192,7 +220,7 @@ fn protected_path(path: &Path) -> bool {
             .any(|protected| path.starts_with(protected))
 }
 
-fn confirm(path: &Path, locale: Locale) -> bool {
+pub(crate) fn confirm(path: &Path, locale: Locale) -> bool {
     let prompt = match locale {
         Locale::ZhCn => format!("将 {} 移到系统回收站？[y/N] ", path.display()),
         Locale::EnUs => format!(
@@ -301,6 +329,28 @@ fn same_file(before: &Metadata, after: &Metadata) -> bool {
         && before.gid() == after.gid()
 }
 
+/// Confirms the object at `path` is still the one that was inspected, by native identity.
+///
+/// Windows previously compared only file type, length and modification time. That is not an identity:
+/// a directory's length is reported as zero and its timestamps are writable, so a directory deleted
+/// and recreated at the same path — or a junction swapped in — satisfied all three while being a
+/// different object. `FILE_ID_INFO` answers the question the comparison was actually asking, and is
+/// the same source the scanner records identity from, so both sides of the comparison mean one thing.
+///
+/// A failure to read the identity is not a match. If the object cannot be identified, the caller must
+/// refuse rather than proceed on the strength of a name.
+#[cfg(windows)]
+fn same_object(before_identity: Option<&sweepx_platform::EntryIdentity>, path: &Path) -> bool {
+    let Some(before) = before_identity else {
+        return false;
+    };
+    match sweepx_platform_windows::read_live_identity(path) {
+        Ok(Some(current)) => &current == before,
+        // Absent or unreadable both mean "cannot prove it is the same object".
+        Ok(None) | Err(_) => false,
+    }
+}
+
 #[cfg(windows)]
 fn same_file(before: &Metadata, after: &Metadata) -> bool {
     before.file_type() == after.file_type()
@@ -402,6 +452,53 @@ fn print_cancelled(format: OutputFormat, locale: Locale, path: &Path) -> Process
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_swapped_after_capture_is_refused() {
+        // The check this replaces compared type, length and modified time. A recreated directory
+        // matches all three - length is zero and the timestamp is fresh in both - so it passed while
+        // being a different object. Identity is what distinguishes them.
+        let dir = std::env::temp_dir().join(format!("sweepx-trash-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let captured = sweepx_platform_windows::read_live_identity(&dir)
+            .expect("readable")
+            .expect("present");
+        assert!(
+            same_object(Some(&captured), &dir),
+            "an untouched directory is still the same object"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("removable");
+        std::fs::create_dir_all(&dir).expect("recreatable");
+        assert!(
+            !same_object(Some(&captured), &dir),
+            "a recreated directory must not pass as the captured one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unidentifiable_or_absent_target_is_refused() {
+        let missing = std::env::temp_dir().join("sweepx-trash-absent-8c1f");
+        let _ = std::fs::remove_dir_all(&missing);
+        let any = sweepx_platform_windows::read_live_identity(&std::env::temp_dir())
+            .expect("readable")
+            .expect("present");
+
+        assert!(
+            !same_object(Some(&any), &missing),
+            "an absent path cannot be proved to be the captured object"
+        );
+        assert!(
+            !same_object(None, &std::env::temp_dir()),
+            "without a captured identity there is nothing to compare against"
+        );
+    }
 
     #[test]
     fn protected_roots_include_filesystem_home_state_and_trash() {

@@ -371,3 +371,36 @@ compaction. Any per-origin figure there would be invented, so none is reported.
 Measured 2026-09-05 on this host: Edge `Default` holds 458.6 MB of CacheStorage across 12 origins
 (`onedrive.live.com` alone 200.4 MB) and 276.6 MB of IndexedDB across 43 (`www.bilibili.com` 236.1 MB,
 85% of the subsystem).
+### Removing one origin's storage
+
+`site-storage --trash-origin <STORAGE_KEY>` moves that origin's storage to the Trash. One origin per
+invocation: R3 permits an individually selected item, not a batch.
+
+The key is matched exactly and a hostname is not accepted as shorthand, because a host can own
+several partitioned, mutually isolated sets of storage. Accepting `example.com` for
+`https://example.com/^0https://other.test` would clear data the user never named.
+
+Three refusals happen before anything is touched, and each leaves the filesystem unchanged:
+
+- **Unknown key** — exit 2, listing how keys are matched.
+- **Held database** — exit 3. LevelDB guards a database with an exclusive lock on `LOCK`; if that
+  lock cannot be taken, the browser has the database open. This is not a theoretical guard: measured
+  2026-09-05 with 35 Edge processes running, an IndexedDB directory renamed *successfully*, so the
+  filesystem will not stop the move. The browser would go on writing against a handle whose directory
+  is gone. The probe must open with no write sharing — Rust's default share mode reported 0 of 43
+  Edge directories held where an exclusive open reported 2.
+- **No interactive terminal** in human format — exit 2.
+
+The probe is per directory rather than per browser, because Chromium opens a database only when a
+site needs it. A directory whose lock cannot be evaluated is treated as held: refusing a removable
+directory costs nothing, while moving a live database is unrecoverable.
+
+An origin can own several directories — IndexedDB keeps `.leveldb` and `.blob` apart — and the Trash
+offers no transaction, so all directories are checked before any is moved and a later failure is
+reported as `status: partial` with the paths that did move. Partial is never rounded to success.
+
+Windows identity revalidation was strengthened for this. `same_file` previously compared type, length
+and modification time; a directory's length is zero and its timestamps are writable, so a directory
+deleted and recreated at the same path satisfied all three while being a different object. Identity
+now comes from `FILE_ID_INFO`, the same source the scanner records, and is re-read immediately before
+each move.
