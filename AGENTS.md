@@ -34,8 +34,12 @@
 
 ## Working on Windows
 
-- The pinned toolchain may be unavailable from the configured mirror. Set
-  `$env:RUSTUP_TOOLCHAIN="stable"` for the session rather than editing `rust-toolchain.toml`.
+- Prefer the pinned toolchain; it matches CI. When the configured mirror cannot serve it, set
+  `$env:RUSTUP_TOOLCHAIN="stable"` for the session rather than editing `rust-toolchain.toml` — but
+  check first, because the fallback is not equivalent: as of 2026-09-06 the `stable` toolchain on
+  this host has no `rustfmt` or `clippy` component, so `cargo fmt`/`cargo clippy` fail outright
+  under it while the pinned 1.98.0 runs both. A missing component is not a code defect; confirm
+  which toolchain is active before believing a formatting or lint failure.
 - `.gitattributes` normalizes to LF. Keep it that way: line endings leaking into a commit make the
   real change unreviewable.
 - Cleaner rule JSON is freely editable — packages ship unsigned, and no digest has to be refreshed
