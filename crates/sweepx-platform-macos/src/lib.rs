@@ -1217,7 +1217,9 @@ mod tests {
             // fixture path is rejected before any test logic runs. Canonicalizing here keeps the
             // guard intact and gives the test a real directory; asserting on the unresolved path
             // would mean weakening the very check these tests exist to cover.
-            let path = path.canonicalize().unwrap();
+            let path = path.canonicalize().unwrap_or_else(|error| {
+                panic!("fixture {path:?} could not be resolved: {error}");
+            });
             Self { path }
         }
 
@@ -1308,12 +1310,16 @@ mod tests {
         }
 
         let scanner = MacosPlatformScanner::new();
+        // Name the root in each failure. This test failed twice in CI with only a bare `unwrap`
+        // location to go on, and the two causes were different — the second could not be told from
+        // the first without knowing which path was refused and at which call.
+        let root = ScanRoot::new(temp.path())
+            .unwrap_or_else(|error| panic!("root {:?} rejected by ScanRoot: {error}", temp.path()));
         let mut admission = scanner
-            .admit_root(
-                &ScanRoot::new(temp.path()).unwrap(),
-                &CancellationToken::new(),
-            )
-            .unwrap();
+            .admit_root(&root, &CancellationToken::new())
+            .unwrap_or_else(|error| {
+                panic!("admit_root refused {:?}: {error:?}", temp.path());
+            });
         let entries = scanner
             .enumerate_children(
                 &mut admission.directory,
@@ -1323,7 +1329,12 @@ mod tests {
                     max_batch_bytes: 1024,
                 },
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "enumerate_children failed under {:?}: {error:?}",
+                    temp.path()
+                );
+            });
 
         assert_eq!(entries.entries.len(), 3);
         assert_eq!(
