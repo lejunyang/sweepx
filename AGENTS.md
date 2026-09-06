@@ -54,14 +54,28 @@
   configuration:
 
   ```pwsh
-  cargo clippy -p <crate> --all-features --target aarch64-linux-android -- -D warnings
+  cargo clippy -p <crate> --all-features --target x86_64-linux-android -- -D warnings
   ```
+
+  Use the target the *active* toolchain actually has — `rustup target list --installed` reports per
+  toolchain, and the pinned one carries `x86_64-linux-android` while `aarch64` resolves to
+  `can't find crate for core`, which looks like a code error and is not one.
 
   Read its output with the target's limits in mind. `sweepx-scanner` and `trash` are declared only
   for linux/macos/windows, so on Android their absence cascades into unresolved-import and
   unused-variable reports that CI never sees. Findings inside a `cfg(any(linux, macos, windows))`
   block are artefacts of the probe; unconditional ones are real. `x86_64-unknown-linux-gnu` is the
   honest target for this, but the configured mirror returned 404 for it.
+- A symlinked ancestor is a real host condition, not an exotic one: macOS `TMPDIR` is
+  `/var/folders/…` and `/var` links to `/private/var`, so any fixture rooted at an unresolved
+  `env::temp_dir()` is refused by the paths that reject linked ancestors. Reproduce it here without
+  elevation — `mklink /J` needs no privilege and Rust classifies a junction as a symlink, so
+  pointing `TMP` through one stands in for `/var`. Resolve such a root under `#[cfg(unix)]` only:
+  `canonicalize` on Windows yields a `\\?\` verbatim path, which the state-write path rejects with
+  `ERROR_INVALID_FUNCTION`.
+- A green step proves only that step. When an early step in a matrix job fails, everything after it
+  is skipped, so its result is unknown rather than passing — do not read a job's first failure as
+  its only failure.
 
 ## Evidence before claims
 
