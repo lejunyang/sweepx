@@ -1336,34 +1336,68 @@ mod tests {
                 );
             });
 
-        assert_eq!(entries.entries.len(), 3);
-        // Assert the set, not the sequence.
-        //
-        // Neither this backend nor the linux or Windows ones sorts, and the trait promises no
-        // order — enumeration returns whatever the directory yields. This assertion used to compare
-        // against `[a, m, z]` and passed only because the volume happened to hand back sorted
-        // names; the CI runner's did not, returning insertion order `[z, a, m]`. Pinning a
-        // filesystem's incidental order tests the volume, not the code, so sort a copy here and
-        // let the real invariant be what it should be: every child present, exactly once.
-        let mut seen = entries
+        // The three fixture names must all be present. Do not assert the total: macOS drops
+        // `.DS_Store` and similar metadata into directories at times not under this test's control,
+        // and an extra entry would then fail a test that is really about the three names.
+        let seen = entries
             .entries
             .iter()
-            .map(|entry| entry.path.file_name().unwrap().as_bytes().to_vec())
-            .collect::<Vec<_>>();
-        seen.sort();
-        assert_eq!(seen, vec![b"a".to_vec(), b"m".to_vec(), b"z".to_vec()]);
+            .map(|entry| entry.path.file_name().unwrap().as_bytes())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in [b"a".as_slice(), b"m".as_slice(), b"z".as_slice()] {
+            assert!(
+                seen.contains(name),
+                "child {:?} missing from {:?}",
+                String::from_utf8_lossy(name),
+                seen.iter()
+                    .map(|value| String::from_utf8_lossy(value).to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
 
+        // Provoke the limit on a *fresh* handle, and through the branch that actually raises it.
+        //
+        // The previous version reused `admission.directory` after the batch above had already
+        // returned `complete`, so the handle was exhausted: the loop takes the `next_directory_record
+        // -> None` path and returns `Ok(complete)` with an empty batch, and `unwrap_err` panicked on
+        // an Ok. Tightening `max_batch_entries` cannot help there, because that check is only reached
+        // once a record has been read.
+        //
+        // The reachable refusal is the retained-byte cap: with `max_batch_bytes` below the cost of a
+        // single entry, the first record trips `entry_cost > max_batch_bytes` while `entries` is
+        // still empty. That is a genuine backend guarantee rather than an artefact of handle state.
+        let mut fresh = scanner
+            .admit_root(&root, &CancellationToken::new())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "admit_root refused {:?} on re-admission: {error:?}",
+                    temp.path()
+                );
+            });
         let error = scanner
             .enumerate_children(
-                &mut admission.directory,
+                &mut fresh.directory,
                 &CancellationToken::new(),
                 DirectoryReadLimits {
-                    max_batch_entries: 1,
-                    max_batch_bytes: 1024,
+                    max_batch_entries: 8,
+                    max_batch_bytes: 1,
                 },
             )
             .unwrap_err();
         assert!(matches!(error, PlatformError::ResourceLimit(_)));
+
+        // A zero limit is refused before any read, so it needs no fixture state at all.
+        let zero = scanner
+            .enumerate_children(
+                &mut fresh.directory,
+                &CancellationToken::new(),
+                DirectoryReadLimits {
+                    max_batch_entries: 0,
+                    max_batch_bytes: 1024,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(zero, PlatformError::ResourceLimit(_)));
     }
 
     #[test]
