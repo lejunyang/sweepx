@@ -54,18 +54,44 @@
   configuration:
 
   ```pwsh
+  cargo check -p <crate> --all-targets --target x86_64-unknown-linux-gnu
+  ```
+
+  `x86_64-unknown-linux-gnu` is the honest target and its std **is** installed now, despite an
+  earlier 404 — verify with `rustup target list --installed` rather than trusting this note. Measured
+  2026-09-06: 16 of the 22 workspace crates check cleanly this way. The other six — `sweepx-audit`,
+  `sweepx-cli`, `sweepx-core`, `sweepx-event-journal`, `sweepx-executor`, `sweepx-safety` — cannot,
+  because `rusqlite` is a hard dependency and `libsqlite3-sys` needs a C cross-compiler with a linux
+  sysroot; the bare `clang` on this host is not enough. That gap covers `sweepx-core`, so a
+  linux-only defect there still has to be reasoned about structurally rather than compiled.
+
+  ```pwsh
   cargo clippy -p <crate> --all-features --target x86_64-linux-android -- -D warnings
   ```
 
-  Use the target the *active* toolchain actually has — `rustup target list --installed` reports per
-  toolchain, and the pinned one carries `x86_64-linux-android` while `aarch64` resolves to
-  `can't find crate for core`, which looks like a code error and is not one.
+  Android only when the above cannot run. Use the target the *active* toolchain actually has —
+  `rustup target list --installed` reports per toolchain, and the pinned one carries
+  `x86_64-linux-android` while `aarch64` resolves to `can't find crate for core`, which looks like a
+  code error and is not one.
 
   Read its output with the target's limits in mind. `sweepx-scanner` and `trash` are declared only
   for linux/macos/windows, so on Android their absence cascades into unresolved-import and
-  unused-variable reports that CI never sees. Findings inside a `cfg(any(linux, macos, windows))`
-  block are artefacts of the probe; unconditional ones are real. `x86_64-unknown-linux-gnu` is the
-  honest target for this, but the configured mirror returned 404 for it.
+  unused-variable reports that CI never sees — and it dies at import resolution before dead-code
+  analysis runs, so it cannot see a dead-code failure at all. Findings inside a
+  `cfg(any(linux, macos, windows))` block are artefacts of the probe; unconditional ones are real.
+- `cfg`-gated enum variants and functions need a dead-code exemption on the platforms that cannot
+  construct them, in *both* directions. A variant built only by the `cfg(windows)` arm of a function
+  is dead on linux, and vice versa; `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` is
+  the counterpart to the `target_os = "windows"` form. Locate a variant's construction sites and the
+  cfg block enclosing each before deciding — that classification is decisive and takes seconds,
+  whereas isolated reproductions of a dead-code report reliably lie: stubbing imports turns public
+  matches into uses, rewriting `cfg` trips clippy on the substitute attributes, and neither reaches
+  the analysis that failed.
+- Test code behind `cfg(all(test, target_os = "…"))` compiles nowhere on this host, so an edit to it
+  reaches CI unchecked. Type-check it by temporarily widening that gate to `cfg(test)` and running
+  `cargo check --tests` against a target of the right family, then restore the file and confirm the
+  restoration by hash. Read only the diagnostics inside the edited line ranges; the rest are the
+  platform's own APIs missing elsewhere.
 - A symlinked ancestor is a real host condition, not an exotic one: macOS `TMPDIR` is
   `/var/folders/…` and `/var` links to `/private/var`, so any fixture rooted at an unresolved
   `env::temp_dir()` is refused by the paths that reject linked ancestors. Reproduce it here without
