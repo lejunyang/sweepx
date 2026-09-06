@@ -332,17 +332,115 @@ verify_remote_checksum() {
   verify_checksum_match "$crate" "$version" "$local_checksum" "$fetched_checksum"
 }
 
+# Compares the packaged crate against the published one, ignoring the commit record.
+#
+# Cargo writes `.cargo_vcs_info.json` into every archive with the HEAD sha of the commit that
+# produced it. That file is generated, not taken from the tree, so `include`/`exclude` cannot drop
+# it and no flag suppresses it. Every new commit therefore changes the archive checksum even when
+# not one byte of the crate's own sources differs.
+#
+# Comparing whole-archive checksums consequently declares a mismatch for every already-published
+# crate as soon as any later commit exists, which is a permanent block rather than a safety check:
+# preflight fails hard, and publish stops before it can resume an interrupted release. Compare the
+# contents instead and report the vcs record separately, so a genuine source difference is still
+# caught while an unrelated commit is not mistaken for one.
+published_contents_match() {
+  local crate=$1
+  local version=$2
+  local local_path=$3
+  local remote_path=$package_target/published-$crate-$version.crate
+
+  rm -f -- "$remote_path"
+  if ! curl \
+    --silent \
+    --show-error \
+    --location \
+    --fail \
+    --retry 3 \
+    --retry-all-errors \
+    --connect-timeout 15 \
+    --max-time 120 \
+    --user-agent 'sweepx-release-helper/1' \
+    --output "$remote_path" \
+    "https://static.crates.io/crates/$crate/$crate-$version.crate"; then
+    rm -f -- "$remote_path"
+    return 2
+  fi
+
+  python3 - "$local_path" "$remote_path" <<'PY'
+import hashlib
+import sys
+import tarfile
+
+IGNORED = {".cargo_vcs_info.json"}
+
+
+def members(path):
+    entries = {}
+    with tarfile.open(path) as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            # Strip the leading "<crate>-<version>/" so the two archives line up.
+            name = member.name.split("/", 1)[1] if "/" in member.name else member.name
+            if name in IGNORED:
+                continue
+            entries[name] = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+    return entries
+
+
+local_path, remote_path = sys.argv[1:3]
+local = members(local_path)
+remote = members(remote_path)
+if local == remote:
+    raise SystemExit(0)
+
+for name in sorted(set(local) | set(remote)):
+    if local.get(name) == remote.get(name):
+        continue
+    if name not in remote:
+        print("only in local: {}".format(name), file=sys.stderr)
+    elif name not in local:
+        print("only in published: {}".format(name), file=sys.stderr)
+    else:
+        print("differs: {}".format(name), file=sys.stderr)
+raise SystemExit(1)
+PY
+  local status=$?
+  rm -f -- "$remote_path"
+  return $status
+}
+
 verify_checksum_match() {
   local crate=$1
   local version=$2
   local local_checksum=$3
   local remote_checksum=$4
 
-  if [[ $local_checksum != "$remote_checksum" ]]; then
-    fail "checksum mismatch for published $crate@$version: local=$local_checksum crates.io=$remote_checksum"
+  if [[ $local_checksum == "$remote_checksum" ]]; then
+    printf 'Verified existing crate checksum: %s@%s (%s).\n' \
+      "$crate" "$version" "$local_checksum"
+    return 0
   fi
-  printf 'Verified existing crate checksum: %s@%s (%s).\n' \
-    "$crate" "$version" "$local_checksum"
+
+  # Whole-archive checksums differ. Decide whether the crate's own contents differ, or only the
+  # generated commit record does.
+  local crate_file
+  crate_file=$(package_path "$crate" "$version")
+  published_contents_match "$crate" "$version" "$crate_file"
+  case $? in
+    0)
+      printf 'Already published; identical contents, differing commit record: %s@%s\n' \
+        "$crate" "$version"
+      return 0
+      ;;
+    2)
+      fail "could not download published $crate@$version to compare contents"
+      ;;
+    *)
+      fail "published $crate@$version differs in content: local=$local_checksum crates.io=$remote_checksum"
+      ;;
+  esac
 }
 
 while IFS=$'\t' read -r crate version; do
