@@ -161,9 +161,21 @@
 
 ## Releasing to crates.io
 
-- Publication is irreversible per name and version. As of 2026-09-06 `sweepx-cache`,
-  `sweepx-canonical`, `sweepx-cleaner-schema`, `sweepx-i18n` and `sweepx-model` hold `0.0.1`; the
-  other eighteen names are still free. A partially completed release is resumed, never re-cut.
+- Publication is irreversible per name and version. As of 2026-09-06 ten crates hold `0.0.1`:
+  `sweepx-audit`, `sweepx-cache`, `sweepx-canonical`, `sweepx-catalog`, `sweepx-cleaner-schema`,
+  `sweepx-fixtures`, `sweepx-i18n`, `sweepx-model`, `sweepx-platform` and `sweepx-protocol`. Twelve
+  names are still free. A partially completed release is resumed, never re-cut.
+- **crates.io meters publishes and a first release is entirely on the strict limit.** A brand-new
+  crate *name* allows a burst of 5 and then refills at one per **10 minutes**; a new *version* of an
+  existing crate allows 30 and refills at one per minute. Every name in a first release is new, so 22
+  crates cost roughly three hours of mandated waiting and no amount of retry tuning avoids it. Two
+  runs failed here reporting "could not publish … after 5 attempts" when the release was only waiting
+  its turn — a generic 15s-doubling-to-120s ladder over five attempts gives up in under four minutes.
+  The 429 response states the exact instant the next publish is allowed; sleep past that and do not
+  consume an attempt, and pace successive crates by `PUBLISH_NEW_CRATE_INTERVAL_SECONDS` (600) so the
+  refusal is not needed to discover the bucket is empty.
+- Piping `cargo publish` through `tee` to inspect its output makes `$?` the status of `tee`, which is
+  almost always 0. Take the status from `PIPESTATUS[0]`, or every failed publish reads as a success.
 - Cargo writes `.cargo_vcs_info.json` into every archive, recording the HEAD sha of the commit that
   produced it. It is generated rather than read from the tree, so `include`/`exclude` cannot drop it
   and no flag suppresses it. **Every commit after a publish therefore changes the archive checksum of
