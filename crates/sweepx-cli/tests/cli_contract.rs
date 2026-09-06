@@ -151,7 +151,10 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     && item["qualificationKey"]["capability"] == "catalog.cleaner.read"
             })
             .unwrap();
-        assert_eq!(cleaner["state"], "report_only");
+        // `qualified`, not `report_only`: both built-in manifests now admit the running Core, so
+        // catalog reading is fully available rather than degraded. This assertion tracked the state
+        // that a mistyped core range produced, not an intended one.
+        assert_eq!(cleaner["state"], "qualified");
 
         let tui = json["data"]["capabilities"]
             .as_array()
@@ -544,24 +547,41 @@ fn cleaner_list_json_uses_cleaner_result_contract() {
     assert_eq!(json["kind"], "cleaner.result");
     assert_eq!(json["summary"]["command"], "cleaner.list");
     assert_eq!(json["data"]["cleaners"][0]["id"], "org.sweepx.cargo-target");
-    assert_eq!(json["status"], "partial");
+    // `ok`, not `partial`: every shipped manifest admits the running Core. `partial` here recorded
+    // a mistyped core range in the chromium manifest rather than a property worth protecting.
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["summary"]["incompatibleCleanerCount"], "0");
     assert_eq!(
         json["data"]["cleaners"][0]["compatibility"]["state"],
         "compatible"
     );
 }
 
+/// Both shipped packages are compatible, so `show` succeeds for either one.
+///
+/// This test previously asserted exit 12 on the chromium package. That only passed because its
+/// manifest carried a mistyped `>=1.0.0` core range, so it was pinning a defect rather than a
+/// contract. The CLI cannot load a cleaner from a caller-supplied directory, so an incompatible
+/// package cannot be constructed at this layer at all; the refusal itself is covered by
+/// `the_compat_gate_refuses_a_package_that_excludes_the_running_core` in sweepx-core, which builds
+/// the incompatible case from bytes.
 #[test]
-fn cleaner_show_reports_incompatible_builtin_with_exit_12() {
+fn cleaner_show_succeeds_for_the_chromium_builtin() {
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
+        .arg("--format")
+        .arg("json")
         .arg("cleaner")
         .arg("show")
         .arg("org.sweepx.chromium-rebuildable-cache");
 
-    let output = cmd.assert().code(12).get_output().clone();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("cleaner is incompatible with this core"));
+    let output = cmd.assert().code(0).get_output().stdout.clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["data"]["cleaner"]["compatibility"]["state"],
+        "compatible"
+    );
 }
 
 #[test]

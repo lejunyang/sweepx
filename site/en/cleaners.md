@@ -28,7 +28,10 @@ cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 - `show` accepts `id` or `id@version`, but fails with a compatibility error when the current Core does not satisfy `requires.core`.
 - No flag bypasses the compatibility gate, and visibility in list never makes a package executable.
 
-The current Core is `0.1.0`, while both built-in manifests require `>=1.0.0, <2.0.0`. List therefore returns partial honestly, and show fails closed. That is expected.
+Both built-in manifests require `>=0.1.0, <0.2.0`, which the current Core `0.1.0` satisfies, so list
+reports `ok` with no incompatible packages and show succeeds. A manifest whose range excludes the
+running Core is still reported honestly as `incompatible` and refused by show — the gate is intact,
+it simply is not being tripped by the shipped packages.
 
 ## Current `cargo-detect` boundary
 

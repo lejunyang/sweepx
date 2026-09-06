@@ -7216,6 +7216,41 @@ mod tests {
         );
     }
 
+    /// The compatibility gate refuses a package whose range excludes the running Core.
+    ///
+    /// This used to be covered only because a shipped manifest carried a mistyped `>=1.0.0` range,
+    /// so the CLI test asserting exit 12 was really observing a defect. Once the range was
+    /// corrected there was no incompatible package left and the coverage vanished with it. Build the
+    /// incompatible case here instead: the range is stated by the test, so the gate stays tested
+    /// however the shipped manifests are versioned.
+    #[test]
+    fn the_compat_gate_refuses_a_package_that_excludes_the_running_core() {
+        let compatible = sweepx_catalog::CARGO_TARGET
+            .load()
+            .expect("the shipped cargo package must load");
+        assert!(
+            cleaner_is_core_compatible(&compatible).expect("a valid range parses"),
+            "the shipped range must admit Core {CORE_VERSION}"
+        );
+
+        // Same package, one field changed: a range no 0.x Core can satisfy.
+        let manifest = String::from_utf8(sweepx_catalog::CARGO_TARGET.manifest_bytes.to_vec())
+            .expect("the manifest is UTF-8");
+        let widened = manifest.replace("\">=0.1.0, <0.2.0\"", "\">=99.0.0, <100.0.0\"");
+        assert_ne!(widened, manifest, "the core range must have been rewritten");
+
+        let incompatible = sweepx_catalog::load_package_bytes(
+            widened.as_bytes(),
+            sweepx_catalog::CARGO_TARGET.rule_files,
+            sweepx_catalog::CARGO_TARGET.evidence_files,
+        )
+        .expect("only the core range changed, so the package still loads");
+        assert!(
+            !cleaner_is_core_compatible(&incompatible).expect("a valid range parses"),
+            "a range excluding Core {CORE_VERSION} must be reported incompatible"
+        );
+    }
+
     #[test]
     fn cargo_detect_compatible_builtin_reaches_runtime_scope_collection() {
         use std::sync::atomic::{AtomicBool, Ordering};

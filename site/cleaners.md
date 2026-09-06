@@ -28,7 +28,7 @@ cargo run -p sweepx-cli -- --format json cleaner show <CLEANER_REF>
 - `show` 可接受 `id` 或 `id@version`，但在当前 Core 不满足 `requires.core` 时以兼容性错误失败。
 - 兼容性门不能通过 flag 绕过，也不会因为 list 能看到 package 就让它变成 executable。
 
-当前 Core 是 `0.1.0`，两个内置 manifest 要求 `>=1.0.0, <2.0.0`，所以 list 会诚实返回 partial，而 show 失败关闭。这是期望状态。
+两个内置 manifest 要求 `>=0.1.0, <0.2.0`，当前 Core `0.1.0` 满足该范围，因此 list 返回 `ok` 且没有不兼容包，show 也能成功。若某个 manifest 的范围排除了正在运行的 Core，它仍会被诚实标记为 `incompatible` 并被 show 拒绝——兼容性闸门依然生效，只是随包发布的清单不会触发它。
 
 ## `cargo-detect` 的当前边界
 
