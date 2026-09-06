@@ -1824,6 +1824,24 @@ mod tests {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
                     .expect("test temp dir permissions must be private");
             }
+            // Resolve the path before any store is rooted at it.
+            //
+            // `ensure_no_symlink_ancestors` refuses a state root reached through a link, which is
+            // what keeps a redirected ancestor from silently relocating the cache. On macOS
+            // `TMPDIR` is `/var/folders/…` and `/var` is a symlink to `/private/var`, so an
+            // unresolved fixture path is `InsecurePath` before a test reaches its subject.
+            // Measured on Windows with a junction standing in for that symlink: 10 of these tests
+            // failed with `InsecurePath`, and resolving the root fixed all 10.
+            //
+            // Unix only, deliberately. `canonicalize` on Windows returns a `\\?\` verbatim path,
+            // and rooting the store there made the same 10 tests fail with
+            // `ERROR_INVALID_FUNCTION` from the write path — trading one broken platform for
+            // another. Windows temp directories are not reached through a link in practice, and
+            // the guard's negative tests build their links *below* this root either way.
+            #[cfg(unix)]
+            let path = path
+                .canonicalize()
+                .expect("test temp dir must be resolvable");
             Self { path }
         }
 
