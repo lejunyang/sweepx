@@ -48,6 +48,12 @@
   reintroduce a check that compares a hand-maintained digest field against the bytes.
 - Case sensitivity is a property of the host and volume, not of the code. Probe the actual
   behavior and assert the matching invariant instead of hardcoding either expectation.
+- Directory enumeration order is likewise the volume's, not the code's. No backend sorts and the
+  `PlatformScanner` contract promises no order, so an assertion comparing enumerated names against a
+  sorted list passes only where the filesystem happens to agree — it tests the volume. A macOS CI
+  runner returned insertion order `[z, a, m]` where the local disk gave `[a, m, z]`. Assert the set:
+  sort a copy, or compare membership. Comparing two enumerations *of the same directory in one run*
+  (paged against unpaged) is fine, because the order is consistent within a run.
 - A green Windows tree does not mean a green CI. `cargo clippy` only lints the `cfg` branches
   selected for the host, so a `use` that serves a `cfg(windows)` block alone is invisible here and
   fails `-D warnings` on the linux runner. Before pushing, lint at least one non-Windows
@@ -58,19 +64,32 @@
   cargo clippy -p <crate> --all-targets --all-features --target aarch64-apple-darwin -- -D warnings
   ```
 
-  Both are installed for the pinned toolchain. Measured 2026-09-06: 16 of the 22 workspace crates
-  lint cleanly on each. The other six — `sweepx-audit`, `sweepx-cli`, `sweepx-core`,
-  `sweepx-event-journal`, `sweepx-executor`, `sweepx-safety` — cannot be compiled off Windows here at
-  all, and the reason is structural rather than a missing flag: `sweepx-core` depends
-  unconditionally on `sweepx-audit` and `sweepx-event-journal`, both of which take `rusqlite` with
-  the `bundled` feature, so a C compiler able to build SQLite *for the target* is mandatory. The
-  `clang` on this host is the Android NDK's, targeting `x86_64-w64-windows-gnu` with no libc headers
-  for either family (`'stdio.h' file not found`), and no `--target` flag substitutes for a sysroot.
-  Dropping `--all-features` does not help: the dependency is unconditional. `sweepx-core` is exactly
-  where a linux-only dead-code failure has already hidden, so reason about that crate structurally
-  and expect CI to be the first compiler that sees it.
+  Both are installed for the pinned toolchain, and with the C cross-compiler below **all 22 crates
+  lint cleanly on all three** of linux, arm64 macOS and x86_64 macOS — measured 2026-09-06. Sweep
+  every crate before pushing; two separate rounds of CI-only failures (a dead-code report in
+  `sweepx-core`, an unused import and dead helper in `sweepx-cli`'s tests) would each have been
+  caught by it.
 
-  When a target is genuinely missing, install it rather than concluding it is unavailable. The
+  `rusqlite` with the `bundled` feature makes a C compiler for the target mandatory, and
+  `sweepx-core` depends on it unconditionally through `sweepx-audit` and `sweepx-event-journal`, so
+  six crates were unbuildable off Windows until one was supplied. This host's `clang` is the Android
+  NDK's, targeting `x86_64-w64-windows-gnu` with no libc headers for either family. `zig cc` carries
+  its own libc for every target and needs no sysroot; it lives at
+  `%LOCALAPPDATA%\zig\zig-x86_64-windows-0.16.0\zig.exe` with shims in `%LOCALAPPDATA%\zig\shims`:
+
+  ```pwsh
+  $shim = "$env:LOCALAPPDATA\zig\shims"
+  $env:CC_x86_64_unknown_linux_gnu = "$shim\cc-x86_64-unknown-linux-gnu.cmd"
+  $env:AR_x86_64_unknown_linux_gnu = "$shim\ar-x86_64-unknown-linux-gnu.cmd"
+  ```
+
+  The shim must **strip the `--target` cc-rs appends** and pin zig's own spelling — cc-rs passes the
+  Rust triple, which zig rejects as `UnknownOperatingSystem`, and the last flag wins. A plain `.cmd`
+  wrapper that only prepends `--target` therefore fails; the shim delegates to a Python filter that
+  drops the caller's value. zig spells targets differently: `x86_64-linux-gnu`, `aarch64-macos`,
+  `x86_64-macos`.
+
+  When a Rust target is genuinely missing, install it rather than concluding it is unavailable. The
   configured mirror 404s on `rust-std-*-apple-darwin` while `static.rust-lang.org` serves it — that
   was verified with a HEAD request (HTTP 200, ~29 MB each) before touching any configuration. osdk's
   `--source`/`source pin` do not change the outcome, because rustup reads `RUSTUP_DIST_SERVER` from
