@@ -28,6 +28,11 @@ pub enum ReuseRefusal {
     /// The evidence names a mechanism this build does not understand.
     UnknownKind(String),
     /// The evidence is structurally unusable, for example a non-numeric position.
+    ///
+    /// Constructed only by the Windows `verify_record`, so a non-Windows build sees it as unused —
+    /// the mirror image of `NoMechanism` below. See that variant for why all of them stay defined
+    /// unconditionally.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     MalformedEvidence,
     /// Re-reading the evidence failed at the OS level; `code` is that error.
     ///
@@ -35,10 +40,16 @@ pub enum ReuseRefusal {
     /// means run elevated, an `87` means SweepX passed bad input and is a bug here. Collapsing it
     /// into a bare "unverifiable" cost a diagnostic round trip when an `87` was mistaken for the
     /// feature silently doing nothing.
+    ///
+    /// Windows-only in practice; see `MalformedEvidence`.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     ReadFailed { code: u32 },
     /// The journal itself declared the stored range unusable, so it cannot vouch for stability.
     ///
     /// No OS error exists here: the read succeeded and its answer was "rescan".
+    ///
+    /// Windows-only in practice; see `MalformedEvidence`.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     JournalMustRescan,
     /// This build has no change-detection mechanism for the host, so nothing can be re-checked.
     ///
@@ -48,6 +59,9 @@ pub enum ReuseRefusal {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     NoMechanism,
     /// The volume demonstrably changed since capture.
+    ///
+    /// Windows-only in practice; see `MalformedEvidence`.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Changed,
 }
 
