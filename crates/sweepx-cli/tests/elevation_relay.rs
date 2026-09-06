@@ -1,13 +1,21 @@
+// `fs` and `Path` serve the fixture helper alone, so they follow it behind the same gate.
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::path::Path;
 
 use assert_cmd::Command;
+// Only the two `cfg(windows)` relay tests build a fixture; the flag-visibility test below runs
+// everywhere and needs neither. Gate the import and the helper the same way the tests are gated,
+// or `-D warnings` fails the linux and macOS runners on an unused import and a dead function.
+#[cfg(windows)]
 use tempfile::TempDir;
 
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
 
+#[cfg(windows)]
 fn fixture_root(temp: &Path) -> std::path::PathBuf {
     let root = temp.join("scan-root");
     fs::create_dir_all(&root).unwrap();
