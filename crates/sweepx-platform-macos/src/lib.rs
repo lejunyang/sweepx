@@ -1337,14 +1337,21 @@ mod tests {
             });
 
         assert_eq!(entries.entries.len(), 3);
-        assert_eq!(
-            entries
-                .entries
-                .iter()
-                .map(|entry| entry.path.file_name().unwrap().as_bytes().to_vec())
-                .collect::<Vec<_>>(),
-            vec![b"a".to_vec(), b"m".to_vec(), b"z".to_vec()]
-        );
+        // Assert the set, not the sequence.
+        //
+        // Neither this backend nor the linux or Windows ones sorts, and the trait promises no
+        // order — enumeration returns whatever the directory yields. This assertion used to compare
+        // against `[a, m, z]` and passed only because the volume happened to hand back sorted
+        // names; the CI runner's did not, returning insertion order `[z, a, m]`. Pinning a
+        // filesystem's incidental order tests the volume, not the code, so sort a copy here and
+        // let the real invariant be what it should be: every child present, exactly once.
+        let mut seen = entries
+            .entries
+            .iter()
+            .map(|entry| entry.path.file_name().unwrap().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        seen.sort();
+        assert_eq!(seen, vec![b"a".to_vec(), b"m".to_vec(), b"z".to_vec()]);
 
         let error = scanner
             .enumerate_children(
