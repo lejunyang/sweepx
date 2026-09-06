@@ -387,6 +387,30 @@ jobs:
           }
 
           Write-Host "all Windows durable-state assertions passed"
+
+          # The block asserted everything successfully and still failed the step with exit 1 --
+          # PowerShell's own error code, not the 2 the refusal produced, so no assertion fired and
+          # no stale $LASTEXITCODE leaked. The remaining candidate is an error record: the refusal
+          # writes to stderr, and a native command's stderr becomes a record that the runner's pwsh
+          # counts even though `2>&1 | Out-String` folded it into the pipeline. Five reproductions
+          # here -- cmd.exe stand-in, real binary, both ErrorActionPreference values, with and
+          # without the icacls stage, and GitHub's own `-command ". 'file'"` form -- all exited 0, so
+          # the conversion is specific to the runner and cannot be measured from a workstation.
+          #
+          # Rather than guess a sixth time: report the records, then state the ending explicitly.
+          # $Error is cleared per stage-free block, so anything in it here is what the step
+          # accumulated while passing, and `exit 0` makes the success path independent of how the
+          # host would otherwise translate that.
+          if ($Error.Count -gt 0) {
+            Write-Host "== error records accumulated while passing ($($Error.Count)) =="
+            foreach ($record in $Error) {
+              Write-Host "   $($record.GetType().Name): $($record.ToString().Trim())"
+            }
+            $Error.Clear()
+          } else {
+            Write-Host "no error records accumulated"
+          }
+          exit 0
       - name: Smoke-test binary and capability truthfulness
         shell: bash
         env:
