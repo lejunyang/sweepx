@@ -143,6 +143,43 @@
   read it. A regression test should pin the *measured* value, not reference the constant it is
   meant to protect.
 - Record measured numbers with their subject and date, and state what they do not cover.
+- A test that fails after a fix is not automatically a test to relax. Classify it first: it may have
+  been pinning the defect, or it may be the only thing covering a real contract. Three tests broke
+  when a mistyped `requires.core` range was corrected; two were describing the defect, but the third
+  was the sole cover for "an incompatible package is refused". Relaxing all three would have removed
+  the guarantee along with the noise. Where the honest fixture no longer exists at that layer, build
+  it one layer down — `sweepx_catalog::load_package_bytes` constructs an incompatible package from
+  bytes, so the gate stays tested no matter how the shipped manifests are versioned.
+- An assertion can describe behavior the code does not have, and then it is the assertion that is
+  wrong. A macOS test called `enumerate_children` twice on one handle and expected the second call to
+  raise `ResourceLimit`; an exhausted handle returns `Ok(complete)` instead, so `unwrap_err` panicked.
+  Read the branch that would have to produce the expected error before assuming the host is at fault
+  — here the reachable refusal was the retained-byte cap on a fresh handle.
+- Totals over a real directory are host-dependent in the same way ordering is. macOS writes
+  `.DS_Store` into directories at moments a test does not control, so assert that the fixture's names
+  are present rather than that the count equals the number written.
+
+## Releasing to crates.io
+
+- Publication is irreversible per name and version. As of 2026-09-06 `sweepx-cache`,
+  `sweepx-canonical`, `sweepx-cleaner-schema`, `sweepx-i18n` and `sweepx-model` hold `0.0.1`; the
+  other eighteen names are still free. A partially completed release is resumed, never re-cut.
+- Cargo writes `.cargo_vcs_info.json` into every archive, recording the HEAD sha of the commit that
+  produced it. It is generated rather than read from the tree, so `include`/`exclude` cannot drop it
+  and no flag suppresses it. **Every commit after a publish therefore changes the archive checksum of
+  every crate, with no source change at all.** Any "already published, identical bytes" check must
+  compare contents with that file excluded, or a resumed release fails on its first crate forever —
+  which is exactly what blocked this one. Diff the two archives member by member before believing a
+  checksum mismatch means a source difference.
+- `cargo package` without `--no-verify` builds the extracted archive, where path dependencies are
+  gone and only the registry versions remain. Confirm this by reading the packaged `Cargo.toml`: it
+  carries `version = "0.0.1"` and no `path`. So packaging a dependent crate requires its SweepX
+  dependencies to be on crates.io and visible in the index already; the ordering in
+  `scripts/publish-crates.sh` exists for that reason, and locally this step can pass for the wrong
+  reason once the dependency is published.
+- A green step proves only that step, and this applies to the release too: `crates-io` failing part
+  way leaves `release` skipped and the tag uncreated, while the crates it did upload stay uploaded.
+  Check the registry itself rather than the workflow conclusion.
 
 ## Filesystem safety
 
