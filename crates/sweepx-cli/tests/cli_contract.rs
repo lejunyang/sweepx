@@ -950,6 +950,9 @@ fn cache_status_json_reports_available_for_valid_preview_cache() {
                 total_records: 0,
                 visible_resource_limit: false,
             },
+            // No evidence: this test is about cache *status* reporting, not reuse. An empty vec is
+            // the fail-closed value — the generation is readable and reported, never reused.
+            validity: Vec::new(),
         })
         .unwrap();
     fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1033,6 +1036,8 @@ fn cache_status_quarantine_presence_is_degraded_and_read_only() {
                 total_records: 0,
                 visible_resource_limit: false,
             },
+            // See the note above: status reporting, not reuse, so no evidence is the right value.
+            validity: Vec::new(),
         })
         .unwrap();
     let quarantine = preview_root.join("quarantine");
