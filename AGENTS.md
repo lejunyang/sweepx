@@ -54,31 +54,39 @@
   configuration:
 
   ```pwsh
-  cargo check -p <crate> --all-targets --target x86_64-unknown-linux-gnu
+  cargo clippy -p <crate> --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings
+  cargo clippy -p <crate> --all-targets --all-features --target aarch64-apple-darwin -- -D warnings
   ```
 
-  `x86_64-unknown-linux-gnu` is the honest target and its std **is** installed now, despite an
-  earlier 404 — verify with `rustup target list --installed` rather than trusting this note. Measured
-  2026-09-06: 16 of the 22 workspace crates check cleanly this way. The other six — `sweepx-audit`,
-  `sweepx-cli`, `sweepx-core`, `sweepx-event-journal`, `sweepx-executor`, `sweepx-safety` — cannot,
-  because `rusqlite` is a hard dependency and `libsqlite3-sys` needs a C cross-compiler with a linux
-  sysroot; the bare `clang` on this host is not enough. That gap covers `sweepx-core`, so a
-  linux-only defect there still has to be reasoned about structurally rather than compiled.
+  Both are installed for the pinned toolchain. Measured 2026-09-06: 16 of the 22 workspace crates
+  lint cleanly on each. The other six — `sweepx-audit`, `sweepx-cli`, `sweepx-core`,
+  `sweepx-event-journal`, `sweepx-executor`, `sweepx-safety` — cannot be compiled off Windows here at
+  all, and the reason is structural rather than a missing flag: `sweepx-core` depends
+  unconditionally on `sweepx-audit` and `sweepx-event-journal`, both of which take `rusqlite` with
+  the `bundled` feature, so a C compiler able to build SQLite *for the target* is mandatory. The
+  `clang` on this host is the Android NDK's, targeting `x86_64-w64-windows-gnu` with no libc headers
+  for either family (`'stdio.h' file not found`), and no `--target` flag substitutes for a sysroot.
+  Dropping `--all-features` does not help: the dependency is unconditional. `sweepx-core` is exactly
+  where a linux-only dead-code failure has already hidden, so reason about that crate structurally
+  and expect CI to be the first compiler that sees it.
+
+  When a target is genuinely missing, install it rather than concluding it is unavailable. The
+  configured mirror 404s on `rust-std-*-apple-darwin` while `static.rust-lang.org` serves it — that
+  was verified with a HEAD request (HTTP 200, ~29 MB each) before touching any configuration. osdk's
+  `--source`/`source pin` do not change the outcome, because rustup reads `RUSTUP_DIST_SERVER` from
+  the injected process environment; set it for the one command instead:
 
   ```pwsh
-  cargo clippy -p <crate> --all-features --target x86_64-linux-android -- -D warnings
+  $env:RUSTUP_DIST_SERVER = "https://static.rust-lang.org"
+  rustup target add aarch64-apple-darwin --toolchain 1.98.0
   ```
 
-  Android only when the above cannot run. Use the target the *active* toolchain actually has —
-  `rustup target list --installed` reports per toolchain, and the pinned one carries
-  `x86_64-linux-android` while `aarch64` resolves to `can't find crate for core`, which looks like a
-  code error and is not one.
-
-  Read its output with the target's limits in mind. `sweepx-scanner` and `trash` are declared only
-  for linux/macos/windows, so on Android their absence cascades into unresolved-import and
-  unused-variable reports that CI never sees — and it dies at import resolution before dead-code
-  analysis runs, so it cannot see a dead-code failure at all. Findings inside a
-  `cfg(any(linux, macos, windows))` block are artefacts of the probe; unconditional ones are real.
+  Do **not** substitute `x86_64-linux-android` for either of the above. It was the fallback while no
+  real target was installable, and it lies in both directions: `sweepx-scanner` and `trash` are
+  declared only for linux/macos/windows, so their absence there cascades into unresolved-import and
+  unused-variable reports CI never sees, and the crate dies at import resolution *before* dead-code
+  analysis runs — so it cannot observe a dead-code failure at all. That is precisely how a linux-only
+  dead-code defect reached CI once already.
 - `cfg`-gated enum variants and functions need a dead-code exemption on the platforms that cannot
   construct them, in *both* directions. A variant built only by the `cfg(windows)` arm of a function
   is dead on linux, and vice versa; `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` is
@@ -87,11 +95,13 @@
   whereas isolated reproductions of a dead-code report reliably lie: stubbing imports turns public
   matches into uses, rewriting `cfg` trips clippy on the substitute attributes, and neither reaches
   the analysis that failed.
-- Test code behind `cfg(all(test, target_os = "…"))` compiles nowhere on this host, so an edit to it
-  reaches CI unchecked. Type-check it by temporarily widening that gate to `cfg(test)` and running
-  `cargo check --tests` against a target of the right family, then restore the file and confirm the
-  restoration by hash. Read only the diagnostics inside the edited line ranges; the rest are the
-  platform's own APIs missing elsewhere.
+- Test code behind `cfg(all(test, target_os = "…"))` is compiled by `--all-targets` on that target,
+  so lint it there before pushing — `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu` are both
+  installed and cover the macOS and linux gates. Only when no such target can be had is the fallback
+  warranted: temporarily widen the gate to `cfg(test)`, `cargo check --tests` against a target of the
+  right family, then restore the file and confirm the restoration by hash, reading only the
+  diagnostics inside the edited line ranges. Note what neither approach proves — cross-compiled test
+  binaries cannot run here, so a *runtime* assertion or panic is still only observable in CI.
 - A symlinked ancestor is a real host condition, not an exotic one: macOS `TMPDIR` is
   `/var/folders/…` and `/var` links to `/private/var`, so any fixture rooted at an unresolved
   `env::temp_dir()` is refused by the paths that reject linked ancestors. Reproduce it here without
