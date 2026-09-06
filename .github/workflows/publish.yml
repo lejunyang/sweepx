@@ -240,6 +240,12 @@ jobs:
       id-token: none
     runs-on: ubuntu-latest
     environment: crates-io
+    # Most of this job is spent waiting, not working. crates.io refills the new-crate allowance at
+    # one per 10 minutes after a burst of 5, so a first release of this workspace needs roughly
+    # 10 minutes per remaining crate; 22 crates from scratch is about 3 hours. State the budget
+    # explicitly rather than relying on the 360-minute default, so a future crate count that no
+    # longer fits fails with a clear timeout instead of being cut off mid-publish.
+    timeout-minutes: 300
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

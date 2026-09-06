@@ -16,6 +16,12 @@ Environment:
   CARGO_REGISTRY_TOKEN          Required for publishing; never passed on argv.
   PUBLISH_MAX_ATTEMPTS          Attempts per crate (default 5, range 1..10).
   PUBLISH_RETRY_DELAY_SECONDS   Initial delay (default 15, range 1..120).
+  PUBLISH_NEW_CRATE_INTERVAL_SECONDS
+                                Wait between crates (default 600, range 0..1800).
+                                crates.io refills the new-crate allowance once
+                                per 10 minutes after a burst of 5, so a first
+                                release needs 600. Set 0 only when every crate
+                                already exists on the registry.
 EOF
 }
 
@@ -43,6 +49,12 @@ done
 
 max_attempts=${PUBLISH_MAX_ATTEMPTS:-5}
 initial_delay=${PUBLISH_RETRY_DELAY_SECONDS:-15}
+# Seconds to wait between publishes of distinct crates.
+#
+# crates.io refills the new-crate allowance at one per 10 minutes once the burst of 5 is spent, so
+# 600 is the interval that a first release actually needs. Lower it only when publishing new
+# versions of crates that already exist, where the refill is one per minute.
+new_crate_interval=${PUBLISH_NEW_CRATE_INTERVAL_SECONDS:-600}
 if ! [[ $max_attempts =~ ^[0-9]+$ ]] ||
   ! ((10#$max_attempts >= 1 && 10#$max_attempts <= 10)); then
   fail 'PUBLISH_MAX_ATTEMPTS must be an integer from 1 through 10'
@@ -51,8 +63,16 @@ if ! [[ $initial_delay =~ ^[0-9]+$ ]] ||
   ! ((10#$initial_delay >= 1 && 10#$initial_delay <= 120)); then
   fail 'PUBLISH_RETRY_DELAY_SECONDS must be an integer from 1 through 120'
 fi
+if ! [[ $new_crate_interval =~ ^[0-9]+$ ]] ||
+  ! ((10#$new_crate_interval <= 1800)); then
+  fail 'PUBLISH_NEW_CRATE_INTERVAL_SECONDS must be an integer from 0 through 1800'
+fi
 max_attempts=$((10#$max_attempts))
 initial_delay=$((10#$initial_delay))
+new_crate_interval=$((10#$new_crate_interval))
+# Counts crates this invocation actually uploaded, so the pacing wait is skipped before the first
+# one and before any crate that turned out to be published already.
+crates_published_this_run=0
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
@@ -478,6 +498,18 @@ while IFS=$'\t' read -r crate version; do
 
   # Cargo reads CARGO_REGISTRY_TOKEN from the environment. Never put it on the
   # command line, where process listings and workflow logs could expose it.
+  #
+  # Space successive publishes out proactively rather than only reacting to a 429. The burst
+  # allowance is spent by the first few crates of a first release, after which every publish needs
+  # the bucket to have refilled; sending one immediately just to be refused wastes an attempt and
+  # makes the log harder to read. Waiting up front costs the same wall-clock time and keeps the
+  # 429 handler as the fallback for a bucket that is emptier than we assumed.
+  if ((crates_published_this_run > 0)); then
+    printf 'Pacing %s@%s: waiting %d seconds for the new-crate quota to refill.\n' \
+      "$crate" "$version" "$new_crate_interval" >&2
+    sleep "$new_crate_interval"
+  fi
+
   delay=$initial_delay
   published=false
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
@@ -489,8 +521,9 @@ while IFS=$'\t' read -r crate version; do
       --registry crates-io \
       --package "$crate" \
       --no-verify \
-      --target-dir "$package_target"
-    publish_status=$?
+      --target-dir "$package_target" \
+      2>&1 | tee "$package_target/publish-$crate.log"
+    publish_status=${PIPESTATUS[0]}
     set -e
 
     # Cargo regenerates the archive during `publish`. Confirm that it is still
@@ -525,6 +558,55 @@ while IFS=$'\t' read -r crate version; do
     fi
 
     if ((attempt < max_attempts)); then
+      # A 429 is not a generic failure and must not be retried on the generic backoff.
+      #
+      # crates.io meters publishes with a leaky bucket: a brand-new crate NAME allows a burst of 5
+      # and then refills at one per 10 minutes, while a new version of an existing crate allows 30
+      # and refills at one per minute. A first release is therefore entirely on the strict limit --
+      # every crate is a new name -- and the generic ladder here (15s doubling to a 120s cap, five
+      # attempts) exhausts itself in under four minutes and reports failure while the release was
+      # merely waiting its turn. That is what stopped this release twice.
+      #
+      # The response states the exact instant the next publish is allowed, so honor it instead of
+      # guessing. Sleeping past that timestamp is the only thing that makes progress; retrying
+      # sooner is guaranteed to be refused again and burns an attempt.
+      retry_after=
+      if [[ -f $package_target/publish-$crate.log ]] &&
+        grep -qi 'Too Many Requests' "$package_target/publish-$crate.log"; then
+        retry_after=$(python3 - "$package_target/publish-$crate.log" <<'PY'
+import email.utils
+import re
+import sys
+import time
+
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+# "Please try again after Sun, 06 Sep 2026 08:40:47 GMT and see ..."
+#
+# Anchor on the RFC 2822 date's own shape rather than on the words that follow it. A first attempt
+# used `([^and]+?) and see`, which is a character class excluding the letters a, n and d -- so it
+# could never match a date containing "Sun" or "Sep". Verified against both real wordings crates.io
+# uses (new-crate limit and per-crate version limit) and a deadline ending the sentence.
+match = re.search(r"try again after ([A-Z][a-z]{2},[^.]+?GMT)", text)
+if not match:
+    raise SystemExit(0)
+parsed = email.utils.parsedate_to_datetime(match.group(1).strip())
+if parsed is None:
+    raise SystemExit(0)
+# Add a small margin: the server's clock and ours need not agree to the second.
+wait = int(parsed.timestamp() - time.time()) + 15
+print(max(wait, 0))
+PY
+        )
+      fi
+
+      if [[ -n $retry_after && $retry_after =~ ^[0-9]+$ ]] && ((retry_after > 0)); then
+        printf 'Rate limited by crates.io; waiting %d seconds until the quota refills.\n' \
+          "$retry_after" >&2
+        sleep "$retry_after"
+        # Do not advance the generic ladder: this attempt never reached the registry's own limit.
+        continue
+      fi
+
       printf 'Publish failed; retrying in %d seconds.\n' "$delay" >&2
       sleep "$delay"
       delay=$((delay * 2))
@@ -533,6 +615,7 @@ while IFS=$'\t' read -r crate version; do
   done
 
   [[ $published == true ]] || fail "could not publish $crate@$version after $max_attempts attempts"
+  crates_published_this_run=$((crates_published_this_run + 1))
 done <"$package_file"
 
 if [[ $check_only == true ]]; then
