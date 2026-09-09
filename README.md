@@ -1,36 +1,36 @@
 # SweepX
 
-**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库包含可运行的开发版 CLI/TUI、显式确认的系统回收站预览，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；它还不是已发布产品，也没有永久删除能力。
+**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库包含可运行的开发版 CLI/TUI、显式确认的系统回收站预览，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；v0.0.1 开发版本已经发布，但它还不是稳定产品，也没有永久删除能力。
 
 > [!CAUTION]
 > `trash` 是当前唯一真实文件变更能力：只接受绝对路径，默认交互确认，提交前重验类型和身份，并且只移到操作系统回收站。它没有 Permanent fallback。仓库仍没有 `plan`、`approve`、`execute` 或永久删除 CLI。
 
 ## 当前实现状态
 
-状态截点：2026-08-29。以下描述来自当前代码与测试，不是发布或跨平台资格声明。
+状态截点：2026-09-10。以下描述来自当前代码与测试，不是稳定性或跨平台资格声明。
 
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
-| Rust workspace | 可构建、可打包的 21 crate 工作区 | 已有发布自动化，但尚未发布稳定版本或作稳定性承诺 |
+| Rust workspace | 可构建、可打包的 22 crate 工作区 | v0.0.1 与五目标二进制已发布，但尚未作稳定性承诺 |
 | `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | 不传路径时扫描当前平台的文件系统根；也可显式给一个或多个绝对根。macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal |
 | `sweepx status` | Linux journal-first 读取 terminal snapshot，并支持对已完成且已持久化的 journal stream 做 degraded 的 `--watch` completed replay；macOS 读取 legacy operation snapshot | Linux `--watch` 只支持 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 的 completed-stream replay：先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required`；malformed cursor/usage 返回 usage error；它不等待新事件、不创建后台 operation，也不支持 cancel。macOS 仍无 journal replay/watch；Windows 已支持 durable state（默认 `%LOCALAPPDATA%\sweepx\state`，强制 current-user-private DACL 与 owner 校验，并拒绝 reparse point），但尚无 journal replay/watch |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
 | `sweepx explain` | 从有界的绝对路径 `scan.result` JSON 生成解释 | 导入数据会被降级为 stale/incomplete，候选强制 non-executable/report-only |
-| `sweepx cache status` | Linux、macOS：preview cache 只读诊断；Windows：disabled | 只支持 `human`/`json`；`--format ndjson` 是 usage error。缺失 state/cache 返回 `absent` + exit 0，且不创建默认或显式 state/cache 目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、大小与校验健康；不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实；warning/error 或 quarantine presence 返回 `degraded` + exit 4 |
+| `sweepx cache status` | Linux、macOS、Windows：preview cache 只读诊断 | 只支持 `human`/`json`；`--format ndjson` 是 usage error。缺失 state/cache 返回 `absent` + exit 0，且不创建默认或显式 state/cache 目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、大小与校验健康；不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实；warning/error 或 quarantine presence 返回 `degraded` + exit 4 |
 | `sweepx cleaner list/show` | 读取内置 Cleaner manifest、规则与兼容性元数据 | 只报告元数据；不执行 Cleaner。版本不兼容时 list 为 partial，show 失败关闭 |
 | `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Scanner 现有有界 locator batch reader，并在三平台 backend 上提供 handle-relative/handle-bound 的有界文件读取路径；workspace 固定输入收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。两份 workspace config 现在通过同一个 retained `.cargo` handle、单个有界枚举 cursor 观察，并拒绝 ASCII 大小写 alias/重复项；由于尚无抗 ABA 的目录 generation 证明，该观察仍明确为 non-atomic。`data.hints[].evidence.cargo.configScope` 只记录 workspace pair/config 状态、外部来源状态、环境变量存在性和 redacted declaration metadata，不记录环境变量值，也不公开 workspace config `target-dir` 原文。只有显式设置且为绝对路径的 `CARGO_HOME` 会在 Cleaner compatibility gate 通过后被私下捕获，并在 scan 后重验；随后只观察该 home 根下直属 `config` / `config.toml` 的存在性。命中只投影 `cargoHomeConfig.state=present_redacted`，且该观察仍是 non-atomic；未命中以及未显式设置、使用默认 home 的情况都保持 `not_checked`，不会提升为 `verified_absent`。为验证 presence integrity，scanner 只做有界、no-follow、handle-bound 的 metadata inspection；配置内容不会被读取、解析、使用或序列化，`target-dir` 值也不会被提取，wire evidence 不包含 `CARGO_HOME` 值或 home/config 路径。SweepX 的 `cargo-detect` surface 没有 Cargo passthrough `--target-dir` 或 `--config`，所以该 CLI 入口把 `cli.targetDir` 与 `cli.configOverrides` 记为 `verified_absent`；普通 Core 调用默认保持 `not_checked`，只有显式使用 no-overrides invocation contract 才可作同样声明。process cwd 也仅在 compatibility gate 通过后私下捕获，并记录 capture-time identity；随后只在精确 native path 与重验后的 workspace root identity 都匹配时投影 `path_matches_revalidated_workspace_root`。由于未跨阶段持有 cwd handle，该状态仍保留 `invocation_cwd_identity_not_bound` blocker；cwd path 本身不序列化到 wire contract。Cargo-home ledger 不读取、解析、使用或序列化配置内容来闭合 precedence，ancestor configs 与 workspace pair 也仍未解决；因此 `precedenceComplete=false`，`targetDir` 继续保持 `NotChecked(config_scope_not_checked)`，`targetShape` 继续保持 `Unknown(config_scope_not_checked)`，且 `candidateAllowed`、`planAllowed`、`approvalAllowed`、`executionAllowed` 全部为 `false`。Core 的 `cleaner_cargo_detect_with_cancel(..., &CancellationToken)` 只让调用方协作取消 scan 之后的 fixed-input/evidence collection；同步 scan 使用另一个内部 token。当前 CLI 没有 Ctrl-C、`sweepx cancel` 或 live registry 接线来触发该 token |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 可导航和查看；`d`/`Delete` 选择移到回收站，退出全屏后再次确认并重验 live identity；不支持 symlink/reparse/root，且没有永久删除降级 |
 | `sweepx trash` | **development preview** 的系统回收站入口 | `sweepx trash /absolute/path` 强制交互终端确认，不提供跳过。仅文件/真实目录，保护系统/home/state/Trash 根，提交前重验，失败绝不转永久删除 |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 当前主机的 Trash file/directory cell 为 `degraded` preview；其余平台和全部 Permanent cell 仍为 `disabled`，不代表发布资格 |
-| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；Linux 已接入 bounded SQLite event journal，在单个事务中写入完整流与 terminal snapshot，并以 degraded 形式公开 completed-stream `status --watch` replay；events 仍在 scan 完成后批量构造，因此它不是 live sink，也尚未 runtime-qualified。`scan --format ndjson` 继续 disabled；macOS 仍是 legacy snapshot；Windows durable state 仍 disabled；没有 native target mutation |
+| P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；Linux 已接入 bounded SQLite event journal，在单个事务中写入完整流与 terminal snapshot，并以 degraded 形式公开 completed-stream `status --watch` replay；events 仍在 scan 完成后批量构造，因此它不是 live sink，也尚未 runtime-qualified。`scan --format ndjson` 继续 disabled；macOS 与 Windows 仍使用 legacy snapshot，均无 replay/watch；P3 计划执行链没有 native target mutation |
 | 真实清理 | **仅 Trash preview 可用** | 显式单路径、确认、重验后移到系统回收站；Permanent、批量计划执行、管理器 mutation 与 destructive Agent workflow 未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
 
 ## 安装
 
-发布页会提供一个统一的 `sweepx` 二进制。安装器下载与当前平台匹配的归档，校验 `SHA256SUMS`，并拒绝包含额外文件的归档。
+发布页已提供 v0.0.1 的统一 `sweepx` 二进制。安装器下载与当前平台匹配的归档，校验 `SHA256SUMS`，并拒绝包含额外文件的归档。
 
 Linux / macOS：
 
@@ -112,13 +112,13 @@ cargo run -p sweepx-cli -- junk --system
 
 `scan` 接受相对路径、`~`、一个或多个绝对根；不传路径时扫描当前平台文件系统根。`scan --no-state` 跳过 operation snapshot/event journal，适合不需要后续 `status`/operation state 或 state filesystem 不支持 journal 的显式只读扫描；它不能与 `--state-dir` 同时使用。默认 `human` 输出最多显示 40 行，按可回收大小降序，并用自动人类单位；`--unit auto|b|kib|mib|gib|tib` 与 `--sort size|path` 可覆盖。`>=` 表示受边界影响的下限，不是精确值；“可回收”是预计可释放的独占分配空间，不等同逻辑大小，也不作释放保证。`json` 始终保留精确字节。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。Linux 已接入 bounded SQLite journal，在单个事务中写入完整事件流与 terminal snapshot；Core 的 `status` 优先读取 journal。Linux 现支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 completed-stream replay。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录大小随后由后台递归聚合回填，后代不作为 TUI 行长期保留。目录 detail rescan 使用 single-flight 后台任务，deadline 为 30 s，导航或退出不会等待非协作 worker。`explain` 默认最多读取 8 MiB 的导入 JSON。
 
-`cache status` 是独立的只读 preview cache 诊断表面，输出 kind 为 `cache.status.result`。Linux 与 macOS 支持 `human`/`json`，Windows 当前 disabled；`--format ndjson` 在创建或读取任何 state 目录之前就以 usage error 拒绝。若默认或显式 state/cache 缺失，命令返回 `disposition=absent`、exit 0，且不创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。检查范围只限 `preview-cache/current.json`、当前 generation 文件、`generations/` 与 `quarantine/` 的浅层结构、近似字节数、当前指针健康和 stored-generation schema/checksum/provenance 健康；它不会触发 scan、repair、quarantine 或 cache rebuild，也不会暴露 cache entries、display path 或预览内容。`available` 只表示缓存结构和校验在当前读取范围内可用，不代表 live/current 文件事实。只要存在 warning、error 或 quarantine presence，结果就降为 `degraded` 并以 exit 4 返回。
+`cache status` 是独立的只读 preview cache 诊断表面，输出 kind 为 `cache.status.result`。Linux、macOS 与 Windows 都支持 `human`/`json`；`--format ndjson` 在创建或读取任何 state 目录之前就以 usage error 拒绝。若默认或显式 state/cache 缺失，命令返回 `disposition=absent`、exit 0，且不创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。检查范围只限 `preview-cache/current.json`、当前 generation 文件、`generations/` 与 `quarantine/` 的浅层结构、近似字节数、当前指针健康和 stored-generation schema/checksum/provenance 健康；它不会触发 scan、repair、quarantine 或 cache rebuild，也不会暴露 cache entries、display path 或预览内容。`available` 只表示缓存结构和校验在当前读取范围内可用，不代表 live/current 文件事实。只要存在 warning、error 或 quarantine presence，结果就降为 `degraded` 并以 exit 4 返回。
 
 库集成方可以调用 `sweepx_core::cleaner_cargo_detect_with_cancel` 并持有传入的 `sweepx_core::CancellationToken`。这个 token 的作用域刻意很窄：它只由同步 scan 完成后的 Cargo fixed-input/evidence collection 检查，不拥有也不会中断此前的同步 scan。若收集阶段观察到取消，相关 typed evidence 失败关闭为 `unknown(cancelled)`，terminal envelope 使用 `status=cancelled`、exit 10 和 `reasonCode=cancelled`；已有输出仍只用于 hint/report-only，取消不会授予 candidate、plan、approval、execution 或 mutation authority。
 
 ### `status` 与 `cancel` 的诚实语义
 
-当前扫描是同步命令。Linux 上 `status` journal-first 读取扫描结束时写入的 terminal snapshot，并支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 degraded completed-stream replay：它只覆盖已完成且已持久化的 journal stream，先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 读取 legacy operation snapshot，仍无 replay/watch；Windows durable snapshot state 完全禁用：默认 `state_dir=None`，不写 terminal snapshot，显式 `--state-dir` 失败关闭。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。Cargo 检测的 caller-owned post-scan token 是独立的 library cooperative-cancellation seam，并未与该命令或 live operation registry 连接；当前 CLI 也没有 Ctrl-C handler 来触发它。
+当前扫描是同步命令。Linux 上 `status` journal-first 读取扫描结束时写入的 terminal snapshot，并支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 degraded completed-stream replay：它只覆盖已完成且已持久化的 journal stream，先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 与 Windows 都能持久化并读取 legacy operation snapshot，但仍无 replay/watch；Windows state directory 由 current-user-private DACL、owner 校验和逐级 reparse-point 拒绝保护。`cancel` 不伪装成可用能力：对于缺失或已经结束的 operation，它返回明确 disposition，而 capability matrix 将 cancellation 标记为 disabled。Cargo 检测的 caller-owned post-scan token 是独立的 library cooperative-cancellation seam，并未与该命令或 live operation registry 连接；当前 CLI 也没有 Ctrl-C handler 来触发它。
 
 ### 导入 JSON 永远不是执行依据
 
@@ -193,8 +193,8 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - macOS scanner 现为 handle-bound degraded live scanner，并通过统一 `sweepx scan` / `scan --tui` 接入；这不等于三平台扫描资格完成。
 - Windows scanner 现为 development-grade/degraded 的只读 handle-relative live scanner，并通过统一的 `scan` / `scan --tui` 接入；这不等于 Windows 或三平台扫描已取得发布资格。
 - Windows NTFS 加速扫描路径已接入为**预览数据源**：资格判定通过时，一次批量元数据读取即产出扫描根的条目数与容量预览（实测 14.5 GB / 36,531 个对象耗时 1.06 s，而完整权威扫描 133 s），但预览标记 `authoritative: false` 且不携带 reopen recipe，不能据以删除任何对象；可移植的 handle-relative 遍历始终权威，加速资格失败只作为观察事件出现，不影响总计精确性。预览输出与独立目录遍历交叉验证，要求路径集合与字节总和完全一致。实测显示 `FSCTL_QUERY_USN_JOURNAL` 需要提权下的 `GENERIC_READ` 卷句柄，低权限句柄即使提权也报告功能不存在，因此未提权时不启用加速是平台属性而非实现缺陷；详见 [原生扫描加速验收矩阵](docs/research/native-scan-qualification.md)。
-- P4 的 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图。
-- 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流；尚未实际发布稳定版本，也没有签名、SBOM、provenance 或稳定支持承诺。
+- P4 的资格化 native Trash beta、P5 的稳定产品和任何 Permanent 能力都仍是未来路线图；当前单对象 Trash 仍只是未取得发布资格的 development preview。
+- 已有五目标二进制、校验和、安装器、GitHub Pages 与 crates.io 的发布工作流，v0.0.1 已发布；仍没有签名、SBOM、provenance 或稳定支持承诺。
 
 ## 文档导航
 

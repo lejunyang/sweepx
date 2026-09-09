@@ -337,7 +337,7 @@ Error {
 
 ### 5.2 可恢复 NDJSON
 
-这是当前 Linux-only 的 degraded completed-stream replay 合同，不是 live stream 合同。当前 `scan --format ndjson` 在扫描、root validation 和 state 创建之前返回 unsupported；不得把 scan 完成后批量构造的 event vector 冒充 live stream。Linux 已有 bounded SQLite journal，在单个事务中写入完整 stream 与 terminal snapshot，Core `status` journal-first，并公开 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`：先做一次同 snapshot 全量校验，再从已完成且已持久化的 stream 中按每页最多 1024 条事件续读。unknown 但语法有效的 cursor 必须先发单独的 `stream.reset_required`；malformed cursor/usage 仍是 usage error。该 replay 不等待新事件、不创建后台 operation，也不支持 cancel，因此仍非 live、非 runtime-qualified。macOS 仍为 legacy snapshot，Windows durable state 仍禁用。
+这是当前 Linux-only 的 degraded completed-stream replay 合同，不是 live stream 合同。当前 `scan --format ndjson` 在扫描、root validation 和 state 创建之前返回 unsupported；不得把 scan 完成后批量构造的 event vector 冒充 live stream。Linux 已有 bounded SQLite journal，在单个事务中写入完整 stream 与 terminal snapshot，Core `status` journal-first，并公开 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`：先做一次同 snapshot 全量校验，再从已完成且已持久化的 stream 中按每页最多 1024 条事件续读。unknown 但语法有效的 cursor 必须先发单独的 `stream.reset_required`；malformed cursor/usage 仍是 usage error。该 replay 不等待新事件、不创建后台 operation，也不支持 cancel，因此仍非 live、非 runtime-qualified。macOS 与 Windows 仍使用 legacy snapshot；Windows state directory 已有 private-DACL/owner/reparse-point 防护，但没有 event journal。
 
 每一行是完整 JSON 对象，使用 `sweepx.event/v1`：
 

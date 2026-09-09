@@ -7,19 +7,19 @@ title: 路线图
 路线图是能力与证据门槛，不是发布日期。代码可以先落地，阶段仍可能因为跨平台、基准、故障注入或安全证据不完整而未完成。
 
 > [!CAUTION]
-> 当前实现横跨 P1/P2 的部分只读能力和 P3 的 library-only 模拟，但没有任何 native mutation。不能把“有 crate/测试”写成“阶段已资格化”。
+> 当前实现横跨 P1/P2 的部分只读能力、单对象 development Trash preview 和 P3 的 library-only 模拟，但没有资格化的 native mutation pipeline。不能把“有 crate/测试”写成“阶段已资格化”。
 
 ## 当前落点
 
 | 轨道 | 当前证据 | 未完成边界 |
 |---|---|---|
 | P0 契约/模型 | workspace、schema、fixture、安全类型和大量测试存在 | 完整 evidence bundle 与所有验收门尚未声明完成 |
-| P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence、journal-first status，以及 degraded 的 `status --watch --format ndjson` completed replay；macOS 保留 legacy snapshot；Windows scan handle-relative degraded | Linux replay 只覆盖已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown-valid cursor 返回 `stream.reset_required`，malformed cursor/usage 是 usage error。它仍 non-live，不等待新事件，不创建后台 operation，也不支持 cancel；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows durable state disabled；live sink、runtime qualification、`scan --format ndjson` 与三平台/资源 gate 未闭合 |
+| P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence、journal-first status，以及 degraded 的 `status --watch --format ndjson` completed replay；macOS 与 Windows 保留 legacy snapshot；Windows scan handle-relative degraded | Linux replay 只覆盖已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown-valid cursor 返回 `stream.reset_required`，malformed cursor/usage 是 usage error。它仍 non-live，不等待新事件，不创建后台 operation，也不支持 cancel；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows state directory 已有 private-DACL/owner/reparse-point 防护，但仍没有 event journal；live sink、runtime qualification、`scan --format ndjson` 与三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` 渐进目录浏览、metadata-only Cleaner、项目与三平台用户缓存的 `junk` report-only 规则，以及 preview cache 只读诊断 | imported explain input report-only；TUI 根准入后立即进入，先列当前层，再以 120 ms 节流的下限快照增量更新直接子目录大小，最终结果收敛为 exact/incomplete；single-flight 使用 30 s 无进展 deadline、late result discard、单槽背压和 32 stuck-worker cap；`cache status` 只做 bounded preview-cache inspection；系统规则仍是窄根且 report-only，Windows OS handler、Linux 临时目录和共享存储仍未接入；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal、单事务 complete-stream/terminal persistence，以及 degraded completed-stream replay 已实现 | replay 仍 non-live、非 runtime-qualified，且只适用于 Linux completed stream；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、`scan --format ndjson`、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
-| P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell | 所有 cell 在 Linux/macOS/Windows 上均 disabled；没有 native adapter、mutation command、approval UI 或产品 mutation capability |
-| P4+ mutation | 无公开能力 | Trash、Permanent 与发布资格全部是未来工作 |
-| 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
+| P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell；当前主机的 file/directory Trash cell 可报告 degraded preview | macOS/Windows Trash cell 与全部 Permanent cell disabled；尚无 release-qualified native adapter、批量 mutation command 或 approval UI |
+| P4+ mutation | 当前仅有显式确认、实时身份重验、绝不回退 Permanent 的单对象 Trash development preview | 资格化 Trash、Permanent 与批量计划执行仍是未来工作 |
+| 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布与 v0.0.1 开发版本已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
 
 ## 阶段目标
 
@@ -61,7 +61,7 @@ title: 路线图
 
 当前没有进入这一步。
 
-P4a.2 只完成了失败关闭的 qualification registry 合同。`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link` 在三个 OS family 上仍全部 disabled。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 和 `mismatched` evidence 永远不能资格化 mutation；未来也只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，单个 cell 才可能合格。
+P4a.2 完成的是失败关闭的 qualification registry 合同，不是发布资格。当前运行平台的 `trash.local.file` 与 `trash.local.directory` cell 可报告 `degraded` preview；其他 OS 的 Trash cell 与全部 Permanent cell 仍为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 和 `mismatched` evidence 永远不能把 mutation 提升为 `qualified`；未来也只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，单个 cell 才可能合格。
 
 ## 未来命令仍然只是提案
 
@@ -77,4 +77,4 @@ P4a.2 只完成了失败关闭的 qualification registry 合同。`trash.local.f
 | `48d5f60` | Optional locator reads stay bound | optional relative reads 现继续绑定同一 filesystem/mount scope，并受剩余 batch byte budget 约束。 |
 | `c0343da` | Cargo fixed-input collector | Cargo 固定输入收集器通过 handle-bound 读取 `Cargo.toml` 与 `.cargo/config*`，对替换、symlink/reparse、mount 变化、资源上限和取消 fail closed。 |
 | `f042e39` | Typed Cargo evidence surfaced | `cargo-detect` 现输出 typed Cargo evidence 和独立 capability 条目；workspace evidence 可在绑定成立时变为 `Known`，但由于全局 override scope 未解，`targetDir` 仍为 `NotChecked`、`targetShape` 仍为 `Unknown`，结果继续只做 hint/report-only，`candidate/plan/approval/execution` 全为 false。 |
-| `933921b` | Read-only `cache status` diagnostics | Linux/macOS 现以 degraded 形式公开 `cache.preview.inspect`：`cache status` 输出 `cache.status.result`，只支持 human/JSON，NDJSON 是 usage error；Windows disabled。缺失 state/cache 返回 `absent` + exit 0，且不创建目录。检查保持 bounded、FD-relative、no-follow，不 scan、不 repair、不 quarantine，也不暴露 cache 条目/path 内容。 |
+| `933921b`、`4f1a796` | Read-only `cache status` diagnostics | Linux/macOS 首先以 degraded 形式公开 `cache.preview.inspect`，随后 Windows 在 private-DACL/owner/reparse-point 防护下实现同一只读能力；`cache status` 输出 `cache.status.result`，只支持 human/JSON，NDJSON 是 usage error。缺失 state/cache 返回 `absent` + exit 0，且不创建目录。检查保持 bounded、no-follow，不 scan、不 repair、不 quarantine，也不暴露 cache 条目/path 内容。 |
