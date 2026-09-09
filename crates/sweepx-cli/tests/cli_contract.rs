@@ -39,6 +39,18 @@ fn resolved_fixture_root(fixture: &TempDir) -> PathBuf {
         .expect("test fixture root must be resolvable")
 }
 
+fn git_fixture_root(fixture: &TempDir) -> PathBuf {
+    #[cfg(unix)]
+    {
+        return fixture
+            .path()
+            .canonicalize()
+            .expect("Git test fixture root must be resolvable");
+    }
+    #[cfg(windows)]
+    fixture.path().to_path_buf()
+}
+
 #[cfg(unix)]
 #[test]
 fn locale_override_beats_environment_for_human_output() {
@@ -736,7 +748,156 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
         .unwrap();
     assert_eq!(target["reclaimable"]["state"], "known");
     assert!(target["reclaimable"].get("value").is_some());
+    assert_eq!(target["classification"], "known_generated");
+    assert_eq!(target["confidence"], "medium");
+    assert_eq!(target["git"], Value::Null);
     assert_eq!(json["incompleteSizeCount"], 0);
+}
+
+#[test]
+fn junk_scan_strengthens_known_candidates_with_git_ignore_evidence() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let mut cmd = cli_command();
+    cmd.arg("--format").arg("json").arg("junk").arg(&root);
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["ruleId"] == "rust.target")
+        .unwrap();
+
+    assert_eq!(target["classification"], "known_generated_ignored");
+    assert_eq!(target["confidence"], "high");
+    assert_eq!(target["git"]["status"], "ignored");
+    assert_eq!(target["git"]["check"], "git.check-ignore.v1");
+    assert!(target["git"]["repositoryEntryId"].is_string());
+    assert_eq!(target["blockers"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn junk_scan_does_not_promote_a_pattern_matching_tracked_directory() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("target/tracked.txt"), b"keep").unwrap();
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("add")
+        .arg("--force")
+        .arg("target/tracked.txt")
+        .status()
+        .unwrap();
+    assert!(add.success());
+
+    let mut cmd = cli_command();
+    cmd.arg("--format").arg("json").arg("junk").arg(&root);
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["ruleId"] == "rust.target")
+        .unwrap();
+
+    assert_eq!(target["classification"], "known_generated");
+    assert_eq!(target["confidence"], "medium");
+    assert_eq!(target["git"], Value::Null);
+    assert_eq!(target["blockers"], json!(["tracked_descendant"]));
+}
+
+#[test]
+fn junk_scan_keeps_known_candidate_when_git_is_unavailable() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let empty_path = root.join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.env("PATH", empty_path)
+        .arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg(&root);
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["ruleId"] == "rust.target")
+        .unwrap();
+
+    assert_eq!(target["classification"], "known_generated");
+    assert_eq!(target["confidence"], "medium");
+    assert_eq!(target["git"], Value::Null);
+    assert_eq!(target["blockers"], json!(["git_query_failed"]));
+}
+
+#[test]
+fn junk_scan_does_not_promote_a_known_directory_containing_a_nested_repository() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+    fs::create_dir_all(root.join("target/project/.git")).unwrap();
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+
+    let mut cmd = cli_command();
+    cmd.arg("--format").arg("json").arg("junk").arg(&root);
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["ruleId"] == "rust.target")
+        .unwrap();
+
+    assert_eq!(target["classification"], "known_generated");
+    assert_eq!(target["confidence"], "medium");
+    assert_eq!(target["git"], Value::Null);
+    assert_eq!(target["blockers"], json!(["nested_repository"]));
 }
 
 #[cfg(target_os = "linux")]

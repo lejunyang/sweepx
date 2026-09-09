@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode as ProcessExitCode;
+use std::process::{Command as ProcessCommand, ExitCode as ProcessExitCode, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,7 +29,8 @@ use sweepx_core::{
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
 use sweepx_model::{
-    ByteValue, EvidenceValue, HumanSizeUnit, ObjectType, ReasonCode, ScanEntryId, ScanSort,
+    ByteValue, EvidenceValue, HumanSizeUnit, IdentityEvidence, ObjectType, ReasonCode, ScanEntryId,
+    ScanSort,
 };
 use sweepx_platform::{
     ElevatedRelaunch, ElevationPolicy, PrivilegeProvider, StartupPrivilegeDecision,
@@ -921,6 +922,94 @@ struct JunkCandidate {
     /// multi-stream files, and a consumer that needs allocation must be able to tell that it did
     /// not get it. Windows never claims allocation by design, so on Windows this is normally true.
     size_is_logical: bool,
+    /// Git evidence augments project-rule confidence but never grants mutation authority.
+    git: Option<GitIgnoreEvidence>,
+    /// Stable report classification; platform candidates predate Git enrichment and omit it.
+    classification: Option<&'static str>,
+    /// Stable confidence label for the classification, independent of the risk tier.
+    confidence: Option<&'static str>,
+    /// Conditions that prevent this report-only candidate from being promoted.
+    blockers: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct GitIgnoreEvidence {
+    status: &'static str,
+    repository_entry_id: String,
+    check: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct GitRepository {
+    entry_id: ScanEntryId,
+    path: PathBuf,
+    depth: usize,
+    ancestor_ids: BTreeSet<ScanEntryId>,
+    uses_gitfile: bool,
+}
+
+const GIT_EVIDENCE_MAX_QUERIES: usize = 256;
+const GIT_EVIDENCE_DEADLINE: Duration = Duration::from_secs(5);
+
+struct GitProbeBudget {
+    remaining_queries: usize,
+    deadline: Instant,
+}
+
+impl GitProbeBudget {
+    fn new() -> Self {
+        Self {
+            remaining_queries: GIT_EVIDENCE_MAX_QUERIES,
+            deadline: Instant::now() + GIT_EVIDENCE_DEADLINE,
+        }
+    }
+
+    fn run(&mut self, repository: &Path, arguments: &[&str], path: &Path) -> Result<i32, ()> {
+        if self.remaining_queries == 0 || Instant::now() >= self.deadline {
+            return Err(());
+        }
+        self.remaining_queries -= 1;
+        let relative = path.strip_prefix(repository).map_err(|_| ())?;
+        if relative.as_os_str().is_empty() {
+            return Err(());
+        }
+        // Git's ignore/index queries are local and non-mutating, but still receive explicit
+        // process/time limits: an unexpected executable or repository configuration must not hang
+        // a disk scan. Fixed arguments keep native path bytes out of a shell.
+        let mut child = ProcessCommand::new("git")
+            .arg("--no-optional-locks")
+            .arg("-c")
+            .arg("core.fsmonitor=false")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .arg("--")
+            .arg(relative)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| ())?;
+        loop {
+            match child.try_wait().map_err(|_| ())? {
+                Some(status) => return status.code().ok_or(()),
+                None if Instant::now() < self.deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(());
+                }
+            }
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining_queries == 0 || Instant::now() >= self.deadline
+    }
 }
 
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
@@ -1038,11 +1127,16 @@ fn run_junk_scan(
                         activity: None,
                         stale_formats: Vec::new(),
                         size_is_logical: size.is_logical_fallback,
+                        git: None,
+                        classification: Some("known_generated"),
+                        confidence: Some("medium"),
+                        blockers: Vec::new(),
                     }
                 })
             })
         })
         .collect::<Vec<_>>();
+    annotate_project_candidates_with_git(&scan.summary, &aggregates, &mut candidates);
     candidates.extend(platform_junk_candidates(
         &scan.summary,
         &aggregates,
@@ -1084,8 +1178,25 @@ fn run_junk_scan(
             }
         );
         for candidate in &candidates {
+            let git_note = match (
+                context.locale(),
+                candidate.git.is_some(),
+                candidate.blockers.is_empty(),
+            ) {
+                (sweepx_i18n::Locale::ZhCn, true, _) => " [Git 已忽略；置信度 high]".to_string(),
+                (sweepx_i18n::Locale::EnUs, true, _) => {
+                    " [Git ignored; confidence high]".to_string()
+                }
+                (sweepx_i18n::Locale::ZhCn, false, false) => {
+                    format!(" [Git 未提升：{}]", candidate.blockers.join(","))
+                }
+                (sweepx_i18n::Locale::EnUs, false, false) => {
+                    format!(" [Git not promoted: {}]", candidate.blockers.join(","))
+                }
+                (_, false, true) => String::new(),
+            };
             println!(
-                "{risk:<4} {:>12}  {rule:<18} {path}",
+                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}",
                 junk_size_label(&candidate.reclaimable, size_unit),
                 risk = candidate.risk,
                 rule = candidate.rule_id,
@@ -1136,6 +1247,14 @@ fn run_junk_scan(
                     // omitted when they do not apply so a reader never sees an empty claim.
                     "activity": candidate.activity,
                     "staleFormats": candidate.stale_formats,
+                    "git": candidate.git.as_ref().map(|evidence| json!({
+                        "status": evidence.status,
+                        "repositoryEntryId": evidence.repository_entry_id,
+                        "check": evidence.check,
+                    })),
+                    "classification": candidate.classification,
+                    "confidence": candidate.confidence,
+                    "blockers": candidate.blockers,
                     // Names the quantity in `reclaimable`. True means apparent logical size,
                     // because this platform declined to claim filesystem allocation; the two
                     // differ on compressed, sparse and multi-stream files, so a consumer that
@@ -1202,6 +1321,308 @@ fn junk_rule_applies(
                 .any(|marker| markers.contains(&normalized_rule_name(marker)))
         })
     })
+}
+
+/// Adds bounded Git evidence to already-classified project candidates.
+///
+/// This seam is intentionally report-only. Git decides its own ignore semantics, while the
+/// scanner remains the source of filesystem identity and size. A subprocess or repository lookup
+/// failure leaves the existing candidate at its original confidence; it never makes it safer.
+fn annotate_project_candidates_with_git(
+    summary: &sweepx_core::ScanSummary,
+    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    candidates: &mut [JunkCandidate],
+) {
+    if summary.boundaries.iter().any(|boundary| {
+        boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit
+            && boundary.detail == "retained entry cap exceeded"
+    }) {
+        for candidate in candidates {
+            candidate.blockers.push("git_scan_evidence_incomplete");
+        }
+        return;
+    }
+    let repositories = git_repositories(summary, aggregates);
+    let mut budget = GitProbeBudget::new();
+    for candidate in candidates.iter_mut() {
+        let Some(repository) = repositories
+            .iter()
+            .filter(|repository| repository_contains(repository, candidate))
+            .max_by_key(|repository| repository.depth)
+        else {
+            continue;
+        };
+        if repository.uses_gitfile {
+            candidate.blockers.push("gitfile_repository_boundary");
+            continue;
+        }
+        if candidate_contains_nested_repository(&repositories, repository, &candidate.entry_id) {
+            candidate.blockers.push("nested_repository");
+            continue;
+        }
+        if aggregates
+            .get(candidate.entry_id.as_str())
+            .is_none_or(|aggregate| !aggregate.coverage.complete || aggregate.coverage.details_lost)
+        {
+            candidate.blockers.push("git_scan_evidence_incomplete");
+            continue;
+        }
+        let Some(path) = path_from_scanned_entry_id(summary, &candidate.entry_id) else {
+            candidate.blockers.push("git_path_binding_unavailable");
+            continue;
+        };
+        if !scanned_identity_matches_path(summary, &repository.entry_id, &repository.path)
+            || !scanned_identity_matches_path(summary, &candidate.entry_id, &path)
+        {
+            candidate.blockers.push("git_identity_changed");
+            continue;
+        }
+        if budget.exhausted() {
+            candidate.blockers.push("git_query_budget_exhausted");
+            continue;
+        }
+        match git_path_has_tracked_descendant(&mut budget, &repository.path, &path) {
+            Ok(true) => {
+                candidate.blockers.push("tracked_descendant");
+                continue;
+            }
+            Ok(false) => {}
+            Err(()) => {
+                candidate.blockers.push("git_query_failed");
+                continue;
+            }
+        }
+        if budget.exhausted() {
+            candidate.blockers.push("git_query_budget_exhausted");
+            continue;
+        }
+        match git_path_is_ignored(&mut budget, &repository.path, &path) {
+            Ok(true) => {
+                candidate.git = Some(GitIgnoreEvidence {
+                    status: "ignored",
+                    repository_entry_id: repository.entry_id.to_string(),
+                    check: "git.check-ignore.v1",
+                });
+                candidate.classification = Some("known_generated_ignored");
+                candidate.confidence = Some("high");
+            }
+            Ok(false) => {}
+            Err(()) => candidate.blockers.push("git_query_failed"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn scanned_identity_matches_path(
+    summary: &sweepx_core::ScanSummary,
+    entry_id: &ScanEntryId,
+    path: &Path,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(expected) = summary
+        .roots
+        .iter()
+        .chain(summary.entries.iter())
+        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
+        .and_then(|entry| entry.identity.as_ref())
+    else {
+        return false;
+    };
+    let IdentityEvidence::Known { value } = &expected.platform_file_identity else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_dir()
+        && value.device.0 == u128::from(metadata.dev())
+        && value.inode.0 == u128::from(metadata.ino())
+}
+
+#[cfg(windows)]
+fn scanned_identity_matches_path(
+    summary: &sweepx_core::ScanSummary,
+    entry_id: &ScanEntryId,
+    path: &Path,
+) -> bool {
+    let Some(expected) = summary
+        .roots
+        .iter()
+        .chain(summary.entries.iter())
+        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
+        .and_then(|entry| entry.identity.as_ref())
+    else {
+        return false;
+    };
+    let IdentityEvidence::Known { value } = &expected.platform_file_identity else {
+        return false;
+    };
+    matches!(
+        sweepx_platform_windows::read_live_identity(path),
+        Ok(Some(actual))
+            if value.device.0 == u128::from(actual.device()) && value.inode.0 == actual.inode()
+    )
+}
+
+fn git_repositories(
+    summary: &sweepx_core::ScanSummary,
+    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+) -> Vec<GitRepository> {
+    let mut repositories = Vec::new();
+    for entry in summary
+        .roots
+        .iter()
+        .chain(summary.entries.iter())
+        .filter(|entry| entry.object_type == ObjectType::Directory)
+    {
+        if entry.coverage.details_lost || !entry.coverage.complete {
+            continue;
+        }
+        let Some(identity) = entry.identity.as_ref() else {
+            continue;
+        };
+        if aggregates
+            .get(identity.entry_id.as_str())
+            .is_none_or(|aggregate| !aggregate.coverage.complete)
+        {
+            continue;
+        }
+        let Some(locator) = entry.native_locator.as_ref() else {
+            continue;
+        };
+        let entry_id = identity.entry_id.clone();
+        let git_marker =
+            summary.entries.iter().find(|child| {
+                child.identity.as_ref().is_some_and(|child_identity| {
+                    child_identity.parent_id.as_ref() == Some(&entry_id)
+                }) && native_name_for_rule(&child.native_basename).as_deref() == Some(".git")
+                    && matches!(child.object_type, ObjectType::Directory | ObjectType::File)
+            });
+        let Some(git_marker) = git_marker else {
+            continue;
+        };
+        let Some(path) = path_from_scanned_entry(entry) else {
+            continue;
+        };
+        repositories.push(GitRepository {
+            entry_id,
+            path,
+            depth: locator.parent_reopen_recipe.len(),
+            ancestor_ids: locator
+                .parent_reopen_recipe
+                .iter()
+                .map(|component| component.entry_id.clone())
+                .collect(),
+            uses_gitfile: git_marker.object_type == ObjectType::File,
+        });
+    }
+    repositories
+}
+
+fn repository_contains(repository: &GitRepository, candidate: &JunkCandidate) -> bool {
+    repository.entry_id == candidate.entry_id
+        || candidate.ancestor_ids.contains(&repository.entry_id)
+}
+
+fn candidate_contains_nested_repository(
+    repositories: &[GitRepository],
+    owning_repository: &GitRepository,
+    candidate_id: &ScanEntryId,
+) -> bool {
+    repositories.iter().any(|nested| {
+        nested.entry_id != owning_repository.entry_id && nested.ancestor_ids.contains(candidate_id)
+    })
+}
+
+fn path_from_scanned_entry_id(
+    summary: &sweepx_core::ScanSummary,
+    entry_id: &ScanEntryId,
+) -> Option<PathBuf> {
+    summary
+        .roots
+        .iter()
+        .chain(summary.entries.iter())
+        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
+        .and_then(path_from_scanned_entry)
+}
+
+fn path_from_scanned_entry(entry: &sweepx_model::ScannedEntry) -> Option<PathBuf> {
+    let locator = entry.validated_native_locator().ok()??;
+    let root = native_absolute_path_for_git(locator.scan_root_absolute_path.as_ref()?)?;
+    if locator.entry.entry_id == locator.scan_root.entry_id {
+        return Some(root);
+    }
+    let mut path = root;
+    for component in locator.parent_reopen_recipe.iter().skip(1) {
+        path.push(native_name_for_git(&component.native_basename)?);
+    }
+    path.push(native_name_for_git(&locator.entry.native_basename)?);
+    Some(path)
+}
+
+#[cfg(unix)]
+fn native_absolute_path_for_git(path: &sweepx_model::NativeAbsolutePath) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    match path {
+        sweepx_model::NativeAbsolutePath::UnixBytes(bytes) => {
+            Some(PathBuf::from(OsString::from_vec(bytes.clone())))
+        }
+        sweepx_model::NativeAbsolutePath::WindowsUtf16(_) => None,
+    }
+}
+
+#[cfg(windows)]
+fn native_absolute_path_for_git(path: &sweepx_model::NativeAbsolutePath) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    match path {
+        sweepx_model::NativeAbsolutePath::WindowsUtf16(units) => {
+            Some(PathBuf::from(OsString::from_wide(units)))
+        }
+        sweepx_model::NativeAbsolutePath::UnixBytes(_) => None,
+    }
+}
+
+#[cfg(unix)]
+fn native_name_for_git(name: &sweepx_model::NativeName) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    match name {
+        sweepx_model::NativeName::UnixBytes(bytes) => Some(OsString::from_vec(bytes.clone())),
+        sweepx_model::NativeName::WindowsUtf16(_) => None,
+    }
+}
+
+#[cfg(windows)]
+fn native_name_for_git(name: &sweepx_model::NativeName) -> Option<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    match name {
+        sweepx_model::NativeName::WindowsUtf16(units) => Some(OsString::from_wide(units)),
+        sweepx_model::NativeName::UnixBytes(_) => None,
+    }
+}
+
+fn git_path_is_ignored(
+    budget: &mut GitProbeBudget,
+    repository: &Path,
+    path: &Path,
+) -> Result<bool, ()> {
+    match budget.run(repository, &["check-ignore", "--quiet"], path)? {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(()),
+    }
+}
+
+fn git_path_has_tracked_descendant(
+    budget: &mut GitProbeBudget,
+    repository: &Path,
+    path: &Path,
+) -> Result<bool, ()> {
+    match budget.run(repository, &["ls-files", "--error-unmatch"], path)? {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(()),
+    }
 }
 
 fn platform_junk_candidates(
@@ -1291,6 +1712,10 @@ fn platform_junk_candidates(
                 activity,
                 stale_formats,
                 size_is_logical: size.is_logical_fallback,
+                git: None,
+                classification: None,
+                confidence: None,
+                blockers: Vec::new(),
             });
         }
     }

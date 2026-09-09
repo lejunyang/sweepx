@@ -1,7 +1,8 @@
 # Git-ignored project artifacts
 
-Status: design recommendation backed by a local read-only measurement on 2026-09-10. No deletion
-authority is proposed here.
+Status: the first report-only enrichment slice is implemented; broader ignored-directory discovery
+remains a design recommendation. The local evidence is a read-only measurement from 2026-09-10.
+No deletion authority is proposed here.
 
 ## Product question
 
@@ -51,32 +52,34 @@ explanation and find generic large ignored paths, but the `ogen/workspace` count
 that it must not turn all ignored bytes into reclaimable bytes. A present ignored `.env.local` was
 only 224 bytes; size is useful for ranking, but neither small nor ignored means unimportant.
 
-## Recommended first vertical slice
+## Delivered first vertical slice
 
-Add report-only Git evidence to `sweepx junk ROOT` while preserving the existing scanner as the
-filesystem authority. Use the system `git` executable initially: it already implements repository
-discovery, nested `.gitignore` precedence, `.git/info/exclude`, global excludes, negation, escaped
-names, and platform matching semantics. Reimplementing those rules in the first slice would create a
-second Git with subtly different answers. The invocation must be non-interactive and bounded, with
-NUL-delimited input/output and fixed arguments; no shell is involved.
+`sweepx junk ROOT` now adds report-only Git evidence to candidates already selected by the existing
+project rules while preserving the scanner as the filesystem authority. It invokes the system
+`git` executable with fixed arguments and native path arguments, without a shell, because Git already
+implements nested `.gitignore` precedence, `.git/info/exclude`, global excludes, negation, escaped
+names, and platform matching semantics. Queries are non-interactive and bounded to 256 subprocesses
+and a five-second total deadline.
 
-Suggested flow:
+The delivered flow:
 
-1. Discover repository roots from scanned `.git` directories or files, with explicit caps on
-   repositories, queried paths, input/output bytes, wall time, and child processes.
-2. Feed eligible scanned paths relative to each repository to `git check-ignore --stdin -z -v`; do
-   not use `--no-index`, because a tracked path must remain distinguishable from an ignored path.
-3. Join results back to scanner entry IDs/native locators. Display paths are never authority. Store
-   only a bounded source kind, rule line/pattern, and repository-relative name in report output; do
-   not persist global-exclude paths or environment values by default.
-4. Apply hard blockers before ranking: nested `.git`, gitfile/submodule/worktree boundary, any
-   tracked descendant, symlink/reparse/mount boundary, incomplete aggregate, Git timeout/error, or
-   an arbitrary ignored file.
-5. Classify rather than guess:
+1. Discover repository roots only from `.git` directory/file entries in the retained scan and only
+   when the repository row itself has complete, non-truncated detail coverage.
+2. Rebuild query paths from validated native locators, then compare the live repository and
+   candidate identities with the scan capture before asking Git; display paths are never
+   classification authority.
+3. Reject gitfile/worktree boundaries, nested repositories, incomplete/details-lost aggregates, and
+   tracked descendants before checking ignore status. A failed or timed-out Git query leaves the
+   candidate at its original confidence and adds a blocker.
+4. A known rule candidate that is untracked and ignored is labeled
+   `known_generated_ignored` / `high`. Other known candidates remain `known_generated` / `medium`.
+5. JSON adds stable `git`, `classification`, `confidence`, and `blockers` fields. The human report
+   makes a successful Git promotion or blocker visible. No path gains mutation authority.
 
-   - `known_generated_ignored`: an existing evidence-backed rule such as `rust.target`,
-     `node.modules`, Python caches, or selected build outputs also matches Git ignore evidence. This
-     is a high-confidence report-only candidate.
+## Recommended next slice
+
+Broader discovery should classify rather than guess:
+
    - `large_ignored_review`: an otherwise unknown ignored directory above a configurable reporting
      threshold. It is ranked for human inspection, remains R3/report-only, and carries blockers.
    - `ignored_local_state`: ignored files and sensitive/config/data-shaped names such as `.env*`,
@@ -84,16 +87,18 @@ Suggested flow:
      ignore evidence alone and should be omitted by default or shown only in an explicit diagnostic
      view.
 
-The output should add stable fields rather than overloading `ruleId`: for example
-`git.status=ignored`, `git.repositoryId`, `git.sourceKind`, `git.pattern`,
-`classification=known_generated_ignored|large_ignored_review`, `confidence`, and `blockers[]`.
-Existing field names and enum values remain unchanged.
+Before enabling `large_ignored_review`, add a dedicated bounded repository-boundary enumeration that
+cannot lose nested `.git` evidence when the main scan reaches its detail-retention cap. It should
+also batch Git queries with NUL-delimited input/output and record bounded ignore-source metadata.
+The existing per-candidate process budget is adequate for the narrow enrichment slice, not for
+arbitrary ignored-path discovery.
 
 ## Tests and acceptance boundary
 
-The first slice is complete when fixtures cover nested `.gitignore`, negation, global excludes,
-non-UTF-8 names on Unix, spaces/newlines through NUL framing, tracked-but-pattern-matching files,
-gitfile worktrees/submodules, nested repositories, time/output caps, missing Git, concurrent file
+The first slice covers normal ignored candidates, tracked descendants, nested repositories, and
+the fallback when no repository is present. Before broad discovery, fixtures must additionally cover
+nested `.gitignore`, negation, global excludes, non-UTF-8 names on Unix, spaces/newlines through
+batched NUL framing, gitfile worktrees/submodules, time/output caps, missing Git, concurrent file
 changes, and incomplete scanner evidence. Cross-platform tests must assert the host's Git semantics
 rather than hardcode case sensitivity.
 

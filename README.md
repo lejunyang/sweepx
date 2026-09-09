@@ -110,6 +110,12 @@ cargo run -p sweepx-cli -- junk --system
 
 ```
 
+当显式根中能完整识别 Git 工作区时，`junk` 会通过有界、非交互的 Git 查询给现有
+`target`、`node_modules`、Python cache 与常见 build-output 候选补充 ignore/tracked 证据。
+只有既命中独立项目规则、又未跟踪且被 ignore、同时没有嵌套仓库或不完整扫描证据的
+目录才标记为 `known_generated_ignored` / `high`；ignore 本身不会发现任意候选、降低风险
+或授予 Trash 权限，`.env.local` 等本地状态也不会仅因被 ignore 而出现。
+
 `scan` 接受相对路径、`~`、一个或多个绝对根；不传路径时扫描当前平台文件系统根。`scan --no-state` 跳过 operation snapshot/event journal，适合不需要后续 `status`/operation state 或 state filesystem 不支持 journal 的显式只读扫描；它不能与 `--state-dir` 同时使用。默认 `human` 输出最多显示 40 行，按可回收大小降序，并用自动人类单位；`--unit auto|b|kib|mib|gib|tib` 与 `--sort size|path` 可覆盖。`>=` 表示受边界影响的下限，不是精确值；“可回收”是预计可释放的独占分配空间，不等同逻辑大小，也不作释放保证。`json` 始终保留精确字节。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。Linux 已接入 bounded SQLite journal，在单个事务中写入完整事件流与 terminal snapshot；Core 的 `status` 优先读取 journal。Linux 现支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 completed-stream replay。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录大小随后由后台递归聚合回填，后代不作为 TUI 行长期保留。目录 detail rescan 使用 single-flight 后台任务，deadline 为 30 s，导航或退出不会等待非协作 worker。`explain` 默认最多读取 8 MiB 的导入 JSON。
 
 `cache status` 是独立的只读 preview cache 诊断表面，输出 kind 为 `cache.status.result`。Linux、macOS 与 Windows 都支持 `human`/`json`；`--format ndjson` 在创建或读取任何 state 目录之前就以 usage error 拒绝。若默认或显式 state/cache 缺失，命令返回 `disposition=absent`、exit 0，且不创建 `state_dir`、`preview-cache/`、`current.json` 或其他缓存目录。检查范围只限 `preview-cache/current.json`、当前 generation 文件、`generations/` 与 `quarantine/` 的浅层结构、近似字节数、当前指针健康和 stored-generation schema/checksum/provenance 健康；它不会触发 scan、repair、quarantine 或 cache rebuild，也不会暴露 cache entries、display path 或预览内容。`available` 只表示缓存结构和校验在当前读取范围内可用，不代表 live/current 文件事实。只要存在 warning、error 或 quarantine presence，结果就降为 `degraded` 并以 exit 4 返回。
