@@ -25,6 +25,20 @@ fn only_child_directory(path: &std::path::Path) -> PathBuf {
     assert!(entries[0].is_dir());
     entries.into_iter().next().unwrap()
 }
+
+#[cfg(unix)]
+fn resolved_fixture_root(fixture: &TempDir) -> PathBuf {
+    // Cache state deliberately refuses symlinked ancestors. macOS exposes `TMPDIR` through
+    // `/var`, which links to `/private/var`, so preserve that production guard and give tests the
+    // native path they would have received if the fixture were created below the real ancestor.
+    // Keep this Unix-only: Windows canonicalization produces a verbatim `\\?\` path that the
+    // state write path intentionally does not accept.
+    fixture
+        .path()
+        .canonicalize()
+        .expect("test fixture root must be resolvable")
+}
+
 #[cfg(unix)]
 #[test]
 fn locale_override_beats_environment_for_human_output() {
@@ -792,7 +806,7 @@ fn cargo_detect_rejects_cargo_passthrough_overrides_at_the_cli_boundary() {
 #[test]
 fn cache_status_json_reports_absent_without_creating_default_state_dir() {
     let fixture = TempDir::new().unwrap();
-    let home = fixture.path().join("home");
+    let home = resolved_fixture_root(&fixture).join("home");
     fs::create_dir(&home).unwrap();
 
     let mut cmd = cli_command();
@@ -848,7 +862,7 @@ fn cache_status_json_reports_absent_without_creating_default_state_dir() {
 #[test]
 fn cache_status_does_not_create_explicit_state_or_preview_dirs() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -869,7 +883,7 @@ fn cache_status_does_not_create_explicit_state_or_preview_dirs() {
 #[test]
 fn cache_status_ndjson_is_usage_error_before_state_creation() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -920,7 +934,8 @@ fn cache_status_json_reports_state_path_usage_errors_as_an_envelope() {
 #[test]
 fn cache_status_json_reports_insecure_cache_as_an_integrity_envelope() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let fixture_root = resolved_fixture_root(&fixture);
+    let state_dir = fixture_root.join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -946,7 +961,7 @@ fn cache_status_json_reports_insecure_cache_as_an_integrity_envelope() {
         !json["errors"][0]["params"]["detail"]
             .as_str()
             .unwrap()
-            .contains(fixture.path().to_string_lossy().as_ref())
+            .contains(fixture_root.to_string_lossy().as_ref())
     );
 }
 
@@ -954,7 +969,7 @@ fn cache_status_json_reports_insecure_cache_as_an_integrity_envelope() {
 #[test]
 fn cache_status_json_reports_available_for_valid_preview_cache() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&state_dir).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1006,7 +1021,7 @@ fn cache_status_json_reports_available_for_valid_preview_cache() {
 #[test]
 fn cache_status_json_reports_degraded_for_invalid_current_pointer() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1040,7 +1055,7 @@ fn cache_status_json_reports_degraded_for_invalid_current_pointer() {
 #[test]
 fn cache_status_quarantine_presence_is_degraded_and_read_only() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&state_dir).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1087,7 +1102,7 @@ fn cache_status_quarantine_presence_is_degraded_and_read_only() {
 #[test]
 fn cache_status_human_output_is_localized() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
         .arg("--locale")
@@ -1108,7 +1123,7 @@ fn cache_status_human_output_is_localized() {
 #[test]
 fn cache_status_human_output_includes_degraded_reason() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1132,7 +1147,7 @@ fn cache_status_human_output_includes_degraded_reason() {
 #[test]
 fn cache_status_human_output_explains_empty_existing_cache() {
     let fixture = TempDir::new().unwrap();
-    let state_dir = fixture.path().join("state");
+    let state_dir = resolved_fixture_root(&fixture).join("state");
     let preview_root = state_dir.join("preview-cache");
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
