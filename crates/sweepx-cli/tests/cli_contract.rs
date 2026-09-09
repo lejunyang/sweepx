@@ -744,11 +744,20 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
 fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() {
     let fixture = TempDir::new().unwrap();
     let cache = fixture.path().join("cache");
+    let home = fixture.path().join("home");
+    let empty_path = fixture.path().join("empty-path");
     fs::create_dir_all(cache.join("example")).unwrap();
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&empty_path).unwrap();
     fs::write(cache.join("example/blob"), b"cache").unwrap();
 
     let mut cmd = cli_command();
-    cmd.env("XDG_CACHE_HOME", &cache)
+    // `junk --system` intentionally discovers caches reported by installed tools in addition to
+    // XDG. Isolate both HOME and PATH so a developer's real npm/pnpm/pip installation cannot add
+    // unrelated candidates to this XDG-specific contract test.
+    cmd.env("HOME", &home)
+        .env("PATH", &empty_path)
+        .env("XDG_CACHE_HOME", &cache)
         .arg("--format")
         .arg("json")
         .arg("junk")
