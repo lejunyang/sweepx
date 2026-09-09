@@ -39,15 +39,16 @@ fn resolved_fixture_root(fixture: &TempDir) -> PathBuf {
         .expect("test fixture root must be resolvable")
 }
 
+#[cfg(unix)]
 fn git_fixture_root(fixture: &TempDir) -> PathBuf {
-    #[cfg(unix)]
-    {
-        return fixture
-            .path()
-            .canonicalize()
-            .expect("Git test fixture root must be resolvable");
-    }
-    #[cfg(windows)]
+    fixture
+        .path()
+        .canonicalize()
+        .expect("Git test fixture root must be resolvable")
+}
+
+#[cfg(windows)]
+fn git_fixture_root(fixture: &TempDir) -> PathBuf {
     fixture.path().to_path_buf()
 }
 

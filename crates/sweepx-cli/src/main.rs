@@ -964,7 +964,13 @@ impl GitProbeBudget {
         }
     }
 
-    fn run(&mut self, repository: &Path, arguments: &[&str], path: &Path) -> Result<i32, ()> {
+    fn run(
+        &mut self,
+        repository: &Path,
+        arguments: &[&str],
+        path: &Path,
+        literal_pathspec: bool,
+    ) -> Result<i32, ()> {
         if self.remaining_queries == 0 || Instant::now() >= self.deadline {
             return Err(());
         }
@@ -973,10 +979,15 @@ impl GitProbeBudget {
         if relative.as_os_str().is_empty() {
             return Err(());
         }
+        // Prefix with `./` so a native name beginning with `:` cannot be parsed as Git pathspec
+        // magic. The index query additionally disables all wildcard interpretation; check-ignore
+        // does not accept literal pathspec mode on the Git versions in the supported runner set.
+        let literal_relative = Path::new(".").join(relative);
         // Git's ignore/index queries are local and non-mutating, but still receive explicit
         // process/time limits: an unexpected executable or repository configuration must not hang
         // a disk scan. Fixed arguments keep native path bytes out of a shell.
-        let mut child = ProcessCommand::new("git")
+        let mut command = ProcessCommand::new("git");
+        command
             .arg("--no-optional-locks")
             .arg("-c")
             .arg("core.fsmonitor=false")
@@ -984,14 +995,16 @@ impl GitProbeBudget {
             .arg(repository)
             .args(arguments)
             .arg("--")
-            .arg(relative)
+            .arg(literal_relative)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_PAGER", "cat")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| ())?;
+            .stderr(Stdio::null());
+        if literal_pathspec {
+            command.env("GIT_LITERAL_PATHSPECS", "1");
+        }
+        let mut child = command.spawn().map_err(|_| ())?;
         loop {
             match child.try_wait().map_err(|_| ())? {
                 Some(status) => return status.code().ok_or(()),
@@ -1333,10 +1346,11 @@ fn annotate_project_candidates_with_git(
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
     candidates: &mut [JunkCandidate],
 ) {
-    if summary.boundaries.iter().any(|boundary| {
-        boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit
-            && boundary.detail == "retained entry cap exceeded"
-    }) {
+    if summary
+        .boundaries
+        .iter()
+        .any(|boundary| boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit)
+    {
         for candidate in candidates {
             candidate.blockers.push("git_scan_evidence_incomplete");
         }
@@ -1469,6 +1483,20 @@ fn git_repositories(
     summary: &sweepx_core::ScanSummary,
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
 ) -> Vec<GitRepository> {
+    // Index markers once. Re-scanning every retained entry for every directory turns repository
+    // discovery quadratic on the large trees this feature is meant to explain.
+    let git_markers = summary
+        .entries
+        .iter()
+        .filter(|entry| native_name_for_rule(&entry.native_basename).as_deref() == Some(".git"))
+        .filter(|entry| matches!(entry.object_type, ObjectType::Directory | ObjectType::File))
+        .filter_map(|entry| {
+            Some((
+                entry.identity.as_ref()?.parent_id.clone()?,
+                entry.object_type.clone(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut repositories = Vec::new();
     for entry in summary
         .roots
@@ -1492,14 +1520,7 @@ fn git_repositories(
             continue;
         };
         let entry_id = identity.entry_id.clone();
-        let git_marker =
-            summary.entries.iter().find(|child| {
-                child.identity.as_ref().is_some_and(|child_identity| {
-                    child_identity.parent_id.as_ref() == Some(&entry_id)
-                }) && native_name_for_rule(&child.native_basename).as_deref() == Some(".git")
-                    && matches!(child.object_type, ObjectType::Directory | ObjectType::File)
-            });
-        let Some(git_marker) = git_marker else {
+        let Some(git_marker_type) = git_markers.get(&entry_id) else {
             continue;
         };
         let Some(path) = path_from_scanned_entry(entry) else {
@@ -1514,7 +1535,7 @@ fn git_repositories(
                 .iter()
                 .map(|component| component.entry_id.clone())
                 .collect(),
-            uses_gitfile: git_marker.object_type == ObjectType::File,
+            uses_gitfile: *git_marker_type == ObjectType::File,
         });
     }
     repositories
@@ -1606,7 +1627,7 @@ fn git_path_is_ignored(
     repository: &Path,
     path: &Path,
 ) -> Result<bool, ()> {
-    match budget.run(repository, &["check-ignore", "--quiet"], path)? {
+    match budget.run(repository, &["check-ignore", "--quiet"], path, false)? {
         0 => Ok(true),
         1 => Ok(false),
         _ => Err(()),
@@ -1618,7 +1639,7 @@ fn git_path_has_tracked_descendant(
     repository: &Path,
     path: &Path,
 ) -> Result<bool, ()> {
-    match budget.run(repository, &["ls-files", "--error-unmatch"], path)? {
+    match budget.run(repository, &["ls-files", "--error-unmatch"], path, true)? {
         0 => Ok(true),
         1 => Ok(false),
         _ => Err(()),
