@@ -13,6 +13,19 @@
     "references": ["https://specifications.freedesktop.org/basedir-spec/latest/"]
   },
   {
+    "id": "linux.stale-build-temp",
+    "platform": "linux",
+    "rootKind": "linux_tmp",
+    "matchKind": "stale_named_direct_child",
+    "names": ["osdk-", "one-sdk-", "sweepx-"],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R3",
+    "evidence": "The candidate is a current-user-owned direct child of /tmp with a known build/test temporary prefix, a top-level modification time at least seven days old, complete scan evidence, unchanged live identity, and no reference observed from the current user's /proc process view. This is report-only: absence of an observed reference is not proof that no external process or future workflow needs it.",
+    "sourceReviewedAt": "2026-09-10",
+    "references": ["https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s18.html", "https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html"]
+  },
+  {
     "id": "macos.user-caches",
     "platform": "macos",
     "rootKind": "macos_user_caches",

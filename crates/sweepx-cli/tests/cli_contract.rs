@@ -632,6 +632,12 @@ fn experimental_cargo_detect_scans_with_compatible_builtin() {
         .arg(&root);
 
     let output = cmd.assert().get_output().clone();
+    assert!(
+        !output.stdout.is_empty(),
+        "junk --system produced no JSON; exit={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["kind"], "cleaner.result");
     assert_eq!(json["summary"]["command"], "cleaner.cargo-detect");
@@ -729,6 +735,12 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
         .arg("junk")
         .arg(fixture.path());
     let output = cmd.assert().get_output().clone();
+    assert!(
+        !output.stdout.is_empty(),
+        "temp junk scan produced no JSON; exit={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let candidates = json["candidates"].as_array().unwrap();
     assert!(candidates.iter().any(|candidate| {
@@ -920,11 +932,19 @@ fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() 
     cmd.env("HOME", &home)
         .env("PATH", &empty_path)
         .env("XDG_CACHE_HOME", &cache)
+        .env("SWEEPX_TEST_LINUX_TMP_ROOT", &empty_path)
         .arg("--format")
         .arg("json")
         .arg("junk")
         .arg("--system");
     let output = cmd.assert().get_output().clone();
+    if output.stdout.is_empty() {
+        panic!(
+            "temp junk scan produced no JSON; exit={:?}, stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let candidates = json["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 1);
@@ -935,6 +955,75 @@ fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() 
     );
     assert_eq!(candidates[0]["sourceReviewedAt"], "2026-08-29");
     assert_eq!(candidates[0]["risk"], "R2");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn junk_system_reports_only_old_owned_known_prefix_temp_roots() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TempDir::new().unwrap();
+    let temp_root = resolved_fixture_root(&fixture);
+    let old = temp_root.join("osdk-old");
+    let recent = temp_root.join("osdk-recent");
+    let unknown = temp_root.join("arbitrary-old");
+    for path in [&old, &recent, &unknown] {
+        fs::create_dir(path).unwrap();
+        fs::write(path.join("payload"), b"cache").unwrap();
+    }
+    let touched = std::process::Command::new("touch")
+        .arg("-d")
+        .arg("@1600000000")
+        .arg(&old)
+        .arg(&unknown)
+        .status()
+        .unwrap();
+    assert!(touched.success());
+    fs::set_permissions(&temp_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = temp_root.join("home");
+    let empty_path = temp_root.join("empty-path");
+    let cache = temp_root.join("cache");
+    let tools = temp_root.join("tools");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&empty_path).unwrap();
+    fs::create_dir(&cache).unwrap();
+    fs::create_dir(cache.join("empty")).unwrap();
+    fs::create_dir(&tools).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/du", tools.join("du")).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.env("HOME", &home)
+        .env("PATH", &tools)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("SWEEPX_TEST_LINUX_TMP_ROOT", &temp_root)
+        .arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg("--system");
+    let output = cmd.assert().get_output().clone();
+    assert!(
+        !output.stdout.is_empty(),
+        "target temp test produced no JSON; exit={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidates = json["candidates"].as_array().unwrap();
+    let temp_candidates = candidates
+        .iter()
+        .filter(|candidate| candidate["ruleId"] == "linux.stale-build-temp")
+        .collect::<Vec<_>>();
+    assert_eq!(temp_candidates.len(), 1);
+    assert_eq!(temp_candidates[0]["path"], old.display().to_string());
+    assert_eq!(temp_candidates[0]["risk"], "R3");
+    assert_eq!(
+        temp_candidates[0]["classification"],
+        "stale_build_temp_report"
+    );
+    assert_eq!(
+        temp_candidates[0]["blockers"],
+        json!(["process_observation_not_system_wide"])
+    );
 }
 
 #[test]

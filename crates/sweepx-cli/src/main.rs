@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode as ProcessExitCode, Stdio};
 use std::sync::mpsc;
 use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 mod trash_command;
@@ -950,6 +952,12 @@ struct GitRepository {
 
 const GIT_EVIDENCE_MAX_QUERIES: usize = 256;
 const GIT_EVIDENCE_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const LINUX_TMP_MIN_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+#[cfg(target_os = "linux")]
+const LINUX_TMP_MAX_CANDIDATES: usize = 1024;
+#[cfg(target_os = "linux")]
+const LINUX_TMP_MEASURE_DEADLINE: Duration = Duration::from_secs(180);
 
 struct GitProbeBudget {
     remaining_queries: usize,
@@ -1056,16 +1064,37 @@ fn run_junk_scan(
     } else {
         Vec::new()
     };
+    #[cfg(target_os = "linux")]
+    let temp_roots = roots
+        .iter()
+        .filter(|root| {
+            linux_temp_root().is_some_and(|temp| {
+                root.parent() == Some(temp.as_path())
+                    && root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(linux_temp_name_has_known_prefix)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    #[cfg(not(target_os = "linux"))]
+    let temp_roots = Vec::<PathBuf>::new();
+    let scan_roots = roots
+        .iter()
+        .filter(|root| !temp_roots.contains(root))
+        .cloned()
+        .collect::<Vec<_>>();
     let progress = ScanProgress::start(
         context.locale(),
-        roots.len(),
+        scan_roots.len(),
         false,
         format == OutputFormat::Human,
     );
     let scan = scan_with_store(
         context,
         &ScanRequest {
-            roots,
+            roots: scan_roots,
             state_dir: None,
         },
         Option::<&sweepx_core::MemorySnapshotStore>::None,
@@ -1150,6 +1179,8 @@ fn run_junk_scan(
         })
         .collect::<Vec<_>>();
     annotate_project_candidates_with_git(&scan.summary, &aggregates, &mut candidates);
+    #[cfg(target_os = "linux")]
+    candidates.extend(linux_temp_candidates(&temp_roots, &platform_rules));
     candidates.extend(platform_junk_candidates(
         &scan.summary,
         &aggregates,
@@ -1696,6 +1727,10 @@ fn platform_junk_candidates(
                 // instead of by asking a tool. The marker is rechecked here because discovery
                 // and classification see the path through different readers.
                 "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
+                #[cfg(target_os = "linux")]
+                "stale_named_direct_child" => {
+                    depth == 0 && linux_stale_temp_root_matches(rule, entry)
+                }
                 _ => false,
             };
             if !matched {
@@ -1708,6 +1743,13 @@ fn platform_junk_candidates(
             // the entry's own estimate, which is kept ahead of the logical fallback because it is
             // the scanner's own claim about this specific entry.
             let aggregate = aggregates.get(identity.entry_id.as_str()).copied();
+            if rule.root_kind == "linux_tmp"
+                && aggregate.is_none_or(|aggregate| {
+                    !aggregate.coverage.complete || aggregate.coverage.details_lost
+                })
+            {
+                continue;
+            }
             let size = if aggregate.is_some() {
                 junk_size_for(aggregate)
             } else {
@@ -1730,17 +1772,152 @@ fn platform_junk_candidates(
                     .iter()
                     .map(|component| component.entry_id.clone())
                     .collect(),
-                activity,
+                activity: if rule.root_kind == "linux_tmp" {
+                    Some("unreferenced_current_user_process_view")
+                } else {
+                    activity
+                },
                 stale_formats,
                 size_is_logical: size.is_logical_fallback,
                 git: None,
-                classification: None,
-                confidence: None,
-                blockers: Vec::new(),
+                classification: (rule.root_kind == "linux_tmp")
+                    .then_some("stale_build_temp_report"),
+                confidence: (rule.root_kind == "linux_tmp").then_some("medium"),
+                blockers: if rule.root_kind == "linux_tmp" {
+                    vec!["process_observation_not_system_wide"]
+                } else {
+                    Vec::new()
+                },
             });
         }
     }
     candidates
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stale_temp_root_matches(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(path) = path_from_scanned_entry(entry) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    let Some(temp_root) = linux_temp_root() else {
+        return false;
+    };
+    let Ok(temp_metadata) = std::fs::symlink_metadata(&temp_root) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.dev() != temp_metadata.dev()
+        || path.parent() != Some(temp_root.as_path())
+        || !scanned_entry_matches_unix_metadata(entry, &metadata)
+    {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !rule.names.iter().any(|prefix| name.starts_with(prefix)) {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    if SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default()
+        < LINUX_TMP_MIN_IDLE
+    {
+        return false;
+    }
+    !linux_current_user_process_references_temp_child(&temp_root, name)
+}
+
+#[cfg(target_os = "linux")]
+fn scanned_entry_matches_unix_metadata(
+    entry: &sweepx_model::ScannedEntry,
+    metadata: &std::fs::Metadata,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(identity) = entry.identity.as_ref() else {
+        return false;
+    };
+    let IdentityEvidence::Known { value } = &identity.platform_file_identity else {
+        return false;
+    };
+    value.device.0 == u128::from(metadata.dev()) && value.inode.0 == u128::from(metadata.ino())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_current_user_process_references_temp_child(
+    temp_root: &Path,
+    candidate_name: &str,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    let current_uid = unsafe { libc::geteuid() };
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .filter(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let process_path = PathBuf::from("/proc").join(pid);
+        if std::fs::symlink_metadata(&process_path)
+            .map(|metadata| metadata.uid() != current_uid)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        for link in ["cwd", "root", "exe"] {
+            if linux_proc_link_references_temp_child(
+                &process_path.join(link),
+                temp_root,
+                candidate_name,
+            ) {
+                return true;
+            }
+        }
+        let Ok(descriptors) = std::fs::read_dir(process_path.join("fd")) else {
+            continue;
+        };
+        if descriptors.flatten().any(|descriptor| {
+            linux_proc_link_references_temp_child(&descriptor.path(), temp_root, candidate_name)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_proc_link_references_temp_child(
+    link: &Path,
+    temp_root: &Path,
+    candidate_name: &str,
+) -> bool {
+    let Ok(target) = std::fs::read_link(link) else {
+        return false;
+    };
+    target
+        .strip_prefix(temp_root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|component| component.as_os_str() == candidate_name)
 }
 
 /// Confirms a scanned root is the one this rule's tool reported.
@@ -2653,6 +2830,13 @@ struct JunkSize {
     is_logical_fallback: bool,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct LinuxTempMeasurement {
+    metadata: std::fs::Metadata,
+    allocated_bytes: u128,
+}
+
 /// Picks the reportable size for one aggregate, preferring allocation and falling back to logical.
 fn junk_size_for(aggregate: Option<&sweepx_model::DirectoryAggregate>) -> JunkSize {
     let Some(aggregate) = aggregate else {
@@ -3019,6 +3203,21 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
         {
             roots.push(cache);
         }
+        if let Some(temp_root) = rules
+            .iter()
+            .any(|rule| rule.root_kind == "linux_tmp")
+            .then(linux_temp_root)
+            .flatten()
+        {
+            for child in linux_stale_temp_roots(&temp_root, &rules) {
+                if !roots
+                    .iter()
+                    .any(|existing: &PathBuf| same_directory(existing.as_path(), child.as_path()))
+                {
+                    roots.push(child);
+                }
+            }
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -3064,6 +3263,202 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(roots)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_temp_root() -> Option<PathBuf> {
+    std::env::var_os("SWEEPX_TEST_LINUX_TMP_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| Some(PathBuf::from("/tmp")))
+        .filter(|path| is_existing_real_directory(path))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stale_temp_roots(temp_root: &Path, rules: &[PlatformJunkRule]) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(rule) = rules.iter().find(|rule| rule.root_kind == "linux_tmp") else {
+        return Vec::new();
+    };
+    let Ok(root_metadata) = std::fs::symlink_metadata(temp_root) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(temp_root) else {
+        return Vec::new();
+    };
+    let current_uid = unsafe { libc::geteuid() };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !rule.names.iter().any(|prefix| name.starts_with(prefix)) {
+                return None;
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if !metadata.file_type().is_dir()
+                || metadata.uid() != current_uid
+                || metadata.dev() != root_metadata.dev()
+                || SystemTime::now()
+                    .duration_since(metadata.modified().ok()?)
+                    .unwrap_or_default()
+                    < LINUX_TMP_MIN_IDLE
+                || linux_current_user_process_references_temp_child(temp_root, name)
+            {
+                return None;
+            }
+            Some(path)
+        })
+        .take(LINUX_TMP_MAX_CANDIDATES)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_temp_name_has_known_prefix(name: &str) -> bool {
+    matches!(
+        name.strip_prefix("osdk-")
+            .or_else(|| name.strip_prefix("one-sdk-"))
+            .or_else(|| name.strip_prefix("sweepx-")),
+        Some(suffix) if !suffix.is_empty()
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_temp_candidates(roots: &[PathBuf], rules: &[PlatformJunkRule]) -> Vec<JunkCandidate> {
+    let Some(rule) = rules.iter().find(|rule| rule.root_kind == "linux_tmp") else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .take(LINUX_TMP_MAX_CANDIDATES)
+        .scan(
+            Instant::now() + LINUX_TMP_MEASURE_DEADLINE,
+            |deadline, path| {
+                if Instant::now() >= *deadline {
+                    return None;
+                }
+                Some((path, *deadline))
+            },
+        )
+        .filter_map(|(path, deadline)| {
+            let before = linux_temp_candidate_metadata(path, rule)?;
+            let measurement = linux_du_measurement(path, deadline)?;
+            let after = linux_temp_candidate_metadata(path, rule)?;
+            if !std::os::unix::fs::MetadataExt::dev(&before)
+                .eq(&std::os::unix::fs::MetadataExt::dev(&after))
+                || !std::os::unix::fs::MetadataExt::ino(&before)
+                    .eq(&std::os::unix::fs::MetadataExt::ino(&after))
+                || before.modified().ok()? != after.modified().ok()?
+                || std::os::unix::fs::MetadataExt::dev(&measurement.metadata)
+                    != std::os::unix::fs::MetadataExt::dev(&after)
+                || std::os::unix::fs::MetadataExt::ino(&measurement.metadata)
+                    != std::os::unix::fs::MetadataExt::ino(&after)
+            {
+                return None;
+            }
+            Some(JunkCandidate {
+                path: path.display().to_string(),
+                rule_id: rule.id.clone(),
+                risk: rule.risk.clone(),
+                reclaimable: ByteValue::Known {
+                    value: sweepx_model::DecimalU128::new(measurement.allocated_bytes),
+                },
+                evidence: rule.evidence.clone(),
+                source_reviewed_at: rule.source_reviewed_at.clone(),
+                references: rule.references.clone(),
+                entry_id: ScanEntryId::for_scan_ordinal(
+                    &sweepx_model::ScanId::new("linux-temp-report"),
+                    u128::from(std::os::unix::fs::MetadataExt::ino(&after)).saturating_add(1),
+                )
+                .ok()?,
+                ancestor_ids: BTreeSet::new(),
+                activity: Some("unreferenced_current_user_process_view"),
+                stale_formats: Vec::new(),
+                size_is_logical: false,
+                git: None,
+                classification: Some("stale_build_temp_report"),
+                confidence: Some("medium"),
+                blockers: vec!["process_observation_not_system_wide"],
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_temp_candidate_metadata(
+    path: &Path,
+    rule: &PlatformJunkRule,
+) -> Option<std::fs::Metadata> {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp_root = linux_temp_root()?;
+    let root_metadata = std::fs::symlink_metadata(&temp_root).ok()?;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let name = path.file_name()?.to_str()?;
+    if path.parent() != Some(temp_root.as_path())
+        || !rule.names.iter().any(|prefix| name.starts_with(prefix))
+        || !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.dev() != root_metadata.dev()
+        || SystemTime::now()
+            .duration_since(metadata.modified().ok()?)
+            .unwrap_or_default()
+            < LINUX_TMP_MIN_IDLE
+        || linux_current_user_process_references_temp_child(&temp_root, name)
+    {
+        return None;
+    }
+    Some(metadata)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_du_measurement(path: &Path, deadline: Instant) -> Option<LinuxTempMeasurement> {
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let output_path = std::env::temp_dir().join(format!(
+        "sweepx-du-{}-{}.out",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+    ));
+    let output_file = std::fs::File::create(&output_path).ok()?;
+    let mut child = ProcessCommand::new("du")
+        .arg("-x")
+        .arg("-s")
+        .arg("-B1")
+        .arg("--")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output_file))
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&output_path);
+                return None;
+            }
+        }
+    };
+    let output = std::fs::read(&output_path).ok()?;
+    let _ = std::fs::remove_file(&output_path);
+    if !status.success() || output.len() > 4096 {
+        return None;
+    }
+    let text = std::str::from_utf8(&output).ok()?;
+    Some(LinuxTempMeasurement {
+        metadata,
+        allocated_bytes: text.split_whitespace().next()?.parse().ok()?,
+    })
 }
 
 fn is_existing_real_directory(path: &Path) -> bool {
@@ -3492,7 +3887,11 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
     let mut ids = BTreeSet::new();
     for rule in &rules {
         let expected = match rule.platform.as_str() {
-            "linux" => ("xdg_cache_home", "direct_children", 1),
+            "linux" => match rule.root_kind.as_str() {
+                "xdg_cache_home" => ("xdg_cache_home", "direct_children", 1),
+                "linux_tmp" => ("linux_tmp", "stale_named_direct_child", 0),
+                _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
+            },
             "macos" => ("macos_user_caches", "direct_children", 1),
             // A platform can host more than one root kind, so the shape is keyed on the root
             // kind rather than on the platform. Keying it on the platform alone made the first
@@ -3545,6 +3944,11 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 .chain(rule.required_markers.iter())
                 .all(|name| safe_rule_component(name))
             || (rule.match_kind == "direct_children" && !rule.names.is_empty())
+            || (rule.match_kind == "stale_named_direct_child"
+                && (rule.root_kind != "linux_tmp"
+                    || rule.names.is_empty()
+                    || !rule.required_markers.is_empty()
+                    || rule.risk != "R3"))
             || (rule.match_kind == "named_descendant" && rule.names.is_empty())
             // A tool-reported root is admitted on the tool's word alone, so it must carry at
             // least one structural marker; without one the rule would report whatever now
@@ -3823,16 +4227,26 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 9);
+        assert_eq!(rules.len(), 10);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
                 .iter()
                 .all(|rule| valid_verification_date(&rule.source_reviewed_at))
         );
-        let linux = rules.iter().find(|rule| rule.platform == "linux").unwrap();
+        let linux = rules
+            .iter()
+            .find(|rule| rule.id == "linux.xdg-user-cache")
+            .unwrap();
         assert_eq!(linux.root_kind, "xdg_cache_home");
         assert_eq!(linux.match_kind, "direct_children");
+        let linux_tmp = rules
+            .iter()
+            .find(|rule| rule.id == "linux.stale-build-temp")
+            .unwrap();
+        assert_eq!(linux_tmp.root_kind, "linux_tmp");
+        assert_eq!(linux_tmp.match_kind, "stale_named_direct_child");
+        assert_eq!(linux_tmp.risk, "R3");
         // Found by id, not by platform: Windows now carries browser cache rules too, and matching
         // on the platform alone silently returned whichever rule happened to be first.
         let windows = rules

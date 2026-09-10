@@ -158,7 +158,7 @@ sweepx --format json junk --system
 
 显式根继续识别明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。若扫描结果中能完整识别 Git 工作区，`junk` 还会以有界、非交互的 Git 查询检查这些**已有规则候选**：未跟踪、被 ignore 且不含嵌套仓库时，JSON 将其标为 `classification=known_generated_ignored`、`confidence=high`；存在 tracked descendant、gitfile/嵌套仓库、扫描证据不完整或 Git 查询失败时保守保留原分类并给出 `blockers[]`。Git ignore 只增强解释，不单独发现或授权删除任意路径；`.env.local` 等本地状态不会仅因被 ignore 而成为候选。
 
-不传显式根并加 `--system` 时，Linux 在绝对 `XDG_CACHE_HOME`（否则 `~/.cache`）下逐个报告应用缓存，macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。`--system` 与显式根互斥。所有结果都只报告候选、规则 ID、风险、来源审阅日期、第一方依据和可回收估算，不自动删除；Linux 的 `/tmp`/`/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未按目录名纳入。
+不传显式根并加 `--system` 时，Linux 除报告 `XDG_CACHE_HOME` 外，还会先浅层筛选 `/tmp`：只选择当前用户拥有、同文件系统、至少 7 天未修改、以 `osdk-` / `one-sdk-` / `sweepx-` 开头且未被当前用户 `/proc` 进程视图引用的顶层目录，再单独扫描并以 R3/report-only 报告。它不报告 `/tmp` 根、socket/pipe/链接、其他用户内容、最近目录、跨挂载目录或任意未知名称；“未被当前用户进程引用”也不是系统级无引用证明，因此结果带 blocker，绝不自动删除。macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。Linux `/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未纳入。
 
 ### 候选的体积是怎么报的
 
