@@ -22,12 +22,12 @@ The Agent must preserve uncertainty from machine output. It may not rewrite part
 
 ## Currently forbidden
 
-The current CLI has only a single-item `trash` preview that requires human confirmation in a terminal. An Agent must not route around that boundary:
+Real mutation in the current CLI is limited to a single-item `trash` preview that requires terminal confirmation and Linux `junk --system --clean-temp`, whose quarantine plan requires the full digest to be typed locally. An Agent must not invoke or route around either confirmation boundary:
 
 - do not treat chat confirmation as HumanApproval;
 - do not call safety/audit/executor libraries directly to fabricate a workflow;
 - do not create, forge, or consume plans, authorizations, permits, or audit tokens;
-- do not run package-manager, browser, or shell cleanup commands;
+- do not run package-manager, browser, or shell cleanup commands, and do not type `clean <digest>` for the user;
 - do not invoke unimplemented `plan`, `approve`, `execute`, or `--dangerously-delete` interfaces;
 - do not describe a fake-executor receipt as a real cleanup result.
 
@@ -37,4 +37,4 @@ Current scan automation should use bounded JSON. `scan --format ndjson` remains 
 
 ## The future boundary remains narrower
 
-The roadmap may eventually let an Agent assist with scan, explain, and plan display, but it may not drive a native dialog, OS verifier, trusted terminal challenge, or dangerous switch. Even if a user says “approved” in chat, a future Core must verify an opaque approval from a trusted local surface and perform fresh live revalidation. No such CLI workflow exists today.
+An Agent may assist with scan, explain, and plan display, but it may not drive a native dialog, OS verifier, trusted terminal challenge, or dangerous switch. Approval in chat does not replace local terminal confirmation: the current Linux temporary quarantine accepts only an exact full digest typed by the user in the foreground terminal, while a general Core approval workflow remains unimplemented.

@@ -4,10 +4,10 @@ title: Introduction
 
 # Introduction
 
-SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade scanner/TUI plus an explicitly confirmed, live-revalidated operating-system Trash preview. Permanent deletion still does not exist.
+SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade scanner/TUI, an explicitly confirmed live-revalidated operating-system Trash preview, and a recoverable Linux stale-build-temp quarantine preview. Permanent deletion still does not exist.
 
 > [!WARNING]
-> The only real mutation is the single-item Trash preview. There is no Permanent adapter and no `plan`, `approve`, or `execute` CLI. Trash failure never falls back to permanent deletion.
+> Real mutation is limited to the single-item Trash preview and Linux `junk --system --clean-temp`, whose digest-bound plan requires explicit terminal confirmation before recoverable cross-filesystem quarantine. There is no Permanent adapter or general `plan` / `approve` / `execute` CLI, and failure never falls back to permanent deletion.
 
 ## Current status
 

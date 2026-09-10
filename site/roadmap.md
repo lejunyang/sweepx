@@ -18,7 +18,7 @@ title: 路线图
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` 渐进目录浏览、metadata-only Cleaner、项目与三平台用户缓存的 `junk` report-only 规则，以及 preview cache 只读诊断 | imported explain input report-only；TUI 根准入后立即进入，先列当前层，再以 120 ms 节流的下限快照增量更新直接子目录大小，最终结果收敛为 exact/incomplete；single-flight 使用 30 s 无进展 deadline、late result discard、单槽背压和 32 stuck-worker cap；`cache status` 只做 bounded preview-cache inspection；`junk --system` 已以 R3/report-only 接入当前用户的已知前缀 stale `/tmp` build/test 目录，但 `/var/tmp`、任意名称临时目录、Windows OS handler 和共享存储仍未接入；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal、单事务 complete-stream/terminal persistence，以及 degraded completed-stream replay 已实现 | replay 仍 non-live、非 runtime-qualified，且只适用于 Linux completed stream；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、`scan --format ndjson`、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
 | P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell；当前主机的 file/directory Trash cell 可报告 degraded preview | macOS/Windows Trash cell 与全部 Permanent cell disabled；尚无 release-qualified native adapter、批量 mutation command 或 approval UI |
-| P4+ mutation | 当前仅有显式确认、实时身份重验、绝不回退 Permanent 的单对象 Trash development preview | 资格化 Trash、Permanent 与批量计划执行仍是未来工作 |
+| P4+ mutation | 显式确认、实时重验的单对象 Trash preview，以及 Linux 陈旧构建临时目录的摘要绑定异盘隔离 preview | 资格化 Trash、Permanent 与通用批量计划执行仍是未来工作 |
 | 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布与 v0.0.1 开发版本已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
 
 ## 阶段目标

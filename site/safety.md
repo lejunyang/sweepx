@@ -4,10 +4,10 @@ title: 安全模型
 
 # 安全模型
 
-SweepX 当前的安全性首先来自能力缺失与类型边界：可运行表面只读，模拟执行表面 sealed，真实 mutation 表面不存在。未来安全目标不能被写成今天已有的删除保证。
+SweepX 当前的安全性首先来自显式能力与类型边界：大部分表面只读，模拟执行表面 sealed；真实 mutation 仅限单对象 Trash preview 与 Linux 陈旧构建临时目录隔离 preview。未来安全目标不能被写成今天已有的删除保证。
 
 > [!CAUTION]
-> 当前仅有单对象 Trash development preview：必须交互确认并在提交前重验；没有 Permanent、plan/approve/execute 或 Trash-to-Permanent fallback。P3 测试仍只覆盖确定性模拟。
+> 单对象 Trash preview 必须交互确认并在提交前重验。Linux 临时目录隔离还要求精确回输完整计划摘要，并在每项搬迁前复核身份、年龄、进程引用和挂载边界；只移动到异盘私有恢复区。没有 Permanent、通用 plan/approve/execute 或任何 Permanent fallback。
 
 ## 已实现的只读边界
 

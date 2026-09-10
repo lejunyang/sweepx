@@ -11,6 +11,8 @@ use std::thread;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+mod temp_clean_command;
 mod trash_command;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -185,6 +187,18 @@ enum Commands {
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         #[arg(long)]
         system: bool,
+        /// Move approved stale Linux build-temp candidates to a recoverable quarantine.
+        ///
+        /// Requires `--system`, human output, and a foreground terminal. The full plan digest
+        /// must be typed back exactly. This never falls back to permanent deletion.
+        #[arg(long, requires = "system", conflicts_with = "roots")]
+        clean_temp: bool,
+        /// Absolute quarantine base on a filesystem different from `/tmp`.
+        ///
+        /// Defaults to `$XDG_DATA_HOME/sweepx/quarantine` or
+        /// `$HOME/.local/share/sweepx/quarantine`.
+        #[arg(long, value_name = "ABSOLUTE_DIRECTORY", requires = "clean_temp")]
+        quarantine_dir: Option<PathBuf>,
         #[arg(value_name = "ROOT")]
         roots: Vec<OsString>,
     },
@@ -533,7 +547,12 @@ fn main() -> ProcessExitCode {
                 .map(RenderedResult::Cleaner)
             }
         },
-        Commands::Junk { system, roots } => {
+        Commands::Junk {
+            system,
+            clean_temp,
+            quarantine_dir,
+            roots,
+        } => {
             let roots = match normalize_junk_roots(system, &roots) {
                 Ok(roots) => roots,
                 Err(error) => {
@@ -541,7 +560,18 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
-            return run_junk_scan(&context, format, size_unit, roots, system);
+            return run_junk_scan(
+                &context,
+                format,
+                size_unit,
+                roots,
+                system,
+                JunkCleanOptions {
+                    enabled: clean_temp,
+                    quarantine_dir: quarantine_dir.as_deref(),
+                    stdin_is_terminal: std::io::stdin().is_terminal(),
+                },
+            );
         }
         Commands::SiteStorage {
             trash_origin,
@@ -899,6 +929,9 @@ struct PlatformJunkRule {
 #[derive(Debug, Clone)]
 struct JunkCandidate {
     path: String,
+    /// Native path retained only for in-process actions; never serialized as authority.
+    #[cfg(target_os = "linux")]
+    native_path: Option<PathBuf>,
     rule_id: String,
     risk: String,
     reclaimable: ByteValue,
@@ -962,6 +995,13 @@ const LINUX_TMP_MEASURE_DEADLINE: Duration = Duration::from_secs(180);
 struct GitProbeBudget {
     remaining_queries: usize,
     deadline: Instant,
+}
+
+struct JunkCleanOptions<'a> {
+    enabled: bool,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    quarantine_dir: Option<&'a Path>,
+    stdin_is_terminal: bool,
 }
 
 impl GitProbeBudget {
@@ -1045,7 +1085,14 @@ fn run_junk_scan(
     size_unit: HumanSizeUnit,
     roots: Vec<PathBuf>,
     include_platform_rules: bool,
+    clean: JunkCleanOptions<'_>,
 ) -> ProcessExitCode {
+    if clean.enabled && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
+        eprintln!(
+            "junk --system --clean-temp requires human output and a foreground interactive terminal"
+        );
+        return ProcessExitCode::from(2);
+    }
     let rules = match load_project_junk_rules() {
         Ok(rules) => rules,
         Err(error) => {
@@ -1152,6 +1199,8 @@ fn run_junk_scan(
                     let size = junk_size_for(aggregates.get(identity.entry_id.as_str()).copied());
                     JunkCandidate {
                         path: entry.display_path.clone(),
+                        #[cfg(target_os = "linux")]
+                        native_path: None,
                         rule_id: rule.id.clone(),
                         risk: rule.risk.clone(),
                         reclaimable: size.value,
@@ -1212,12 +1261,34 @@ fn run_junk_scan(
             .then_with(|| left.path.cmp(&right.path))
     });
     let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
+    #[cfg(target_os = "linux")]
+    let temp_clean_inputs = candidates
+        .iter()
+        .filter(|candidate| candidate.rule_id == "linux.stale-build-temp")
+        .filter_map(|candidate| {
+            let EvidenceValue::Known { value } = &candidate.reclaimable else {
+                return None;
+            };
+            Some(temp_clean_command::TempCleanInput {
+                path: candidate.native_path.clone()?,
+                allocated_bytes: value.0,
+            })
+        })
+        .collect::<Vec<_>>();
     if format == OutputFormat::Human {
         println!(
             "{}",
-            match context.locale() {
-                sweepx_i18n::Locale::ZhCn => "垃圾扫描报告（已核验可重建/可丢弃位置；仅报告）",
-                sweepx_i18n::Locale::EnUs =>
+            match (context.locale(), clean.enabled) {
+                (sweepx_i18n::Locale::ZhCn, true) => {
+                    "垃圾扫描报告与可恢复临时目录清理预览"
+                }
+                (sweepx_i18n::Locale::EnUs, true) => {
+                    "Junk scan report and recoverable temporary-directory cleanup preview"
+                }
+                (sweepx_i18n::Locale::ZhCn, false) => {
+                    "垃圾扫描报告（已核验可重建/可丢弃位置；仅报告）"
+                }
+                (sweepx_i18n::Locale::EnUs, false) =>
                     "Junk scan report (verified rebuildable/disposable locations; report-only)",
             }
         );
@@ -1249,8 +1320,26 @@ fn run_junk_scan(
         }
         println!(
             "{}",
-            match context.locale() {
-                sweepx_i18n::Locale::ZhCn => format!(
+            match (context.locale(), clean.enabled) {
+                (sweepx_i18n::Locale::ZhCn, true) => format!(
+                    "汇总：{} 个候选，已统计可回收 {}{}；{} 项为下限或未知；尚未移动，下一步将展示精确确认计划。",
+                    candidates.len(),
+                    if incomplete_size_count > 0 { ">= " } else { "" },
+                    known_reclaimable
+                        .map(|bytes| size_unit.format(bytes))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    incomplete_size_count,
+                ),
+                (sweepx_i18n::Locale::EnUs, true) => format!(
+                    "Summary: {} candidates, {}{} accounted reclaimable; {} lower-bound or unknown sizes; nothing has moved yet, and an exact confirmation plan follows.",
+                    candidates.len(),
+                    if incomplete_size_count > 0 { ">= " } else { "" },
+                    known_reclaimable
+                        .map(|bytes| size_unit.format(bytes))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    incomplete_size_count,
+                ),
+                (sweepx_i18n::Locale::ZhCn, false) => format!(
                     "汇总：{} 个候选，已统计可回收 {}{}；{} 项为下限或未知；没有执行删除。",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
@@ -1259,7 +1348,7 @@ fn run_junk_scan(
                         .unwrap_or_else(|| "unknown".to_string()),
                     incomplete_size_count,
                 ),
-                sweepx_i18n::Locale::EnUs => format!(
+                (sweepx_i18n::Locale::EnUs, false) => format!(
                     "Summary: {} candidates, {}{} accounted reclaimable; {} lower-bound or unknown sizes; nothing was deleted.",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
@@ -1307,6 +1396,23 @@ fn run_junk_scan(
                 })).collect::<Vec<_>>(),
             })
         );
+    }
+    if clean.enabled {
+        #[cfg(target_os = "linux")]
+        {
+            return temp_clean_command::run_temp_clean(
+                temp_clean_inputs,
+                clean.quarantine_dir,
+                format,
+                context.locale(),
+                clean.stdin_is_terminal,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("junk --system --clean-temp is currently available only on Linux");
+            return ProcessExitCode::from(3);
+        }
     }
     ProcessExitCode::from(scan.output.conservative_exit_code() as u8)
 }
@@ -1760,6 +1866,8 @@ fn platform_junk_candidates(
             };
             candidates.push(JunkCandidate {
                 path: entry.display_path.clone(),
+                #[cfg(target_os = "linux")]
+                native_path: None,
                 rule_id: rule.id.clone(),
                 risk: rule.risk.clone(),
                 reclaimable: size.value,
@@ -3363,6 +3471,8 @@ fn linux_temp_candidates(roots: &[PathBuf], rules: &[PlatformJunkRule]) -> Vec<J
             }
             Some(JunkCandidate {
                 path: path.display().to_string(),
+                #[cfg(target_os = "linux")]
+                native_path: Some(path.to_path_buf()),
                 rule_id: rule.id.clone(),
                 risk: rule.risk.clone(),
                 reclaimable: ByteValue::Known {

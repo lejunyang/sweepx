@@ -125,7 +125,10 @@ impl TrashCandidate {
         if !same_object(self.identity.as_ref(), &self.path) {
             return Err(TrashError::Changed);
         }
-        trash::delete(&self.path).map_err(|error| TrashError::Backend(error.to_string()))?;
+        trash::delete(&self.path).map_err(|error| TrashError::Backend {
+            detail: error.to_string(),
+            cross_filesystem_linux: linux_cross_filesystem_trash(&self.path),
+        })?;
         match std::fs::symlink_metadata(&self.path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             _ => Err(TrashError::OutcomeUnknown),
@@ -144,7 +147,10 @@ pub(crate) enum TrashError {
     MissingLiveIdentity,
     Changed,
     Inspect(io::Error),
-    Backend(String),
+    Backend {
+        detail: String,
+        cross_filesystem_linux: bool,
+    },
     OutcomeUnknown,
 }
 
@@ -170,12 +176,43 @@ impl std::fmt::Display for TrashError {
             ),
             Self::Changed => formatter.write_str("the selected filesystem object changed before submission"),
             Self::Inspect(error) => write!(formatter, "cannot inspect target: {error}"),
-            Self::Backend(error) => write!(formatter, "operating-system Trash rejected the item: {error}"),
+            Self::Backend {
+                detail,
+                cross_filesystem_linux: true,
+            } => write!(
+                formatter,
+                "operating-system Trash rejected the item: {detail}. On Linux this item is on a different filesystem from the desktop Trash. Cross-filesystem Trash normally requires a usable per-volume Trash on the source mount (for /tmp on the root filesystem, typically /.Trash-UID), so the desktop Trash can exist while this path remains unsupported"
+            ),
+            Self::Backend { detail, .. } => {
+                write!(formatter, "operating-system Trash rejected the item: {detail}")
+            }
             Self::OutcomeUnknown => formatter.write_str(
                 "Trash returned success but the source path still exists; inspect the Trash before retrying",
             ),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cross_filesystem_trash(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let source = std::fs::symlink_metadata(path).ok();
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local/share"))
+        });
+    let trash = data_home.and_then(|data_home| std::fs::symlink_metadata(data_home).ok());
+    matches!((source, trash), (Some(source), Some(trash)) if source.dev() != trash.dev())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_cross_filesystem_trash(_path: &Path) -> bool {
+    false
 }
 
 fn protected_path(path: &Path) -> bool {
@@ -529,5 +566,17 @@ mod tests {
                 &home.join(".local/share/Trash/files/already-trashed")
             ));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cross_filesystem_trash_error_explains_per_volume_requirement() {
+        let error = TrashError::Backend {
+            detail: "rejected".to_string(),
+            cross_filesystem_linux: true,
+        }
+        .to_string();
+        assert!(error.contains("different filesystem"));
+        assert!(error.contains("/.Trash-UID"));
     }
 }

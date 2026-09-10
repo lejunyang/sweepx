@@ -30,6 +30,9 @@ trash = { version = "5.2.6", default-features = false, features = ["coinit_apart
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sweepx-canonical = { version = "0.0.1", path = "../sweepx-canonical" }
+
 [target.'cfg(windows)'.dependencies]
 sweepx-platform-windows = { version = "0.0.1", path = "../sweepx-platform-windows" }
 # `SetStdHandle` only, so an elevated child's output can reach the parent's pipe: a relaunched

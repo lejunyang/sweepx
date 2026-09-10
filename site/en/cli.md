@@ -160,6 +160,17 @@ Explicit roots continue to discover clearly rebuildable project artifacts: Rust 
 
 With no explicit root, Linux `--system` reports XDG caches and shallowly filters `/tmp` before scanning only direct children that are current-user-owned, on the same filesystem, at least seven days old, named with an `osdk-`, `one-sdk-`, or `sweepx-` prefix, and not referenced by the current user's `/proc` process view. Those entries remain R3/report-only and carry a blocker because this is not system-wide proof of inactivity; nothing is deleted automatically. The `/tmp` root, sockets/pipes/links, other users' content, recent entries, mount crossings, and unknown names are excluded. macOS reports children below `~/Library/Caches`; Windows admits only depth-2 `LocalCache` / `TempState` directories below `%LOCALAPPDATA%/Packages`. Linux `/var/tmp`, Windows system cleanup, and package-manager/container shared stores remain outside the matcher.
 
+Linux can explicitly execute this narrow stale-build-temp set:
+
+```bash
+sweepx junk --system --clean-temp
+# optional: --quarantine-dir /absolute/private/directory
+```
+
+This mode accepts only human output in a foreground interactive terminal. SweepX prints every target, size, quarantine location, residual process-observation boundary, and the full canonical digest; the user must type `clean <full digest>` exactly, because the short fingerprint grants no authority. After confirmation it revalidates device/inode, owner, type, mtime, age, current-user process references, and nested mounts for every directory, then moves it to a private `0700` quarantine on a filesystem different from `/tmp`. `plan.json` and per-item `outcomes.jsonl` are made durable before movement; a failure stops later items and reports partial/reconciliation rather than deleting permanently. The default base is `$XDG_DATA_HOME/sweepx/quarantine` or `$HOME/.local/share/sweepx/quarantine`.
+
+This is not a replacement implementation of desktop Trash. Freedesktop Trash normally requires a cross-filesystem item to use a `.Trash-$UID` on the **source mount**. On this host `/tmp` is on the root disk while the HOME Trash is on another disk; GIO measured `Trashing on system internal mounts is not supported`, and an ordinary user cannot create `/.Trash-$UID`. A desktop Trash can therefore exist while root-filesystem `/tmp` remains untrashable. SweepX explains this class of failure and never turns a Trash failure into permanent deletion.
+
 ### How a candidate's size is reported
 
 `reclaimable` prefers the filesystem's allocated size. When the platform will not claim allocation,

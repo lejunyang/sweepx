@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "SweepX"
   text: "先看清，再决定"
-  tagline: "可运行的开发版磁盘分析 CLI/TUI，并提供显式确认的系统回收站预览。"
+  tagline: "可运行的开发版磁盘分析 CLI/TUI，并提供显式确认的 Trash 与 Linux 临时目录隔离预览。"
   image:
     src: /mark.svg
     alt: SweepX
@@ -24,12 +24,12 @@ features:
     details: Linux、macOS 与 Windows 均已有 degraded 的开发版只读 scanner，并统一通过 `sweepx scan` / `scan --tui` 接入；macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal。
   - title: 证据不会变成授权
     details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。`cache status` 也只是 preview cache 的只读诊断；`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实。
-  - title: Trash-first 预览
-    details: CLI 与 TUI 可在显式确认、实时身份重验后移到系统回收站；没有 Permanent fallback，plan/approve/execute 仍未开放。
+  - title: 可恢复清理预览
+    details: CLI/TUI 支持显式确认、实时重验的单对象 Trash；Linux 另有完整摘要确认、逐项重验的陈旧构建临时目录异盘隔离。没有 Permanent fallback，通用 plan/approve/execute 仍未开放。
 ---
 
 > [!CAUTION]
-> **SweepX 的真实变更能力目前仅限 development Trash preview。** 它只移动单个已重验对象到系统回收站，不支持永久删除或批量计划执行。P3 中的计划、授权、durable audit 和 executor 仍是 library-only 的确定性模拟。
+> **SweepX 的真实变更能力目前仅限 development Trash preview 和 Linux 陈旧构建临时目录隔离 preview。** 后者只接受内置规则候选、完整摘要确认和逐项重验，并移动到异盘恢复区；不支持永久删除或通用批量计划执行。P3 中的通用计划、授权、durable audit 和 executor 仍是 library-only 的确定性模拟。
 
 ## 现在能做什么
 
@@ -44,7 +44,7 @@ features:
 | `cache status` | Linux/macOS/Windows：preview cache 只读诊断 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门；`cargo-detect` 有固定输入读取和 typed evidence，但仍是 hint/report-only |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 先进入界面再渐进扫描；当前层行有界保留，递归大小由 30 s deadline 的 single-flight 后台任务聚合 |
-| Trash / Permanent | 当前主机可体验单对象 Trash preview；Permanent 不存在 |
+| Trash / Permanent | 单对象 Trash preview；Linux 另有陈旧 `/tmp` 构建目录的摘要绑定隔离 preview；Permanent 不存在 |
 
 CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。`cache status` 只支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录；检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构和健康，不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；v0.0.1 开发版本已发布，稳定版本尚未发布。
@@ -63,4 +63,4 @@ CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖�
 
 ## 一句话结论
 
-SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI 与单对象 Trash preview 可体验；`plan`、`approve`、`execute` 和 Permanent 仍只是未来提案。
+SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI、单对象 Trash preview 与 Linux 陈旧构建临时目录隔离 preview 可体验；通用 `plan`、`approve`、`execute` 和 Permanent 仍只是未来提案。

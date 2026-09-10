@@ -1960,6 +1960,19 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             CapabilityState::Degraded,
             "PROJECT_JUNK_RULES_REPORT_ONLY",
         ),
+        mutating_command_record(
+            "junk.clean-temp",
+            if current_os == "linux" {
+                CapabilityState::Degraded
+            } else {
+                CapabilityState::Disabled
+            },
+            if current_os == "linux" {
+                "LINUX_TEMP_QUARANTINE_PREVIEW"
+            } else {
+                "LINUX_TEMP_QUARANTINE_UNAVAILABLE"
+            },
+        ),
         command_record(
             "capabilities",
             CapabilityState::Qualified,
@@ -5338,6 +5351,12 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "PROJECT_JUNK_RULES_REPORT_ONLY" => {
             "Junk scan reports a narrow set of rebuildable project artifacts and never deletes automatically."
+        }
+        "LINUX_TEMP_QUARANTINE_PREVIEW" => {
+            "Linux stale-build-temp cleanup is a development preview that requires exact full-digest terminal confirmation, per-item revalidation, and a private recovery filesystem; it never permanently deletes."
+        }
+        "LINUX_TEMP_QUARANTINE_UNAVAILABLE" => {
+            "Stale-build-temp quarantine is currently available only on Linux."
         }
         "TUI_READ_PATH_SUPPORTED" => {
             "TUI validates a bounded scan.result input and stays read-only."

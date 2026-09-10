@@ -85,7 +85,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["summary"]["commandCount"], "11");
+    assert_eq!(json["summary"]["commandCount"], "12");
     assert_eq!(json["summary"]["capabilityCount"], "40");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert_eq!(
@@ -94,7 +94,7 @@ fn capabilities_json_uses_fixed_machine_keys() {
             .filter(|command| command["mutating"] == true)
             .map(|command| command["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["trash"]
+        vec!["junk.clean-temp", "trash"]
     );
     assert!(commands.iter().all(|command| {
         !matches!(command["id"].as_str(), Some("plan" | "approve" | "execute"))
@@ -715,6 +715,26 @@ fn trash_rejects_relative_paths_without_changing_them() {
     let mut cmd = cli_command();
     cmd.arg("trash").arg("relative.txt");
     cmd.assert().code(8);
+}
+
+#[test]
+fn junk_temp_cleanup_requires_a_foreground_human_confirmation() {
+    let mut cmd = cli_command();
+    cmd.arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg("--system")
+        .arg("--clean-temp");
+    cmd.assert()
+        .code(2)
+        .stderr(predicates::str::contains("foreground interactive terminal"));
+}
+
+#[test]
+fn junk_temp_cleanup_requires_system_discovery() {
+    let mut cmd = cli_command();
+    cmd.arg("junk").arg("--clean-temp");
+    cmd.assert().code(2);
 }
 
 #[cfg(target_os = "linux")]

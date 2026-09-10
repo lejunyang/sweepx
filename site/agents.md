@@ -22,12 +22,12 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 当前禁止范围
 
-当前 CLI 只有需要人在终端交互确认的单对象 `trash` preview；Agent 不得绕过这条边界：
+当前 CLI 的真实变更仅限需要人在终端交互确认的单对象 `trash` preview，以及必须精确回输完整摘要的 Linux `junk --system --clean-temp` 隔离 preview；Agent 不得调用或绕过任一确认边界：
 
 - 不得把聊天确认当作 HumanApproval；
 - 不得直接调用 safety/audit/executor library 拼出伪工作流；
 - 不得生成、伪造或消费 plan、authorization、permit 或 audit token；
-- 不得执行包管理器、浏览器或 shell cleanup 命令；
+- 不得执行包管理器、浏览器或 shell cleanup 命令，也不得替人输入 `clean <digest>`；
 - 不得调用未实现的 `plan`、`approve`、`execute` 或 `--dangerously-delete`；
 - 不得将 fake executor receipt 描述为真实清理结果。
 
@@ -37,4 +37,4 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 未来边界仍然更窄
 
-路线图允许未来 Agent 协助 scan、explain 和计划展示，但不允许它驱动 native dialog、OS verifier、trusted terminal challenge 或危险开关。即使用户在聊天中说“批准”，也必须由未来 Core 验证来自可信本地表面的 opaque approval，并重新做 live revalidation。当前尚无这条 CLI workflow。
+路线图允许 Agent 协助 scan、explain 和计划展示，但不允许它驱动 native dialog、OS verifier、trusted terminal challenge 或危险开关。即使用户在聊天中说“批准”，也不能替代本地终端确认；当前 Linux 临时目录隔离只接受用户在前台终端精确输入完整摘要，通用 Core approval workflow 仍未实现。
