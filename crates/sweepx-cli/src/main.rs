@@ -1796,7 +1796,7 @@ fn platform_junk_candidates(
 
 #[cfg(target_os = "linux")]
 fn linux_stale_temp_root_matches(
-    rule: &PlatformJunkRule,
+    _rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
 ) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -1824,7 +1824,7 @@ fn linux_stale_temp_root_matches(
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    if !rule.names.iter().any(|prefix| name.starts_with(prefix)) {
+    if !linux_temp_name_has_known_prefix(name) {
         return false;
     }
     let Ok(modified) = metadata.modified() else {
@@ -3278,9 +3278,9 @@ fn linux_temp_root() -> Option<PathBuf> {
 fn linux_stale_temp_roots(temp_root: &Path, rules: &[PlatformJunkRule]) -> Vec<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
-    let Some(rule) = rules.iter().find(|rule| rule.root_kind == "linux_tmp") else {
+    if !rules.iter().any(|rule| rule.root_kind == "linux_tmp") {
         return Vec::new();
-    };
+    }
     let Ok(root_metadata) = std::fs::symlink_metadata(temp_root) else {
         return Vec::new();
     };
@@ -3293,7 +3293,7 @@ fn linux_stale_temp_roots(temp_root: &Path, rules: &[PlatformJunkRule]) -> Vec<P
         .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_str()?;
-            if !rule.names.iter().any(|prefix| name.starts_with(prefix)) {
+            if !linux_temp_name_has_known_prefix(name) {
                 return None;
             }
             let path = entry.path();
@@ -3317,12 +3317,15 @@ fn linux_stale_temp_roots(temp_root: &Path, rules: &[PlatformJunkRule]) -> Vec<P
 
 #[cfg(target_os = "linux")]
 fn linux_temp_name_has_known_prefix(name: &str) -> bool {
-    matches!(
-        name.strip_prefix("osdk-")
-            .or_else(|| name.strip_prefix("one-sdk-"))
-            .or_else(|| name.strip_prefix("sweepx-")),
-        Some(suffix) if !suffix.is_empty()
-    )
+    name.strip_prefix("osdk-")
+        .or_else(|| name.strip_prefix("one-sdk-"))
+        .or_else(|| name.strip_prefix("sweepx-"))
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
 }
 
 #[cfg(target_os = "linux")]
