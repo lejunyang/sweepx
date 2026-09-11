@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 mod linux_temp;
 #[cfg(target_os = "linux")]
+mod permanent_delete_command;
+#[cfg(target_os = "linux")]
 mod temp_clean_command;
 mod trash_command;
 
@@ -232,6 +234,16 @@ enum Commands {
     /// Move one file or directory to the operating system Trash/Recycle Bin.
     Trash {
         #[arg(required = true, value_name = "ABSOLUTE_PATH")]
+        path: OsString,
+    },
+    /// Permanently delete one regular file on Linux.
+    ///
+    /// This irreversible development preview requires human output, a foreground terminal, an
+    /// exact digest-derived challenge, durable audit, and immediate identity revalidation. It is
+    /// never used as a fallback from `trash`.
+    #[cfg(target_os = "linux")]
+    Delete {
+        #[arg(required = true, value_name = "ABSOLUTE_REGULAR_FILE")]
         path: OsString,
     },
     Capabilities,
@@ -651,6 +663,28 @@ fn main() -> ProcessExitCode {
                 format,
                 context.locale(),
                 std::io::stdin().is_terminal(),
+            );
+        }
+        #[cfg(target_os = "linux")]
+        Commands::Delete { path } => {
+            let state_dir = match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    eprintln!("no state directory is available for the permanent-delete audit");
+                    return ProcessExitCode::from(8);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ProcessExitCode::from(8);
+                }
+            };
+            return permanent_delete_command::run_cli_permanent_delete(
+                &path,
+                format,
+                context.locale(),
+                &state_dir,
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
             );
         }
         Commands::Capabilities => capabilities(&context).map(RenderedResult::Capabilities),
@@ -4037,6 +4071,15 @@ mod tests {
                 ..
             })
         ));
+        #[cfg(target_os = "linux")]
+        {
+            let parsed = Cli::try_parse_from(["sweepx", "delete", "/tmp/file"]).unwrap();
+            assert!(matches!(parsed.command, Commands::Delete { .. }));
+            assert!(
+                Cli::try_parse_from(["sweepx", "delete", "--permanently", "/tmp/file",]).is_err()
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
         assert!(Cli::try_parse_from(["sweepx", "delete"]).is_err());
         assert!(
             Cli::try_parse_from([

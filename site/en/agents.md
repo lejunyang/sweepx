@@ -22,13 +22,13 @@ The Agent must preserve uncertainty from machine output. It may not rewrite part
 
 ## Currently forbidden
 
-Real mutation in the current CLI is limited to a single-item `trash` preview that requires terminal confirmation and Linux `junk --system --clean-temp`, whose quarantine plan requires the full digest to be typed locally. An Agent must not invoke or route around either confirmation boundary:
+Real mutation in the current CLI is limited to a terminal-confirmed single-item `trash` preview, Linux `junk --system --clean-temp`, and the Linux single-regular-file `delete` Permanent preview. An Agent must not invoke or route around any confirmation boundary:
 
 - do not treat chat confirmation as HumanApproval;
 - do not call safety/audit/executor libraries directly to fabricate a workflow;
 - do not create, forge, or consume plans, authorizations, permits, or audit tokens;
 - do not run package-manager, browser, or shell cleanup commands, and do not type `clean <digest>` for the user;
-- do not invoke unimplemented `plan`, `approve`, `execute`, or `--dangerously-delete` interfaces;
+- do not invoke `delete` or type `PERMANENT 1 1 <FULL_DIGEST>` for the user; do not invoke unimplemented `plan`, `approve`, `execute`, or `--dangerously-delete` interfaces;
 - do not describe a fake-executor receipt as a real cleanup result.
 
 ## Structured output and language
@@ -37,4 +37,4 @@ Current scan automation should use bounded JSON. `scan --format ndjson` remains 
 
 ## The future boundary remains narrower
 
-An Agent may assist with scan, explain, and plan display, but it may not drive a native dialog, OS verifier, trusted terminal challenge, or dangerous switch. Approval in chat does not replace local terminal confirmation: the current Linux temporary quarantine accepts only an exact full digest typed by the user in the foreground terminal, while a general Core approval workflow remains unimplemented.
+An Agent may assist with scan, explain, and plan display, but it may not drive a native dialog, OS verifier, trusted terminal challenge, or dangerous switch. Approval in chat does not replace local terminal confirmation: the current Linux temporary quarantine and single-file Permanent preview accept only an exact full digest typed by the user in the foreground terminal, while a general Core approval workflow remains unimplemented.

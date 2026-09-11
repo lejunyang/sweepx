@@ -4,10 +4,10 @@ title: Safety model
 
 # Safety model
 
-SweepX safety starts with explicit capability and type boundaries. Scanning remains read-only and the simulated execution surface remains sealed. Real mutation is limited to the single-item operating-system Trash preview and the digest-confirmed Linux stale temporary-object quarantine preview. Future safety goals must not be written as guarantees that exist today.
+SweepX safety starts with explicit capability and type boundaries. Scanning remains read-only and the simulated execution surface remains sealed. Real mutation is limited to single-item Trash, Linux stale-temporary quarantine, and a Linux single-regular-file Permanent preview. Future safety goals must not be written as guarantees that exist today.
 
 > [!CAUTION]
-> Trash preview requires terminal confirmation and immediate revalidation. Linux temporary quarantine additionally requires exact full-digest confirmation, per-item identity, age, removability, process-reference, and mount-boundary revalidation, and refuses execution when discovery is incomplete. The source is removed only after cross-filesystem copy, byte verification, and fsync; there is no Permanent implementation, general plan/approve/execute CLI, or Permanent fallback.
+> The Linux single-file Permanent preview accepts only a canonical absolute regular-file path and requires an ordinary user, a full-digest foreground-terminal challenge, a persisted plan/intent, and final parent/object/marker revalidation. Directory, link, special-file, batch, and cross-platform Permanent remain disabled. Trash failure never invokes Permanent, and Permanent is not secure erase.
 
 ## Implemented read-only boundaries
 
@@ -68,13 +68,13 @@ P4a.2 adds a typed, validated capability-qualification record contract, not a mu
 |---|---|---|---|
 | `trash.local.file` | degraded on current host | degraded on current host | degraded on current host |
 | `trash.local.directory` | degraded on current host | degraded on current host | degraded on current host |
-| `permanent.local.file` | disabled | disabled | disabled |
+| `permanent.local.file` | degraded preview | disabled | disabled |
 | `permanent.local.directory` | disabled | disabled | disabled |
 | `permanent.local.link` | disabled | disabled | disabled |
 
 Validation rejects `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence as mutation qualification. A single cell could qualify later only when the evidence class is `real_os_qualification`, validity is `current`, and the complete tuple exactly matches Core/version, policy and adapter digests, OS build, architecture, filesystem/version, volume, provider/backend, ordinary-user profile, and capability.
 
-This remains a fail-closed registry substrate, not a live registry service. Trash is a `degraded` preview, not a qualified mutation record. There is no Permanent adapter or approval UI today.
+This remains a fail-closed registry substrate, not a live registry service. Trash and Linux single-file Permanent are `degraded` previews, not qualified mutation records. There is no general approval UI today.
 
 ## Non-negotiable gates for future mutation
 
@@ -89,6 +89,6 @@ The following are future release gates, not present capability claims:
 - Intent persists before submission; ambiguous submission enters reconciliation instead of guessed replay.
 - `unknown` never renders as `0`, and potentially reclaimable never becomes guaranteed freed space.
 
-## About the future Permanent proposal
+## Permanent boundary
 
-Design material discusses a separate Permanent R4 authorization and explicit dangerous source. That remains a model and roadmap item: the current CLI has no `--dangerously-delete` and there is no Permanent adapter. If ever introduced, it must bind an existing exact plan, cannot select extra targets or bypass protections, and cannot become a Trash fallback. It is not secure erase.
+The current implementation covers only a locally confirmed Linux single-regular-file path. General Permanent plans, broker approval, `execute --dangerously-delete`, directory manifests, links, and other platforms remain model and roadmap work. Any extension must bind an exact plan, cannot add targets or bypass protection, and cannot become a Trash fallback. Permanent is not secure erase.

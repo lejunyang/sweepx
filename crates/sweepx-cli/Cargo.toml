@@ -31,6 +31,7 @@ trash = { version = "5.2.6", default-features = false, features = ["coinit_apart
 libc = "0.2.189"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+sweepx-audit = { version = "0.0.1", path = "../sweepx-audit" }
 sweepx-canonical = { version = "0.0.1", path = "../sweepx-canonical" }
 
 [target.'cfg(windows)'.dependencies]

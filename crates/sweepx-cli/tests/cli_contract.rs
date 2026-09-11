@@ -137,7 +137,14 @@ fn capabilities_json_uses_fixed_machine_keys() {
     assert_eq!(json["kind"], "capabilities.result");
     assert!(json.get("requestId").is_some());
     assert!(json.get("request_id").is_none());
-    assert_eq!(json["summary"]["commandCount"], "12");
+    assert_eq!(
+        json["summary"]["commandCount"],
+        if cfg!(target_os = "linux") {
+            "13"
+        } else {
+            "12"
+        }
+    );
     assert_eq!(json["summary"]["capabilityCount"], "40");
     let commands = json["data"]["commands"].as_array().unwrap();
     assert_eq!(
@@ -146,7 +153,11 @@ fn capabilities_json_uses_fixed_machine_keys() {
             .filter(|command| command["mutating"] == true)
             .map(|command| command["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["junk.clean-temp", "trash"]
+        if cfg!(target_os = "linux") {
+            vec!["junk.clean-temp", "trash", "delete"]
+        } else {
+            vec!["junk.clean-temp", "trash"]
+        }
     );
     assert!(commands.iter().all(|command| {
         !matches!(command["id"].as_str(), Some("plan" | "approve" | "execute"))
@@ -468,6 +479,12 @@ fn capabilities_json_uses_fixed_machine_keys() {
                     record.reason_code,
                     "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION"
                 );
+            } else if os_family == OsFamily::Linux
+                && cfg!(target_os = "linux")
+                && capability == CapabilityCell::PERMANENT_LOCAL_FILE
+            {
+                assert_eq!(record.state, CapabilityState::Degraded);
+                assert_eq!(record.reason_code, "LINUX_PERMANENT_FILE_PREVIEW");
             } else {
                 assert_eq!(record.state, CapabilityState::Disabled);
                 assert_eq!(record.reason_code, reason_code);
@@ -767,6 +784,45 @@ fn trash_rejects_relative_paths_without_changing_them() {
     let mut cmd = cli_command();
     cmd.arg("trash").arg("relative.txt");
     cmd.assert().code(8);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn permanent_delete_requires_a_foreground_terminal_before_creating_state() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("keep.txt");
+    let state = fixture.path().join("state");
+    fs::write(&path, b"keep").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.arg("--state-dir").arg(&state).arg("delete").arg(&path);
+    cmd.assert().code(8);
+
+    assert!(path.exists());
+    assert!(!state.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn noninteractive_permanent_delete_leaves_directory_and_link_inputs_unchanged() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    let state = root.join("state");
+    let directory = root.join("directory");
+    fs::create_dir(&directory).unwrap();
+    let target = root.join("target");
+    fs::write(&target, b"keep").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    for path in [&directory, &link] {
+        let mut cmd = cli_command();
+        cmd.arg("--state-dir").arg(&state).arg("delete").arg(path);
+        cmd.assert().code(8);
+        assert!(path.exists());
+    }
+    assert!(target.exists());
+    assert!(!state.exists());
 }
 
 #[test]

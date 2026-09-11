@@ -4,7 +4,7 @@ title: Architecture
 
 # Architecture
 
-SweepX centers shared protocols and safety types while keeping the runnable read-only path separate from the mutation model that still exists only as library simulation.
+SweepX centers shared protocols and safety types while separating runnable scan/preview paths, the narrow Linux single-file Permanent path, and the general mutation model that still exists only as library simulation.
 
 ## Current data flow
 
@@ -44,6 +44,8 @@ The Scanner also now exposes a bounded locator batch reader so read-only upper l
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 
+Linux `delete` reuses `sweepx-audit` exact authorization, claim, intent, outcome, and fencing, but does not make the general P3 executor native. The CLI constructs and persists one single-file R4 plan and, after revalidation, submits exactly one basename-relative `unlinkat` against a retained parent FD. That adapter does not exist in non-Linux builds.
+
 ## State and cancellation
 
 CLI scan completes synchronously. On Linux, events are constructed as a batch after scanning, then the complete stream and terminal snapshot are committed to a bounded SQLite journal in one transaction; Core `status` is journal-first and supports degraded completed replay through `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]`: it performs one same-snapshot full validation, then reads pages of at most 1024 events from a completed, persisted stream; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. Because events are still constructed after the scan, this surface is not a live sink, does not wait for new events, does not create a background operation, and does not support cancel. macOS and Windows still write legacy operation snapshots; the Windows state directory is protected by a current-user-private DACL, an ownership check, and per-component reparse-point rejection. `scan --no-state` skips the corresponding operation-state writes for read-only scans that do not need later status/operation state or whose state filesystem does not support the journal, and it conflicts with `--state-dir`. Live cancellation remains disabled. `cancel` returns an honest disposition, which is why its capability is disabled.
@@ -56,7 +58,7 @@ Core does not preserve live authority merely because scan JSON uses the project 
 
 The same trust boundary applies to the current Cargo detector. It now has a handle-bound fixed-input collector and can produce `known` workspace evidence when manifest binding holds, but `targetDir` remains `not_checked` because the global override scope is unresolved, and `targetShape` remains `unknown`. CLI output therefore stays hint/report-only rather than any plan/approval/execution authority.
 
-## Why P3 is not a real executor
+## Why P3 is still not a general real executor
 
 The P3 library layering deliberately leaves nowhere to plug in native mutation:
 
@@ -68,7 +70,7 @@ The P3 library layering deliberately leaves nowhere to plug in native mutation:
 - the adapter trait is sealed and its only implementation is deterministic and fake.
 - audit persistence is currently Unix-only; the separate Linux scan event-state path has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, and degraded completed-stream replay. Because that replay covers only completed, persisted streams and events are still constructed after scanning, this is still not live, cross-platform, or runtime-qualified native-mutation storage.
 
-That supports state-machine and crash-semantics tests without deleting a target. The audit library performs filesystem I/O for its own state files; that is not mutation of scanned targets.
+The P3 executor itself supports state-machine and crash-semantics tests without deleting a target. Real Linux single-file `delete` is a separate constrained CLI path; it exposes no native adapter trait, directory manifest, or batch execution.
 
 ## Future architecture direction
 
@@ -79,4 +81,4 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-The public surface currently covers the first two steps and read-only views. P3 simulates later states inside libraries. Native platform actions, an approval broker, and CLI wiring are not implemented.
+Beyond the first two steps and read-only views, the public surface now has only the Linux single-file local plan/challenge/intent/unlink/outcome path. General native platform actions, an approval broker, and plan/execute CLI wiring remain unimplemented.

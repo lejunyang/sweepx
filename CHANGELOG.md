@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks, and initial Cargo-target and Chromium cache metadata.
 - Immutable plan and simulation-only authorization models.
 - Durable audit and recovery state plus deterministic simulated execution.
+- Linux-only single-regular-file Permanent deletion preview with a persisted canonical plan,
+  exact foreground-terminal digest challenge, durable intent/outcome audit, no-follow identity
+  revalidation, and one parent-relative `unlinkat` action.
 - Bilingual documentation site, architecture documents, and release roadmap.
 
 ### Security
@@ -40,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   oversized, malformed, or unbounded generation state without repair or
   quarantine side effects.
 - Imported scan data is forced to stale, incomplete, report-only status.
-- Native filesystem mutation, Trash, permanent deletion, elevation, and
-  destructive CLI commands remain unavailable.
+- General native plan execution, directory/link/batch/cross-platform Permanent deletion, elevated
+  cleanup, and destructive Agent workflows remain unavailable.
 - Simulation accepts no native target paths and uses only a sealed fake adapter.
 [Unreleased]: https://github.com/lejunyang/sweepx/commits/main

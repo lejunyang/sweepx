@@ -1247,6 +1247,7 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+ "sweepx-audit",
  "sweepx-cache",
  "sweepx-canonical",
  "sweepx-core",

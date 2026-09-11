@@ -4,7 +4,7 @@ title: 架构
 
 # 架构
 
-SweepX 以共享的协议与安全类型为中心，把已经可运行的只读路径和仍在 library 层的模拟 mutation model 分开。
+SweepX 以共享的协议与安全类型为中心，把可运行的扫描/预览路径、Linux 单文件 Permanent 窄路径和仍在 library 层的通用模拟 mutation model 分开。
 
 ## 当前数据流
 
@@ -44,6 +44,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
 
+Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个单文件 R4 plan，重验后只向 retained parent FD 提交一次 exact-basename `unlinkat`；该 adapter 在非 Linux 构建中不存在。
+
 ## 状态与取消
 
 CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 与 Windows 仍写 legacy operation snapshot；Windows state directory 由 current-user-private DACL、owner 校验和逐级 reparse-point 拒绝保护。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
@@ -56,7 +58,7 @@ Core 不会因为 scan JSON 带有本项目 schema 就保留它的 live 权威�
 
 同样地，当前 Cargo detector 虽然已经具备 handle-bound 的固定输入收集器，并能在 manifest 绑定成立时给出 `known` workspace evidence，但 `targetDir` 仍因全局 override scope 未解而保持 `not_checked`，`targetShape` 仍保持 `unknown`。因此 CLI 结果继续是 hint/report-only，而不是 plan/approval/execution authority。
 
-## P3 为什么不算真实 executor
+## P3 为什么仍不算通用真实 executor
 
 P3 的库分层有意让 native mutation 无处接入：
 
@@ -68,7 +70,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
 - audit persistence 当前仅支持 Unix；独立的 Linux scan event-state 路径已有 bounded SQLite journal、单事务完整流/terminal persistence，以及 degraded completed-stream replay。由于该 replay 只覆盖已完成且已持久化的 stream，且事件仍在 scan 后批量构造，它仍不是 live、跨平台或 runtime-qualified 的 native mutation 存储。
 
-这能测试状态机与崩溃语义，却不会删除目标。审计库对自己的 state 文件使用文件系统 I/O，不等于对扫描目标做 mutation。
+这套 P3 executor 本身只测试状态机与崩溃语义，不会删除目标。真实 Linux 单文件 `delete` 是独立的受限 CLI 路径；它没有开放 native adapter trait、目录 manifest 或批量执行。
 
 ## 未来架构方向
 
@@ -79,4 +81,4 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-当前公共表面只覆盖前两步和只读视图；P3 在库内模拟后续状态。native platform action、approval broker 和 CLI wiring 都尚未实现。
+当前公共表面除前两步和只读视图外，只增加了 Linux 单文件的本地 plan/challenge/intent/unlink/outcome 窄路径；通用 native platform action、approval broker 与 plan/execute CLI wiring 仍未实现。

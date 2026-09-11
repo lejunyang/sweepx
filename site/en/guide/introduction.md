@@ -4,10 +4,10 @@ title: Introduction
 
 # Introduction
 
-SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade scanner/TUI, an explicitly confirmed live-revalidated operating-system Trash preview, and a recoverable Linux stale temporary-object quarantine preview. Permanent deletion still does not exist.
+SweepX is a safety-first Rust disk-analysis project. The current repository has a runnable development-grade scanner/TUI, an explicitly confirmed live-revalidated operating-system Trash preview, a recoverable Linux stale temporary-object quarantine preview, and a Linux single-regular-file Permanent preview.
 
 > [!WARNING]
-> Real mutation is limited to the single-item Trash preview and Linux `junk --system --clean-temp`, whose digest-bound plan requires explicit terminal confirmation before recoverable cross-filesystem quarantine. There is no Permanent adapter or general `plan` / `approve` / `execute` CLI, and failure never falls back to permanent deletion.
+> Linux `sweepx delete /canonical/absolute/file` can now permanently remove one regular file, but an ordinary user must type the full plan digest at a foreground terminal. The plan and intent are durable before `unlinkat`, followed by immediate parent/object/marker revalidation. Directory, link, batch, cross-platform, and general plan execution remain absent; Trash failure never falls through to this path, and it is not secure erase.
 
 ## Current status
 
@@ -20,6 +20,7 @@ SweepX is a safety-first Rust disk-analysis project. The current repository has 
 - `cache status` provides read-only preview-cache diagnostics on Linux, macOS, and Windows, with output kind `cache.status.result`. It supports human/JSON only, treats NDJSON as a usage error, and returns `absent` without creating directories when state/cache is missing. Inspection is bounded to `preview-cache/current.json`, the current generation file, and the flat `generations/` / `quarantine/` directories, reporting approximate bytes and health only; it does not scan, repair, quarantine, or reveal cached entries or path contents. `available` means only that bounded cache structure and validation are readable, not that any live/current filesystem fact is true.
 - Built-in Cleaners support metadata-only list/show and fail closed on Core-version incompatibility.
 - `sweepx scan --tui` opens its file-manager-style browser immediately after root admission. Direct children arrive first, then a single-flight background pass fills in recursive directory sizes within a 30-second deadline without retaining descendants as rows. `d`/`Delete` selects one item for Trash; confirmation happens after leaving the full-screen view, followed by live scan-identity revalidation.
+- Linux `sweepx delete` is a `degraded` single-regular-file Permanent preview. It accepts only a canonical absolute path, refuses elevated processes, directories/links/special files, protected paths, and `.sweepx-protect` ancestry, and requires a full-digest challenge plus durable audit.
 - P3 implements immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed deterministic simulated executor as library APIs. Even with degraded Linux completed-stream replay, the overall journal path is neither live, runtime-qualified, nor cross-platform, and there is still no trusted HumanApproval broker.
 
 Those are code- and test-backed development capabilities. The v0.0.1 development release and five platform archives are published, but SweepX still has no stable-product, production-support, or three-platform scan qualification claim.

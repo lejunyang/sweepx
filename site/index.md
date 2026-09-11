@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "SweepX"
   text: "先看清，再决定"
-  tagline: "可运行的开发版磁盘分析 CLI/TUI，并提供显式确认的 Trash 与 Linux 临时对象隔离预览。"
+  tagline: "可运行的开发版磁盘分析 CLI/TUI，并提供受保护的 Trash、Linux 隔离与单文件 Permanent 预览。"
   image:
     src: /mark.svg
     alt: SweepX
@@ -26,10 +26,12 @@ features:
     details: 导入 scan JSON 会被强制降级为 stale、incomplete 和 report-only。`cache status` 也只是 preview cache 的只读诊断；`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实。
   - title: 可恢复清理预览
     details: CLI/TUI 支持显式确认、实时重验的单对象 Trash；Linux 另有完整摘要确认、逐项重验的陈旧临时对象异盘隔离，名称不作为授权依据。没有 Permanent fallback，通用 plan/approve/execute 仍未开放。
+  - title: Linux 单文件 Permanent 预览
+    details: 只接受 canonical 绝对路径普通文件；完整摘要挑战、durable intent 与 parent-relative unlinkat 形成独立 R4 路径。目录、链接、批量和跨平台 Permanent 仍禁用。
 ---
 
 > [!CAUTION]
-> **SweepX 的真实变更能力目前仅限 development Trash preview 和 Linux 陈旧临时对象隔离 preview。** 后者只接受通过身份、活跃度、可删除性和引用检查的 `/tmp` 直接子对象，经完整摘要确认和逐项重验后移动到异盘恢复区；不支持永久删除或通用批量计划执行。P3 中的通用计划、授权、durable audit 和 executor 仍是 library-only 的确定性模拟。
+> **SweepX 另有 Linux 单普通文件 Permanent development preview。** 它要求普通用户在前台终端输入完整摘要，先持久化计划/intent，再重验并执行一次 `unlinkat`。它不是 secure erase，也不覆盖目录、链接、批量或跨平台执行；Trash 失败绝不进入该路径。P3 的通用计划/执行仍是 library-only 模拟。
 
 ## 现在能做什么
 
@@ -44,7 +46,7 @@ features:
 | `cache status` | Linux/macOS/Windows：preview cache 只读诊断 |
 | Cleaner | 只读 list/show 元数据，带版本兼容门；`cargo-detect` 有固定输入读取和 typed evidence，但仍是 hint/report-only |
 | CLI/TUI | 单一 `sweepx` 入口；默认终端表格，`scan --tui` 先进入界面再渐进扫描；当前层行有界保留，递归大小由 30 s deadline 的 single-flight 后台任务聚合 |
-| Trash / Permanent | 单对象 Trash preview；Linux 另有任意名称、按身份/活跃度/引用判定的陈旧 `/tmp` 直接子对象摘要绑定隔离 preview；Permanent 不存在 |
+| Trash / Permanent | 单对象 Trash preview；Linux 另有 `/tmp` 隔离 preview 与单普通文件 Permanent preview；目录/link/批量/跨平台 Permanent 不存在 |
 
 CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。`cache status` 只支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录；检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构和健康，不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；v0.0.1 开发版本已发布，稳定版本尚未发布。
@@ -54,7 +56,7 @@ CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖�
 | 你想了解 | 页面 |
 |---|---|
 | 项目现在到底实现了什么 | [介绍](/guide/introduction) |
-| 如何运行当前只读命令 | [CLI 与只读扫描](/cli) |
+| 如何运行当前命令 | [CLI 与安全清理预览](/cli) |
 | 为什么导入报告不能执行 | [安全模型](/safety) |
 | Cleaner 是规则还是脚本 | [Cleaner 概念](/cleaners) |
 | Agent 被允许做什么 | [Agent 边界](/agents) |
@@ -63,4 +65,4 @@ CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖�
 
 ## 一句话结论
 
-SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI、单对象 Trash preview 与 Linux 陈旧临时对象隔离 preview 可体验；通用 `plan`、`approve`、`execute` 和 Permanent 仍只是未来提案。
+SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI、单对象 Trash、Linux 陈旧临时对象隔离与单普通文件 Permanent preview 可体验；通用 `plan`、`approve`、`execute` 和更广的 Permanent 仍是未来工作。

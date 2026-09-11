@@ -4,10 +4,10 @@ title: 安全模型
 
 # 安全模型
 
-SweepX 当前的安全性首先来自显式能力与类型边界：大部分表面只读，模拟执行表面 sealed；真实 mutation 仅限单对象 Trash preview 与 Linux 陈旧临时对象隔离 preview。未来安全目标不能被写成今天已有的删除保证。
+SweepX 当前的安全性首先来自显式能力与类型边界：大部分表面只读，模拟执行表面 sealed；真实 mutation 仅限单对象 Trash、Linux 陈旧临时对象隔离和 Linux 单普通文件 Permanent preview。未来安全目标不能被写成今天已有的删除保证。
 
 > [!CAUTION]
-> 单对象 Trash preview 必须交互确认并在提交前重验。Linux 临时对象隔离还要求精确回输完整计划摘要，并在每项移除前复核身份、年龄、可删除性、进程引用和挂载边界；发现不完整即拒绝执行，复制、逐字节校验和 fsync 完成后才移除源对象，恢复区位于异盘私有目录。没有 Permanent、通用 plan/approve/execute 或任何 Permanent fallback。
+> Linux 单文件 Permanent preview 只允许 canonical 绝对路径普通文件，要求普通用户、前台终端完整摘要挑战、预先持久化的计划/intent，以及提交前 parent/object/marker 重验；目录、link、special、批量与跨平台 Permanent 仍禁用。Trash 失败不会进入 Permanent，Permanent 也不是 secure erase。
 
 ## 已实现的只读边界
 
@@ -68,13 +68,13 @@ P4a.2 增加的是 typed/validated capability qualification record 合同，不�
 |---|---|---|---|
 | `trash.local.file` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
 | `trash.local.directory` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
-| `permanent.local.file` | disabled | disabled | disabled |
+| `permanent.local.file` | degraded preview | disabled | disabled |
 | `permanent.local.directory` | disabled | disabled | disabled |
 | `permanent.local.link` | disabled | disabled | disabled |
 
 验证器拒绝把 `fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 用作 mutation 资格。未来只有 evidence class 为 `real_os_qualification`、有效性为 `current`，且完整匹配 Core/version、policy 与 adapter digest、OS build、arch、filesystem/version、volume、provider/backend、ordinary-user profile 和精确 capability 的 tuple，才可能使单个单元合格。
 
-这仍是失败关闭的 registry substrate，不是运行时 registry 服务。当前 Trash 只是 `degraded` preview，没有 `qualified` mutation 记录、Permanent adapter 或 approval UI。
+这仍是失败关闭的 registry substrate，不是运行时 registry 服务。Trash 与 Linux 单文件 Permanent 只是 `degraded` preview，没有 `qualified` mutation 记录或通用 approval UI。
 
 ## 未来 mutation 的不可谈判约束
 
@@ -89,6 +89,6 @@ P4a.2 增加的是 typed/validated capability qualification record 合同，不�
 - intent 必须先持久化；不确定提交进入 reconciliation，不自动重试猜测。
 - `unknown` 不显示为 `0`，potentially reclaimable 不显示为 guaranteed freed space。
 
-## 关于未来 Permanent 提案
+## Permanent 边界
 
-设计材料讨论过独立的 Permanent R4 授权和显式危险来源。这仍然只是模型与路线图：当前 CLI 没有 `--dangerously-delete`，也没有 Permanent adapter。若未来引入，它必须绑定既有精确计划，不能选择额外目标、绕过保护或成为 Trash fallback；它也不等于 secure erase。
+当前实现仅覆盖 Linux 单普通文件的本地前台确认路径。通用 Permanent plan、broker approval、`execute --dangerously-delete`、目录 manifest、link 和其他平台仍是模型与路线图。任何扩展都必须绑定精确计划，不能选择额外目标、绕过保护或成为 Trash fallback；Permanent 不等于 secure erase。

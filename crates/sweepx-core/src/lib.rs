@@ -1930,7 +1930,8 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
         ExitCode::Partial,
         compat_snapshot_with_digest(current_os, cleaner_catalog.cleaner_set_digest.clone()),
     );
-    let commands = vec![
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut commands = vec![
         command_record("scan", CapabilityState::Degraded, scan_reason),
         command_record(
             "explain",
@@ -1984,6 +1985,12 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION",
         ),
     ];
+    #[cfg(target_os = "linux")]
+    commands.push(mutating_command_record(
+        "delete",
+        CapabilityState::Degraded,
+        "LINUX_PERMANENT_FILE_PREVIEW",
+    ));
     let capabilities = vec![
         capability_record(
             &recorded_at,
@@ -2214,7 +2221,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Linux,
             CapabilityCell::PERMANENT_LOCAL_FILE,
-            "PERMANENT_QUALIFICATION_ABSENT",
+            if current_os == "linux" {
+                "LINUX_PERMANENT_FILE_PREVIEW"
+            } else {
+                "PERMANENT_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -5215,12 +5226,13 @@ fn mutation_capability_record(
     evidence_class: EvidenceClass,
 ) -> CapabilityRecordV1 {
     let preview_trash = reason_code == "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION";
+    let preview_permanent = reason_code == "LINUX_PERMANENT_FILE_PREVIEW";
     let mut record = capability_record(
         recorded_at,
         qualification_expires_at,
         os_family,
         capability,
-        if preview_trash {
+        if preview_trash || preview_permanent {
             CapabilityState::Degraded
         } else {
             CapabilityState::Disabled
@@ -5234,6 +5246,14 @@ fn mutation_capability_record(
             "preview command only; not release-qualified".to_string(),
             "explicit confirmation and immediate identity revalidation required".to_string(),
             "no Permanent fallback".to_string(),
+        ]
+    } else if preview_permanent {
+        vec![
+            "Linux single-regular-file preview only; not release-qualified".to_string(),
+            "foreground exact-digest confirmation and immediate identity revalidation required"
+                .to_string(),
+            "directories, links, special files, batches, elevated runtimes, and Trash fallback are refused"
+                .to_string(),
         ]
     } else {
         match evidence_class {
@@ -5313,6 +5333,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "PERMANENT_QUALIFICATION_ABSENT" => {
             "Permanent deletion is disabled because independent qualification is absent for this exact capability cell."
+        }
+        "LINUX_PERMANENT_FILE_PREVIEW" => {
+            "Linux can permanently unlink one ordinary-user-owned regular file after exact foreground-terminal confirmation, durable intent, and immediate parent/object identity revalidation; this preview is not release-qualified or secure erase."
         }
         "CANCEL_LIVE_REGISTRY_ABSENT" => {
             "Cancel is disabled because P1 does not maintain a live in-process operation registry."

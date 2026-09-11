@@ -4,10 +4,10 @@ title: 介绍
 
 # 介绍
 
-SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可运行的开发版扫描 CLI/TUI、需要显式确认和实时重验的系统回收站 preview，以及 Linux 陈旧临时对象的可恢复隔离 preview；Permanent 删除仍不存在。
+SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可运行的开发版扫描 CLI/TUI、需要显式确认和实时重验的系统回收站 preview、Linux 陈旧临时对象的可恢复隔离 preview，以及 Linux 单普通文件 Permanent preview。
 
 > [!WARNING]
-> 当前真实 mutation 只有单对象 Trash preview，以及 Linux `junk --system --clean-temp` 的摘要绑定、显式确认、异盘可恢复隔离 preview。没有 Permanent 或通用 `plan` / `approve` / `execute` CLI；失败不会降级为永久删除。
+> Linux `sweepx delete /canonical/absolute/file` 现在能永久移除一个普通文件，但必须由普通用户在前台终端精确回输完整计划摘要；计划与 intent 在 `unlinkat` 前持久化，随后再次重验 parent/object/marker。目录、链接、特殊文件、批量与跨平台 Permanent 仍不存在，Trash 失败永不降级到该路径，且它不是 secure erase。
 
 ## 当前状态
 
@@ -20,6 +20,7 @@ SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可�
 - `cache status` 在 Linux、macOS 与 Windows 上提供 preview cache 的只读诊断，输出 `cache.status.result`。它只支持 human/JSON，NDJSON 是 usage error；缺失 state/cache 返回 `absent` 且不创建目录。检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构、近似字节数和健康状态；它不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。`available` 只表示缓存结构/校验可读，不代表 live/current 文件事实。
 - 内置 Cleaner 支持 metadata-only 的 list/show，并在 core 版本不兼容时失败关闭。
 - `sweepx scan --tui` 在根目录准入后立即打开同一二进制内的文件管理器式浏览器；当前层先出现，直接子目录的递归大小由 single-flight 后台任务回填（30 秒 deadline），后代不会作为列表行长期保留。可用 `d`/`Delete` 选择单项移到回收站；确认发生在退出全屏之后，并再次验证 live scan identity。
+- Linux `sweepx delete` 为 `degraded` 的单普通文件 Permanent preview：只接收 canonical 绝对路径，拒绝提权进程、目录/link/special、保护路径和 `.sweepx-protect` ancestry，并要求完整摘要挑战与 durable audit。
 - P3 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 和 sealed deterministic simulated executor，但只有 library API；Linux journal 路径虽已公开 degraded 的 completed-stream replay，仍不具备 live、runtime 或跨平台资格，且仍没有可信 HumanApproval broker。
 
 这些是代码和测试覆盖到的开发能力。v0.0.1 开发版本及五个平台归档已经发布，但它仍不是稳定产品、生产支持或三平台扫描资格声明。

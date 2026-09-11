@@ -717,6 +717,12 @@ pub struct SimulatedOutcome {
     pub notes: Vec<String>,
 }
 
+/// A validated terminal result accepted by the durable audit store.
+///
+/// Native constructors are intentionally limited to the exact Permanent operation supported by
+/// the audit schema and pass the same contradiction checks as simulated outcomes.
+pub type ActionOutcome = SimulatedOutcome;
+
 impl SimulatedOutcome {
     #[allow(clippy::too_many_arguments)]
     pub fn trash_success(
@@ -779,6 +785,101 @@ impl SimulatedOutcome {
             destination_postcheck: None,
             resulting_trash_locator: None,
             platform_result: Some(platform_result.into()),
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Permanent, &outcome)?;
+        Ok(outcome)
+    }
+
+    /// Records a confirmed native Permanent unlink result.
+    ///
+    /// This differs from the simulation constructor only in the operation label. It remains
+    /// subject to the same contradiction checks: the source must be absent and no destination
+    /// or recovery locator may be claimed.
+    pub fn native_permanent_success(
+        adapter_version: impl Into<String>,
+        started_at: SystemTime,
+        finished_at: SystemTime,
+        source_postcheck: Observation,
+        platform_result: impl Into<String>,
+        notes: Vec<String>,
+    ) -> Result<Self, AuditError> {
+        let outcome = Self {
+            actual_platform_operation: "native_permanent_unlink".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status: StableStatus::PermanentDeleteSucceeded,
+            recovery_state: RecoveryState::InapplicablePermanent,
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: Some(platform_result.into()),
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Permanent, &outcome)?;
+        Ok(outcome)
+    }
+
+    /// Records a failed native Permanent unlink while preserving the post-submit observation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn native_permanent_failure(
+        adapter_version: impl Into<String>,
+        started_at: SystemTime,
+        finished_at: SystemTime,
+        source_postcheck: Observation,
+        source_unchanged: bool,
+        error_domain: impl Into<String>,
+        error_code: impl Into<String>,
+        platform_result: impl Into<String>,
+        notes: Vec<String>,
+    ) -> Result<Self, AuditError> {
+        let outcome = Self {
+            actual_platform_operation: "native_permanent_unlink".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status: StableStatus::FailedPlatformError,
+            recovery_state: if source_unchanged {
+                RecoveryState::FailedSourceUnchanged
+            } else {
+                RecoveryState::Indeterminate
+            },
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: Some(platform_result.into()),
+            platform_error_domain: Some(error_domain.into()),
+            platform_error_code: Some(error_code.into()),
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Permanent, &outcome)?;
+        Ok(outcome)
+    }
+
+    /// Records an indeterminate native Permanent unlink result.
+    pub fn native_permanent_indeterminate(
+        adapter_version: impl Into<String>,
+        started_at: SystemTime,
+        finished_at: SystemTime,
+        source_postcheck: Observation,
+        notes: Vec<String>,
+    ) -> Result<Self, AuditError> {
+        let outcome = Self {
+            actual_platform_operation: "native_permanent_unlink".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at,
+            finished_at,
+            stable_status: StableStatus::IndeterminatePlatformResult,
+            recovery_state: RecoveryState::Indeterminate,
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: None,
             platform_error_domain: None,
             platform_error_code: None,
             notes,
@@ -1012,6 +1113,14 @@ fn operation_for_mode(mode: RequestedMode) -> &'static str {
         RequestedMode::Trash => "simulated_trash",
         RequestedMode::Permanent => "simulated_permanent_delete",
     }
+}
+
+fn operation_matches_mode(mode: RequestedMode, operation: &str) -> bool {
+    operation == operation_for_mode(mode)
+        || matches!(
+            (mode, operation),
+            (RequestedMode::Permanent, "native_permanent_unlink")
+        )
 }
 
 #[derive(Debug)]
@@ -1357,6 +1466,11 @@ pub enum AuditError {
     AuthorizationBindingMismatch,
     #[error("raw audit registration accepts deterministic simulation authority only")]
     NonSimulationAuthorizationRejected,
+    #[error(
+        "native audit registration requires HumanApproval or explicit dangerous-delete authority for an all-R4 Permanent action set"
+    )]
+    /// A native registration did not carry an approved all-R4 Permanent binding.
+    NativeAuthorizationRequired,
     #[error("action is not authorized for the requested item")]
     ActionNotAuthorized,
     #[error("action {0} already has a reserved or completed attempt")]
@@ -1489,6 +1603,41 @@ impl AuditStore {
     }
 
     pub fn register_authorization(&self, request: RegisterAuthorization) -> Result<(), AuditError> {
+        if request.binding.authorization_source != AuthorizationSource::DeterministicSimulation {
+            return Err(AuditError::NonSimulationAuthorizationRejected);
+        }
+        self.register_authorization_inner(request)
+    }
+
+    /// Registers a native Permanent authorization after the caller has completed its trusted
+    /// local approval step or supplied the separately modeled dangerous-delete authority.
+    ///
+    /// This narrow entry point accepts only HumanApproval/ExplicitDangerousDelete + Permanent +
+    /// all-R4 bindings. It does not create authority, accept paths, or relax any
+    /// plan/revalidation gate; it only persists an exact binding before native intent is reserved.
+    pub fn register_native_authorization(
+        &self,
+        request: RegisterAuthorization,
+    ) -> Result<(), AuditError> {
+        if !matches!(
+            request.binding.authorization_source,
+            AuthorizationSource::HumanApproval | AuthorizationSource::ExplicitDangerousDelete
+        ) || request.binding.requested_mode != RequestedMode::Permanent
+            || request
+                .binding
+                .risk_by_action
+                .values()
+                .any(|risk| *risk != RiskTier::R4)
+        {
+            return Err(AuditError::NativeAuthorizationRequired);
+        }
+        self.register_authorization_inner(request)
+    }
+
+    fn register_authorization_inner(
+        &self,
+        request: RegisterAuthorization,
+    ) -> Result<(), AuditError> {
         self.ensure_process()?;
         self.ensure_not_in_observer_phase()?;
         validate_binding(&request.binding)?;
@@ -4081,9 +4230,6 @@ fn validate_binding(binding: &AuthorizationBinding) -> Result<(), AuditError> {
         }
         _ => {}
     }
-    if binding.authorization_source != AuthorizationSource::DeterministicSimulation {
-        return Err(AuditError::NonSimulationAuthorizationRejected);
-    }
     Ok(())
 }
 
@@ -4348,8 +4494,7 @@ fn validate_outcome_shape(
     let has_platform_result = outcome.platform_result.is_some();
     let has_error =
         outcome.platform_error_domain.is_some() || outcome.platform_error_code.is_some();
-    let expected_operation = operation_for_mode(requested_mode);
-    if outcome.actual_platform_operation != expected_operation {
+    if !operation_matches_mode(requested_mode, &outcome.actual_platform_operation) {
         return Err(AuditError::InvalidOutcome(
             "operation does not match requested mode",
         ));
@@ -4815,6 +4960,56 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_registration_accepts_only_permanent_all_r4_authority() {
+        let (_temp, store) = store();
+        let mut native = binding(41, RequestedMode::Permanent);
+        native.authorization_source = AuthorizationSource::HumanApproval;
+        native
+            .risk_by_action
+            .values_mut()
+            .for_each(|risk| *risk = RiskTier::R4);
+        store
+            .register_native_authorization(RegisterAuthorization {
+                binding: native.clone(),
+            })
+            .unwrap();
+
+        let mut trash = binding(42, RequestedMode::Trash);
+        trash.authorization_source = AuthorizationSource::HumanApproval;
+        trash
+            .risk_by_action
+            .values_mut()
+            .for_each(|risk| *risk = RiskTier::R4);
+        assert!(matches!(
+            store.register_native_authorization(RegisterAuthorization { binding: trash }),
+            Err(AuditError::NativeAuthorizationRequired)
+        ));
+
+        let mut low_risk = binding(43, RequestedMode::Permanent);
+        low_risk.authorization_source = AuthorizationSource::ExplicitDangerousDelete;
+        low_risk
+            .risk_by_action
+            .values_mut()
+            .for_each(|risk| *risk = RiskTier::R3);
+        assert!(matches!(
+            store.register_native_authorization(RegisterAuthorization { binding: low_risk }),
+            Err(AuditError::NativeAuthorizationRequired)
+        ));
+
+        let mut ordinary = binding(44, RequestedMode::Permanent);
+        ordinary.authorization_source = AuthorizationSource::ExplicitDangerousDelete;
+        ordinary
+            .risk_by_action
+            .values_mut()
+            .for_each(|risk| *risk = RiskTier::R4);
+        assert!(matches!(
+            store.register_authorization(RegisterAuthorization { binding: ordinary }),
+            Err(AuditError::NonSimulationAuthorizationRejected)
+        ));
     }
 
     // `AuditStore::open` reports `UnsupportedPlatform` off Unix, so this
