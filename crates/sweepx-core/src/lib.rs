@@ -5353,10 +5353,10 @@ fn capability_reason(reason_code: &str) -> &'static str {
             "Junk scan reports a narrow set of rebuildable project artifacts and never deletes automatically."
         }
         "LINUX_TEMP_QUARANTINE_PREVIEW" => {
-            "Linux stale-build-temp cleanup is a development preview that requires exact full-digest terminal confirmation, per-item revalidation, and a private recovery filesystem; it never permanently deletes."
+            "Linux stale temporary-object cleanup is a development preview that requires exact full-digest terminal confirmation, per-item inactivity, identity and reference revalidation, and a private recovery filesystem; it never permanently deletes."
         }
         "LINUX_TEMP_QUARANTINE_UNAVAILABLE" => {
-            "Stale-build-temp quarantine is currently available only on Linux."
+            "Stale temporary-object quarantine is currently available only on Linux."
         }
         "TUI_READ_PATH_SUPPORTED" => {
             "TUI validates a bounded scan.result input and stays read-only."

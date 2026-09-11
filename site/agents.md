@@ -37,4 +37,4 @@ Agent 必须保留机器输出中的不确定性，不能把 partial 改写为�
 
 ## 未来边界仍然更窄
 
-路线图允许 Agent 协助 scan、explain 和计划展示，但不允许它驱动 native dialog、OS verifier、trusted terminal challenge 或危险开关。即使用户在聊天中说“批准”，也不能替代本地终端确认；当前 Linux 临时目录隔离只接受用户在前台终端精确输入完整摘要，通用 Core approval workflow 仍未实现。
+路线图允许 Agent 协助 scan、explain 和计划展示，但不允许它驱动 native dialog、OS verifier、trusted terminal challenge 或危险开关。即使用户在聊天中说“批准”，也不能替代本地终端确认；当前 Linux 临时对象隔离只接受用户在前台终端精确输入完整摘要，通用 Core approval workflow 仍未实现。

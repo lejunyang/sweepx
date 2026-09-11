@@ -4,7 +4,7 @@ title: 介绍
 
 # 介绍
 
-SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可运行的开发版扫描 CLI/TUI、需要显式确认和实时重验的系统回收站 preview，以及 Linux 陈旧构建临时目录的可恢复隔离 preview；Permanent 删除仍不存在。
+SweepX 是一个安全优先的 Rust 磁盘分析项目。当前仓库已有可运行的开发版扫描 CLI/TUI、需要显式确认和实时重验的系统回收站 preview，以及 Linux 陈旧临时对象的可恢复隔离 preview；Permanent 删除仍不存在。
 
 > [!WARNING]
 > 当前真实 mutation 只有单对象 Trash preview，以及 Linux `junk --system --clean-temp` 的摘要绑定、显式确认、异盘可恢复隔离 preview。没有 Permanent 或通用 `plan` / `approve` / `execute` CLI；失败不会降级为永久删除。

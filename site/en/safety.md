@@ -4,10 +4,10 @@ title: Safety model
 
 # Safety model
 
-SweepX safety starts with explicit capability and type boundaries. Scanning remains read-only and the simulated execution surface remains sealed. Real mutation is limited to the single-item operating-system Trash preview and the digest-confirmed Linux stale-build-temp quarantine preview. Future safety goals must not be written as guarantees that exist today.
+SweepX safety starts with explicit capability and type boundaries. Scanning remains read-only and the simulated execution surface remains sealed. Real mutation is limited to the single-item operating-system Trash preview and the digest-confirmed Linux stale temporary-object quarantine preview. Future safety goals must not be written as guarantees that exist today.
 
 > [!CAUTION]
-> Trash preview requires terminal confirmation and immediate revalidation. Linux temporary quarantine additionally requires exact full-digest confirmation and per-item identity, age, process-reference, and mount-boundary revalidation, and moves only to a private recovery directory on another filesystem. There is no Permanent implementation, general plan/approve/execute CLI, or Permanent fallback.
+> Trash preview requires terminal confirmation and immediate revalidation. Linux temporary quarantine additionally requires exact full-digest confirmation, per-item identity, age, removability, process-reference, and mount-boundary revalidation, and refuses execution when discovery is incomplete. The source is removed only after cross-filesystem copy, byte verification, and fsync; there is no Permanent implementation, general plan/approve/execute CLI, or Permanent fallback.
 
 ## Implemented read-only boundaries
 

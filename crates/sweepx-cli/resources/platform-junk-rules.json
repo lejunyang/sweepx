@@ -13,15 +13,15 @@
     "references": ["https://specifications.freedesktop.org/basedir-spec/latest/"]
   },
   {
-    "id": "linux.stale-build-temp",
+    "id": "linux.stale-temp-object",
     "platform": "linux",
     "rootKind": "linux_tmp",
-    "matchKind": "stale_named_direct_child",
-    "names": ["osdk-", "one-sdk-", "sweepx-"],
+    "matchKind": "stale_inactive_direct_child",
+    "names": [],
     "requiredMarkers": [],
     "depth": 0,
     "risk": "R3",
-    "evidence": "The candidate is a current-user-owned direct child of /tmp with a known build/test temporary prefix, a top-level modification time at least seven days old, complete scan evidence, unchanged live identity, and no reference observed from the current user's /proc process view. This is report-only: absence of an observed reference is not proof that no external process or future workflow needs it.",
+    "evidence": "The candidate is any current-user-owned direct child object of /tmp on the same filesystem. SweepX admits directories, regular files, symlinks, named pipes, and stale Unix-domain sockets; names are never used as evidence. Directories receive a no-follow recursive walk that sums filesystem allocation and uses the newest recursive atime, mtime, and ctime for the seven-day idle threshold. SweepX rejects mount crossings, external hard links, device inodes, bound sockets, and objects referenced through current-user cwd/root/exe/fd views (including held FIFOs seen as pipe inodes), map_files/mountinfo views, or Unix-domain socket tables in observable network namespaces. Other users' references or private namespaces can remain unreadable to an unprivileged process, so cleanup fail-closes whenever that current-user observation is incomplete.",
     "sourceReviewedAt": "2026-09-10",
     "references": ["https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s18.html", "https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html"]
   },

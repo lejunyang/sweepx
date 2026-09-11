@@ -158,16 +158,16 @@ sweepx --format json junk --system
 
 显式根继续识别明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。若扫描结果中能完整识别 Git 工作区，`junk` 还会以有界、非交互的 Git 查询检查这些**已有规则候选**：未跟踪、被 ignore 且不含嵌套仓库时，JSON 将其标为 `classification=known_generated_ignored`、`confidence=high`；存在 tracked descendant、gitfile/嵌套仓库、扫描证据不完整或 Git 查询失败时保守保留原分类并给出 `blockers[]`。Git ignore 只增强解释，不单独发现或授权删除任意路径；`.env.local` 等本地状态不会仅因被 ignore 而成为候选。
 
-不传显式根并加 `--system` 时，Linux 除报告 `XDG_CACHE_HOME` 外，还会先浅层筛选 `/tmp`：只选择当前用户拥有、同文件系统、至少 7 天未修改、以 `osdk-` / `one-sdk-` / `sweepx-` 开头且未被当前用户 `/proc` 进程视图引用的顶层目录，再单独扫描并以 R3/report-only 报告。它不报告 `/tmp` 根、socket/pipe/链接、其他用户内容、最近目录、跨挂载目录或任意未知名称；“未被当前用户进程引用”也不是系统级无引用证明，因此结果带 blocker，绝不自动删除。macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。Linux `/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未纳入。
+不传显式根并加 `--system` 时，Linux 除报告 `XDG_CACHE_HOME` 外，还会枚举 `/tmp` 的任意直接子对象，名称不参与判断。候选必须是当前用户拥有、与 `/tmp` 同设备、可从 sticky 父目录删除且递归 atime/mtime/ctime 至少 7 天未更新的目录、普通文件、符号链接、FIFO 或无绑定 Unix socket；目录会 no-follow 递归统计分配大小和最新活动时间。SweepX 拒绝其他用户对象、跨设备/挂载边界、外部硬链接、设备 inode、已绑定 socket，以及在当前用户可读的 `cwd`/`root`/`exe`/`fd`（含 FIFO 的 `pipe:[inode]` 引用）/`map_files`/`mountinfo` 或可观测网络命名空间 Unix socket 表中出现的对象。其他用户私有进程或挂载/网络命名空间仍可能不可见；只要当前用户视图读取不完整，报告标记 partial 且清理拒绝执行。macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。Linux `/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未纳入。
 
-Linux 可显式执行这一组陈旧构建临时目录：
+Linux 可显式隔离这一组陈旧临时对象：
 
 ```bash
 sweepx junk --system --clean-temp
 # 可选：--quarantine-dir /absolute/private/directory
 ```
 
-该模式只接受 human 输出和前台交互终端。SweepX 先打印全部目标、大小、隔离位置、剩余进程观察边界和完整 canonical digest；用户必须原样输入 `clean <完整摘要>`，短指纹不授权。确认后它再次重验每个目录的设备/inode、所有者、类型、mtime、年龄、当前用户进程引用和嵌套挂载，再把目录移动到与 `/tmp` 不同文件系统上的 `0700` 私有隔离区。`plan.json` 和逐项 `outcomes.jsonl` 在移动前持久化；中途失败会停止后续项并报告 partial/reconciliation，不会永久删除。默认隔离根是 `$XDG_DATA_HOME/sweepx/quarantine` 或 `$HOME/.local/share/sweepx/quarantine`。
+该模式只接受 human 输出和前台交互终端。SweepX 先打印全部目标、大小、隔离位置、剩余进程观察边界和完整 canonical digest；用户必须原样输入 `clean <完整摘要>`，短指纹不授权。确认后它再次重验每个对象的设备/inode、所有者、类型、atime/mtime/ctime、年龄、当前用户进程引用和挂载边界，检查异盘剩余空间，再把对象复制到与 `/tmp` 不同文件系统上的 `0700` 私有隔离区。普通文件会保留稀疏区间、同步数据并逐字节校验，目录项、FIFO/socket 类型和元数据完成 fsync 后才移除源对象。`plan.json` 和逐项 `outcomes.jsonl` 在移动前持久化；中途失败会停止后续项并报告 partial/reconciliation，不会永久删除。默认隔离根是 `$XDG_DATA_HOME/sweepx/quarantine` 或 `$HOME/.local/share/sweepx/quarantine`。
 
 这不是桌面 Trash 的替代实现。Linux Freedesktop Trash 通常要求跨文件系统项目进入**源挂载点自己的** `.Trash-$UID`。本机 `/tmp` 位于根盘而 HOME Trash 位于另一块盘，GIO 实测返回 `Trashing on system internal mounts is not supported`，普通用户也无权在 `/` 创建 `/.Trash-$UID`；因此桌面回收站存在，不代表根盘 `/tmp` 支持 Trash。SweepX 会解释这一类失败，且绝不从 Trash 自动降级为永久删除。
 

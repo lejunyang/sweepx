@@ -1,9 +1,9 @@
 # SweepX
 
-**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库包含可运行的开发版 CLI/TUI、显式确认的系统回收站预览、Linux 陈旧构建临时目录的可恢复隔离预览，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；v0.0.1 开发版本已经发布，但它还不是稳定产品，也没有永久删除能力。
+**SweepX 是一个安全优先的 Rust 磁盘分析项目。** 当前仓库包含可运行的开发版 CLI/TUI、显式确认的系统回收站预览、Linux 陈旧临时对象的可恢复隔离预览，以及 P3 的计划、simulation-only 授权、审计恢复与确定性模拟执行库；v0.0.1 开发版本已经发布，但它还不是稳定产品，也没有永久删除能力。
 
 > [!CAUTION]
-> 当前真实文件变更能力只有两条窄路径：`trash` 对单个绝对路径做交互确认、身份重验并提交系统回收站；Linux `junk --system --clean-temp` 对内置规则发现的陈旧构建临时目录生成摘要绑定计划，经前台终端精确确认后移动到异盘私有隔离区。两者都没有 Permanent fallback。仓库仍没有通用 `plan`、`approve`、`execute` 或永久删除 CLI。
+> 当前真实文件变更能力只有两条窄路径：`trash` 对单个绝对路径做交互确认、身份重验并提交系统回收站；Linux `junk --system --clean-temp` 对通过身份、7 天不活跃、归属、可删除性和引用检查的 `/tmp` 直接子对象生成摘要绑定计划，经前台终端精确确认后复制到异盘私有隔离区，源对象校验并 fsync 后才移除。两者都没有 Permanent fallback。仓库仍没有通用 `plan`、`approve`、`execute` 或永久删除 CLI。
 
 ## 当前实现状态
 
@@ -21,11 +21,11 @@
 | `sweepx cleaner cargo-detect` | **实验性** live-only Cargo target 只读检测入口 | Scanner 现有有界 locator batch reader，并在三平台 backend 上提供 handle-relative/handle-bound 的有界文件读取路径；workspace 固定输入收集器只读取已 admission 的 `Cargo.toml` 与 `.cargo/config*`。两份 workspace config 现在通过同一个 retained `.cargo` handle、单个有界枚举 cursor 观察，并拒绝 ASCII 大小写 alias/重复项；由于尚无抗 ABA 的目录 generation 证明，该观察仍明确为 non-atomic。`data.hints[].evidence.cargo.configScope` 只记录 workspace pair/config 状态、外部来源状态、环境变量存在性和 redacted declaration metadata，不记录环境变量值，也不公开 workspace config `target-dir` 原文。只有显式设置且为绝对路径的 `CARGO_HOME` 会在 Cleaner compatibility gate 通过后被私下捕获，并在 scan 后重验；随后只观察该 home 根下直属 `config` / `config.toml` 的存在性。命中只投影 `cargoHomeConfig.state=present_redacted`，且该观察仍是 non-atomic；未命中以及未显式设置、使用默认 home 的情况都保持 `not_checked`，不会提升为 `verified_absent`。为验证 presence integrity，scanner 只做有界、no-follow、handle-bound 的 metadata inspection；配置内容不会被读取、解析、使用或序列化，`target-dir` 值也不会被提取，wire evidence 不包含 `CARGO_HOME` 值或 home/config 路径。SweepX 的 `cargo-detect` surface 没有 Cargo passthrough `--target-dir` 或 `--config`，所以该 CLI 入口把 `cli.targetDir` 与 `cli.configOverrides` 记为 `verified_absent`；普通 Core 调用默认保持 `not_checked`，只有显式使用 no-overrides invocation contract 才可作同样声明。process cwd 也仅在 compatibility gate 通过后私下捕获，并记录 capture-time identity；随后只在精确 native path 与重验后的 workspace root identity 都匹配时投影 `path_matches_revalidated_workspace_root`。由于未跨阶段持有 cwd handle，该状态仍保留 `invocation_cwd_identity_not_bound` blocker；cwd path 本身不序列化到 wire contract。Cargo-home ledger 不读取、解析、使用或序列化配置内容来闭合 precedence，ancestor configs 与 workspace pair 也仍未解决；因此 `precedenceComplete=false`，`targetDir` 继续保持 `NotChecked(config_scope_not_checked)`，`targetShape` 继续保持 `Unknown(config_scope_not_checked)`，且 `candidateAllowed`、`planAllowed`、`approvalAllowed`、`executionAllowed` 全部为 `false`。Core 的 `cleaner_cargo_detect_with_cancel(..., &CancellationToken)` 只让调用方协作取消 scan 之后的 fixed-input/evidence collection；同步 scan 使用另一个内部 token。当前 CLI 没有 Ctrl-C、`sweepx cancel` 或 live registry 接线来触发该 token |
 | `sweepx scan --tui` | 扫描后进入同一进程内的文件管理器式目录浏览 | 可导航和查看；`d`/`Delete` 选择移到回收站，退出全屏后再次确认并重验 live identity；不支持 symlink/reparse/root，且没有永久删除降级 |
 | `sweepx trash` | **development preview** 的系统回收站入口 | `sweepx trash /absolute/path` 强制交互终端确认，不提供跳过。仅文件/真实目录，保护系统/home/state/Trash 根，提交前重验，失败绝不转永久删除 |
-| `sweepx junk --system --clean-temp` | **Linux-only development preview** 的陈旧构建临时目录隔离 | 先展示完整候选计划，要求精确回输 canonical digest，再逐项重验并移动到异盘私有恢复区；不处理任意 `tmp.*`，不永久删除 |
+| `sweepx junk --system --clean-temp` | **Linux-only development preview** 的陈旧临时对象隔离 | 支持任意名称的目录、普通文件、符号链接、FIFO 和无绑定 Unix socket；名称不是授权依据。先展示完整候选计划，要求精确回输 canonical digest，再逐项重验、复制校验并移动到异盘私有恢复区；不永久删除 |
 | `sweepx capabilities` | 报告命令和平台能力状态 | `qualified` 只表示该只读合同在当前测试范围内，不是产品发布资格 |
 | P4a.2 qualification records | capability、精确平台 tuple、evidence class 与有效性现在有 typed/validated 记录合同 | 当前主机的 Trash file/directory cell 为 `degraded` preview；其余平台和全部 Permanent cell 仍为 `disabled`，不代表发布资格 |
 | P3 libraries | 已实现 immutable plan、simulation-only authorization、Unix audit/recovery 与 deterministic simulation | 仅 library API；Linux 已接入 bounded SQLite event journal，在单个事务中写入完整流与 terminal snapshot，并以 degraded 形式公开 completed-stream `status --watch` replay；events 仍在 scan 完成后批量构造，因此它不是 live sink，也尚未 runtime-qualified。`scan --format ndjson` 继续 disabled；macOS 与 Windows 仍使用 legacy snapshot，均无 replay/watch；P3 计划执行链没有 native target mutation |
-| 真实清理 | **单对象 Trash preview + Linux 陈旧构建临时目录隔离预览** | `trash` 处理一个重验路径；`junk --system --clean-temp` 只处理已知前缀、至少 7 天、当前用户且同文件系统的 `/tmp` 直接子目录，要求精确回输完整计划摘要并移动到异盘私有隔离区。Permanent、通用计划执行与 destructive Agent workflow 未实现 |
+| 真实清理 | **单对象 Trash preview + Linux 陈旧临时对象隔离预览** | `trash` 处理一个重验路径；`junk --system --clean-temp` 处理至少 7 天未访问、未修改且未变更元数据、当前用户拥有、同文件系统、可删除且未观察到引用的 `/tmp` 直接子对象。发现不完整会拒绝清理，确认后执行异盘复制、字节校验和 fsync，再移除源对象。Permanent、通用计划执行与 destructive Agent workflow 未实现 |
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
 
@@ -108,7 +108,7 @@ cargo run -p sweepx-cli -- cleaner cargo-detect /absolute/path/to/workspace
 cargo run -p sweepx-cli -- junk ~/Projects
 # 扫描当前平台经过核验的用户缓存根（只报告）
 cargo run -p sweepx-cli -- junk --system
-# Linux：生成陈旧构建临时目录计划，精确确认后移动到异盘恢复区
+# Linux：生成陈旧临时对象计划，精确确认后复制到异盘恢复区
 cargo run -p sweepx-cli -- junk --system --clean-temp
 
 ```
@@ -225,4 +225,4 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - P3 plan/simulation authorization、audit/recovery 和 executor 已在 library 层实现；仍没有公共 CLI 合同、可信 HumanApproval broker 或 native adapter。
 - 对 sparse、compressed、hard link、clone/reflink、snapshot、dedup、overlay、quota 和共享存储的空间归因不能被概括成“将释放多少空间”。
 
-最重要的当前结论是：**SweepX 已有可运行的扫描/TUI、单对象 Trash preview 和 Linux 陈旧构建临时目录隔离 preview，但还没有通用计划执行或 Permanent 清理能力。**
+最重要的当前结论是：**SweepX 已有可运行的扫描/TUI、单对象 Trash preview 和 Linux 陈旧临时对象隔离 preview，但还没有通用计划执行或 Permanent 清理能力。**

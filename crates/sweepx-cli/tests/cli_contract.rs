@@ -3,6 +3,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, MutexGuard};
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -13,6 +15,56 @@ use tempfile::TempDir;
 
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
+}
+
+#[cfg(target_os = "linux")]
+static LINUX_TEMP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "linux")]
+struct SyntheticLinuxProc {
+    _lock: MutexGuard<'static, ()>,
+    _proc: TempDir,
+    _net_unix: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+fn isolate_linux_temp_env() -> SyntheticLinuxProc {
+    let lock = LINUX_TEMP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let proc = TempDir::new().unwrap();
+    fs::create_dir_all(proc.path().join("self")).unwrap();
+    fs::write(proc.path().join("self/mountinfo"), b"").unwrap();
+    let net_unix = proc.path().join("net-unix");
+    fs::write(
+        &net_unix,
+        b"Num       RefCount Protocol Flags    Type St Inode Path\n",
+    )
+    .unwrap();
+    // SAFETY: The module-wide lock makes these process-global seams test-serialized.
+    unsafe {
+        std::env::set_var("SWEEPX_TEST_LINUX_PROC_ROOT", proc.path());
+        std::env::set_var("SWEEPX_TEST_LINUX_PROC_NET_UNIX", &net_unix);
+        std::env::set_var("SWEEPX_TEST_LINUX_NOW_UNIX", "4000000000");
+    }
+    SyntheticLinuxProc {
+        _lock: lock,
+        _proc: proc,
+        _net_unix: net_unix,
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SyntheticLinuxProc {
+    fn drop(&mut self) {
+        // SAFETY: Drop still holds the test-serialization lock.
+        unsafe {
+            std::env::remove_var("SWEEPX_TEST_LINUX_PROC_ROOT");
+            std::env::remove_var("SWEEPX_TEST_LINUX_PROC_NET_UNIX");
+            std::env::remove_var("SWEEPX_TEST_LINUX_TMP_ROOT");
+            std::env::remove_var("SWEEPX_TEST_LINUX_NOW_UNIX");
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -936,6 +988,7 @@ fn junk_scan_does_not_promote_a_known_directory_containing_a_nested_repository()
 #[cfg(target_os = "linux")]
 #[test]
 fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() {
+    let _linux_temp_env = isolate_linux_temp_env();
     let fixture = TempDir::new().unwrap();
     let cache = fixture.path().join("cache");
     let home = fixture.path().join("home");
@@ -979,31 +1032,54 @@ fn junk_system_uses_only_the_explicit_xdg_cache_root_and_reports_verification() 
 
 #[cfg(target_os = "linux")]
 #[test]
-fn junk_system_reports_only_old_owned_known_prefix_temp_roots() {
+fn junk_system_reports_old_arbitrary_temp_files_and_directories() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _linux_temp_env = isolate_linux_temp_env();
     let fixture = TempDir::new().unwrap();
     let temp_root = resolved_fixture_root(&fixture);
-    let old = temp_root.join("osdk-old");
-    let recent = temp_root.join("osdk-recent");
-    let unknown = temp_root.join("arbitrary-old");
-    for path in [&old, &recent, &unknown] {
-        fs::create_dir(path).unwrap();
-        fs::write(path.join("payload"), b"cache").unwrap();
-    }
+    let support = TempDir::new().unwrap();
+    let old_dir = temp_root.join("arbitrary-old-directory");
+    let old_file = temp_root.join("arbitrary-old-file");
+    let old_symlink = temp_root.join("arbitrary-old-symlink");
+    let old_fifo = temp_root.join("arbitrary-old-fifo");
+    let active_dir = temp_root.join("arbitrary-active-directory");
+    fs::create_dir(&old_dir).unwrap();
+    fs::write(old_dir.join("payload"), b"cache").unwrap();
+    fs::write(&old_file, b"old").unwrap();
+    std::os::unix::fs::symlink("missing-target", &old_symlink).unwrap();
+    let mkfifo = std::process::Command::new("mkfifo")
+        .arg(&old_fifo)
+        .status()
+        .unwrap();
+    assert!(mkfifo.success());
+    fs::create_dir(&active_dir).unwrap();
     let touched = std::process::Command::new("touch")
         .arg("-d")
         .arg("@1600000000")
-        .arg(&old)
-        .arg(&unknown)
+        .arg(&old_dir)
+        .arg(old_dir.join("payload"))
+        .arg(&old_file)
+        .arg("-h")
+        .arg(&old_symlink)
+        .arg(&old_fifo)
+        .arg(&active_dir)
         .status()
         .unwrap();
     assert!(touched.success());
+    fs::write(active_dir.join("payload"), b"active").unwrap();
+    let active_touched = std::process::Command::new("touch")
+        .arg("-d")
+        .arg("@4000000000")
+        .arg(active_dir.join("payload"))
+        .status()
+        .unwrap();
+    assert!(active_touched.success());
     fs::set_permissions(&temp_root, fs::Permissions::from_mode(0o700)).unwrap();
-    let home = temp_root.join("home");
-    let empty_path = temp_root.join("empty-path");
-    let cache = temp_root.join("cache");
-    let tools = temp_root.join("tools");
+    let home = support.path().join("home");
+    let empty_path = support.path().join("empty-path");
+    let cache = support.path().join("cache");
+    let tools = support.path().join("tools");
     fs::create_dir(&home).unwrap();
     fs::create_dir(&empty_path).unwrap();
     fs::create_dir(&cache).unwrap();
@@ -1031,26 +1107,100 @@ fn junk_system_reports_only_old_owned_known_prefix_temp_roots() {
     let candidates = json["candidates"].as_array().unwrap();
     let temp_candidates = candidates
         .iter()
-        .filter(|candidate| candidate["ruleId"] == "linux.stale-build-temp")
+        .filter(|candidate| candidate["ruleId"] == "linux.stale-temp-object")
         .collect::<Vec<_>>();
-    assert_eq!(temp_candidates.len(), 1);
-    assert_eq!(temp_candidates[0]["path"], old.display().to_string());
-    assert_eq!(temp_candidates[0]["risk"], "R3");
     assert_eq!(
-        temp_candidates[0]["classification"],
-        "stale_build_temp_report"
+        temp_candidates.len(),
+        4,
+        "temp discovery: {:?}; paths: {:?}",
+        json["tempDiscovery"],
+        temp_candidates
+            .iter()
+            .map(|candidate| candidate["path"].as_str())
+            .collect::<Vec<_>>()
     );
+    let paths = temp_candidates
+        .iter()
+        .map(|candidate| candidate["path"].as_str().unwrap().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        old_dir.display().to_string(),
+        old_file.display().to_string(),
+        old_symlink.display().to_string(),
+        old_fifo.display().to_string(),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(paths, expected);
+    assert_eq!(temp_candidates[0]["risk"], "R3");
+    assert_eq!(json["tempDiscovery"]["complete"], true);
+    assert_eq!(temp_candidates[0]["classification"], "stale_temp_report");
     assert_eq!(
         temp_candidates[0]["blockers"],
-        json!(["process_observation_not_system_wide"])
+        json!(["system_wide_reference_view_unavailable"])
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn junk_system_accepts_an_explicit_direct_tmp_child_without_name_filter() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _linux_temp_env = isolate_linux_temp_env();
+    let fixture = TempDir::new().unwrap();
+    let temp_root = resolved_fixture_root(&fixture);
+    let target = temp_root.join("anything-not-prefixed");
+    fs::write(&target, b"old").unwrap();
+    let touched = std::process::Command::new("touch")
+        .arg("-d")
+        .arg("@1600000000")
+        .arg(&target)
+        .status()
+        .unwrap();
+    assert!(touched.success());
+    fs::set_permissions(&temp_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = temp_root.join("home");
+    let empty_path = temp_root.join("empty-path");
+    let cache = temp_root.join("cache");
+    let tools = temp_root.join("tools");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&empty_path).unwrap();
+    fs::create_dir(&cache).unwrap();
+    fs::create_dir(&tools).unwrap();
+
+    let mut cmd = cli_command();
+    cmd.env("HOME", &home)
+        .env("PATH", &empty_path)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("SWEEPX_TEST_LINUX_TMP_ROOT", &temp_root)
+        .arg("--format")
+        .arg("json")
+        .arg("junk")
+        .arg("--system")
+        .arg(&target);
+    let output = cmd.assert().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "no JSON; exit={:?}, stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let paths = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["path"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(paths.contains(target.display().to_string().as_str()));
 }
 
 #[test]
 fn junk_system_rejects_an_explicit_root_before_scanning() {
-    let fixture = TempDir::new().unwrap();
     let mut cmd = cli_command();
-    cmd.arg("junk").arg("--system").arg(fixture.path());
+    cmd.arg("junk")
+        .arg("--system")
+        .arg("/definitely/not/a/tmp/child");
     cmd.assert().code(2);
 }
 

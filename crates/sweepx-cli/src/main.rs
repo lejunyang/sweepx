@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode as ProcessExitCode, Stdio};
 use std::sync::mpsc;
 use std::thread;
-#[cfg(target_os = "linux")]
-use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+mod linux_temp;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
 mod trash_command;
@@ -187,7 +187,7 @@ enum Commands {
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         #[arg(long)]
         system: bool,
-        /// Move approved stale Linux build-temp candidates to a recoverable quarantine.
+        /// Move approved stale Linux temporary objects to a recoverable quarantine.
         ///
         /// Requires `--system`, human output, and a foreground terminal. The full plan digest
         /// must be typed back exactly. This never falls back to permanent deletion.
@@ -553,7 +553,7 @@ fn main() -> ProcessExitCode {
             quarantine_dir,
             roots,
         } => {
-            let roots = match normalize_junk_roots(system, &roots) {
+            let normalized_roots = match normalize_junk_roots(system, &roots) {
                 Ok(roots) => roots,
                 Err(error) => {
                     eprintln!("{error}");
@@ -564,7 +564,8 @@ fn main() -> ProcessExitCode {
                 &context,
                 format,
                 size_unit,
-                roots,
+                normalized_roots.scan_roots,
+                normalized_roots.temp_roots,
                 system,
                 JunkCleanOptions {
                     enabled: clean_temp,
@@ -985,12 +986,6 @@ struct GitRepository {
 
 const GIT_EVIDENCE_MAX_QUERIES: usize = 256;
 const GIT_EVIDENCE_DEADLINE: Duration = Duration::from_secs(5);
-#[cfg(target_os = "linux")]
-const LINUX_TMP_MIN_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-#[cfg(target_os = "linux")]
-const LINUX_TMP_MAX_CANDIDATES: usize = 1024;
-#[cfg(target_os = "linux")]
-const LINUX_TMP_MEASURE_DEADLINE: Duration = Duration::from_secs(180);
 
 struct GitProbeBudget {
     remaining_queries: usize,
@@ -1079,11 +1074,13 @@ impl GitProbeBudget {
 const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
 const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-rules.json");
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_junk_scan(
     context: &CoreContext,
     format: OutputFormat,
     size_unit: HumanSizeUnit,
     roots: Vec<PathBuf>,
+    temp_requested_roots: Vec<PathBuf>,
     include_platform_rules: bool,
     clean: JunkCleanOptions<'_>,
 ) -> ProcessExitCode {
@@ -1111,27 +1108,29 @@ fn run_junk_scan(
     } else {
         Vec::new()
     };
+    let scan_roots = roots;
     #[cfg(target_os = "linux")]
-    let temp_roots = roots
+    let temp_root = linux_temp::report_temp_root();
+    #[cfg(target_os = "linux")]
+    let temp_discovery = platform_rules
         .iter()
-        .filter(|root| {
-            linux_temp_root().is_some_and(|temp| {
-                root.parent() == Some(temp.as_path())
-                    && root
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(linux_temp_name_has_known_prefix)
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    #[cfg(not(target_os = "linux"))]
-    let temp_roots = Vec::<PathBuf>::new();
-    let scan_roots = roots
-        .iter()
-        .filter(|root| !temp_roots.contains(root))
-        .cloned()
-        .collect::<Vec<_>>();
+        .find(|rule| rule.root_kind == "linux_tmp")
+        .and_then(|rule| {
+            let temp_root = temp_root.as_ref()?;
+            let requested = if temp_requested_roots.is_empty() {
+                None
+            } else {
+                Some(temp_requested_roots.as_slice())
+            };
+            Some((
+                rule,
+                linux_temp::discover(
+                    temp_root,
+                    requested,
+                    Instant::now() + linux_temp::MEASURE_DEADLINE,
+                ),
+            ))
+        });
     let progress = ScanProgress::start(
         context.locale(),
         scan_roots.len(),
@@ -1229,7 +1228,9 @@ fn run_junk_scan(
         .collect::<Vec<_>>();
     annotate_project_candidates_with_git(&scan.summary, &aggregates, &mut candidates);
     #[cfg(target_os = "linux")]
-    candidates.extend(linux_temp_candidates(&temp_roots, &platform_rules));
+    if let Some((rule, discovery)) = &temp_discovery {
+        candidates.extend(linux_temp_candidates(rule, discovery));
+    }
     candidates.extend(platform_junk_candidates(
         &scan.summary,
         &aggregates,
@@ -1262,9 +1263,25 @@ fn run_junk_scan(
     });
     let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
     #[cfg(target_os = "linux")]
+    let temp_discovery_complete = temp_discovery
+        .as_ref()
+        .is_none_or(|(_, discovery)| discovery.complete);
+    #[cfg(not(target_os = "linux"))]
+    let temp_discovery_complete = true;
+    #[cfg(target_os = "linux")]
+    let temp_discovery_json: Option<serde_json::Value> =
+        temp_discovery.as_ref().map(|(_, discovery)| {
+            json!({
+                "complete": discovery.complete,
+                "incompleteReason": discovery.incomplete_reason,
+            })
+        });
+    #[cfg(not(target_os = "linux"))]
+    let temp_discovery_json: Option<serde_json::Value> = None;
+    #[cfg(target_os = "linux")]
     let temp_clean_inputs = candidates
         .iter()
-        .filter(|candidate| candidate.rule_id == "linux.stale-build-temp")
+        .filter(|candidate| candidate.rule_id == linux_temp::RULE_ID)
         .filter_map(|candidate| {
             let EvidenceValue::Known { value } = &candidate.reclaimable else {
                 return None;
@@ -1280,10 +1297,10 @@ fn run_junk_scan(
             "{}",
             match (context.locale(), clean.enabled) {
                 (sweepx_i18n::Locale::ZhCn, true) => {
-                    "垃圾扫描报告与可恢复临时目录清理预览"
+                    "垃圾扫描报告与可恢复临时对象清理预览"
                 }
                 (sweepx_i18n::Locale::EnUs, true) => {
-                    "Junk scan report and recoverable temporary-directory cleanup preview"
+                    "Junk scan report and recoverable temporary-object cleanup preview"
                 }
                 (sweepx_i18n::Locale::ZhCn, false) => {
                     "垃圾扫描报告（已核验可重建/可丢弃位置；仅报告）"
@@ -1359,13 +1376,27 @@ fn run_junk_scan(
                 ),
             }
         );
-    } else {
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((_, discovery)) = &temp_discovery
+        && !discovery.complete
+    {
+        eprintln!(
+            "Linux /tmp discovery was incomplete: {}; --clean-temp will refuse the truncated report.",
+            discovery
+                .incomplete_reason
+                .as_deref()
+                .unwrap_or("unknown reason")
+        );
+    }
+    if format != OutputFormat::Human {
         println!(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
-                "status": if scan.output.status == sweepx_protocol::OutputStatus::Ok { "ok" } else { "partial" },
+                "status": if scan.output.status == sweepx_protocol::OutputStatus::Ok && temp_discovery_complete { "ok" } else { "partial" },
                 "readOnly": true,
+                "tempDiscovery": temp_discovery_json,
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
                 "incompleteSizeCount": incomplete_size_count,
@@ -1403,6 +1434,7 @@ fn run_junk_scan(
             return temp_clean_command::run_temp_clean(
                 temp_clean_inputs,
                 clean.quarantine_dir,
+                temp_discovery_complete,
                 format,
                 context.locale(),
                 clean.stdin_is_terminal,
@@ -1834,9 +1866,7 @@ fn platform_junk_candidates(
                 // and classification see the path through different readers.
                 "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
                 #[cfg(target_os = "linux")]
-                "stale_named_direct_child" => {
-                    depth == 0 && linux_stale_temp_root_matches(rule, entry)
-                }
+                "stale_inactive_direct_child" => false,
                 _ => false,
             };
             if !matched {
@@ -1880,152 +1910,35 @@ fn platform_junk_candidates(
                     .iter()
                     .map(|component| component.entry_id.clone())
                     .collect(),
+                #[cfg(target_os = "linux")]
                 activity: if rule.root_kind == "linux_tmp" {
-                    Some("unreferenced_current_user_process_view")
+                    Some(linux_temp::ACTIVITY_CODE)
                 } else {
                     activity
                 },
+                #[cfg(not(target_os = "linux"))]
+                activity,
                 stale_formats,
                 size_is_logical: size.is_logical_fallback,
                 git: None,
+                #[cfg(target_os = "linux")]
                 classification: (rule.root_kind == "linux_tmp")
-                    .then_some("stale_build_temp_report"),
+                    .then_some(linux_temp::CLASSIFICATION),
+                #[cfg(not(target_os = "linux"))]
+                classification: None,
                 confidence: (rule.root_kind == "linux_tmp").then_some("medium"),
+                #[cfg(target_os = "linux")]
                 blockers: if rule.root_kind == "linux_tmp" {
-                    vec!["process_observation_not_system_wide"]
+                    vec![linux_temp::REFERENCE_BLOCKER]
                 } else {
                     Vec::new()
                 },
+                #[cfg(not(target_os = "linux"))]
+                blockers: Vec::new(),
             });
         }
     }
     candidates
-}
-
-#[cfg(target_os = "linux")]
-fn linux_stale_temp_root_matches(
-    _rule: &PlatformJunkRule,
-    entry: &sweepx_model::ScannedEntry,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let Some(path) = path_from_scanned_entry(entry) else {
-        return false;
-    };
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-        return false;
-    };
-    let Some(temp_root) = linux_temp_root() else {
-        return false;
-    };
-    let Ok(temp_metadata) = std::fs::symlink_metadata(&temp_root) else {
-        return false;
-    };
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.dev() != temp_metadata.dev()
-        || path.parent() != Some(temp_root.as_path())
-        || !scanned_entry_matches_unix_metadata(entry, &metadata)
-    {
-        return false;
-    }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if !linux_temp_name_has_known_prefix(name) {
-        return false;
-    }
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    if SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default()
-        < LINUX_TMP_MIN_IDLE
-    {
-        return false;
-    }
-    !linux_current_user_process_references_temp_child(&temp_root, name)
-}
-
-#[cfg(target_os = "linux")]
-fn scanned_entry_matches_unix_metadata(
-    entry: &sweepx_model::ScannedEntry,
-    metadata: &std::fs::Metadata,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let Some(identity) = entry.identity.as_ref() else {
-        return false;
-    };
-    let IdentityEvidence::Known { value } = &identity.platform_file_identity else {
-        return false;
-    };
-    value.device.0 == u128::from(metadata.dev()) && value.inode.0 == u128::from(metadata.ino())
-}
-
-#[cfg(target_os = "linux")]
-fn linux_current_user_process_references_temp_child(
-    temp_root: &Path,
-    candidate_name: &str,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let Ok(processes) = std::fs::read_dir("/proc") else {
-        return true;
-    };
-    let current_uid = unsafe { libc::geteuid() };
-    for process in processes.flatten() {
-        let Some(pid) = process
-            .file_name()
-            .to_str()
-            .filter(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let process_path = PathBuf::from("/proc").join(pid);
-        if std::fs::symlink_metadata(&process_path)
-            .map(|metadata| metadata.uid() != current_uid)
-            .unwrap_or(true)
-        {
-            continue;
-        }
-        for link in ["cwd", "root", "exe"] {
-            if linux_proc_link_references_temp_child(
-                &process_path.join(link),
-                temp_root,
-                candidate_name,
-            ) {
-                return true;
-            }
-        }
-        let Ok(descriptors) = std::fs::read_dir(process_path.join("fd")) else {
-            continue;
-        };
-        if descriptors.flatten().any(|descriptor| {
-            linux_proc_link_references_temp_child(&descriptor.path(), temp_root, candidate_name)
-        }) {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn linux_proc_link_references_temp_child(
-    link: &Path,
-    temp_root: &Path,
-    candidate_name: &str,
-) -> bool {
-    let Ok(target) = std::fs::read_link(link) else {
-        return false;
-    };
-    target
-        .strip_prefix(temp_root)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .is_some_and(|component| component.as_os_str() == candidate_name)
 }
 
 /// Confirms a scanned root is the one this rule's tool reported.
@@ -2938,13 +2851,6 @@ struct JunkSize {
     is_logical_fallback: bool,
 }
 
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-struct LinuxTempMeasurement {
-    metadata: std::fs::Metadata,
-    allocated_bytes: u128,
-}
-
 /// Picks the reportable size for one aggregate, preferring allocation and falling back to logical.
 fn junk_size_for(aggregate: Option<&sweepx_model::DirectoryAggregate>) -> JunkSize {
     let Some(aggregate) = aggregate else {
@@ -3258,18 +3164,61 @@ fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_c
     }
 }
 
-fn normalize_junk_roots(system: bool, raw_roots: &[OsString]) -> Result<Vec<PathBuf>, String> {
-    if system && !raw_roots.is_empty() {
+struct NormalizedJunkRoots {
+    scan_roots: Vec<PathBuf>,
+    temp_roots: Vec<PathBuf>,
+}
+
+fn normalize_junk_roots(
+    system: bool,
+    raw_roots: &[OsString],
+) -> Result<NormalizedJunkRoots, String> {
+    if !system {
+        return Ok(NormalizedJunkRoots {
+            scan_roots: normalize_scan_roots(raw_roots).map_err(|error| error.to_string())?,
+            temp_roots: Vec::new(),
+        });
+    }
+
+    let explicit = if raw_roots.is_empty() {
+        Vec::new()
+    } else {
+        normalize_roots(raw_roots).map_err(|error| error.to_string())?
+    };
+    #[cfg(target_os = "linux")]
+    if !explicit.is_empty() {
+        if let Some(temp_root) = linux_temp::report_temp_root()
+            && explicit.iter().all(|root| {
+                root == temp_root.as_path() || root.parent() == Some(temp_root.as_path())
+            })
+        {
+            let temp_roots = explicit
+                .iter()
+                .filter(|root| root.as_path() != temp_root.as_path())
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(NormalizedJunkRoots {
+                scan_roots: default_platform_junk_roots()?,
+                temp_roots,
+            });
+        }
+        return Err(
+            "junk --system cannot be combined with explicit non-temporary roots".to_string(),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    if !explicit.is_empty() {
         return Err("junk --system cannot be combined with explicit roots".to_string());
     }
-    if !system {
-        return normalize_scan_roots(raw_roots).map_err(|error| error.to_string());
-    }
-    let roots = default_platform_junk_roots()?;
-    if roots.is_empty() {
+
+    let scan_roots = default_platform_junk_roots()?;
+    if scan_roots.is_empty() {
         return Err("no supported platform junk root is available".to_string());
     }
-    Ok(roots)
+    Ok(NormalizedJunkRoots {
+        scan_roots,
+        temp_roots: Vec::new(),
+    })
 }
 
 fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
@@ -3310,21 +3259,6 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
             && is_existing_real_directory(&cache)
         {
             roots.push(cache);
-        }
-        if let Some(temp_root) = rules
-            .iter()
-            .any(|rule| rule.root_kind == "linux_tmp")
-            .then(linux_temp_root)
-            .flatten()
-        {
-            for child in linux_stale_temp_roots(&temp_root, &rules) {
-                if !roots
-                    .iter()
-                    .any(|existing: &PathBuf| same_directory(existing.as_path(), child.as_path()))
-                {
-                    roots.push(child);
-                }
-            }
         }
     }
     #[cfg(target_os = "macos")]
@@ -3374,204 +3308,48 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_temp_root() -> Option<PathBuf> {
-    std::env::var_os("SWEEPX_TEST_LINUX_TMP_ROOT")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| Some(PathBuf::from("/tmp")))
-        .filter(|path| is_existing_real_directory(path))
-}
-
-#[cfg(target_os = "linux")]
-fn linux_stale_temp_roots(temp_root: &Path, rules: &[PlatformJunkRule]) -> Vec<PathBuf> {
+fn linux_temp_candidates(
+    rule: &PlatformJunkRule,
+    discovery: &linux_temp::LinuxTempDiscovery,
+) -> Vec<JunkCandidate> {
     use std::os::unix::fs::MetadataExt;
 
-    if !rules.iter().any(|rule| rule.root_kind == "linux_tmp") {
-        return Vec::new();
-    }
-    let Ok(root_metadata) = std::fs::symlink_metadata(temp_root) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(temp_root) else {
-        return Vec::new();
-    };
-    let current_uid = unsafe { libc::geteuid() };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            if !linux_temp_name_has_known_prefix(name) {
-                return None;
-            }
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path).ok()?;
-            if !metadata.file_type().is_dir()
-                || metadata.uid() != current_uid
-                || metadata.dev() != root_metadata.dev()
-                || SystemTime::now()
-                    .duration_since(metadata.modified().ok()?)
-                    .unwrap_or_default()
-                    < LINUX_TMP_MIN_IDLE
-                || linux_current_user_process_references_temp_child(temp_root, name)
-            {
-                return None;
-            }
-            Some(path)
-        })
-        .take(LINUX_TMP_MAX_CANDIDATES)
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_temp_name_has_known_prefix(name: &str) -> bool {
-    name.strip_prefix("osdk-")
-        .or_else(|| name.strip_prefix("one-sdk-"))
-        .or_else(|| name.strip_prefix("sweepx-"))
-        .is_some_and(|suffix| {
-            !suffix.is_empty()
-                && suffix
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn linux_temp_candidates(roots: &[PathBuf], rules: &[PlatformJunkRule]) -> Vec<JunkCandidate> {
-    let Some(rule) = rules.iter().find(|rule| rule.root_kind == "linux_tmp") else {
-        return Vec::new();
-    };
-    roots
+    discovery
+        .candidates
         .iter()
-        .take(LINUX_TMP_MAX_CANDIDATES)
-        .scan(
-            Instant::now() + LINUX_TMP_MEASURE_DEADLINE,
-            |deadline, path| {
-                if Instant::now() >= *deadline {
-                    return None;
-                }
-                Some((path, *deadline))
-            },
-        )
-        .filter_map(|(path, deadline)| {
-            let before = linux_temp_candidate_metadata(path, rule)?;
-            let measurement = linux_du_measurement(path, deadline)?;
-            let after = linux_temp_candidate_metadata(path, rule)?;
-            if !std::os::unix::fs::MetadataExt::dev(&before)
-                .eq(&std::os::unix::fs::MetadataExt::dev(&after))
-                || !std::os::unix::fs::MetadataExt::ino(&before)
-                    .eq(&std::os::unix::fs::MetadataExt::ino(&after))
-                || before.modified().ok()? != after.modified().ok()?
-                || std::os::unix::fs::MetadataExt::dev(&measurement.metadata)
-                    != std::os::unix::fs::MetadataExt::dev(&after)
-                || std::os::unix::fs::MetadataExt::ino(&measurement.metadata)
-                    != std::os::unix::fs::MetadataExt::ino(&after)
-            {
-                return None;
+        .filter_map(|candidate| {
+            let metadata = &candidate.measurement.top;
+            let mut blockers = vec![linux_temp::REFERENCE_BLOCKER];
+            if !discovery.complete {
+                blockers.push("linux_tmp_discovery_incomplete");
             }
             Some(JunkCandidate {
-                path: path.display().to_string(),
-                #[cfg(target_os = "linux")]
-                native_path: Some(path.to_path_buf()),
+                path: candidate.path.display().to_string(),
+                native_path: Some(candidate.path.clone()),
                 rule_id: rule.id.clone(),
                 risk: rule.risk.clone(),
                 reclaimable: ByteValue::Known {
-                    value: sweepx_model::DecimalU128::new(measurement.allocated_bytes),
+                    value: sweepx_model::DecimalU128::new(candidate.measurement.allocated_bytes),
                 },
                 evidence: rule.evidence.clone(),
                 source_reviewed_at: rule.source_reviewed_at.clone(),
                 references: rule.references.clone(),
                 entry_id: ScanEntryId::for_scan_ordinal(
                     &sweepx_model::ScanId::new("linux-temp-report"),
-                    u128::from(std::os::unix::fs::MetadataExt::ino(&after)).saturating_add(1),
+                    u128::from(metadata.ino()).saturating_add(1),
                 )
                 .ok()?,
                 ancestor_ids: BTreeSet::new(),
-                activity: Some("unreferenced_current_user_process_view"),
+                activity: Some(linux_temp::ACTIVITY_CODE),
                 stale_formats: Vec::new(),
                 size_is_logical: false,
                 git: None,
-                classification: Some("stale_build_temp_report"),
+                classification: Some(linux_temp::CLASSIFICATION),
                 confidence: Some("medium"),
-                blockers: vec!["process_observation_not_system_wide"],
+                blockers,
             })
         })
         .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_temp_candidate_metadata(
-    path: &Path,
-    rule: &PlatformJunkRule,
-) -> Option<std::fs::Metadata> {
-    use std::os::unix::fs::MetadataExt;
-
-    let temp_root = linux_temp_root()?;
-    let root_metadata = std::fs::symlink_metadata(&temp_root).ok()?;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    let name = path.file_name()?.to_str()?;
-    if path.parent() != Some(temp_root.as_path())
-        || !rule.names.iter().any(|prefix| name.starts_with(prefix))
-        || !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.dev() != root_metadata.dev()
-        || SystemTime::now()
-            .duration_since(metadata.modified().ok()?)
-            .unwrap_or_default()
-            < LINUX_TMP_MIN_IDLE
-        || linux_current_user_process_references_temp_child(&temp_root, name)
-    {
-        return None;
-    }
-    Some(metadata)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_du_measurement(path: &Path, deadline: Instant) -> Option<LinuxTempMeasurement> {
-    let file = std::fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    let output_path = std::env::temp_dir().join(format!(
-        "sweepx-du-{}-{}.out",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .ok()?
-            .as_nanos()
-    ));
-    let output_file = std::fs::File::create(&output_path).ok()?;
-    let mut child = ProcessCommand::new("du")
-        .arg("-x")
-        .arg("-s")
-        .arg("-B1")
-        .arg("--")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(output_file))
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let status = loop {
-        match child.try_wait().ok()? {
-            Some(status) => break status,
-            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_file(&output_path);
-                return None;
-            }
-        }
-    };
-    let output = std::fs::read(&output_path).ok()?;
-    let _ = std::fs::remove_file(&output_path);
-    if !status.success() || output.len() > 4096 {
-        return None;
-    }
-    let text = std::str::from_utf8(&output).ok()?;
-    Some(LinuxTempMeasurement {
-        metadata,
-        allocated_bytes: text.split_whitespace().next()?.parse().ok()?,
-    })
 }
 
 fn is_existing_real_directory(path: &Path) -> bool {
@@ -4002,7 +3780,7 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
         let expected = match rule.platform.as_str() {
             "linux" => match rule.root_kind.as_str() {
                 "xdg_cache_home" => ("xdg_cache_home", "direct_children", 1),
-                "linux_tmp" => ("linux_tmp", "stale_named_direct_child", 0),
+                "linux_tmp" => ("linux_tmp", "stale_inactive_direct_child", 0),
                 _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
             },
             "macos" => ("macos_user_caches", "direct_children", 1),
@@ -4057,9 +3835,9 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 .chain(rule.required_markers.iter())
                 .all(|name| safe_rule_component(name))
             || (rule.match_kind == "direct_children" && !rule.names.is_empty())
-            || (rule.match_kind == "stale_named_direct_child"
+            || (rule.match_kind == "stale_inactive_direct_child"
                 && (rule.root_kind != "linux_tmp"
-                    || rule.names.is_empty()
+                    || !rule.names.is_empty()
                     || !rule.required_markers.is_empty()
                     || rule.risk != "R3"))
             || (rule.match_kind == "named_descendant" && rule.names.is_empty())
@@ -4355,10 +4133,10 @@ mod tests {
         assert_eq!(linux.match_kind, "direct_children");
         let linux_tmp = rules
             .iter()
-            .find(|rule| rule.id == "linux.stale-build-temp")
+            .find(|rule| rule.id == "linux.stale-temp-object")
             .unwrap();
         assert_eq!(linux_tmp.root_kind, "linux_tmp");
-        assert_eq!(linux_tmp.match_kind, "stale_named_direct_child");
+        assert_eq!(linux_tmp.match_kind, "stale_inactive_direct_child");
         assert_eq!(linux_tmp.risk, "R3");
         // Found by id, not by platform: Windows now carries browser cache rules too, and matching
         // on the platform alone silently returned whichever rule happened to be first.
