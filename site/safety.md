@@ -4,10 +4,10 @@ title: 安全模型
 
 # 安全模型
 
-SweepX 当前的安全性首先来自显式能力与类型边界：大部分表面只读，模拟执行表面 sealed；真实 mutation 仅限单对象 Trash、Linux 陈旧临时对象隔离和 Linux 单普通文件 Permanent preview。未来安全目标不能被写成今天已有的删除保证。
+SweepX 当前的安全性首先来自显式能力与类型边界：大部分表面只读，模拟执行表面 sealed；真实 mutation 仅限单对象 Trash、Linux 陈旧临时对象隔离和 Linux 有界文件/目录 Permanent preview。未来安全目标不能被写成今天已有的删除保证。
 
 > [!CAUTION]
-> Linux 单文件 Permanent preview 只允许 canonical 绝对路径普通文件，要求普通用户、前台终端完整摘要挑战、预先持久化的计划/intent，以及提交前 parent/object/marker 重验；目录、link、special、批量与跨平台 Permanent 仍禁用。Trash 失败不会进入 Permanent，Permanent 也不是 secure erase。
+> Linux 文件/目录 Permanent preview 只允许解析后的绝对路径、普通文件和真实目录，要求普通用户、前台终端完整摘要挑战、封闭有界 manifest、逐项持久化 intent/outcome，以及提交前 parent/object/marker 重验；link、special、跨挂载、超限与跨平台 Permanent 仍禁用。Trash 失败不会进入 Permanent，Permanent 也不是 secure erase。
 
 ## 已实现的只读边界
 
@@ -69,12 +69,12 @@ P4a.2 增加的是 typed/validated capability qualification record 合同，不�
 | `trash.local.file` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
 | `trash.local.directory` | 当前主机为 degraded preview | 当前主机为 degraded preview | 当前主机为 degraded preview |
 | `permanent.local.file` | degraded preview | disabled | disabled |
-| `permanent.local.directory` | disabled | disabled | disabled |
+| `permanent.local.directory` | degraded preview | disabled | disabled |
 | `permanent.local.link` | disabled | disabled | disabled |
 
 验证器拒绝把 `fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 用作 mutation 资格。未来只有 evidence class 为 `real_os_qualification`、有效性为 `current`，且完整匹配 Core/version、policy 与 adapter digest、OS build、arch、filesystem/version、volume、provider/backend、ordinary-user profile 和精确 capability 的 tuple，才可能使单个单元合格。
 
-这仍是失败关闭的 registry substrate，不是运行时 registry 服务。Trash 与 Linux 单文件 Permanent 只是 `degraded` preview，没有 `qualified` mutation 记录或通用 approval UI。
+这仍是失败关闭的 registry substrate，不是运行时 registry 服务。Trash 与 Linux 有界 file/directory Permanent 只是 `degraded` preview，没有 `qualified` mutation 记录或通用 approval UI。
 
 ## 未来 mutation 的不可谈判约束
 
@@ -91,4 +91,4 @@ P4a.2 增加的是 typed/validated capability qualification record 合同，不�
 
 ## Permanent 边界
 
-当前实现仅覆盖 Linux 单普通文件的本地前台确认路径。通用 Permanent plan、broker approval、`execute --dangerously-delete`、目录 manifest、link 和其他平台仍是模型与路线图。任何扩展都必须绑定精确计划，不能选择额外目标、绕过保护或成为 Trash fallback；Permanent 不等于 secure erase。
+当前实现仅覆盖 Linux 有界普通文件/真实目录树的本地前台确认路径。通用 Permanent plan、broker approval、`execute --dangerously-delete`、link、超限树和其他平台仍是模型与路线图。目录采用封闭 manifest 与非递归后序动作；新增项保留并使操作停止/partial。任何扩展都必须绑定精确计划，不能选择额外目标、绕过保护或成为 Trash fallback；Permanent 不等于 secure erase。

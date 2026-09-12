@@ -1,12 +1,12 @@
-//! Linux-only single-file Permanent deletion preview.
+//! Linux-only bounded file-or-directory Permanent deletion preview.
 //!
 //! The command is deliberately narrower than the future general plan executor: it admits one
-//! regular file, constructs a canonical one-action plan, requires an exact foreground-terminal
-//! challenge, writes durable intent, and submits one parent-relative `unlinkat`. Directories,
-//! links, special files, elevated processes, mount roots, protected paths, and marker-protected
-//! ancestry remain outside this preview.
+//! regular file or a closed directory manifest, requires an exact foreground-terminal challenge,
+//! writes durable intent per action, and submits only parent-relative `unlinkat`/`rmdir` calls.
+//! Links, special files, elevated processes, mount roots, protected paths, and marker-protected
+//! ancestry or descendants remain outside this preview.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
@@ -27,12 +27,46 @@ use sweepx_audit::{
 use sweepx_core::OutputFormat;
 use sweepx_i18n::Locale;
 
-const PLAN_SCHEMA: &str = "sweepx.permanent-file.plan/v1";
-const ADAPTER_VERSION: &str = "linux-unlinkat-single-file/v1";
-const POLICY_VERSION: &str = "permanent-file-preview/v1";
+const FILE_PLAN_SCHEMA: &str = "sweepx.permanent-file.plan/v1";
+const DIRECTORY_PLAN_SCHEMA: &str = "sweepx.permanent-directory.plan/v1";
+const ADAPTER_VERSION: &str = "linux-unlinkat-manifest/v1";
+const POLICY_VERSION: &str = "permanent-local-preview/v2";
 const PROTECTION_MARKER: &[u8] = b".sweepx-protect";
 const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CONFIRMATION_BYTES: u64 = 256;
+const MAX_DIRECTORY_ACTIONS: usize = 256;
+const MAX_DIRECTORY_DEPTH: usize = 64;
+const MAX_MANIFEST_PATH_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "targetType", rename_all = "snake_case")]
+enum PermanentPlan {
+    File(Box<PermanentFilePlan>),
+    Directory(Box<PermanentDirectoryPlan>),
+}
+
+impl PermanentPlan {
+    fn action_count(&self) -> usize {
+        match self {
+            Self::File(_) => 1,
+            Self::Directory(plan) => plan.actions.len(),
+        }
+    }
+
+    fn path(&self) -> &str {
+        match self {
+            Self::File(plan) => &plan.path,
+            Self::Directory(plan) => &plan.path,
+        }
+    }
+
+    fn size_bytes(&self) -> &str {
+        match self {
+            Self::File(plan) => &plan.size_bytes,
+            Self::Directory(plan) => &plan.logical_bytes,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +101,52 @@ struct PermanentFilePlan {
     secure_erase: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermanentDirectoryPlan {
+    schema: &'static str,
+    created_at_unix_nanos: String,
+    mode: &'static str,
+    path: String,
+    path_bytes: Vec<u8>,
+    parent: String,
+    parent_bytes: Vec<u8>,
+    basename_bytes: Vec<u8>,
+    parent_device: String,
+    parent_inode: String,
+    parent_mount_id: String,
+    logical_bytes: String,
+    action_count: usize,
+    actions: Vec<PermanentDirectoryPlanAction>,
+    policy_version: &'static str,
+    adapter_version: &'static str,
+    irreversible: bool,
+    secure_erase: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermanentDirectoryPlanAction {
+    action_id: String,
+    relative_components: Vec<Vec<u8>>,
+    display_path: String,
+    object_type: PlannedObjectType,
+    identity: FileIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlannedObjectType {
+    File,
+    Directory,
+}
+
+#[derive(Debug)]
+enum PermanentCandidate {
+    File(PermanentFileCandidate),
+    Directory(PermanentDirectoryCandidate),
+}
+
 #[derive(Debug)]
 struct PermanentFileCandidate {
     path: PathBuf,
@@ -78,7 +158,29 @@ struct PermanentFileCandidate {
     identity: FileIdentity,
 }
 
+#[derive(Debug)]
+struct PermanentDirectoryCandidate {
+    path: PathBuf,
+    parent_path: PathBuf,
+    basename: Vec<u8>,
+    parent: OwnedFd,
+    root: OwnedFd,
+    parent_identity: FileIdentity,
+    root_identity: FileIdentity,
+    actions: Vec<DirectoryAction>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryAction {
+    action_id: String,
+    relative_components: Vec<Vec<u8>>,
+    display_path: PathBuf,
+    object_type: PlannedObjectType,
+    identity: FileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FileIdentity {
     device: u64,
     inode: u64,
@@ -104,9 +206,16 @@ enum DeleteError {
     ProtectedPath,
     ProtectionMarker(PathBuf),
     UnsupportedType,
+    UnsupportedFilesystem,
     MultipleHardLinks,
+    ResourceLimit(&'static str),
     OwnershipMismatch,
     TargetChanged,
+    Partial {
+        completed: usize,
+        total: usize,
+        detail: String,
+    },
     Audit(String),
     PostSubmitAudit(String),
     Inspect(io::Error),
@@ -130,7 +239,7 @@ impl std::fmt::Display for DeleteError {
                 formatter.write_str("path must be an absolute, normalized, non-root path")
             }
             Self::NonCanonicalPath => formatter.write_str(
-                "path must already be canonical and may not traverse symbolic links",
+                "path must be the resolved absolute path, with no . or .. components or symbolic-link ancestors; on Linux, pass the output of `realpath -- PATH`",
             ),
             Self::ProtectedPath => formatter.write_str(
                 "the selected path is a protected system, home, state, Trash, executable, or current-working-directory path",
@@ -138,19 +247,33 @@ impl std::fmt::Display for DeleteError {
             Self::ProtectionMarker(path) => write!(
                 formatter,
                 "a .sweepx-protect entry protects this target at {}",
-                path.display()
+                terminal_text(&path.display().to_string())
             ),
             Self::UnsupportedType => formatter.write_str(
-                "this preview permanently deletes one regular file only; directories, links, and special files are refused",
+                "this preview accepts regular files and real directories only; links and special files are refused",
+            ),
+            Self::UnsupportedFilesystem => formatter.write_str(
+                "the target filesystem is not in the qualified local-filesystem allowlist",
             ),
             Self::MultipleHardLinks => formatter.write_str(
                 "the file has multiple hard links; this preview will not claim permanent removal while another name can retain the inode",
             ),
+            Self::ResourceLimit(limit) => {
+                write!(formatter, "directory plan exceeds the {limit} safety limit")
+            }
             Self::OwnershipMismatch => {
                 formatter.write_str("the target must be owned by the invoking user")
             }
             Self::TargetChanged => formatter.write_str(
                 "the target or its parent changed before permanent deletion; nothing was submitted",
+            ),
+            Self::Partial {
+                completed,
+                total,
+                detail,
+            } => write!(
+                formatter,
+                "permanent directory deletion stopped after {completed} of {total} approved actions: {detail}"
             ),
             Self::Audit(detail) => write!(formatter, "durable audit failed: {detail}"),
             Self::PostSubmitAudit(detail) => write!(
@@ -166,7 +289,7 @@ impl std::fmt::Display for DeleteError {
     }
 }
 
-/// Runs the Linux single-regular-file Permanent preview.
+/// Runs the Linux file-or-directory Permanent preview.
 pub(crate) fn run_cli_permanent_delete(
     raw_path: &OsStr,
     format: OutputFormat,
@@ -198,20 +321,18 @@ pub(crate) fn run_cli_permanent_delete(
         );
     }
 
-    let candidate = match PermanentFileCandidate::capture(PathBuf::from(raw_path), Some(state_dir))
-    {
+    let candidate = match PermanentCandidate::capture(PathBuf::from(raw_path), Some(state_dir)) {
         Ok(candidate) => candidate,
         Err(error) => return print_result(format, locale, None, None, Err(error)),
     };
     let plan = candidate.plan();
-    let approval_started = Instant::now();
     let digest = match sweepx_canonical::plan_digest_hex(&plan) {
         Ok(digest) => digest,
         Err(error) => {
             return print_result(
                 format,
                 locale,
-                Some(&candidate.path),
+                Some(candidate.path()),
                 None,
                 Err(DeleteError::Audit(error.to_string())),
             );
@@ -227,30 +348,82 @@ pub(crate) fn run_cli_permanent_delete(
             return print_result(
                 format,
                 locale,
-                Some(&candidate.path),
+                Some(candidate.path()),
                 Some(&digest),
                 Err(error),
             );
         }
     };
 
+    let approval_started = Instant::now();
     print_plan(locale, &plan, &digest);
-    if !confirm_digest(&digest, io::stdin().lock(), io::stdout()) {
-        return print_cancelled(locale, &candidate.path, &digest);
+    if !confirm_digest(
+        &digest,
+        plan.action_count(),
+        io::stdin().lock(),
+        io::stdout(),
+    ) {
+        return print_cancelled(locale, candidate.path(), &digest);
     }
     if approval_started.elapsed() >= APPROVAL_TTL {
         return print_result(
             format,
             locale,
-            Some(&candidate.path),
+            Some(candidate.path()),
             Some(&digest),
             Err(DeleteError::ConfirmationExpired),
         );
     }
 
-    let path = candidate.path.clone();
+    let path = candidate.path().to_path_buf();
     let result = candidate.submit(state_dir, &audit, &digest, approval_started);
     print_result(format, locale, Some(&path), Some(&digest), result)
+}
+
+impl PermanentCandidate {
+    fn capture(path: PathBuf, state_dir: Option<&Path>) -> Result<Self, DeleteError> {
+        validate_path_shape(&path)?;
+        let metadata = fs::symlink_metadata(&path).map_err(DeleteError::Inspect)?;
+        if metadata.file_type().is_symlink() {
+            return Err(DeleteError::NonCanonicalPath);
+        }
+        if metadata.is_file() {
+            PermanentFileCandidate::capture(path, state_dir).map(Self::File)
+        } else if metadata.is_dir() {
+            PermanentDirectoryCandidate::capture(path, state_dir).map(Self::Directory)
+        } else {
+            Err(DeleteError::UnsupportedType)
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::File(candidate) => &candidate.path,
+            Self::Directory(candidate) => &candidate.path,
+        }
+    }
+
+    fn plan(&self) -> PermanentPlan {
+        match self {
+            Self::File(candidate) => PermanentPlan::File(Box::new(candidate.plan())),
+            Self::Directory(candidate) => PermanentPlan::Directory(Box::new(candidate.plan())),
+        }
+    }
+
+    fn submit(
+        self,
+        state_dir: &Path,
+        audit: &AuditStore,
+        digest: &str,
+        approval_started: Instant,
+    ) -> Result<(), DeleteError> {
+        match self {
+            Self::File(candidate) => candidate.submit(state_dir, audit, digest, approval_started),
+            Self::Directory(candidate) => {
+                candidate.submit(state_dir, audit, digest, approval_started)
+            }
+        }
+    }
 }
 
 impl PermanentFileCandidate {
@@ -258,6 +431,9 @@ impl PermanentFileCandidate {
         validate_path_shape(&path)?;
         reject_protected_path(&path, state_dir)?;
         ensure_no_protection_marker(&path)?;
+        if path.file_name() == Some(OsStr::from_bytes(PROTECTION_MARKER)) {
+            return Err(DeleteError::ProtectionMarker(path));
+        }
 
         let parent_path = path.parent().ok_or(DeleteError::InvalidPath)?.to_path_buf();
         let basename = safe_component(path.file_name().ok_or(DeleteError::InvalidPath)?)?;
@@ -292,7 +468,7 @@ impl PermanentFileCandidate {
 
     fn plan(&self) -> PermanentFilePlan {
         PermanentFilePlan {
-            schema: PLAN_SCHEMA,
+            schema: FILE_PLAN_SCHEMA,
             created_at_unix_nanos: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos().to_string())
@@ -337,7 +513,7 @@ impl PermanentFileCandidate {
             return Err(DeleteError::ConfirmationExpired);
         }
         self.revalidate(Some(state_dir))?;
-        let binding = audit_binding(digest)?;
+        let binding = audit_binding(digest, ["action-000000".to_string()])?;
         let authorization_id = binding.authorization_id.clone();
         let plan_digest = binding.plan_digest.clone();
         audit
@@ -351,7 +527,7 @@ impl PermanentFileCandidate {
                 &claim,
                 IntentRequest {
                     item_id: ItemId::new("item-0001").map_err(audit_error)?,
-                    action_id: ActionId::new("action-0001").map_err(audit_error)?,
+                    action_id: ActionId::new("action-000000").map_err(audit_error)?,
                     source_path_hash: hash_native_path(&self.path).map_err(audit_error)?,
                     before_revalidation_digest: DigestString::new(format!(
                         "sha256:{}",
@@ -537,11 +713,677 @@ impl PermanentFileCandidate {
     }
 }
 
-fn persist_plan(
-    audit_root: &Path,
-    plan: &PermanentFilePlan,
-    digest: &str,
+impl PermanentDirectoryCandidate {
+    fn capture(path: PathBuf, state_dir: Option<&Path>) -> Result<Self, DeleteError> {
+        validate_path_shape(&path)?;
+        reject_protected_path(&path, state_dir)?;
+        ensure_no_protection_marker(&path)?;
+        if path.file_name() == Some(OsStr::from_bytes(PROTECTION_MARKER)) {
+            return Err(DeleteError::ProtectionMarker(path));
+        }
+
+        let parent_path = path.parent().ok_or(DeleteError::InvalidPath)?.to_path_buf();
+        let basename = safe_component(path.file_name().ok_or(DeleteError::InvalidPath)?)?;
+        let parent = open_directory(&parent_path).map_err(DeleteError::Inspect)?;
+        let parent_identity = identity_for_fd(&parent).map_err(DeleteError::Inspect)?;
+        let root = open_child_directory(&parent, path.file_name().ok_or(DeleteError::InvalidPath)?)
+            .map_err(DeleteError::Inspect)?;
+        let root_identity = identity_for_fd(&root).map_err(DeleteError::Inspect)?;
+        validate_directory_identity(&root_identity, &parent_identity)?;
+
+        let actions = capture_directory_manifest(&path, &root, &root_identity)?;
+        Ok(Self {
+            path,
+            parent_path,
+            basename,
+            parent,
+            root,
+            parent_identity,
+            root_identity,
+            actions,
+        })
+    }
+
+    fn plan(&self) -> PermanentDirectoryPlan {
+        let logical_bytes = self
+            .actions
+            .iter()
+            .filter(|action| action.object_type == PlannedObjectType::File)
+            .fold(0_u128, |sum, action| {
+                sum.saturating_add(u128::from(action.identity.size))
+            });
+        PermanentDirectoryPlan {
+            schema: DIRECTORY_PLAN_SCHEMA,
+            created_at_unix_nanos: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos().to_string())
+                .unwrap_or_else(|_| "invalid-clock".to_string()),
+            mode: "permanent",
+            path: self.path.display().to_string(),
+            path_bytes: self.path.as_os_str().as_bytes().to_vec(),
+            parent: self.parent_path.display().to_string(),
+            parent_bytes: self.parent_path.as_os_str().as_bytes().to_vec(),
+            basename_bytes: self.basename[..self.basename.len() - 1].to_vec(),
+            parent_device: self.parent_identity.device.to_string(),
+            parent_inode: self.parent_identity.inode.to_string(),
+            parent_mount_id: self.parent_identity.mount_id.to_string(),
+            logical_bytes: logical_bytes.to_string(),
+            action_count: self.actions.len(),
+            actions: self
+                .actions
+                .iter()
+                .map(|action| PermanentDirectoryPlanAction {
+                    action_id: action.action_id.clone(),
+                    relative_components: action.relative_components.clone(),
+                    display_path: action.display_path.display().to_string(),
+                    object_type: action.object_type,
+                    identity: action.identity.clone(),
+                })
+                .collect(),
+            policy_version: POLICY_VERSION,
+            adapter_version: ADAPTER_VERSION,
+            irreversible: true,
+            secure_erase: false,
+        }
+    }
+
+    fn submit(
+        self,
+        state_dir: &Path,
+        audit: &AuditStore,
+        digest: &str,
+        approval_started: Instant,
+    ) -> Result<(), DeleteError> {
+        if approval_started.elapsed() >= APPROVAL_TTL {
+            return Err(DeleteError::ConfirmationExpired);
+        }
+        self.revalidate_manifest(Some(state_dir))?;
+        let binding = audit_binding(
+            digest,
+            self.actions.iter().map(|action| action.action_id.clone()),
+        )?;
+        let authorization_id = binding.authorization_id.clone();
+        let plan_digest = binding.plan_digest.clone();
+        audit
+            .register_native_authorization(RegisterAuthorization { binding })
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+        let mut claim = audit
+            .claim_execution(&authorization_id, &plan_digest)
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+
+        let total = self.actions.len();
+        let mut completed = 0_usize;
+        for action in &self.actions {
+            let action_result =
+                self.execute_action(state_dir, audit, &mut claim, action, approval_started);
+            match action_result {
+                Ok(()) => completed += 1,
+                Err(error) => {
+                    if let Err(finalize_error) = record_remaining_actions_not_submitted(
+                        audit,
+                        &mut claim,
+                        &self.actions[completed + 1..],
+                        "skipped after an earlier directory manifest action stopped",
+                    ) {
+                        return Err(DeleteError::PostSubmitAudit(format!(
+                            "{error}; additionally failed to close later audit actions: {finalize_error}"
+                        )));
+                    }
+                    audit.consume_execution(&claim).map_err(|audit_error| {
+                        DeleteError::PostSubmitAudit(audit_error.to_string())
+                    })?;
+                    return Err(DeleteError::Partial {
+                        completed,
+                        total,
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        audit
+            .consume_execution(&claim)
+            .map_err(|error| DeleteError::PostSubmitAudit(error.to_string()))?;
+        Ok(())
+    }
+
+    fn revalidate_manifest(&self, state_dir: Option<&Path>) -> Result<(), DeleteError> {
+        reject_protected_path(&self.path, state_dir)?;
+        ensure_no_protection_marker(&self.path)?;
+        let current_parent = identity_for_fd(&self.parent).map_err(DeleteError::Inspect)?;
+        if !current_parent.same_object(&self.parent_identity) {
+            return Err(DeleteError::TargetChanged);
+        }
+        let reopened_parent = open_directory(&self.parent_path).map_err(DeleteError::Inspect)?;
+        if !identity_for_fd(&reopened_parent)
+            .map_err(DeleteError::Inspect)?
+            .same_object(&current_parent)
+        {
+            return Err(DeleteError::TargetChanged);
+        }
+        let current_root = identity_for_fd(&self.root).map_err(DeleteError::Inspect)?;
+        if current_root != self.root_identity {
+            return Err(DeleteError::TargetChanged);
+        }
+        let live_actions = capture_directory_manifest(&self.path, &self.root, &self.root_identity)?;
+        if live_actions != self.actions {
+            return Err(DeleteError::TargetChanged);
+        }
+        Ok(())
+    }
+
+    fn execute_action(
+        &self,
+        state_dir: &Path,
+        audit: &AuditStore,
+        claim: &mut sweepx_audit::ClaimedExecution,
+        action: &DirectoryAction,
+        approval_started: Instant,
+    ) -> Result<(), DeleteError> {
+        let source_hash = hash_native_path(&action.display_path).map_err(audit_error)?;
+        let revalidation_digest = DigestString::new(format!(
+            "sha256:{}",
+            sweepx_canonical::plan_digest_hex(&action.identity)
+                .map_err(|error| DeleteError::Audit(error.to_string()))?
+        ))
+        .map_err(audit_error)?;
+        let token = audit
+            .reserve_intent(
+                claim,
+                IntentRequest {
+                    item_id: ItemId::new("item-0001").map_err(audit_error)?,
+                    action_id: ActionId::new(action.action_id.clone()).map_err(audit_error)?,
+                    source_path_hash: source_hash,
+                    before_revalidation_digest: revalidation_digest,
+                },
+            )
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+        let armed = audit
+            .arm_native_intent(claim, token)
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+        armed
+            .validate_in_memory_current_process()
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+
+        let prepared = match self.prepare_action(state_dir, action) {
+            Ok(prepared) if approval_started.elapsed() < APPROVAL_TTL => prepared,
+            Ok(prepared) => {
+                let token = armed.into_durable_intent();
+                record_not_submitted(
+                    audit,
+                    claim,
+                    &token,
+                    Some(&prepared.current),
+                    "approval expired before directory action submission",
+                )?;
+                return Err(DeleteError::ConfirmationExpired);
+            }
+            Err(error) => {
+                let token = armed.into_durable_intent();
+                record_not_submitted(
+                    audit,
+                    claim,
+                    &token,
+                    None,
+                    &format!("directory action final preflight refused: {error}"),
+                )?;
+                return Err(error);
+            }
+        };
+
+        let flags = if action.object_type == PlannedObjectType::Directory {
+            libc::AT_REMOVEDIR
+        } else {
+            0
+        };
+        let started_at = SystemTime::now();
+        // SAFETY: prepared holds the exact revalidated parent descriptor and a validated,
+        // NUL-terminated basename. The flag selects only unlink or nonrecursive rmdir.
+        let unlink_result = unsafe {
+            libc::unlinkat(
+                prepared.parent.as_raw_fd(),
+                prepared.basename.as_ptr().cast(),
+                flags,
+            )
+        };
+        let backend_error = (unlink_result != 0).then(io::Error::last_os_error);
+        let sync_error = if backend_error.is_none() {
+            File::from(prepared.parent.try_clone().map_err(DeleteError::Inspect)?)
+                .sync_all()
+                .err()
+        } else {
+            None
+        };
+        let finished_at = SystemTime::now();
+        let token = armed.into_durable_intent();
+        let observed = metadata_at(&prepared.parent, &prepared.basename);
+        let source_postcheck = observation_from_metadata(&observed);
+        let outcome = if let Some(error) = &backend_error {
+            ActionOutcome::native_permanent_failure(
+                ADAPTER_VERSION,
+                started_at,
+                finished_at,
+                source_postcheck.clone(),
+                matches!(&observed, Ok(current) if action_identity_matches(action, current)),
+                "errno",
+                error.raw_os_error().unwrap_or(-1).to_string(),
+                "unlinkat_failed",
+                vec![format!("directory manifest action {}", action.action_id)],
+            )
+        } else if let Some(error) = &sync_error {
+            ActionOutcome::native_permanent_indeterminate(
+                ADAPTER_VERSION,
+                started_at,
+                finished_at,
+                source_postcheck,
+                vec![format!(
+                    "parent directory fsync failed after unlinkat: {error}"
+                )],
+            )
+        } else if !source_postcheck.exists {
+            ActionOutcome::native_permanent_success(
+                ADAPTER_VERSION,
+                started_at,
+                finished_at,
+                source_postcheck,
+                "unlinkat_succeeded",
+                vec![format!("directory manifest action {}", action.action_id)],
+            )
+        } else {
+            ActionOutcome::native_permanent_indeterminate(
+                ADAPTER_VERSION,
+                started_at,
+                finished_at,
+                source_postcheck,
+                vec!["unlinkat returned success but postcheck observed the basename".to_string()],
+            )
+        }
+        .map_err(audit_error)?;
+        audit
+            .record_outcome(claim, &token, outcome)
+            .map_err(|error| DeleteError::PostSubmitAudit(error.to_string()))?;
+
+        match (backend_error, sync_error, observed) {
+            (Some(error), _, Ok(current)) if action_identity_matches(action, &current) => {
+                Err(DeleteError::Backend(error))
+            }
+            (Some(_), _, _) | (None, Some(_), _) => Err(DeleteError::OutcomeUnknown),
+            (None, None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            (None, None, _) => Err(DeleteError::OutcomeUnknown),
+        }
+    }
+
+    fn prepare_action(
+        &self,
+        state_dir: &Path,
+        action: &DirectoryAction,
+    ) -> Result<PreparedDirectoryAction, DeleteError> {
+        reject_protected_path(&self.path, Some(state_dir))?;
+        ensure_no_protection_marker(&self.path)?;
+        self.verify_root_binding()?;
+        ensure_marker_absent(&self.root, &self.path)?;
+        if action.relative_components.is_empty() {
+            let current =
+                metadata_at(&self.parent, &self.basename).map_err(DeleteError::Inspect)?;
+            if !action_identity_matches(action, &current) {
+                return Err(DeleteError::TargetChanged);
+            }
+            return Ok(PreparedDirectoryAction {
+                parent: self.parent.try_clone().map_err(DeleteError::Inspect)?,
+                basename: self.basename.clone(),
+                current,
+            });
+        }
+
+        let mut parent = self.root.try_clone().map_err(DeleteError::Inspect)?;
+        let parent_components = &action.relative_components[..action.relative_components.len() - 1];
+        let mut opened_components = Vec::new();
+        for component in parent_components {
+            parent = open_child_directory(&parent, OsStr::from_bytes(component))
+                .map_err(DeleteError::Inspect)?;
+            opened_components.push(component.clone());
+            let expected = self
+                .actions
+                .iter()
+                .find(|candidate| {
+                    candidate.object_type == PlannedObjectType::Directory
+                        && candidate.relative_components == opened_components
+                })
+                .ok_or(DeleteError::TargetChanged)?;
+            let observed = identity_for_fd(&parent).map_err(DeleteError::Inspect)?;
+            if !action_identity_matches(expected, &observed) {
+                return Err(DeleteError::TargetChanged);
+            }
+            ensure_marker_absent(
+                &parent,
+                &root_path_from_relative(&self.path, &opened_components),
+            )?;
+        }
+        let basename = safe_component(OsStr::from_bytes(
+            action
+                .relative_components
+                .last()
+                .expect("non-root action has basename"),
+        ))?;
+        let current = metadata_at(&parent, &basename).map_err(DeleteError::Inspect)?;
+        if !action_identity_matches(action, &current) {
+            return Err(DeleteError::TargetChanged);
+        }
+        if action.object_type == PlannedObjectType::Directory {
+            let target_directory = open_child_directory(
+                &parent,
+                OsStr::from_bytes(
+                    action
+                        .relative_components
+                        .last()
+                        .expect("non-root action has basename"),
+                ),
+            )
+            .map_err(DeleteError::Inspect)?;
+            ensure_marker_absent(&target_directory, &action.display_path)?;
+        }
+        Ok(PreparedDirectoryAction {
+            parent,
+            basename,
+            current,
+        })
+    }
+
+    fn verify_root_binding(&self) -> Result<(), DeleteError> {
+        let parent = identity_for_fd(&self.parent).map_err(DeleteError::Inspect)?;
+        if !parent.same_object(&self.parent_identity) {
+            return Err(DeleteError::TargetChanged);
+        }
+        let reopened_parent = open_directory(&self.parent_path).map_err(DeleteError::Inspect)?;
+        if !identity_for_fd(&reopened_parent)
+            .map_err(DeleteError::Inspect)?
+            .same_object(&self.parent_identity)
+        {
+            return Err(DeleteError::TargetChanged);
+        }
+        let root = identity_for_fd(&self.root).map_err(DeleteError::Inspect)?;
+        if !root.same_object(&self.root_identity) {
+            return Err(DeleteError::TargetChanged);
+        }
+        let named = metadata_at(&self.parent, &self.basename).map_err(DeleteError::Inspect)?;
+        if !named.same_object(&self.root_identity) {
+            return Err(DeleteError::TargetChanged);
+        }
+        Ok(())
+    }
+}
+
+fn record_remaining_actions_not_submitted(
+    audit: &AuditStore,
+    claim: &mut sweepx_audit::ClaimedExecution,
+    actions: &[DirectoryAction],
+    note: &str,
 ) -> Result<(), DeleteError> {
+    for action in actions {
+        let token = audit
+            .reserve_intent(
+                claim,
+                IntentRequest {
+                    item_id: ItemId::new("item-0001").map_err(audit_error)?,
+                    action_id: ActionId::new(action.action_id.clone()).map_err(audit_error)?,
+                    source_path_hash: hash_native_path(&action.display_path)
+                        .map_err(audit_error)?,
+                    before_revalidation_digest: DigestString::new(format!(
+                        "sha256:{}",
+                        sweepx_canonical::plan_digest_hex(&action.identity)
+                            .map_err(|error| DeleteError::Audit(error.to_string()))?
+                    ))
+                    .map_err(audit_error)?,
+                },
+            )
+            .map_err(|error| DeleteError::Audit(error.to_string()))?;
+        record_not_submitted(audit, claim, &token, None, note)?;
+    }
+    Ok(())
+}
+
+fn action_identity_matches(action: &DirectoryAction, current: &FileIdentity) -> bool {
+    match action.object_type {
+        PlannedObjectType::File => current == &action.identity,
+        // Removing approved children necessarily changes a directory's ctime, mtime, size and
+        // link count. The directory action therefore binds the native object, mount, filesystem,
+        // owner and type while the exact child set is enforced separately by nonrecursive rmdir.
+        PlannedObjectType::Directory => {
+            current.same_object(&action.identity)
+                && current.filesystem_magic == action.identity.filesystem_magic
+                && current.uid == action.identity.uid
+                && current.mode & libc::S_IFMT == libc::S_IFDIR
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedDirectoryAction {
+    parent: OwnedFd,
+    basename: Vec<u8>,
+    current: FileIdentity,
+}
+
+fn observation_from_metadata(observed: &io::Result<FileIdentity>) -> Observation {
+    match observed {
+        Ok(current) => Observation {
+            exists: true,
+            identity: Some(identity_text(current)),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Observation {
+            exists: false,
+            identity: None,
+        },
+        Err(_) => Observation {
+            exists: true,
+            identity: None,
+        },
+    }
+}
+
+fn record_not_submitted(
+    audit: &AuditStore,
+    claim: &sweepx_audit::ClaimedExecution,
+    token: &sweepx_audit::DurableIntentToken,
+    current: Option<&FileIdentity>,
+    note: &str,
+) -> Result<(), DeleteError> {
+    let outcome = ActionOutcome::native_permanent_not_submitted(
+        ADAPTER_VERSION,
+        SystemTime::now(),
+        Observation {
+            // `None` means the caller could not prove the later action's current identity; it
+            // does not prove absence. Keep the action indeterminate instead of inventing vanish.
+            exists: true,
+            identity: current.map(identity_text),
+        },
+        vec![note.to_string()],
+    )
+    .map_err(audit_error)?;
+    audit
+        .record_outcome(claim, token, outcome)
+        .map_err(|error| DeleteError::Audit(error.to_string()))
+}
+
+fn validate_directory_identity(
+    identity: &FileIdentity,
+    parent_identity: &FileIdentity,
+) -> Result<(), DeleteError> {
+    if identity.mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(DeleteError::UnsupportedType);
+    }
+    ensure_supported_local_filesystem(identity)?;
+    if identity.uid != current_euid() {
+        return Err(DeleteError::OwnershipMismatch);
+    }
+    if identity.mount_id != parent_identity.mount_id {
+        return Err(DeleteError::ProtectedPath);
+    }
+    Ok(())
+}
+
+fn capture_directory_manifest(
+    root_path: &Path,
+    root: &OwnedFd,
+    root_identity: &FileIdentity,
+) -> Result<Vec<DirectoryAction>, DeleteError> {
+    let mut actions = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert((
+        root_identity.mount_id,
+        root_identity.device,
+        root_identity.inode,
+    ));
+    let mut retained_path_bytes = 0_usize;
+    capture_directory_postorder(
+        root_path,
+        root,
+        root_identity,
+        Vec::new(),
+        root_identity.clone(),
+        &mut actions,
+        &mut visited,
+        &mut retained_path_bytes,
+    )?;
+    for (index, action) in actions.iter_mut().enumerate() {
+        action.action_id = format!("action-{index:06}");
+    }
+    Ok(actions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_directory_postorder(
+    root_path: &Path,
+    directory: &OwnedFd,
+    root_identity: &FileIdentity,
+    relative_components: Vec<Vec<u8>>,
+    identity: FileIdentity,
+    actions: &mut Vec<DirectoryAction>,
+    visited: &mut HashSet<(u64, u64, u64)>,
+    retained_path_bytes: &mut usize,
+) -> Result<(), DeleteError> {
+    if relative_components.len() > MAX_DIRECTORY_DEPTH {
+        return Err(DeleteError::ResourceLimit("maximum depth"));
+    }
+    let display_path = root_path_from_relative(root_path, &relative_components);
+    ensure_marker_absent(directory, &display_path)?;
+    let mut children = read_directory_names(directory)?;
+    children.sort();
+    if actions
+        .len()
+        .saturating_add(children.len())
+        .saturating_add(1)
+        > MAX_DIRECTORY_ACTIONS
+    {
+        return Err(DeleteError::ResourceLimit("256-action"));
+    }
+
+    for name in children {
+        let name_os = OsStr::from_bytes(&name);
+        let mut child_relative = relative_components.clone();
+        child_relative.push(name.clone());
+        let child_display = root_path_from_relative(root_path, &child_relative);
+        if name_os == OsStr::from_bytes(PROTECTION_MARKER) {
+            return Err(DeleteError::ProtectionMarker(child_display));
+        }
+        let pinned = open_entry_at(directory, name_os).map_err(DeleteError::Inspect)?;
+        let child_identity = identity_for_fd(&pinned).map_err(DeleteError::Inspect)?;
+        if child_identity.mount_id != root_identity.mount_id
+            || child_identity.device != root_identity.device
+            || child_identity.filesystem_magic != root_identity.filesystem_magic
+            || child_identity.uid != current_euid()
+        {
+            return Err(DeleteError::ProtectedPath);
+        }
+        if child_identity.mode & libc::S_IFMT == libc::S_IFREG {
+            if child_identity.hard_link_count != 1 {
+                return Err(DeleteError::MultipleHardLinks);
+            }
+            account_manifest_path(retained_path_bytes, &child_relative)?;
+            ensure_action_capacity(actions)?;
+            actions.push(DirectoryAction {
+                action_id: String::new(),
+                relative_components: child_relative,
+                display_path: child_display,
+                object_type: PlannedObjectType::File,
+                identity: child_identity,
+            });
+        } else if child_identity.mode & libc::S_IFMT == libc::S_IFDIR {
+            if !visited.insert((
+                child_identity.mount_id,
+                child_identity.device,
+                child_identity.inode,
+            )) {
+                return Err(DeleteError::TargetChanged);
+            }
+            let child_directory =
+                open_child_directory(directory, name_os).map_err(DeleteError::Inspect)?;
+            let opened_identity =
+                identity_for_fd(&child_directory).map_err(DeleteError::Inspect)?;
+            if opened_identity != child_identity {
+                return Err(DeleteError::TargetChanged);
+            }
+            capture_directory_postorder(
+                root_path,
+                &child_directory,
+                root_identity,
+                child_relative,
+                child_identity,
+                actions,
+                visited,
+                retained_path_bytes,
+            )?;
+        } else {
+            return Err(DeleteError::UnsupportedType);
+        }
+    }
+    account_manifest_path(retained_path_bytes, &relative_components)?;
+    ensure_action_capacity(actions)?;
+    actions.push(DirectoryAction {
+        action_id: String::new(),
+        relative_components,
+        display_path,
+        object_type: PlannedObjectType::Directory,
+        identity,
+    });
+    Ok(())
+}
+
+fn account_manifest_path(
+    retained_path_bytes: &mut usize,
+    relative_components: &[Vec<u8>],
+) -> Result<(), DeleteError> {
+    let path_bytes = relative_components
+        .iter()
+        .try_fold(0_usize, |total, component| {
+            total.checked_add(component.len().saturating_add(1))
+        });
+    *retained_path_bytes = retained_path_bytes
+        .checked_add(path_bytes.ok_or(DeleteError::ResourceLimit("manifest path-byte"))?)
+        .ok_or(DeleteError::ResourceLimit("manifest path-byte"))?;
+    if *retained_path_bytes > MAX_MANIFEST_PATH_BYTES {
+        Err(DeleteError::ResourceLimit("1 MiB manifest path-byte"))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_action_capacity(actions: &[DirectoryAction]) -> Result<(), DeleteError> {
+    if actions.len() >= MAX_DIRECTORY_ACTIONS {
+        Err(DeleteError::ResourceLimit("256-action"))
+    } else {
+        Ok(())
+    }
+}
+
+fn root_path_from_relative(root: &Path, components: &[Vec<u8>]) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(OsStr::from_bytes(component));
+    }
+    path
+}
+
+fn persist_plan(audit_root: &Path, plan: &PermanentPlan, digest: &str) -> Result<(), DeleteError> {
     let path = audit_root.join(format!("plan-{digest}.json"));
     let mut file = OpenOptions::new()
         .write(true)
@@ -577,7 +1419,7 @@ fn persist_plan(
 fn prepare_audit(
     audit_root: &Path,
     state_dir: &Path,
-    plan: &PermanentFilePlan,
+    plan: &PermanentPlan,
     digest: &str,
 ) -> Result<AuditStore, DeleteError> {
     // Reuse Core's no-follow, owner-private state admission before creating the audit child.
@@ -589,19 +1431,25 @@ fn prepare_audit(
     Ok(audit)
 }
 
-fn audit_binding(digest: &str) -> Result<AuthorizationBinding, DeleteError> {
+fn audit_binding(
+    digest: &str,
+    raw_action_ids: impl IntoIterator<Item = String>,
+) -> Result<AuthorizationBinding, DeleteError> {
     let mut item_ids = BTreeSet::new();
     item_ids.insert(ItemId::new("item-0001").map_err(audit_error)?);
     let mut action_ids = BTreeSet::new();
-    let action = ActionId::new("action-0001").map_err(audit_error)?;
-    action_ids.insert(action.clone());
     let mut item_by_action = BTreeMap::new();
-    item_by_action.insert(
-        action.clone(),
-        ItemId::new("item-0001").map_err(audit_error)?,
-    );
     let mut risk_by_action = BTreeMap::new();
-    risk_by_action.insert(action, RiskTier::R4);
+    let item_id = ItemId::new("item-0001").map_err(audit_error)?;
+    for action_id in raw_action_ids {
+        let action = ActionId::new(action_id).map_err(audit_error)?;
+        if !action_ids.insert(action.clone()) {
+            return Err(DeleteError::Audit("duplicate plan action id".to_string()));
+        }
+        item_by_action.insert(action.clone(), item_id.clone());
+        risk_by_action.insert(action, RiskTier::R4);
+    }
+    let action_count = action_ids.len() as u64;
     Ok(AuthorizationBinding {
         authorization_id: AuthorizationId::new(format!("permanent-{}", &digest[..32]))
             .map_err(audit_error)?,
@@ -612,7 +1460,7 @@ fn audit_binding(digest: &str) -> Result<AuthorizationBinding, DeleteError> {
         requested_mode: RequestedMode::Permanent,
         item_ids,
         action_ids,
-        action_count: 1,
+        action_count,
         item_by_action,
         risk_by_action,
         policy_version: POLICY_VERSION.to_string(),
@@ -667,18 +1515,32 @@ fn reject_protected_path(path: &Path, state_dir: Option<&Path>) -> Result<(), De
     ];
     if exact.contains(&path)
         || trees.iter().any(|protected| path.starts_with(protected))
-        || path == executable
+        || executable.starts_with(path)
         || cwd.starts_with(path)
         || home.as_ref().is_some_and(|home| path == home)
         || state_dir.is_some_and(|state| path.starts_with(state) || state.starts_with(path))
-        || home.as_ref().is_some_and(|home| {
-            path.starts_with(home.join(".local/share/Trash"))
-                || path.starts_with(home.join(".local/state/sweepx"))
-        })
+        || protected_user_trees(&home)
+            .iter()
+            .any(|protected| path.starts_with(protected) || protected.starts_with(path))
     {
         return Err(DeleteError::ProtectedPath);
     }
     Ok(())
+}
+
+fn protected_user_trees(home: &Option<PathBuf>) -> Vec<PathBuf> {
+    let mut protected = Vec::new();
+    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
+        protected.push(state_home.join("sweepx"));
+    } else if let Some(home) = home {
+        protected.push(home.join(".local/state/sweepx"));
+    }
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+        protected.push(data_home.join("Trash"));
+    } else if let Some(home) = home {
+        protected.push(home.join(".local/share/Trash"));
+    }
+    protected
 }
 
 fn ensure_no_protection_marker(path: &Path) -> Result<(), DeleteError> {
@@ -735,6 +1597,75 @@ fn open_child_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
         )
     };
     owned_fd(fd)
+}
+
+fn open_entry_at(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+    let name = safe_component(name).map_err(|error| io::Error::other(error.to_string()))?;
+    // SAFETY: parent is live and name is one validated, NUL-terminated component. O_NOFOLLOW
+    // pins the directory entry itself and never follows a symlink target.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr().cast(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_fd(fd)
+}
+
+fn read_directory_names(directory: &OwnedFd) -> Result<Vec<Vec<u8>>, DeleteError> {
+    // A dup shares the directory offset with the retained authority descriptor, so reopening `.`
+    // is required for each snapshot. Otherwise a second revalidation would start at EOF and
+    // falsely describe a non-empty directory as empty.
+    // SAFETY: directory is live and the constant `.` is NUL terminated. The result is a fresh
+    // directory descriptor with an independent enumeration offset.
+    let raw = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(DeleteError::Inspect(io::Error::last_os_error()));
+    }
+    // SAFETY: raw is a fresh live directory descriptor. On success fdopendir takes ownership and
+    // closedir below becomes its sole closer.
+    let stream = unsafe { libc::fdopendir(raw) };
+    if stream.is_null() {
+        // SAFETY: fdopendir failed and did not consume the valid descriptor.
+        unsafe { libc::close(raw) };
+        return Err(DeleteError::Inspect(io::Error::last_os_error()));
+    }
+    let mut names = Vec::new();
+    let result = loop {
+        if names.len() >= MAX_DIRECTORY_ACTIONS {
+            break Err(DeleteError::ResourceLimit("256-action"));
+        }
+        // SAFETY: errno location belongs to this thread. Clearing it distinguishes EOF from error.
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        // SAFETY: stream is live and used only by this loop.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(DeleteError::Inspect(error))
+            };
+        }
+        // SAFETY: readdir returned a valid dirent with a NUL-terminated d_name.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        names.push(name.to_vec());
+    };
+    // SAFETY: stream was returned by fdopendir and is closed exactly once here.
+    unsafe { libc::closedir(stream) };
+    result.map(|()| names)
 }
 
 fn open_directory(path: &Path) -> io::Result<OwnedFd> {
@@ -839,29 +1770,6 @@ impl FileIdentity {
     }
 }
 
-impl Serialize for FileIdentity {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        (
-            self.device,
-            self.inode,
-            self.mount_id,
-            self.filesystem_magic,
-            self.uid,
-            self.mode,
-            self.hard_link_count,
-            self.size,
-            self.modified_seconds,
-            self.modified_nanoseconds,
-            self.changed_seconds,
-            self.changed_nanoseconds,
-        )
-            .serialize(serializer)
-    }
-}
-
 fn filesystem_magic(fd: &OwnedFd) -> io::Result<i64> {
     let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: fd is live and stat points to writable storage.
@@ -883,7 +1791,7 @@ fn ensure_supported_local_filesystem(identity: &FileIdentity) -> Result<(), Dele
     if KNOWN_LOCAL.contains(&filesystem) {
         Ok(())
     } else {
-        Err(DeleteError::UnsupportedType)
+        Err(DeleteError::UnsupportedFilesystem)
     }
 }
 
@@ -947,31 +1855,68 @@ fn is_foreground_terminal() -> bool {
     foreground >= 0 && foreground == unsafe { libc::getpgrp() }
 }
 
-fn print_plan(locale: Locale, plan: &PermanentFilePlan, digest: &str) {
+fn print_plan(locale: Locale, plan: &PermanentPlan, digest: &str) {
     let fingerprint = sweepx_canonical::attention_fingerprint_from_digest_hex(digest);
+    let path = terminal_text(plan.path());
+    let target_kind = match plan {
+        PermanentPlan::File(_) => "file",
+        PermanentPlan::Directory(_) => "directory",
+    };
     match locale {
         Locale::ZhCn => {
             println!("永久删除计划（不可恢复，不是安全擦除）");
-            println!("  路径：{}", plan.path);
-            println!("  大小：{} 字节", plan.size_bytes);
+            println!("  类型：{target_kind}");
+            println!("  路径：{path}");
+            println!("  动作：{} 个", plan.action_count());
+            println!("  大小：{} 字节", plan.size_bytes());
             println!("  风险：R4");
             println!("  计划指纹：{fingerprint}");
             println!("  完整计划摘要：{digest}");
         }
         Locale::EnUs => {
             println!("Permanent deletion plan (irreversible; not secure erase)");
-            println!("  path: {}", plan.path);
-            println!("  size: {} bytes", plan.size_bytes);
+            println!("  type: {target_kind}");
+            println!("  path: {path}");
+            println!("  actions: {}", plan.action_count());
+            println!("  size: {} bytes", plan.size_bytes());
             println!("  risk: R4");
             println!("  plan fingerprint: {fingerprint}");
             println!("  full plan digest: {digest}");
         }
     }
+    if let PermanentPlan::Directory(directory) = plan {
+        for action in &directory.actions {
+            println!(
+                "  [{}] {:?}: {}",
+                action.action_id,
+                action.object_type,
+                terminal_text(&action.display_path)
+            );
+        }
+    }
 }
 
-fn confirm_digest<R: BufRead, W: Write>(digest: &str, reader: R, mut writer: W) -> bool {
-    let challenge = format!("PERMANENT 1 1 {digest}");
-    let _ = write!(writer, "Type `{challenge}` to delete this exact file: ");
+fn terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| {
+            if character.is_control() {
+                character.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+
+fn confirm_digest<R: BufRead, W: Write>(
+    digest: &str,
+    action_count: usize,
+    reader: R,
+    mut writer: W,
+) -> bool {
+    let challenge = format!("PERMANENT 1 {action_count} {digest}");
+    let _ = write!(writer, "Type `{challenge}` to delete this exact target: ");
     let _ = writer.flush();
     let mut answer = String::new();
     let read = reader.take(MAX_CONFIRMATION_BYTES).read_line(&mut answer);
@@ -990,7 +1935,7 @@ fn print_result(
     digest: Option<&str>,
     result: Result<(), DeleteError>,
 ) -> ProcessExitCode {
-    let path = path.map(|path| path.display().to_string());
+    let path = path.map(|path| terminal_text(&path.display().to_string()));
     match result {
         Ok(()) => {
             if format == OutputFormat::Human {
@@ -1076,37 +2021,46 @@ mod tests {
         let digest = "abc123";
         assert!(confirm_digest(
             digest,
+            1,
             &b"PERMANENT 1 1 abc123\n"[..],
             Vec::new()
         ));
         assert!(!confirm_digest(
             digest,
+            1,
             &b"permanent 1 1 abc123\n"[..],
+            Vec::new()
+        ));
+        assert!(confirm_digest(
+            digest,
+            4,
+            &b"PERMANENT 1 4 abc123\n"[..],
             Vec::new()
         ));
         assert!(!confirm_digest(
             digest,
+            4,
+            &b"PERMANENT 1 1 abc123\n"[..],
+            Vec::new()
+        ));
+        assert!(!confirm_digest(
+            digest,
+            1,
             &b"PERMANENT 1 1 other\n"[..],
             Vec::new()
         ));
         assert!(!confirm_digest(
             digest,
+            1,
             &b" PERMANENT 1 1 abc123\n"[..],
             Vec::new()
         ));
     }
 
     #[test]
-    fn rejects_directory_link_and_marker_protected_file() {
+    fn rejects_link_and_marker_protected_file() {
         let fixture = TempDir::new().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        let directory = root.join("directory");
-        fs::create_dir(&directory).unwrap();
-        assert!(matches!(
-            PermanentFileCandidate::capture(directory, None),
-            Err(DeleteError::UnsupportedType)
-        ));
-
         let file = root.join("file");
         fs::write(&file, b"keep").unwrap();
         let link = root.join("link");
@@ -1152,6 +2106,19 @@ mod tests {
     }
 
     #[test]
+    fn resolved_absolute_path_guidance_is_actionable() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let file = root.join("file");
+        fs::write(&file, b"keep").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        let error = PermanentCandidate::capture(link, None).unwrap_err();
+        assert!(error.to_string().contains("realpath -- PATH"));
+    }
+
+    #[test]
     fn submitted_file_is_unlinked_and_durably_audited() {
         let fixture = TempDir::new().unwrap();
         let root = fixture.path().canonicalize().unwrap();
@@ -1159,7 +2126,7 @@ mod tests {
         let state = root.join("state");
         fs::write(&path, b"delete me").unwrap();
         let candidate = PermanentFileCandidate::capture(path.clone(), Some(&state)).unwrap();
-        let plan = candidate.plan();
+        let plan = PermanentPlan::File(Box::new(candidate.plan()));
         let digest = sweepx_canonical::plan_digest_hex(&plan).unwrap();
 
         let audit_root = state.join("permanent-delete-audit");
@@ -1190,5 +2157,239 @@ mod tests {
         assert!(!projection.batches[0].needs_reconciliation);
         assert_eq!(projection.batches[0].items.len(), 1);
         assert!(plan_path.is_file());
+    }
+
+    #[test]
+    fn directory_manifest_is_postorder_and_includes_root_last() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        fs::create_dir_all(directory.join("nested")).unwrap();
+        fs::write(directory.join("a"), b"a").unwrap();
+        fs::write(directory.join("nested/b"), b"b").unwrap();
+
+        let candidate = PermanentDirectoryCandidate::capture(directory, None).unwrap();
+        assert_eq!(candidate.actions.len(), 4);
+        assert!(
+            candidate
+                .actions
+                .last()
+                .unwrap()
+                .relative_components
+                .is_empty()
+        );
+        for (directory_index, action) in candidate.actions.iter().enumerate() {
+            if action.object_type != PlannedObjectType::Directory {
+                continue;
+            }
+            assert!(
+                candidate.actions[directory_index + 1..]
+                    .iter()
+                    .all(|later| {
+                        !later
+                            .relative_components
+                            .starts_with(&action.relative_components)
+                            || later.relative_components.len() <= action.relative_components.len()
+                    })
+            );
+        }
+    }
+
+    #[test]
+    fn submitted_directory_removes_exact_manifest_and_audits_each_action() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        let state = root.join("state");
+        fs::create_dir_all(directory.join("nested")).unwrap();
+        fs::write(directory.join("a"), b"a").unwrap();
+        fs::write(directory.join("nested/b"), b"b").unwrap();
+        let candidate =
+            PermanentDirectoryCandidate::capture(directory.clone(), Some(&state)).unwrap();
+        let action_count = candidate.actions.len();
+        let plan = PermanentPlan::Directory(Box::new(candidate.plan()));
+        let digest = sweepx_canonical::plan_digest_hex(&plan).unwrap();
+        let audit_root = state.join("permanent-delete-audit");
+        let audit = prepare_audit(&audit_root, &state, &plan, &digest).unwrap();
+
+        candidate
+            .submit(&state, &audit, &digest, Instant::now())
+            .unwrap();
+
+        assert!(!directory.exists());
+        let integrity = audit.verify_integrity().unwrap();
+        assert_eq!(integrity.action_sequence, (action_count * 2) as u64);
+        assert_eq!(integrity.latest_sequence, (action_count * 2 + 3) as u64);
+        let projection = audit.projection_snapshot().unwrap();
+        assert_eq!(
+            projection.batches[0].state,
+            sweepx_protocol::AuditProjectionState::Terminal
+        );
+        assert!(!projection.batches[0].needs_reconciliation);
+    }
+
+    #[test]
+    fn directory_revalidation_refuses_new_children_without_deleting_anything() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("planned"), b"planned").unwrap();
+        let candidate = PermanentDirectoryCandidate::capture(directory.clone(), None).unwrap();
+        fs::write(directory.join("late"), b"late").unwrap();
+
+        assert!(matches!(
+            candidate.revalidate_manifest(None),
+            Err(DeleteError::TargetChanged)
+        ));
+        assert!(directory.join("planned").exists());
+        assert!(directory.join("late").exists());
+    }
+
+    #[test]
+    fn directory_action_preserves_new_children_and_audits_source_unchanged() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        let state = root.join("state");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("planned"), b"planned").unwrap();
+        let candidate =
+            PermanentDirectoryCandidate::capture(directory.clone(), Some(&state)).unwrap();
+        let plan = PermanentPlan::Directory(Box::new(candidate.plan()));
+        let digest = sweepx_canonical::plan_digest_hex(&plan).unwrap();
+        let audit_root = state.join("permanent-delete-audit");
+        let audit = prepare_audit(&audit_root, &state, &plan, &digest).unwrap();
+        let binding = audit_binding(
+            &digest,
+            candidate
+                .actions
+                .iter()
+                .map(|action| action.action_id.clone()),
+        )
+        .unwrap();
+        let authorization_id = binding.authorization_id.clone();
+        let plan_digest = binding.plan_digest.clone();
+        audit
+            .register_native_authorization(RegisterAuthorization { binding })
+            .unwrap();
+        let mut claim = audit
+            .claim_execution(&authorization_id, &plan_digest)
+            .unwrap();
+
+        candidate
+            .execute_action(
+                &state,
+                &audit,
+                &mut claim,
+                &candidate.actions[0],
+                Instant::now(),
+            )
+            .unwrap();
+        fs::write(directory.join("late"), b"late").unwrap();
+        let error = candidate
+            .execute_action(
+                &state,
+                &audit,
+                &mut claim,
+                &candidate.actions[1],
+                Instant::now(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, DeleteError::Backend(ref source) if source.raw_os_error() == Some(libc::ENOTEMPTY))
+        );
+        assert!(!directory.join("planned").exists());
+        assert!(directory.join("late").exists());
+        assert!(directory.exists());
+        record_remaining_actions_not_submitted(
+            &audit,
+            &mut claim,
+            &candidate.actions[2..],
+            "skipped after root removal observed an unplanned child",
+        )
+        .unwrap();
+        audit.consume_execution(&claim).unwrap();
+        let projection = audit.projection_snapshot().unwrap();
+        assert_eq!(
+            projection.batches[0].state,
+            sweepx_protocol::AuditProjectionState::Terminal
+        );
+        assert!(!projection.batches[0].needs_reconciliation);
+    }
+
+    #[test]
+    fn directory_manifest_refuses_symlink_and_action_overflow() {
+        let symlink_fixture = TempDir::new().unwrap();
+        let symlink_root = symlink_fixture.path().canonicalize().unwrap();
+        let directory = symlink_root.join("tree");
+        fs::create_dir(&directory).unwrap();
+        std::os::unix::fs::symlink("target", directory.join("link")).unwrap();
+        assert!(matches!(
+            PermanentDirectoryCandidate::capture(directory, None),
+            Err(DeleteError::UnsupportedType)
+        ));
+
+        let limit_fixture = TempDir::new().unwrap();
+        let limit_root = limit_fixture.path().canonicalize().unwrap();
+        let directory = limit_root.join("tree");
+        fs::create_dir(&directory).unwrap();
+        for index in 0..MAX_DIRECTORY_ACTIONS {
+            fs::write(directory.join(format!("file-{index:03}")), b"x").unwrap();
+        }
+        assert!(matches!(
+            PermanentDirectoryCandidate::capture(directory, None),
+            Err(DeleteError::ResourceLimit("256-action"))
+        ));
+    }
+
+    #[test]
+    fn directory_manifest_refuses_nested_protection_marker() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        fs::create_dir_all(directory.join("nested")).unwrap();
+        fs::write(directory.join("nested/.sweepx-protect"), b"").unwrap();
+
+        assert!(matches!(
+            PermanentDirectoryCandidate::capture(directory, None),
+            Err(DeleteError::ProtectionMarker(_))
+        ));
+    }
+
+    #[test]
+    fn empty_directory_is_one_nonrecursive_action() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("empty");
+        fs::create_dir(&directory).unwrap();
+
+        let candidate = PermanentDirectoryCandidate::capture(directory, None).unwrap();
+        assert_eq!(candidate.actions.len(), 1);
+        assert_eq!(
+            candidate.actions[0].object_type,
+            PlannedObjectType::Directory
+        );
+        assert!(candidate.actions[0].relative_components.is_empty());
+    }
+
+    #[test]
+    fn directory_plan_digest_binds_every_manifest_entry() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let directory = root.join("tree");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("a"), b"a").unwrap();
+        let candidate = PermanentDirectoryCandidate::capture(directory.clone(), None).unwrap();
+        let first = PermanentPlan::Directory(Box::new(candidate.plan()));
+        let first_digest = sweepx_canonical::plan_digest_hex(&first).unwrap();
+
+        fs::write(directory.join("b"), b"b").unwrap();
+        let candidate = PermanentDirectoryCandidate::capture(directory, None).unwrap();
+        let second = PermanentPlan::Directory(Box::new(candidate.plan()));
+        let second_digest = sweepx_canonical::plan_digest_hex(&second).unwrap();
+
+        assert_ne!(first_digest, second_digest);
     }
 }

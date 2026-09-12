@@ -485,6 +485,12 @@ fn capabilities_json_uses_fixed_machine_keys() {
             {
                 assert_eq!(record.state, CapabilityState::Degraded);
                 assert_eq!(record.reason_code, "LINUX_PERMANENT_FILE_PREVIEW");
+            } else if os_family == OsFamily::Linux
+                && cfg!(target_os = "linux")
+                && capability == CapabilityCell::PERMANENT_LOCAL_DIRECTORY
+            {
+                assert_eq!(record.state, CapabilityState::Degraded);
+                assert_eq!(record.reason_code, "LINUX_PERMANENT_DIRECTORY_PREVIEW");
             } else {
                 assert_eq!(record.state, CapabilityState::Disabled);
                 assert_eq!(record.reason_code, reason_code);

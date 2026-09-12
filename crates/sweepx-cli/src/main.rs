@@ -236,14 +236,15 @@ enum Commands {
         #[arg(required = true, value_name = "ABSOLUTE_PATH")]
         path: OsString,
     },
-    /// Permanently delete one regular file on Linux.
+    /// Permanently delete one bounded local file or directory tree on Linux.
     ///
     /// This irreversible development preview requires human output, a foreground terminal, an
-    /// exact digest-derived challenge, durable audit, and immediate identity revalidation. It is
-    /// never used as a fallback from `trash`.
+    /// exact digest-derived challenge, durable per-action audit, and immediate identity
+    /// revalidation. Directories use a bounded closed manifest and nonrecursive postorder actions.
+    /// It is never used as a fallback from `trash`.
     #[cfg(target_os = "linux")]
     Delete {
-        #[arg(required = true, value_name = "ABSOLUTE_REGULAR_FILE")]
+        #[arg(required = true, value_name = "ABSOLUTE_FILE_OR_DIRECTORY")]
         path: OsString,
     },
     Capabilities,

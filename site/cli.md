@@ -7,7 +7,7 @@ title: CLI 与安全清理预览
 当前 `sweepx` 是唯一的可执行入口。它提供 `scan`、`junk`、`explain`、`status`、`cancel`、`cache`、`cleaner`、`trash`、Linux `delete` 和 `capabilities`；`scan --tui` 在根目录准入后立即进入交互浏览，并在后台渐进扫描。
 
 > [!CAUTION]
-> `trash` 仍是默认的可恢复动作，失败不会 fallback。Linux `delete` 是独立的单普通文件 R4 Permanent preview：要求 canonical 绝对路径、前台终端完整摘要挑战、durable plan/intent 与提交前身份重验。目录/link/批量/跨平台 Permanent，以及通用 `plan`、`approve`、`execute` 仍未实现。
+> `trash` 仍是默认的可恢复动作，失败不会 fallback。Linux `delete` 是独立的有界文件/目录 R4 Permanent preview：要求解析后的绝对路径、前台终端完整摘要挑战、封闭 manifest、逐项 durable intent/outcome 与提交前身份重验。link、超限/跨平台 Permanent，以及通用 `plan`、`approve`、`execute` 仍未实现。
 
 ## 构建与查看能力
 
@@ -34,9 +34,9 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 ### P4a.2 资格记录不是新命令
 
-协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前主机的两个 Trash cell 为 `degraded` preview；Linux `permanent.local.file` 也为 `degraded` preview，其余 Permanent cell 仍为 `disabled`。
+协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前主机的两个 Trash cell 与 Linux file/directory Permanent 为 `degraded` preview；link 和其他平台 Permanent 仍为 `disabled`。
 
-这些记录仍是失败关闭的 qualification registry substrate；`degraded` preview 不等于 `qualified`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前没有通用 `plan`/approval UI；Permanent adapter 仅覆盖 Linux 单普通文件。
+这些记录仍是失败关闭的 qualification registry substrate；`degraded` preview 不等于 `qualified`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前没有通用 `plan`/approval UI；Permanent adapter 仅覆盖 Linux 有界普通文件/真实目录树。
 
 ## 安装
 
@@ -241,15 +241,15 @@ TUI 直接消费本次 live scan 的 typed 结果，不要求中间 JSON。单�
 
 `--tui` 要求 stdin/stdout 都是终端，并且不能与 `--format json|ndjson` 组合。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录的递归大小在后台扫描时约每 120 ms 以明确的下限值（`>=`）增量回填并重排，最终结果再收敛为 exact 或 incomplete，后代不作为列表行长期保存。进度通道容量为 1，慢终端只会丢弃已过时的中间快照，不会反压扫描。目录 detail rescan 以 single-flight 后台任务运行：30 秒是无进展 deadline，有有效增量时续期；导航或退出不会等待非协作 worker。
 
-## Linux 单文件永久删除预览
+## Linux 有界文件/目录永久删除预览
 
 ```bash
-cargo run -p sweepx-cli -- delete /canonical/absolute/path/to/file
+cargo run -p sweepx-cli -- delete "$(realpath -- /path/to/file-or-directory)"
 ```
 
-`delete` 是 Linux-only、R4、不可恢复的 development preview。它只接受当前用户拥有且 hard-link count 为 1 的单个普通文件；路径必须已 canonicalize，不能经过 symlink，目录、link、special file、root/capability-bearing 进程、系统/home/state/Trash/cwd/executable 保护范围及任一祖先中的 `.sweepx-protect` 都会失败关闭。命令只接受 human 输出且 stdin/stdout 必须处于前台终端。
+`delete` 是 Linux-only、R4、不可恢复的 development preview。它接受当前用户拥有的普通文件，或最多 256 个动作、深度 64、累计路径数据 1 MiB 的真实目录树；普通文件 hard-link count 必须为 1。路径必须是 `realpath -- PATH` 得到的解析后绝对路径，不能包含 `.` / `..` 或经过 symlink。link、special file、跨 mount、root/capability-bearing 进程、系统/home/state/Trash/cwd/executable 保护范围及任一祖先/后代中的 `.sweepx-protect` 都会失败关闭。命令只接受 human 输出且 stdin/stdout 必须处于前台终端。
 
-执行前会展示完整 canonical digest，并要求逐字输入 `PERMANENT 1 1 <FULL_DIGEST>`。计划先写入当前用户私有的 `state/permanent-delete-audit/`，随后 durable audit 记录 authorization、claim 和 action intent；最后再次重验保护链、parent/object identity、类型、local filesystem、mount、owner、hard-link count 与 metadata fingerprint，才对 retained parent FD + exact basename 调用一次 `unlinkat`。提交后记录 outcome 并 fsync parent directory。Linux 没有“仅当 basename 仍指向已打开 inode 时才 unlink”的通用原子接口，因此最终 identity check 与 `unlinkat` 之间仍有明确的同 UID pathname race；本功能保持 preview 状态。该命令没有递归、批量、`--yes`、`--force`、`--permanently` 或 `--dangerously-delete` 旁路；它也永远不会被 `trash` 失败触发。Permanent 表示绕过回收站，不是 secure erase。
+执行前会展示完整 canonical digest，并要求逐字输入 `PERMANENT 1 <ACTION_COUNT> <FULL_DIGEST>`。计划先写入当前用户私有的 `state/permanent-delete-audit/`；目录会将每个后代绑定为独立 action，按后序逐项执行。每项都先写 durable intent，再重验保护链、parent/object identity、类型、local filesystem、mount、owner、hard-link count 与 metadata fingerprint，最后只调用一次 parent-relative `unlinkat` 或 nonrecursive `rmdir`，并写入独立 outcome。新增/替换对象不会被顺手删除；若已有动作成功，结果明确报告 partial。Linux 没有“仅当 basename 仍指向已打开 inode 时才 unlink”的通用原子接口，因此最终 identity check 与 `unlinkat` 之间仍有明确的同 UID pathname race；本功能保持 preview 状态。该命令没有无界递归、`--yes`、`--force`、`--permanently` 或 `--dangerously-delete` 旁路；它也永远不会被 `trash` 失败触发。Permanent 表示绕过回收站，不是 secure erase。
 
 扫描加速和跨平台垃圾规则的来源、可借鉴点、GPL 边界以及 Linux 策略见 [MangoDisk 采用决策](https://github.com/lejunyang/sweepx/blob/main/docs/research/mangodisk-adoption.md)。
 
@@ -336,7 +336,7 @@ sweepx execute ...
 sweepx execute ... --dangerously-delete
 ```
 
-P3 中有对应概念的 library model 与 fake execution tests，但仍没有通用 plan/approve/execute CLI。Linux 单普通文件 `delete` 是独立 preview，不使用这组通用命令。
+P3 中有对应概念的 library model 与 fake execution tests，但仍没有通用 plan/approve/execute CLI。Linux 有界文件/目录 `delete` 是独立 preview，不使用这组通用命令。
 
 ## `site-storage`
 

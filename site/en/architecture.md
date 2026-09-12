@@ -4,7 +4,7 @@ title: Architecture
 
 # Architecture
 
-SweepX centers shared protocols and safety types while separating runnable scan/preview paths, the narrow Linux single-file Permanent path, and the general mutation model that still exists only as library simulation.
+SweepX centers shared protocols and safety types while separating runnable scan/preview paths, the narrow Linux bounded file/directory Permanent path, and the general mutation model that still exists only as library simulation.
 
 ## Current data flow
 
@@ -44,7 +44,7 @@ The Scanner also now exposes a bounded locator batch reader so read-only upper l
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 
-Linux `delete` reuses `sweepx-audit` exact authorization, claim, intent, outcome, and fencing, but does not make the general P3 executor native. The CLI constructs and persists one single-file R4 plan and, after revalidation, submits exactly one basename-relative `unlinkat` against a retained parent FD. That adapter does not exist in non-Linux builds.
+Linux `delete` reuses `sweepx-audit` exact authorization, claim, intent, outcome, and fencing, but does not make the general P3 executor native. The CLI constructs and persists one closed R4 plan of at most 256 actions. A file uses one exact-basename `unlinkat`; a directory runs manifest-bound `unlinkat`/nonrecursive `rmdir` actions in postorder. That adapter does not exist in non-Linux builds.
 
 ## State and cancellation
 
@@ -70,7 +70,7 @@ The P3 library layering deliberately leaves nowhere to plug in native mutation:
 - the adapter trait is sealed and its only implementation is deterministic and fake.
 - audit persistence is currently Unix-only; the separate Linux scan event-state path has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, and degraded completed-stream replay. Because that replay covers only completed, persisted streams and events are still constructed after scanning, this is still not live, cross-platform, or runtime-qualified native-mutation storage.
 
-The P3 executor itself supports state-machine and crash-semantics tests without deleting a target. Real Linux single-file `delete` is a separate constrained CLI path; it exposes no native adapter trait, directory manifest, or batch execution.
+The P3 executor itself supports state-machine and crash-semantics tests without deleting a target. Real Linux file/directory `delete` is a separate constrained CLI path; it exposes no native adapter trait or unbounded/cross-target batch execution.
 
 ## Future architecture direction
 
@@ -81,4 +81,4 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-Beyond the first two steps and read-only views, the public surface now has only the Linux single-file local plan/challenge/intent/unlink/outcome path. General native platform actions, an approval broker, and plan/execute CLI wiring remain unimplemented.
+Beyond the first two steps and read-only views, the public surface now has only the Linux bounded file/directory local closed-plan/challenge/per-action-intent/unlink/outcome path. General native platform actions, an approval broker, and plan/execute CLI wiring remain unimplemented.

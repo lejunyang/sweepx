@@ -2233,7 +2233,11 @@ pub fn capabilities(_context: &CoreContext) -> Result<CapabilitiesSuccess, CoreE
             &qualification_expires_at,
             OsFamily::Linux,
             CapabilityCell::PERMANENT_LOCAL_DIRECTORY,
-            "PERMANENT_QUALIFICATION_ABSENT",
+            if current_os == "linux" {
+                "LINUX_PERMANENT_DIRECTORY_PREVIEW"
+            } else {
+                "PERMANENT_QUALIFICATION_ABSENT"
+            },
             EvidenceClass::Incomplete,
         ),
         mutation_capability_record(
@@ -5226,7 +5230,10 @@ fn mutation_capability_record(
     evidence_class: EvidenceClass,
 ) -> CapabilityRecordV1 {
     let preview_trash = reason_code == "TRASH_PREVIEW_REQUIRES_CONFIRMATION_AND_REVALIDATION";
-    let preview_permanent = reason_code == "LINUX_PERMANENT_FILE_PREVIEW";
+    let preview_permanent = matches!(
+        reason_code,
+        "LINUX_PERMANENT_FILE_PREVIEW" | "LINUX_PERMANENT_DIRECTORY_PREVIEW"
+    );
     let mut record = capability_record(
         recorded_at,
         qualification_expires_at,
@@ -5249,10 +5256,10 @@ fn mutation_capability_record(
         ]
     } else if preview_permanent {
         vec![
-            "Linux single-regular-file preview only; not release-qualified".to_string(),
+            "Linux bounded local file/directory preview only; not release-qualified".to_string(),
             "foreground exact-digest confirmation and immediate identity revalidation required"
                 .to_string(),
-            "directories, links, special files, batches, elevated runtimes, and Trash fallback are refused"
+            "links, special files, over-limit or cross-mount trees, cross-target batches, elevated runtimes, and Trash fallback are refused"
                 .to_string(),
         ]
     } else {
@@ -5336,6 +5343,9 @@ fn capability_reason(reason_code: &str) -> &'static str {
         }
         "LINUX_PERMANENT_FILE_PREVIEW" => {
             "Linux can permanently unlink one ordinary-user-owned regular file after exact foreground-terminal confirmation, durable intent, and immediate parent/object identity revalidation; this preview is not release-qualified or secure erase."
+        }
+        "LINUX_PERMANENT_DIRECTORY_PREVIEW" => {
+            "Linux can permanently remove one bounded, closed, ordinary-user-owned file/directory manifest after exact foreground-terminal confirmation and per-action durable audit/revalidation; this preview is not release-qualified or secure erase."
         }
         "CANCEL_LIVE_REGISTRY_ABSENT" => {
             "Cancel is disabled because P1 does not maintain a live in-process operation registry."

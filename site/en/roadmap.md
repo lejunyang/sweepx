@@ -17,8 +17,8 @@ The roadmap defines capability and evidence gates, not dates. Code may land befo
 | P1 scanner CLI | Linux read-only scan is degraded and has a bounded SQLite journal, one-transaction complete-stream/terminal persistence, journal-first status, and degraded completed replay through `status --watch --format ndjson`; macOS and Windows retain legacy snapshots; Windows scan is handle-relative degraded | Linux replay covers only completed, persisted streams: it performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown-valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. It is still non-live, does not wait for new events, does not create a background operation, and does not support cancel; `scan --no-state` explicitly skips operation-state writes and conflicts with `--state-dir`; the Windows state directory has private-DACL/owner/reparse-point protection but still no event journal; the live sink, runtime qualification, `scan --format ndjson`, and three-platform/resource gates remain open |
 | P2 analysis/TUI/Cleaner | Bounded explain, progressive directory browsing through `scan --tui`, metadata-only Cleaner, report-only project and platform user-cache `junk` rules, plus read-only preview-cache diagnostics | Imported explain input is report-only; TUI enters after root admission, lists the current level first, then updates direct-directory sizes with throttled lower-bound snapshots before converging to exact/incomplete evidence. `cache status` remains bounded and read-only. `junk --system` now reports arbitrary-name current-user `/tmp` direct-child objects that are on the same device, removable, inactive for seven days, and not observably referenced; `/var/tmp`, Windows OS handlers, and shared stores remain excluded; signing/sandbox/full cross-surface qualification remain open |
 | P3 plan/audit/simulation | Immutable plans, simulation-only authorization, Unix audit/recovery, and a sealed fake executor are implemented; Linux bounded journaling, one-transaction complete-stream/terminal persistence, and degraded completed replay exist | Replay is still non-live, not runtime-qualified, and Linux-only for completed persisted streams; there is no trusted HumanApproval broker, native path, real revalidation, live event sink, `scan --format ndjson`, non-Linux journal parity, or platform adapter; the phase is not qualified |
-| P4a qualification substrate | Linux `cfg(test)` disposable fixture; P4a.2 typed/validated qualification records and five independent mutation cells; current-host file/directory Trash and Linux single-file Permanent cells can report a degraded preview | macOS/Windows Trash, directory/link/cross-platform Permanent remain disabled; no release-qualified native adapter, batch mutation command, or general approval UI exists |
-| P4+ mutation | An explicitly confirmed, live-revalidated single-item Trash preview, digest-bound Linux stale-temporary quarantine, and Linux single-regular-file Permanent preview are public | Qualified Trash, directory/link/cross-platform Permanent, and general batch plan execution remain future work |
+| P4a qualification substrate | Linux `cfg(test)` disposable fixture; P4a.2 typed/validated qualification records and five independent mutation cells; current-host file/directory Trash and Linux bounded file/directory Permanent cells can report a degraded preview | macOS/Windows Trash and link/over-limit/cross-platform Permanent remain disabled; no release-qualified native adapter, cross-target batch mutation command, or general approval UI exists |
+| P4+ mutation | An explicitly confirmed, live-revalidated single-item Trash preview, digest-bound Linux stale-temporary quarantine, and Linux bounded file/directory Permanent preview are public | Qualified Trash, link/over-limit/cross-platform Permanent, and general batch plan execution remain future work |
 | Release engineering | CI, Pages, five target archives/checksums, Unix/Windows installers, ordered crates.io publication, and the v0.0.1 development release exist | No stable release yet; signing, SBOM, and provenance gates remain open |
 
 ## Phase targets
@@ -48,9 +48,9 @@ The nearest active work is P3 libraries. They converge only while model and faul
 
 Even completing those items does not automatically create a `sweepx plan/approve/execute` CLI. Public API design, trusted local approval, real live revalidation, and native adapters are separate later work.
 
-## Hard stop before P4
+## Hard stop for P4 release qualification
 
-Before the first native Trash test, the project needs at least:
+Before any native mutation can be called release-qualified, the project needs at least:
 
 1. an exact OS/architecture/filesystem/provider capability tuple;
 2. disposable fixtures and an independent oracle;
@@ -59,13 +59,13 @@ Before the first native Trash test, the project needs at least:
 5. proof that every Trash failure path avoids Permanent;
 6. consistent identity, risk, and outcome semantics across CLI, TUI, Agent, and Cleaner.
 
-The narrow Linux single-regular-file Permanent preview now exists, but the overall cross-platform P4 release gate is not met.
+The narrow Linux bounded file/directory Permanent preview now exists, but the overall cross-platform P4 release gate is not met.
 
-P4a.2 completes only the fail-closed qualification-registry contract. `trash.local.file` and `trash.local.directory` report degraded on the current host; Linux `permanent.local.file` is also degraded, while every other Permanent cell remains disabled. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, and `mismatched` evidence can never qualify mutation; a single cell could qualify later only with current `real_os_qualification` evidence that completely matches its exact tuple.
+P4a.2 completes only the fail-closed qualification-registry contract. `trash.local.file` and `trash.local.directory` report degraded on the current host; Linux file/directory Permanent is also degraded, while link and all non-Linux Permanent cells remain disabled. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, and `mismatched` evidence can never qualify mutation; a single cell could qualify later only with current `real_os_qualification` evidence that completely matches its exact tuple.
 
 ## Future commands remain proposals
 
-`plan create/show`, trusted broker approval, `execute`, and `--dangerously-delete` remain absent from the command tree. Linux `delete` is a separate locally confirmed single-file preview, not a general plan-execution surface.
+`plan create/show`, trusted broker approval, `execute`, and `--dangerously-delete` remain absent from the command tree. Linux `delete` is a separate locally confirmed bounded single-target preview, not a general plan-execution surface.
 
 ## Newly recorded milestone
 

@@ -7,7 +7,7 @@ title: CLI and guarded cleanup previews
 The current `sweepx` binary is the sole executable entry point. It exposes `scan`, `junk`, `explain`, `status`, `cancel`, `cache`, `cleaner`, `trash`, Linux `delete`, and `capabilities`; `scan --tui` enters after root admission and scans progressively in the background.
 
 > [!CAUTION]
-> `trash` remains the default recoverable action and never falls back. Linux `delete` is a separate single-regular-file R4 Permanent preview: it requires a canonical absolute path, full-digest foreground-terminal challenge, durable plan/intent, and immediate identity revalidation. Directory/link/batch/cross-platform Permanent and general `plan`/`approve`/`execute` remain unimplemented.
+> `trash` remains the default recoverable action and never falls back. Linux `delete` is a separate bounded file/directory R4 Permanent preview: it requires a resolved absolute path, full-digest foreground-terminal challenge, a closed manifest, per-action durable intent/outcome, and immediate identity revalidation. Link, unbounded/cross-platform Permanent, and general `plan`/`approve`/`execute` remain unimplemented.
 
 ## Build and inspect capabilities
 
@@ -34,9 +34,9 @@ Locale resolution considers the explicit override, locale environment, and syste
 
 ### P4a.2 qualification records are not a new command
 
-The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. The current host's two Trash cells are reported as a `degraded` preview. Linux `permanent.local.file` is also a `degraded` preview; every other Permanent cell remains `disabled`.
+The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. The current host's Trash cells and Linux file/directory Permanent cells are `degraded` previews; link and every non-Linux Permanent cell remain `disabled`.
 
-These records remain a fail-closed qualification-registry substrate; a `degraded` preview is not `qualified`. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. There is still no general plan/approval UI; the Permanent adapter covers only one regular file on Linux.
+These records remain a fail-closed qualification-registry substrate; a `degraded` preview is not `qualified`. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. There is still no general plan/approval UI; the Permanent adapter covers only bounded regular-file/real-directory trees on Linux.
 
 ## Install
 
@@ -253,15 +253,15 @@ The TUI consumes the typed result of this live scan without an intermediate JSON
 
 `--tui` requires terminal stdin and stdout and cannot be combined with `--format json|ndjson`. The TUI enters after root admission and auto-opens a single root. Direct children appear first; while the background scan runs, recursive directory totals are merged and resorted as explicit lower bounds (`>=`) at roughly 120 ms intervals. The final result then converges to exact or explicitly incomplete evidence, without retaining descendants as list rows. A one-slot progress channel drops superseded intermediate snapshots instead of applying terminal backpressure. Detail rescans are single-flight; 30 seconds is a no-progress deadline renewed by valid updates, and navigation or quit does not wait for a non-cooperative worker.
 
-## Linux single-file Permanent preview
+## Linux bounded file/directory Permanent preview
 
 ```bash
-cargo run -p sweepx-cli -- delete /canonical/absolute/path/to/file
+cargo run -p sweepx-cli -- delete "$(realpath -- /path/to/file-or-directory)"
 ```
 
-`delete` is a Linux-only, R4, irreversible development preview. It accepts one regular file owned by the current user with a hard-link count of one. The path must already be canonical and cannot traverse a symlink. Directories, links, special files, root/capability-bearing processes, protected system/home/state/Trash/cwd/executable scopes, and any ancestry containing `.sweepx-protect` fail closed. The command accepts only human output with stdin and stdout attached to the foreground terminal.
+`delete` is a Linux-only, R4, irreversible development preview. It accepts a current-user-owned regular file or a real directory tree bounded to 256 actions, depth 64, and 1 MiB of retained path data; regular files require a hard-link count of one. The path must be the resolved absolute path returned by `realpath -- PATH`, with no `.` / `..` or symlink traversal. Links, special files, mount crossings, root/capability-bearing processes, protected system/home/state/Trash/cwd/executable scopes, and any ancestor or descendant containing `.sweepx-protect` fail closed. The command accepts only human output with stdin and stdout attached to the foreground terminal.
 
-Before execution it displays the full canonical digest and requires the exact `PERMANENT 1 1 <FULL_DIGEST>` challenge. The plan is persisted under the current user's private `state/permanent-delete-audit/`; durable audit then records authorization, claim, and action intent. Only after one last protection, parent/object identity, type, local-filesystem, mount, owner, hard-link-count, and metadata-fingerprint check does it call `unlinkat` once against the retained parent FD and exact basename. It records the outcome and fsyncs the parent directory. Linux has no general atomic “unlink only if this basename still names the opened inode” primitive, so an explicit same-UID pathname race remains between the last identity check and `unlinkat`; this is why the capability stays a preview. There is no recursive/batch mode or `--yes`, `--force`, `--permanently`, or `--dangerously-delete` bypass, and Trash failure never invokes it. Permanent means bypassing Trash; it is not secure erase.
+Before execution it displays the full canonical digest and requires the exact `PERMANENT 1 <ACTION_COUNT> <FULL_DIGEST>` challenge. The plan is persisted under the current user's private `state/permanent-delete-audit/`. A directory binds every descendant as a separate action and runs them in postorder. Each action receives its own durable intent, protection/parent/object/type/filesystem/mount/owner/hard-link/fingerprint check, one parent-relative `unlinkat` or nonrecursive `rmdir`, and its own outcome. New or replaced objects are never swept in; if earlier actions succeeded, the result is explicitly partial. Linux has no general atomic “unlink only if this basename still names the opened inode” primitive, so an explicit same-UID pathname race remains between the last identity check and `unlinkat`; this is why the capability stays a preview. There is no unbounded recursion or `--yes`, `--force`, `--permanently`, or `--dangerously-delete` bypass, and Trash failure never invokes it. Permanent means bypassing Trash; it is not secure erase.
 
 See [MangoDisk adoption decisions](https://github.com/lejunyang/sweepx/blob/main/docs/research/mangodisk-adoption.md) for acceleration findings, rule provenance, the GPL boundary, and the Linux policy.
 
@@ -354,7 +354,7 @@ sweepx execute ...
 sweepx execute ... --dangerously-delete
 ```
 
-P3 has library models and fake-execution tests for related concepts, but there is still no general plan/approve/execute CLI. Linux single-regular-file `delete` is a separate preview rather than that general surface.
+P3 has library models and fake-execution tests for related concepts, but there is still no general plan/approve/execute CLI. Linux bounded file/directory `delete` is a separate preview rather than that general surface.
 
 ## `site-storage`
 

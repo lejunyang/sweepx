@@ -888,6 +888,49 @@ impl SimulatedOutcome {
         Ok(outcome)
     }
 
+    /// Records a native Permanent action that was refused before platform submission.
+    pub fn native_permanent_not_submitted(
+        adapter_version: impl Into<String>,
+        at: SystemTime,
+        source_postcheck: Observation,
+        notes: Vec<String>,
+    ) -> Result<Self, AuditError> {
+        let (stable_status, recovery_state) =
+            if source_postcheck.exists && source_postcheck.identity.is_some() {
+                (
+                    StableStatus::FailedSourceUnchanged,
+                    RecoveryState::FailedSourceUnchanged,
+                )
+            } else if !source_postcheck.exists {
+                (
+                    StableStatus::VanishedBeforeAction,
+                    RecoveryState::VanishedBeforeAction,
+                )
+            } else {
+                (
+                    StableStatus::IndeterminatePlatformResult,
+                    RecoveryState::Indeterminate,
+                )
+            };
+        let outcome = Self {
+            actual_platform_operation: "native_permanent_unlink".to_string(),
+            adapter_version: adapter_version.into(),
+            started_at: at,
+            finished_at: at,
+            stable_status,
+            recovery_state,
+            source_postcheck,
+            destination_postcheck: None,
+            resulting_trash_locator: None,
+            platform_result: None,
+            platform_error_domain: None,
+            platform_error_code: None,
+            notes,
+        };
+        validate_outcome_shape(RequestedMode::Permanent, &outcome)?;
+        Ok(outcome)
+    }
+
     pub fn failed_source_unchanged(
         mode: RequestedMode,
         adapter_version: impl Into<String>,

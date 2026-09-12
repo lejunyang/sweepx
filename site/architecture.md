@@ -4,7 +4,7 @@ title: 架构
 
 # 架构
 
-SweepX 以共享的协议与安全类型为中心，把可运行的扫描/预览路径、Linux 单文件 Permanent 窄路径和仍在 library 层的通用模拟 mutation model 分开。
+SweepX 以共享的协议与安全类型为中心，把可运行的扫描/预览路径、Linux 有界文件/目录 Permanent 窄路径和仍在 library 层的通用模拟 mutation model 分开。
 
 ## 当前数据流
 
@@ -44,7 +44,7 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
 
-Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个单文件 R4 plan，重验后只向 retained parent FD 提交一次 exact-basename `unlinkat`；该 adapter 在非 Linux 构建中不存在。
+Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个最多 256 action 的封闭 R4 plan；普通文件执行一次 exact-basename `unlinkat`，目录按 manifest 后序逐项执行 `unlinkat`/nonrecursive `rmdir`。该 adapter 在非 Linux 构建中不存在。
 
 ## 状态与取消
 
@@ -70,7 +70,7 @@ P3 的库分层有意让 native mutation 无处接入：
 - adapter trait sealed，唯一实现是 deterministic fake adapter。
 - audit persistence 当前仅支持 Unix；独立的 Linux scan event-state 路径已有 bounded SQLite journal、单事务完整流/terminal persistence，以及 degraded completed-stream replay。由于该 replay 只覆盖已完成且已持久化的 stream，且事件仍在 scan 后批量构造，它仍不是 live、跨平台或 runtime-qualified 的 native mutation 存储。
 
-这套 P3 executor 本身只测试状态机与崩溃语义，不会删除目标。真实 Linux 单文件 `delete` 是独立的受限 CLI 路径；它没有开放 native adapter trait、目录 manifest 或批量执行。
+这套 P3 executor 本身只测试状态机与崩溃语义，不会删除目标。真实 Linux 文件/目录 `delete` 是独立的受限 CLI 路径；它没有开放 native adapter trait 或无界/跨目标批量执行。
 
 ## 未来架构方向
 
@@ -81,4 +81,4 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
      -> platform action -> reconcile -> audit
 ```
 
-当前公共表面除前两步和只读视图外，只增加了 Linux 单文件的本地 plan/challenge/intent/unlink/outcome 窄路径；通用 native platform action、approval broker 与 plan/execute CLI wiring 仍未实现。
+当前公共表面除前两步和只读视图外，只增加了 Linux 有界文件/目录的本地 closed-plan/challenge/per-action-intent/unlink/outcome 窄路径；通用 native platform action、approval broker 与 plan/execute CLI wiring 仍未实现。

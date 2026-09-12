@@ -17,8 +17,8 @@ title: 路线图
 | P1 scanner CLI | Linux read-only scan degraded，且已有 bounded SQLite journal、单事务完整流/terminal persistence、journal-first status，以及 degraded 的 `status --watch --format ndjson` completed replay；macOS 与 Windows 保留 legacy snapshot；Windows scan handle-relative degraded | Linux replay 只覆盖已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown-valid cursor 返回 `stream.reset_required`，malformed cursor/usage 是 usage error。它仍 non-live，不等待新事件，不创建后台 operation，也不支持 cancel；`scan --no-state` 可显式跳过 operation state 写入且与 `--state-dir` 冲突；Windows state directory 已有 private-DACL/owner/reparse-point 防护，但仍没有 event journal；live sink、runtime qualification、`scan --format ndjson` 与三平台/资源 gate 未闭合 |
 | P2 analysis/TUI/Cleaner | bounded explain、`scan --tui` 渐进目录浏览、metadata-only Cleaner、项目与三平台用户缓存的 `junk` report-only 规则，以及 preview cache 只读诊断 | imported explain input report-only；TUI 根准入后立即进入，先列当前层，再以 120 ms 节流的下限快照增量更新直接子目录大小，最终结果收敛为 exact/incomplete；single-flight 使用 30 s 无进展 deadline、late result discard、单槽背压和 32 stuck-worker cap；`cache status` 只做 bounded preview-cache inspection；`junk --system` 已以 R3/report-only 枚举当前用户拥有、同设备、可删除、7 天未活跃且未观察到引用的任意名称 `/tmp` 直接子对象，但 `/var/tmp`、Windows OS handler 和共享存储仍未接入；签名/沙箱/完整跨表面资格未闭合 |
 | P3 plan/audit/simulation | immutable plan、simulation-only authorization、Unix audit/recovery、sealed fake executor 已实现；Linux bounded journal、单事务 complete-stream/terminal persistence，以及 degraded completed-stream replay 已实现 | replay 仍 non-live、非 runtime-qualified，且只适用于 Linux completed stream；没有可信 HumanApproval broker、native path、真实 revalidation、live event sink、`scan --format ndjson`、非 Linux journal parity 或 platform adapter；阶段尚未资格化 |
-| P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell；当前主机的 file/directory Trash cell 和 Linux single-file Permanent cell 可报告 degraded preview | macOS/Windows Trash cell、目录/link/跨平台 Permanent 仍 disabled；尚无 release-qualified native adapter、批量 mutation command 或通用 approval UI |
-| P4+ mutation | 显式确认、实时重验的单对象 Trash preview，Linux 陈旧临时对象摘要绑定隔离，以及 Linux 单普通文件 Permanent preview | 资格化 Trash、目录/link/跨平台 Permanent 与通用批量计划执行仍是未来工作 |
+| P4a 资格底座 | Linux `cfg(test)` disposable fixture；P4a.2 typed/validated qualification records 与五个独立 mutation cell；当前主机的 file/directory Trash cell 和 Linux bounded file/directory Permanent cell 可报告 degraded preview | macOS/Windows Trash cell、link/超限/跨平台 Permanent 仍 disabled；尚无 release-qualified native adapter、跨目标批量 mutation command 或通用 approval UI |
+| P4+ mutation | 显式确认、实时重验的单对象 Trash preview，Linux 陈旧临时对象摘要绑定隔离，以及 Linux 有界文件/目录 Permanent preview | 资格化 Trash、link/超限/跨平台 Permanent 与通用批量计划执行仍是未来工作 |
 | 发布工程 | CI、Pages、五目标归档/checksum、Unix/Windows 安装器、crates.io 顺序发布与 v0.0.1 开发版本已实现 | 尚无稳定 release；签名、SBOM 与 provenance gate 未完成 |
 
 ## 阶段目标
@@ -48,9 +48,9 @@ title: 路线图
 
 即便完成这些，也不会自动产生 `sweepx plan/approve/execute` CLI。公共接口设计、可信本地审批、真实 live revalidation 和 native adapter 是后续独立工作。
 
-## P4 之前的硬停止线
+## P4 发布资格的硬停止线
 
-在第一个 native Trash test 之前，至少需要：
+在宣称 native mutation 达到发布资格之前，至少需要：
 
 1. 精确 OS/arch/filesystem/provider capability tuple；
 2. disposable fixture 与独立 oracle；
@@ -59,13 +59,13 @@ title: 路线图
 5. 证明所有 Trash failure path 不会进入 Permanent；
 6. CLI/TUI/Agent/Cleaner 对相同身份、风险与结果保持一致。
 
-Linux 单普通文件 Permanent 已落地一条窄 preview，但尚未达到这一整套跨平台 P4 发布门槛。
+Linux 有界文件/目录 Permanent 已落地一条窄 preview，但尚未达到这一整套跨平台 P4 发布门槛。
 
-P4a.2 完成的是失败关闭的 qualification registry 合同，不是发布资格。当前运行平台的 `trash.local.file` 与 `trash.local.directory` cell 可报告 `degraded` preview；Linux `permanent.local.file` 也为 `degraded`，其他 Permanent cell 仍为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 和 `mismatched` evidence 永远不能把 mutation 提升为 `qualified`；未来也只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，单个 cell 才可能合格。
+P4a.2 完成的是失败关闭的 qualification registry 合同，不是发布资格。当前运行平台的 `trash.local.file` 与 `trash.local.directory` cell 可报告 `degraded` preview；Linux file/directory Permanent 也为 `degraded`，link 和其他平台 Permanent 仍为 `disabled`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 和 `mismatched` evidence 永远不能把 mutation 提升为 `qualified`；未来也只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，单个 cell 才可能合格。
 
 ## 未来命令仍然只是提案
 
-`plan create/show`、trusted broker approval、`execute` 和 `--dangerously-delete` 仍不在当前命令树。Linux `delete` 是独立的本地前台确认单文件 preview，不代表通用计划执行已经落地。
+`plan create/show`、trusted broker approval、`execute` 和 `--dangerously-delete` 仍不在当前命令树。Linux `delete` 是独立的本地前台确认、有界单目标 preview，不代表通用计划执行已经落地。
 
 ## 新近里程碑记录
 
