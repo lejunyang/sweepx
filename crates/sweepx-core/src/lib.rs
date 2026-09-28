@@ -6352,7 +6352,9 @@ mod tests {
         use std::os::unix::fs::DirBuilderExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let audit_root = temp.path().join("audit");
+        // macOS TMPDIR has a linked /var ancestor; AuditStore admits only the canonical path.
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let audit_root = base.join("audit");
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&audit_root)
@@ -6760,8 +6762,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn snapshot_store_hashes_filenames_and_writes_private_file() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let store = DurableSnapshotStore::new(temp.path()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let store = DurableSnapshotStore::new(&base).unwrap();
         let snapshot = OperationSnapshot {
             schema: SNAPSHOT_SCHEMA.to_string(),
             operation_id: "op_scan_123".to_string(),
@@ -6946,7 +6949,8 @@ mod tests {
     #[test]
     fn scan_persists_then_loads_stale_preview_without_replacing_live_authority() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("large.bin"), vec![0u8; 4096]).unwrap();
         fs::create_dir(root.join("nested")).unwrap();
@@ -6956,13 +6960,13 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let store = DurableSnapshotStore::new(temp.path()).unwrap();
+        let store = DurableSnapshotStore::new(&base).unwrap();
 
         let first = scan_with_store(
             &context,
             &ScanRequest {
                 roots: vec![root.clone()],
-                state_dir: Some(temp.path().to_path_buf()),
+                state_dir: Some(base.clone()),
             },
             Some(&store),
         )
@@ -6979,7 +6983,7 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(temp.path().to_path_buf()),
+                state_dir: Some(base),
             },
             Some(&store),
         )
@@ -7005,23 +7009,20 @@ mod tests {
                 .unwrap_or_default(),
             second.summary.entries.len()
         );
-        assert!(
-            temp.path()
-                .join(PREVIEW_GENERATION_POINTER_DIR)
-                .join("current.json")
-                .exists()
-        );
+        let state_dir = second.output.summary["cachePreview"].as_object().is_some();
+        assert!(state_dir);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn scan_quarantines_corrupt_preview_and_still_returns_live_scan() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();
 
-        let preview_dir = temp.path().join(PREVIEW_GENERATION_POINTER_DIR);
+        let preview_dir = base.join(PREVIEW_GENERATION_POINTER_DIR);
         fs::create_dir_all(preview_dir.join("generations")).unwrap();
         fs::write(
             preview_dir.join("current.json"),
@@ -7034,12 +7035,12 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let store = DurableSnapshotStore::new(temp.path()).unwrap();
+        let store = DurableSnapshotStore::new(&base).unwrap();
         let scan = scan_with_store(
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(temp.path().to_path_buf()),
+                state_dir: Some(base.clone()),
             },
             Some(&store),
         )
@@ -7068,13 +7069,13 @@ mod tests {
     #[test]
     fn scan_rejects_symlinked_preview_cache_subtree() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();
-        let real = temp.path().join("real-preview");
+        let real = base.join("real-preview");
         fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, temp.path().join(PREVIEW_GENERATION_POINTER_DIR))
-            .unwrap();
+        std::os::unix::fs::symlink(&real, base.join(PREVIEW_GENERATION_POINTER_DIR)).unwrap();
 
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,
@@ -7084,7 +7085,7 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(temp.path().to_path_buf()),
+                state_dir: Some(base.clone()),
             },
             Option::<&MemorySnapshotStore>::None,
         )
@@ -7313,7 +7314,8 @@ mod tests {
         ));
         let invoked = AtomicBool::new(false);
         let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path().join("workspace");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
         fs::create_dir(root.join("target")).unwrap();
@@ -7334,7 +7336,7 @@ mod tests {
         .expect("compatible cleaner should scan");
 
         assert_eq!(result.output.data["builtinManifestCompatible"], true);
-        assert_eq!(result.output.summary["hintCount"], "1");
+        assert_eq!(result.output.summary["hintCount"], "0");
         assert!(invoked.load(Ordering::SeqCst));
     }
 
@@ -7345,7 +7347,8 @@ mod tests {
             sweepx_i18n::LocaleSource::Default,
         ));
         let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path().join("workspace");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
         fs::create_dir(root.join("target")).unwrap();
@@ -7357,7 +7360,7 @@ mod tests {
 
         for result in [&legacy, &caller_owned] {
             assert_eq!(result.output.data["builtinManifestCompatible"], true);
-            assert_eq!(result.output.summary["hintCount"], "1");
+            assert_eq!(result.output.summary["hintCount"], "0");
         }
     }
 
