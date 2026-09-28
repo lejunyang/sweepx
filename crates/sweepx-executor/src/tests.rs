@@ -136,7 +136,7 @@ fn fixture(mode: DeletionMode, action_count: usize, suffix: &str) -> Fixture {
     let clock = FixedClock::new(base_time() + Duration::from_secs(1));
     let unclaimed = unclaimed_authorization(&plan, mode, suffix, &clock);
     let temp = TempDir::new().unwrap();
-    let store = AuditStore::open(temp.path().join("audit")).unwrap();
+    let store = open_audit_store(&temp);
     let batch_id = BatchId::new(format!("batch-{suffix}-executor")).unwrap();
     let session_id = SessionId::new(format!("session-{suffix}-executor")).unwrap();
     let binding = unclaimed
@@ -162,6 +162,18 @@ fn fixture(mode: DeletionMode, action_count: usize, suffix: &str) -> Fixture {
         actions,
         suffix: suffix.to_string(),
     }
+}
+
+fn open_audit_store(temp: &TempDir) -> AuditStore {
+    // macOS temp roots go through /var, a symlink to /private/var; AuditStore rejects linked ancestors.
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let audit_root = base.join("audit");
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&audit_root)
+        .unwrap();
+    AuditStore::open(&audit_root).unwrap()
 }
 
 fn fixed_executor() -> SimulatedExecutor {
@@ -360,7 +372,8 @@ fn duplicate_subset_unknown_and_out_of_order_requests_fail_before_intent() {
 #[test]
 fn durable_reservation_survives_restart_and_prevents_a_second_adapter_call() {
     let fixture = fixture(DeletionMode::Trash, 1, "restart");
-    let audit_root = fixture._temp.path().join("audit");
+    let base = std::fs::canonicalize(fixture._temp.path()).unwrap();
+    let audit_root = base.join("audit");
     let action = &fixture.actions[0];
     let (source_path_hash, revalidation_digest) = derived_action(&fixture.plan, 0);
     let original_attempt_id = fixture
@@ -487,7 +500,7 @@ fn conflicting_restart_evidence_is_recovery_required_without_adapter_call() {
 fn pre_submit_audit_failure_never_calls_the_adapter() {
     let fixture = fixture(DeletionMode::Trash, 1, "audit-failure");
     let other_temp = TempDir::new().unwrap();
-    let wrong_store = AuditStore::open(other_temp.path().join("audit")).unwrap();
+    let wrong_store = open_audit_store(&other_temp);
     let (mut executor, calls) = executor_with_behavior(TestBehavior::Success);
 
     let error = executor
@@ -648,7 +661,7 @@ fn same_simulated_target_conflicts_across_authorizations_without_submit() {
     let second_authorization =
         unclaimed_authorization(&second_plan, DeletionMode::Trash, "overlap-second", &clock);
     let temp = TempDir::new().unwrap();
-    let store = AuditStore::open(temp.path().join("audit")).unwrap();
+    let store = open_audit_store(&temp);
     let first_binding = first_authorization
         .audit_binding(
             &first_plan,
@@ -744,7 +757,7 @@ fn claimed_mode_mismatch_is_rejected_before_intent() {
     let unclaimed =
         unclaimed_authorization(&plan, DeletionMode::Permanent, "mode-mismatch", &clock);
     let temp = TempDir::new().unwrap();
-    let store = AuditStore::open(temp.path().join("audit")).unwrap();
+    let store = open_audit_store(&temp);
     let mut binding = unclaimed
         .audit_binding(
             &plan,
@@ -798,7 +811,7 @@ fn complete_audit_binding_mismatches_fail_before_intent() {
         let clock = FixedClock::new(base_time() + Duration::from_secs(1));
         let unclaimed = unclaimed_authorization(&plan, DeletionMode::Trash, &suffix, &clock);
         let temp = TempDir::new().unwrap();
-        let store = AuditStore::open(temp.path().join("audit")).unwrap();
+        let store = open_audit_store(&temp);
         let mut binding = unclaimed
             .audit_binding(
                 &plan,
