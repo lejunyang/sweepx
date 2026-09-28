@@ -2126,7 +2126,7 @@ mod tests {
         };
         store.write_generation(&generation).unwrap();
 
-        let path = temp.path().join("generations/gen-tamper.json");
+        let path = store.generation_path("gen-tamper");
         let mut envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         // Edit the token in place and leave the checksum alone: that is what an attacker who
         // wants a false "unchanged" verdict would have to do.
@@ -2230,13 +2230,14 @@ mod tests {
 
         let real_generations = temp.path().join("real-generations");
         fs::create_dir(&real_generations).unwrap();
-        symlink(&real_generations, temp.path().join("generations")).unwrap();
+        let generations = store.generations_dir();
+        symlink(&real_generations, &generations).unwrap();
         let error = store.write_generation(&generation).unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
 
-        fs::remove_file(temp.path().join("generations")).unwrap();
-        fs::create_dir(temp.path().join("generations")).unwrap();
-        fs::write(temp.path().join("generations/gen-1.json"), b"{not-json").unwrap();
+        fs::remove_file(store.generations_dir()).unwrap();
+        fs::create_dir(store.generations_dir()).unwrap();
+        fs::write(store.generation_path("gen-1"), b"{not-json").unwrap();
         fs::write(
             temp.path().join("current.json"),
             br#"{"generation":"gen-1"}"#,
@@ -2244,7 +2245,7 @@ mod tests {
         .unwrap();
         let real_quarantine = temp.path().join("real-quarantine");
         fs::create_dir(&real_quarantine).unwrap();
-        symlink(&real_quarantine, temp.path().join("quarantine")).unwrap();
+        symlink(&real_quarantine, store.quarantine_dir()).unwrap();
         let error = store.load_current().unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
     }
