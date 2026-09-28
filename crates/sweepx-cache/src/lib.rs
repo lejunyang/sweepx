@@ -2042,7 +2042,7 @@ mod tests {
 
         // Rewrite the payload without the field, then recompute the checksum so the test
         // exercises the missing field rather than tamper detection.
-        let path = temp.path().join("generations/gen-old.json");
+        let path = store.generation_path("gen-old");
         let mut envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         envelope["payload"]
             .as_object_mut()
@@ -2156,7 +2156,7 @@ mod tests {
         };
         store.write_generation(&generation).unwrap();
 
-        let generation_path = temp.path().join("generations/gen-1.json");
+        let generation_path = store.generation_path("gen-1");
         fs::write(&generation_path, b"{not-json").unwrap();
 
         let loaded = store.load_current().unwrap();
