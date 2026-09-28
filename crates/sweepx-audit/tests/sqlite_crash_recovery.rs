@@ -69,7 +69,9 @@ fn register(store: &AuditStore, binding: &AuthorizationBinding) {
 }
 
 fn private_root(temp: &TempDir) -> PathBuf {
-    let root = temp.path().join("audit");
+    // Resolve macOS TMPDIR (/var/folders -> /private/var/folders); the store rejects linked ancestors.
+    let base = fs::canonicalize(temp.path()).unwrap();
+    let root = base.join("audit");
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     root

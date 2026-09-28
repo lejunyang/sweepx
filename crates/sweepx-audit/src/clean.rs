@@ -4845,11 +4845,19 @@ mod tests {
     #[cfg(unix)]
     fn store() -> (TempDir, AuditStore) {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().join("audit");
+        let store = open_store(&temp);
+        (temp, store)
+    }
+
+    #[cfg(unix)]
+    fn open_store(temp: &TempDir) -> AuditStore {
+        // macOS TMPDIR is under /var/folders, and /var is a symlink to /private/var. The store
+        // deliberately rejects symlinked ancestors, so resolve the fixture before opening it.
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("audit");
         use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let store = AuditStore::open(&root).unwrap();
-        (temp, store)
+        AuditStore::open(&root).unwrap()
     }
 
     #[cfg(unix)]
@@ -5133,7 +5141,7 @@ mod tests {
         drop(first_claim);
 
         let other_temp = TempDir::new().unwrap();
-        let other_store = AuditStore::open(other_temp.path().join("audit")).unwrap();
+        let other_store = open_store(&other_temp);
         let second = binding(6, RequestedMode::Permanent);
         register(&other_store, &second);
         let second_claim = other_store
@@ -5705,7 +5713,7 @@ mod tests {
         drop(recovery);
 
         let first_temp = TempDir::new().unwrap();
-        let first_store = AuditStore::open(first_temp.path().join("audit")).unwrap();
+        let first_store = open_store(&first_temp);
         let first_binding = binding(33, RequestedMode::Permanent);
         register(&first_store, &first_binding);
         let first_claim = first_store
@@ -5714,7 +5722,7 @@ mod tests {
         let first_token = reserve(&first_store, &first_claim, &first_binding);
 
         let second_temp = TempDir::new().unwrap();
-        let second_store = AuditStore::open(second_temp.path().join("audit")).unwrap();
+        let second_store = open_store(&second_temp);
         let second_binding = binding(34, RequestedMode::Permanent);
         register(&second_store, &second_binding);
         let mut second_claim = second_store
@@ -5946,7 +5954,7 @@ mod tests {
             .unwrap();
 
         let other_temp = TempDir::new().unwrap();
-        let other_store = AuditStore::open(other_temp.path().join("audit")).unwrap();
+        let other_store = open_store(&other_temp);
         let other_binding = binding(39, RequestedMode::Permanent);
         register(&other_store, &other_binding);
         let other_claim = other_store
@@ -6025,7 +6033,8 @@ mod tests {
             Err(AuditError::SymlinkRejected(_))
         ));
 
-        let broad = temp.path().join("broad");
+        let broad_base = fs::canonicalize(temp.path()).unwrap();
+        let broad = broad_base.join("broad");
         fs::DirBuilder::new().mode(0o755).create(&broad).unwrap();
         fs::set_permissions(&broad, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
