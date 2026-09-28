@@ -216,7 +216,8 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 - [Cleaner Catalog](docs/CLEANER-CATALOG.md)：生态证据、风险与 report-only 边界。
 - [MangoDisk 采用决策](docs/research/mangodisk-adoption.md)：规则来源审计、许可证边界与 Linux 策略。
 - [MangoDisk 未纳入规则](docs/research/mangodisk-unadopted-rules.md)：205 条规则的覆盖差距与后续核验批次。
-- [Lemon Cleaner 调研结论](docs/research/lemon-cleaner-research.md)：macOS 垃圾扫描类别、GPL 许可证边界与独立实现要求。
+- [Lemon Cleaner 调研结论](docs/research/lemon-cleaner-research.md)：macOS 垃圾扫描类别、GPL 许可证边界与适配要求。
+- [垃圾扫描策略收集](docs/research/cleaner-strategy-collection.md)：MangoDisk 与 Lemon Cleaner 的规则结构、分类、防护项和分批落地路线。
 - [原生扫描加速验收矩阵](docs/research/native-scan-qualification.md)：可先实现项与 Windows/macOS 真机门槛。
 - [路线图](docs/ROADMAP.md)：当前实现快照、阶段目标、测试矩阵与发布门槛。
 - [发布指南](RELEASING.md)：版本、提交消息门禁、token、产物与失败恢复。
