@@ -1900,6 +1900,7 @@ fn platform_junk_candidates(
                 // instead of by asking a tool. The marker is rechecked here because discovery
                 // and classification see the path through different readers.
                 "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
+                "verified_known_root" => depth == 0 && known_macos_root_matches(rule, entry),
                 #[cfg(target_os = "linux")]
                 "stale_inactive_direct_child" => false,
                 _ => false,
@@ -2202,6 +2203,113 @@ fn render_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::Scan
         .iter()
         .all(|marker| root.join(marker).exists())
 }
+
+#[cfg(target_os = "macos")]
+fn known_macos_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+    let Some(locator) = entry.native_locator.as_ref() else {
+        return false;
+    };
+    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
+        return false;
+    };
+    known_macos_roots(rule)
+        .into_iter()
+        .find(|root| captured.equals_path(root).unwrap_or(false))
+        .is_some_and(|root| root_has_required_markers(&root, &rule.required_markers))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn known_macos_root_matches(_rule: &PlatformJunkRule, _entry: &sweepx_model::ScannedEntry) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
+    let Some(home) = user_home_dir().filter(|home| home.is_absolute()) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let push = |path: PathBuf, paths: &mut Vec<PathBuf>| {
+        if is_existing_real_directory(&path)
+            && !paths.iter().any(|existing| same_directory(existing, &path))
+        {
+            paths.push(path);
+        }
+    };
+    let join_home = |components: &[&str]| {
+        let mut path = home.clone();
+        for component in components {
+            path.push(component);
+        }
+        path
+    };
+    match rule.root_kind.as_str() {
+        "macos_developer_cache" => match rule.id.as_str() {
+            "macos.xcode-derived-data" => {
+                push(
+                    join_home(&["Library", "Developer", "Xcode", "DerivedData"]),
+                    &mut paths,
+                );
+            }
+            "macos.cargo-registry-cache" => {
+                push(
+                    home.join(".cargo").join("registry").join("cache"),
+                    &mut paths,
+                );
+                push(home.join(".cargo").join("git").join("db"), &mut paths);
+            }
+            _ => {}
+        },
+        "macos_browser_cache" => match rule.id.as_str() {
+            "macos.firefox-cache" => {
+                push(
+                    join_home(&["Library", "Caches", "Firefox", "Profiles"]),
+                    &mut paths,
+                );
+            }
+            "macos.chromium-cache" => {
+                push(join_home(&["Library", "Caches", "Chromium"]), &mut paths);
+            }
+            "macos.safari-cache" => {
+                for components in [
+                    &["Library", "Caches", "com.apple.Safari"][..],
+                    &["Library", "Caches", "Metadata", "Safari"],
+                    &[
+                        "Library",
+                        "Containers",
+                        "com.apple.Safari.CacheDeleteExtension",
+                        "Data",
+                    ],
+                    &["Library", "Caches", "com.apple.Safari.SafeBrowsing"],
+                    &["Library", "Caches", "com.apple.safaridavclient"],
+                ] {
+                    push(join_home(components), &mut paths);
+                }
+            }
+            _ => {}
+        },
+        "macos_app_cache" if rule.id == "macos.tencent-meeting-cache" => {
+            push(
+                join_home(&[
+                    "Library",
+                    "Caches",
+                    "com.tencent.meeting",
+                    "WebKit",
+                    "NetworkCache",
+                ]),
+                &mut paths,
+            );
+        }
+        _ => {}
+    }
+    paths
+}
+
+#[cfg(not(target_os = "macos"))]
+fn known_macos_roots(_rule: &PlatformJunkRule) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// One origin's share of a browser storage subsystem, with the bytes it holds.
 ///
 /// The unit is the **full storage key**, not a hostname. Chromium partitions third-party storage by
@@ -3300,13 +3408,23 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
     {
         // Apple defines Library/Caches as discardable, but candidate classification remains
         // report-only and no broader Library/Application Support root is admitted here.
-        if rules.iter().any(|rule| rule.platform == "macos")
-            && let Some(cache) = user_home_dir()
+        if rules.iter().any(|rule| rule.platform == "macos") {
+            if let Some(cache) = user_home_dir()
                 .filter(|home| home.is_absolute())
                 .map(|home| home.join("Library/Caches"))
-            && is_existing_real_directory(&cache)
-        {
-            roots.push(cache);
+                .filter(|cache| is_existing_real_directory(cache))
+            {
+                roots.push(cache);
+            }
+            for rule in rules.iter().filter(|rule| rule.platform == "macos") {
+                for root in known_macos_roots(rule) {
+                    if !roots.iter().any(|existing: &PathBuf| {
+                        same_directory(existing.as_path(), root.as_path())
+                    }) {
+                        roots.push(root);
+                    }
+                }
+            }
         }
     }
     #[cfg(target_os = "windows")]
@@ -3491,6 +3609,8 @@ struct CandidateSources {
 /// identical from the outside. The fingerprint is read from the directory's own contents, so it
 /// holds regardless of where the cache lives or which tool reported it.
 struct StructuralFingerprint {
+    /// Additional children that must exist directly under the root.
+    required_children: &'static [&'static str],
     /// A child that must exist directly under the root, for example `files` for a pnpm store.
     required_child: &'static str,
     /// Optional shard layout: this many children of `required_child`, all directories whose names
@@ -3534,6 +3654,7 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
                 versioned_child_prefix: Some("v"),
             },
             fingerprint: StructuralFingerprint {
+                required_children: &[],
                 required_child: "files",
                 hex_shard_count: Some(256),
             },
@@ -3547,6 +3668,7 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
             },
             // The root itself has no shard layout; the generations below carry the evidence.
             fingerprint: StructuralFingerprint {
+                required_children: &[],
                 required_child: "",
                 hex_shard_count: None,
             },
@@ -3568,6 +3690,7 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
                 versioned_child_prefix: None,
             },
             fingerprint: StructuralFingerprint {
+                required_children: &[],
                 required_child: "_cacache",
                 hex_shard_count: None,
             },
@@ -3598,6 +3721,9 @@ fn same_directory(left: &Path, right: &Path) -> bool {
 fn matches_structural_fingerprint(root: &Path, fingerprint: &StructuralFingerprint) -> bool {
     if fingerprint.required_child.is_empty() {
         return true;
+    }
+    if !root_has_named_children(root, fingerprint.required_children.iter().copied()) {
+        return false;
     }
     let child = root.join(fingerprint.required_child);
     if !std::fs::symlink_metadata(&child).is_ok_and(|metadata| metadata.file_type().is_dir()) {
@@ -3799,12 +3925,23 @@ fn tool_reported_root_for(root_kind: &str) -> Option<ToolReportedRoot> {
 /// read-only and uses `symlink_metadata` so a symlinked marker cannot stand in for a real child;
 /// the scanner still performs the authoritative no-follow admission afterwards.
 fn root_has_required_markers(root: &Path, markers: &[String]) -> bool {
-    markers.iter().all(|marker| {
+    root_has_named_children_display(root, markers)
+}
+
+fn root_has_named_children<'a>(root: &Path, names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().all(|marker| {
         std::fs::symlink_metadata(root.join(marker)).is_ok_and(|metadata| {
             let file_type = metadata.file_type();
             file_type.is_dir() || file_type.is_file()
         })
     })
+}
+
+fn root_has_named_children_display<'a>(
+    root: &Path,
+    names: impl IntoIterator<Item = &'a String>,
+) -> bool {
+    root_has_named_children(root, names.into_iter().map(String::as_str))
 }
 
 fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
@@ -3818,7 +3955,13 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 "linux_tmp" => ("linux_tmp", "stale_inactive_direct_child", 0),
                 _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
             },
-            "macos" => ("macos_user_caches", "direct_children", 1),
+            "macos" => match rule.root_kind.as_str() {
+                "macos_user_caches" => ("macos_user_caches", "direct_children", 1),
+                "macos_developer_cache" => ("macos_developer_cache", "verified_known_root", 0),
+                "macos_browser_cache" => ("macos_browser_cache", "verified_known_root", 0),
+                "macos_app_cache" => ("macos_app_cache", "verified_known_root", 0),
+                _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
+            },
             // A platform can host more than one root kind, so the shape is keyed on the root
             // kind rather than on the platform. Keying it on the platform alone made the first
             // root kind the only one that platform could ever express.
@@ -3887,6 +4030,7 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
             // happens to sit at that path.
             || (rule.match_kind == "verified_cache_root"
                 && (!rule.names.is_empty() || rule.required_markers.is_empty()))
+            || (rule.match_kind == "verified_known_root" && !rule.names.is_empty())
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
         }
@@ -4162,7 +4306,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 10);
+        assert_eq!(rules.len(), 16);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -4184,6 +4328,23 @@ mod tests {
         assert_eq!(linux_tmp.risk, "R3");
         // Found by id, not by platform: Windows now carries browser cache rules too, and matching
         // on the platform alone silently returned whichever rule happened to be first.
+        let macos_rules: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.platform == "macos")
+            .collect();
+        assert_eq!(macos_rules.len(), 7);
+        let integrated_macos_ids = [
+            "macos.xcode-derived-data",
+            "macos.cargo-registry-cache",
+            "macos.firefox-cache",
+            "macos.chromium-cache",
+            "macos.safari-cache",
+            "macos.tencent-meeting-cache",
+        ];
+        for id in integrated_macos_ids {
+            assert!(rules.iter().any(|rule| rule.id == id), "missing {id}");
+        }
+
         let windows = rules
             .iter()
             .find(|rule| rule.id == "windows.packaged-app-cache")
@@ -4465,6 +4626,7 @@ mod tests {
         let files = root.join("files");
         std::fs::create_dir_all(&files).expect("create files");
         let fingerprint = StructuralFingerprint {
+            required_children: &[],
             required_child: "files",
             hex_shard_count: Some(256),
         };
@@ -4499,6 +4661,7 @@ mod tests {
     fn an_empty_fingerprint_accepts_any_directory() {
         let temp = tempfile::tempdir().expect("temp dir");
         let fingerprint = StructuralFingerprint {
+            required_children: &[],
             required_child: "",
             hex_shard_count: None,
         };

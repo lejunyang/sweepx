@@ -10,7 +10,9 @@
     "risk": "R2",
     "evidence": "The XDG Base Directory specification defines this root for user-specific non-essential cache data; configuration and persistent data homes remain outside it.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://specifications.freedesktop.org/basedir-spec/latest/"]
+    "references": [
+      "https://specifications.freedesktop.org/basedir-spec/latest/"
+    ]
   },
   {
     "id": "linux.stale-temp-object",
@@ -23,7 +25,10 @@
     "risk": "R3",
     "evidence": "The candidate is any current-user-owned direct child object of /tmp on the same filesystem. SweepX admits directories, regular files, symlinks, named pipes, and stale Unix-domain sockets; names are never used as evidence. Directories receive a no-follow recursive walk that sums filesystem allocation and uses the newest recursive atime, mtime, and ctime for the seven-day idle threshold. SweepX rejects mount crossings, external hard links, device inodes, bound sockets, and objects referenced through current-user cwd/root/exe/fd views (including held FIFOs seen as pipe inodes), map_files/mountinfo views, or Unix-domain socket tables in observable network namespaces. Other users' references or private namespaces can remain unreadable to an unprivileged process, so cleanup fail-closes whenever that current-user observation is incomplete.",
     "sourceReviewedAt": "2026-09-10",
-    "references": ["https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s18.html", "https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html"]
+    "references": [
+      "https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s18.html",
+      "https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html"
+    ]
   },
   {
     "id": "macos.user-caches",
@@ -36,20 +41,121 @@
     "risk": "R2",
     "evidence": "Apple defines Library/Caches as data applications must be able to regenerate; Application Support, preferences, containers, and user documents remain outside this root.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://developer.apple.com/documentation/foundation/url/cachesdirectory", "https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html"]
+    "references": [
+      "https://developer.apple.com/documentation/foundation/url/cachesdirectory",
+      "https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html"
+    ]
+  },
+  {
+    "id": "macos.xcode-derived-data",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Apple identifies Library/Developer/Xcode/DerivedData as generated build products and indexes; project sources, signing material and archives remain outside the root. This report-only rule follows MangoDisk and Lemon Cleaner's Xcode strategy but does not close Xcode automatically.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://developer.apple.com/documentation/Xcode-Release-Notes/xcode-26-release-notes"
+    ]
+  },
+  {
+    "id": "macos.cargo-registry-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Cargo documents registry/cache and git/db as downloaded dependency caches that can be restored by extraction, checkout, or redownload; credentials, installed binaries and registry/src remain outside the selected cache roots.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://doc.rust-lang.org/cargo/guide/cargo-home.html"
+    ]
+  },
+  {
+    "id": "macos.firefox-cache",
+    "platform": "macos",
+    "rootKind": "macos_browser_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Firefox stores its macOS disk cache under Library/Caches/Firefox/Profiles, separate from the Application Support profile that contains bookmarks, credentials, history and settings.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://support.mozilla.org/en-US/kb/how-clear-firefox-cache",
+      "https://support.mozilla.org/en-US/kb/profiles-where-firefox-stores-user-data"
+    ]
+  },
+  {
+    "id": "macos.chromium-cache",
+    "platform": "macos",
+    "rootKind": "macos_browser_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "The rule selects Chromium's cache root under Library/Caches/Chromium; cookies, history, passwords, bookmarks, extensions and other durable profile data remain outside the selected root.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://chromium.googlesource.com/chromium/src/+/main/docs/user_data_dir.md"
+    ]
+  },
+  {
+    "id": "macos.safari-cache",
+    "platform": "macos",
+    "rootKind": "macos_browser_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "The rule covers Safari's documented cache, Safari metadata cache, CacheDeleteExtension, SafeBrowsing and safaridavclient roots; bookmarks, history, passwords, settings and other Safari durable data remain excluded.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://support.apple.com/guide/safari/clear-your-cache-ibrw1020/mac",
+      "https://developer.apple.com/documentation/foundation/url/cachesdirectory"
+    ]
+  },
+  {
+    "id": "macos.tencent-meeting-cache",
+    "platform": "macos",
+    "rootKind": "macos_app_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "The selected root is Tencent Meeting's WebKit NetworkCache. HSTS, CacheStorage, transport state, accounts, meetings, downloads, databases, preferences, dynamic resources and the sandbox container remain excluded.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://meeting.tencent.com/download/",
+      "https://developer.apple.com/documentation/foundation/url/cachesdirectory"
+    ]
   },
   {
     "id": "windows.packaged-app-cache",
     "platform": "windows",
     "rootKind": "windows_packages",
     "matchKind": "named_descendant",
-    "names": ["LocalCache", "TempState"],
+    "names": [
+      "LocalCache",
+      "TempState"
+    ],
     "requiredMarkers": [],
     "depth": 2,
     "risk": "R2",
     "evidence": "Windows exposes LocalCacheFolder and TemporaryFolder separately from persistent LocalFolder data; only those package children are selected and LocalState remains outside the match.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://learn.microsoft.com/windows/apps/develop/data/store-and-retrieve-app-data"]
+    "references": [
+      "https://learn.microsoft.com/windows/apps/develop/data/store-and-retrieve-app-data"
+    ]
   },
   {
     "id": "windows.chromium-http-cache",
@@ -57,7 +163,9 @@
     "rootKind": "chromium_render_cache",
     "matchKind": "verified_cache_root",
     "names": [],
-    "requiredMarkers": ["Cache_Data"],
+    "requiredMarkers": [
+      "Cache_Data"
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "The HTTP cache holds only responses the network stack can fetch again; Chromium documents the disk cache as recreated whenever its files are missing or corrupt. Measured on Windows 2026-09-05: Edge Default 345.4 MB over 1257 files, Chrome Default 315.7 MB over 3256 files. The marker is the Cache_Data child rather than an index file, because this backend keeps entries one level below the root and carries no index at the root itself. Service Worker CacheStorage is deliberately not matched here: it holds PWA offline state, not refetchable responses, despite also being named cache.",
@@ -73,7 +181,9 @@
     "rootKind": "chromium_render_cache",
     "matchKind": "verified_cache_root",
     "names": [],
-    "requiredMarkers": ["js"],
+    "requiredMarkers": [
+      "js"
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "Compiled JavaScript and WebAssembly caches are derived from script the site serves again; discarding them costs one recompilation. Measured on Windows 2026-09-05: Edge Dev Default 611.7 MB over 21636 files, Edge Default 308.0 MB, Chrome Default 197.9 MB. Edge Dev held the single largest reclaimable directory on this host, which is why per-installation discovery matters rather than assuming one browser. The marker is the js child, present in both the js and wasm layout.",
@@ -89,7 +199,9 @@
     "rootKind": "chromium_render_cache",
     "matchKind": "verified_cache_root",
     "names": [],
-    "requiredMarkers": ["data_1"],
+    "requiredMarkers": [
+      "data_1"
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "GPU program and shader caches are rebuilt by the driver on next use. Measured on Windows 2026-09-05: Edge GrShaderCache 10.7 MB, Edge Dev GrShaderCache 11.1 MB, Chrome GrShaderCache 9.8 MB, Edge Default GPUCache 1.6 MB. These use the blockfile backend, whose data_0 through data_3 and index files are written even when the cache is empty, so an empty one still occupies about 0.5 MB and is reported with a near-zero reclaimable estimate rather than being treated as a find. data_1 is the marker because data_0 also appears in unrelated layouts.",
@@ -98,18 +210,24 @@
       "https://www.chromium.org/developers/design-documents/network-stack/disk-cache/",
       "https://source.chromium.org/chromium/chromium/src/+/main:gpu/ipc/host/gpu_disk_cache.cc"
     ]
-  },  {
+  },
+  {
     "id": "tool.npm-cache",
     "platform": "any",
     "rootKind": "npm_reported_cache",
     "matchKind": "verified_tool_root",
     "names": [],
-    "requiredMarkers": ["_cacache"],
+    "requiredMarkers": [
+      "_cacache"
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "npm documents this directory as a fully recoverable content-addressable cache that is recreated on demand, and reports its effective location through `npm config get cache`. The location is measured rather than assumed because the effective cache is frequently not the platform default. The `_cacache` marker must be present before the directory is reported.",
     "sourceReviewedAt": "2026-09-05",
-    "references": ["https://docs.npmjs.com/cli/v10/commands/npm-cache", "https://docs.npmjs.com/cli/v10/using-npm/config#cache"]
+    "references": [
+      "https://docs.npmjs.com/cli/v10/commands/npm-cache",
+      "https://docs.npmjs.com/cli/v10/using-npm/config#cache"
+    ]
   },
   {
     "id": "tool.pnpm-store",
@@ -117,12 +235,17 @@
     "rootKind": "pnpm_reported_store",
     "matchKind": "verified_tool_root",
     "names": [],
-    "requiredMarkers": ["files"],
+    "requiredMarkers": [
+      "files"
+    ],
     "depth": 0,
     "risk": "R3",
     "evidence": "pnpm reports its effective content-addressable store through `pnpm store path`. The store is refetchable, but installed projects hard-link into it, so removing it can require reinstalling dependencies before those projects build again. Reported at a higher risk tier than a plain download cache for that reason, and only when the `files` marker and the store's 256 two-hex-digit shard layout are both present. Discovery enumerates documented defaults and `PNPM_STORE_DIR` as well as the reported path, because an abandoned store is never the one pnpm reports: measured on 2026-09-05, the default location held 146.8 MB last written 2024-10-26 while the store actually in use held 127.5 MB elsewhere, so the resolver alone would have missed the larger, inert copy. Each candidate carries an `activity` marker of `live` or `stale`; the live store is the one that must not be reclaimed.",
     "sourceReviewedAt": "2026-09-05",
-    "references": ["https://pnpm.io/cli/store", "https://pnpm.io/npmrc#store-dir"]
+    "references": [
+      "https://pnpm.io/cli/store",
+      "https://pnpm.io/npmrc#store-dir"
+    ]
   },
   {
     "id": "tool.pip-cache",
@@ -130,11 +253,16 @@
     "rootKind": "pip_reported_cache",
     "matchKind": "verified_tool_root",
     "names": [],
-    "requiredMarkers": ["wheels"],
+    "requiredMarkers": [
+      "wheels"
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "pip documents this directory as a cache of HTTP responses and locally built wheels that is rebuilt by refetching, and reports its effective location through `pip cache dir`. The location is measured rather than assumed because virtual environments and vendored runtimes routinely relocate it. The `wheels` marker must be present before the directory is reported; it is used instead of a format directory because a cache written by an older pip has only the legacy `http` layout, and requiring `http-v2` would skip exactly those roots. Measured on 2026-09-05: the legacy `http` format held 73.1 MB last written 2023-12-09 beside a current `http-v2` of 0 MB, so the superseded format was 99.9% of the bytes.",
     "sourceReviewedAt": "2026-09-05",
-    "references": ["https://pip.pypa.io/en/stable/topics/caching/", "https://pip.pypa.io/en/stable/cli/pip_cache/"]
+    "references": [
+      "https://pip.pypa.io/en/stable/topics/caching/",
+      "https://pip.pypa.io/en/stable/cli/pip_cache/"
+    ]
   }
 ]

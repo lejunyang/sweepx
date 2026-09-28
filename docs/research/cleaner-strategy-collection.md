@@ -158,6 +158,19 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
    - Docker/虚拟机/模拟器镜像；
    - 系统目录中的受保护数据库和状态文件。
 
+## 已集成的第一批 macOS 策略
+
+206-09-29 已将以下 report-only 策略接入 `crates/sweepx-cli/resources/platform-junk-rules.json`，并由统一 `junk --system` 扫描路径发现：
+
+- `macos.xcode-derived-data`：`~/Library/Developer/Xcode/DerivedData`。
+- `macos.cargo-registry-cache`：`~/.cargo/registry/cache` 与 `~/.cargo/git/db`。
+- `macos.firefox-cache`：`~/Library/Caches/Firefox/Profiles`。
+- `macos.chromium-cache`：`~/Library/Caches/Chromium`。
+- `macos.safari-cache`：Safari cache、Safari metadata、CacheDeleteExtension、SafeBrowsing、safaridavclient。
+- `macos.tencent-meeting-cache`：腾讯会议 WebKit `NetworkCache`。
+
+这些规则仍然只产生报告，不会自动删除；删除能力必须另走不可变计划、实时重验和用户确认。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：
