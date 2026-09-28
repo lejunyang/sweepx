@@ -1,0 +1,24 @@
+# Project toolchain versions. Keep the Rust and Bun pins aligned with
+# rust-toolchain.toml and the GitHub Actions workflows respectively.
+[tools]
+rust = { version = "1.98.0", components = "rustfmt,clippy" }
+bun = "1.4.0"
+# The repository's Python utilities use tomllib, which requires Python 3.11+.
+python = "3.12"
+
+# Materialize the native Cargo lock at the repository root and both Bun
+# projects without recursively treating unrelated directories as projects.
+[deps]
+roots = ["schemas", "site"]
+
+[deps.cargo]
+
+[deps.bun]
+
+# Rust always needs a host linker, and the bundled SQLite dependency also
+# compiles C. macOS and Windows obtain their compilers from their platform SDKs.
+[syspkg.packages]
+"apt:build-essential" = { version = "latest", os = "linux" }
+"dnf:gcc" = { version = "latest", os = "linux" }
+"pacman:gcc" = { version = "latest", os = "linux" }
+"apk:build-base" = { version = "latest", os = "linux" }

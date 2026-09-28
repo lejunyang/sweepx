@@ -1,0 +1,21 @@
+schema = 4
+
+[platforms.linux-x64.tools.bun]
+request = "1.4.0"
+version = "1.4.0"
+
+[platforms.linux-x64.tools.python]
+request = "3.12"
+version = "3.12.14"
+
+[platforms.linux-x64.tools.python.options]
+implementation = "cpython"
+python-version = "3.12.14"
+variant = "default"
+
+[platforms.linux-x64.tools.rust]
+request = "1.98.0"
+version = "1.98.0"
+
+[platforms.linux-x64.tools.rust.options]
+components = "rustfmt,clippy"
