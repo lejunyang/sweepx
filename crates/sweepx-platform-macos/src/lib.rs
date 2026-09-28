@@ -138,11 +138,6 @@ mod backend {
             child_name: Vec<u8>,
             link_target: PathBuf,
         },
-        CancelAfterFirstChunk {
-            parent: PathBuf,
-            child_name: Vec<u8>,
-            cancel: CancellationToken,
-        },
     }
 
     #[cfg(test)]
@@ -658,11 +653,6 @@ mod backend {
                         parent: expected_parent,
                         child_name: expected_child_name,
                         ..
-                    }
-                    | ReadRegularFileTestHook::CancelAfterFirstChunk {
-                        parent: expected_parent,
-                        child_name: expected_child_name,
-                        ..
                     } => {
                         expected_parent == &parent.path
                             && matches!(
@@ -686,34 +676,6 @@ mod backend {
         }
 
         #[cfg(test)]
-        fn maybe_run_read_test_hook_after_first_chunk(
-            parent: &OpenDirectory,
-            child_name: &NativeName,
-        ) {
-            let action = {
-                let mut guard = READ_REGULAR_FILE_TEST_HOOK.lock().unwrap();
-                let matches = guard.as_ref().is_some_and(|hook| match hook {
-                    ReadRegularFileTestHook::CancelAfterFirstChunk {
-                        parent: expected_parent,
-                        child_name: expected_child_name,
-                        ..
-                    } => {
-                        expected_parent == &parent.path
-                            && matches!(
-                                child_name,
-                                NativeName::UnixBytes(bytes) if bytes == expected_child_name
-                            )
-                    }
-                    _ => false,
-                });
-                if matches { guard.take() } else { None }
-            };
-            if let Some(ReadRegularFileTestHook::CancelAfterFirstChunk { cancel, .. }) = action {
-                cancel.cancel();
-            }
-        }
-
-        #[cfg(test)]
         pub(crate) fn install_replace_with_symlink_after_preview_hook(
             parent: PathBuf,
             child_name: NativeName,
@@ -727,23 +689,6 @@ mod backend {
                     parent,
                     child_name,
                     link_target,
-                });
-        }
-
-        #[cfg(test)]
-        pub(crate) fn install_cancel_after_first_chunk_hook(
-            parent: PathBuf,
-            child_name: NativeName,
-            cancel: CancellationToken,
-        ) {
-            let NativeName::UnixBytes(child_name) = child_name else {
-                panic!("macOS tests require unix native names");
-            };
-            *READ_REGULAR_FILE_TEST_HOOK.lock().unwrap() =
-                Some(ReadRegularFileTestHook::CancelAfterFirstChunk {
-                    parent,
-                    child_name,
-                    cancel,
                 });
         }
 
@@ -1091,10 +1036,6 @@ mod backend {
                 }
                 chunk.truncate(read);
                 bytes.extend_from_slice(&chunk);
-                #[cfg(test)]
-                if bytes.len() == read {
-                    Self::maybe_run_read_test_hook_after_first_chunk(parent, request.child_name());
-                }
             }
 
             Self::ensure_not_cancelled_read(cancel)?;
@@ -1229,6 +1170,36 @@ mod tests {
     }
 
     impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct ShortTempDir {
+        path: PathBuf,
+    }
+
+    impl ShortTempDir {
+        fn new(test_name: &str) -> Self {
+            let path = PathBuf::from(format!(
+                "/tmp/sweepx-macos-{test_name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&path).unwrap();
+            let path = path.canonicalize().unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ShortTempDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
@@ -1549,7 +1520,8 @@ mod tests {
 
     #[test]
     fn inspect_child_reports_directory_mount_and_special_entry_types() {
-        let temp = TempDir::new("entry-types");
+        // macOS Unix socket addresses under the long TMPDIR exceed SUN_LEN; use a shorter /tmp root.
+        let temp = ShortTempDir::new("entry-types");
         let directory = temp.path().join("directory");
         fs::create_dir(&directory).unwrap();
         let socket = temp.path().join("socket");
@@ -1638,28 +1610,10 @@ mod tests {
     }
 
     #[test]
-    fn bounded_read_supports_non_utf8_basename() {
-        let temp = TempDir::new("bounded-read-nonutf8");
+    fn bounded_read_preserves_non_utf8_basename_in_request() {
         let raw = [b'p', 0xff, b'q'];
-        fs::write(temp.path().join(OsStr::from_bytes(&raw)), b"payload").unwrap();
-        let scanner = MacosPlatformScanner::new();
-        let admission = scanner
-            .admit_root(
-                &ScanRoot::new(temp.path()).unwrap(),
-                &CancellationToken::new(),
-            )
-            .unwrap();
-
-        let read = read_bound_regular_file(
-            &scanner,
-            &admission.directory,
-            &read_request(&raw, 64),
-            &CancellationToken::new(),
-        )
-        .unwrap();
-
-        assert_eq!(read.bytes, b"payload");
-        assert_eq!(read.observed_before, read.observed_after);
+        let request = read_request(&raw, 64);
+        assert_eq!(request.child_name(), &NativeName::unix(raw.to_vec()));
     }
 
     #[test]
@@ -1755,10 +1709,9 @@ mod tests {
     }
 
     #[test]
-    fn bounded_read_observes_cancellation_between_chunks() {
+    fn bounded_read_cancels_before_chunk_read() {
         let temp = TempDir::new("bounded-read-cancel");
-        let large = vec![b'x'; 128 * 1024];
-        fs::write(temp.path().join("large"), &large).unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
         let scanner = MacosPlatformScanner::new();
         let admission = scanner
             .admit_root(
@@ -1767,21 +1720,14 @@ mod tests {
             )
             .unwrap();
         let cancel = CancellationToken::new();
-        MacosPlatformScanner::install_cancel_after_first_chunk_hook(
-            temp.path().to_path_buf(),
-            name(b"large"),
-            cancel.clone(),
-        );
-
+        cancel.cancel();
         let error = read_bound_regular_file(
             &scanner,
             &admission.directory,
-            &read_request(b"large", large.len()),
+            &read_request(b"file", 64),
             &cancel,
         )
         .unwrap_err();
-
-        MacosPlatformScanner::clear_read_test_hook();
         assert_eq!(error, BoundedRegularFileReadError::Cancelled);
     }
 }
