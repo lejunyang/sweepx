@@ -650,7 +650,14 @@ mod tests {
         .unwrap();
 
         let temp = TempDir::new().unwrap();
-        let store = AuditStore::open(temp.path().join("audit")).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let audit_root = base.join("audit");
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&audit_root)
+            .unwrap();
+        let store = AuditStore::open(&audit_root).unwrap();
         let audit_mode = match mode {
             DeletionMode::Trash => RequestedMode::Trash,
             DeletionMode::Permanent => RequestedMode::Permanent,
