@@ -19,3 +19,22 @@ version = "1.98.0"
 
 [platforms.linux-x64.tools.rust.options]
 components = "rustfmt,clippy"
+
+[deps.bun]
+installer = "bun"
+installer_version = "1.4.0"
+manifest = "site/package.json"
+manifest_sha256 = "b3b909ed73db79ae546357170ac538c57221e5419e40bfe6f9e41fe999ba8bf4"
+run = "bun.exe install --frozen-lockfile --ignore-scripts"
+
+[deps.bun.native_lock]
+kind = "bun-lock"
+path = "site/bun.lock"
+sha256 = "362721877041d5a70bea450e40bfdd55eb1421014d553925d435f25aaa30f645"
+
+[deps.cargo]
+installer = "cargo"
+installer_version = "1.98.0"
+manifest = "Cargo.toml"
+manifest_sha256 = "328e6b53605509b3c6d77c44e8371561a37d785ca2fd1f0c5fd3d33782a64720"
+run = "cargo.exe fetch --locked"
