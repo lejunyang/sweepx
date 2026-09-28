@@ -260,7 +260,14 @@ fn public_api_round_trip_enforces_one_shot_and_conflicting_duplicate_guards() {
     let plan_digest = binding.plan_digest.clone();
 
     let temp = TempDir::new().unwrap();
-    let store = AuditStore::open(temp.path().join("audit")).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let audit_root = base.join("audit");
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&audit_root)
+        .unwrap();
+    let store = AuditStore::open(&audit_root).unwrap();
     store
         .register_authorization(RegisterAuthorization { binding })
         .unwrap();
