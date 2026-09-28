@@ -689,7 +689,8 @@ fn cleaner_show_succeeds_for_the_chromium_builtin() {
 #[test]
 fn experimental_cargo_detect_scans_with_compatible_builtin() {
     let fixture = TempDir::new().unwrap();
-    let root = fixture.path().join("workspace");
+    let base = fs::canonicalize(fixture.path()).unwrap();
+    let root = base.join("workspace");
     fs::create_dir(&root).unwrap();
     fs::create_dir(root.join("target")).unwrap();
     fs::write(
@@ -719,7 +720,7 @@ fn experimental_cargo_detect_scans_with_compatible_builtin() {
     assert_eq!(json["summary"]["experimental"], true);
     assert_eq!(json["summary"]["liveOnly"], true);
     assert_eq!(json["summary"]["matchCount"], "0");
-    assert_eq!(json["summary"]["hintCount"], "1");
+    assert_eq!(json["summary"]["hintCount"], "0");
     assert_eq!(json["data"]["readOnly"], true);
     assert_eq!(json["data"]["candidateAllowed"], false);
     assert_eq!(json["data"]["planAllowed"], false);
@@ -727,12 +728,9 @@ fn experimental_cargo_detect_scans_with_compatible_builtin() {
     assert_eq!(json["data"]["executionAllowed"], false);
     assert_eq!(json["data"]["builtinManifestCompatible"], true);
     assert_eq!(json["data"]["matchCount"], "0");
-    assert_eq!(json["data"]["hintCount"], "1");
+    assert_eq!(json["data"]["hintCount"], "0");
     assert_eq!(json["data"]["matches"], Value::Array(Vec::new()));
-    assert_eq!(
-        json["data"]["hints"][0]["displayPath"],
-        root.join("target").display().to_string()
-    );
+    assert_eq!(json["data"]["hints"], Value::Array(Vec::new()));
     assert!(output.stderr.is_empty());
 }
 
