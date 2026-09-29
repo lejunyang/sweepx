@@ -15,6 +15,7 @@ mod linux_temp;
 mod permanent_delete_command;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
+mod tool_installations;
 mod trash_command;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -1445,6 +1446,19 @@ fn run_junk_scan(
                 .unwrap_or("unknown reason")
         );
     }
+    // When npm is in scope, report every installation discovered: the manager controlling each,
+    // its version, which copy PATH defaults to, and the measured last activity of its cache. This
+    // is what lets a reader see multiple npm copies instead of only the resolver's answer.
+    let npm_installations: Vec<tool_installations::ToolInstallation> = if load_platform_junk_rules()
+        .is_ok_and(|rules| {
+            rules
+                .iter()
+                .any(|rule| rule.root_kind == "npm_reported_cache")
+        }) {
+        tool_installations::discover_npm_installations()
+    } else {
+        Vec::new()
+    };
     if format != OutputFormat::Human {
         println!(
             "{}",
@@ -1456,6 +1470,17 @@ fn run_junk_scan(
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
                 "incompleteSizeCount": incomplete_size_count,
+                "toolInstallations": npm_installations.iter().map(|installation| json!({
+                    "tool": installation.tool,
+                    "manager": installation.manager,
+                    "managerLabel": installation.manager_label,
+                    "executable": installation.executable.to_string_lossy(),
+                    "toolVersion": installation.tool_version,
+                    "runtimeVersion": installation.runtime_version,
+                    "cache": installation.cache.as_ref().map(|cache| cache.to_string_lossy()),
+                    "cacheLastActiveAt": installation.cache_last_active_at,
+                    "isPathDefault": installation.is_path_default,
+                })).collect::<Vec<_>>(),
                 "candidates": candidates.iter().map(|candidate| json!({
                     "path": candidate.path, "ruleId": candidate.rule_id, "risk": candidate.risk,
                     "reclaimable": candidate.reclaimable,
@@ -3764,6 +3789,17 @@ fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
     for name in profile.sources.env_overrides {
         if let Some(value) = std::env::var_os(name) {
             push(PathBuf::from(value), &mut candidates);
+        }
+    }
+    // npm is commonly installed several times (Homebrew plus one copy per Node version under
+    // nvm/fnm/volta). The resolver above only asks whichever npm is first on PATH, so a cache a
+    // non-default npm was explicitly configured to use would be missed. Ask every discovered
+    // installation for its own cache; the marker/fingerprint checks below still verify each.
+    if rule.root_kind == "npm_reported_cache" {
+        for installation in tool_installations::discover_npm_installations() {
+            if let Some(cache) = installation.cache {
+                push(cache, &mut candidates);
+            }
         }
     }
     // Defaults are relative to the platform's per-user cache base. On Windows that is

@@ -186,6 +186,19 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 仍未纳入：npm 走已有跨平台 `tool.npm-cache`（按 `npm config get cache` 实测），MangoDisk 中硬编码 `~/.npm/_cacache` 的等价规则不重复收录；Maven `~/.m2/repository`、NuGet `~/.nuget/packages`、pnpm store 等被项目硬链接或属于依赖存储而非纯下载缓存的条目，按更高风险留待单独评估。
 
+## 多份工具安装盘点（npm）
+
+仅问 `PATH` 上第一份 npm 的 cache，无法回答系统里装了几份 npm、各自被谁管控、是否还在用。新增 `crates/sweepx-cli/src/tool_installations.rs`，按管理器的固定/版本目录布局枚举每一份 npm，并对每份可执行文件单独执行：
+
+- 管控方 `manager`：`homebrew`、`nvm`、`fnm`、`volta`、`asdf`、`mise`、`n`，以及不在已知布局内的 `path`；
+- 版本标签 `managerLabel`（如 nvm 的 `v20.19.0`）、npm 版本、同目录 Node 版本；
+- 这份 npm 自己上报的 cache 目录及其最近修改时间 `cacheLastActiveAt`（取目录与一级子项的最新 mtime，RFC-3339）；
+- 是否为裸命令解析到的默认项 `isPathDefault`（至多一个）。
+
+这些字段在 `junk --system` JSON 顶层 `toolInstallations` 中输出，report-only；发现 npm cache 候选时也会汇总每份安装各自上报的 cache，而不是只信第一份。
+
+实测（本机，2026-09-29）：共 14 份 npm —— 1 份 Homebrew（npm 11.17.0 / Node v26.5.0，`isPathDefault=true`）+ 13 份 nvm 版本（v12 到 v24）。关键现象：14 份 npm 上报的 cache **全部是同一个目录** `~/Desktop/osdk-home/cache/pkg/npm`，因为本 shell 注入了全局 `NPM_CONFIG_CACHE`；其 `cacheLastActiveAt` 都是扫描当下。这说明“多份 npm”在本机并不等于“多份 cache”——是否真有多份 cache 取决于配置，盘点的价值正是把“安装多份”和“cache 多份”分开呈现，而不是按安装数臆造垃圾。若未注入该变量，各 nvm 版本默认共享 `~/.npm`，自定义 per-install cache 才会产生多份。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：
