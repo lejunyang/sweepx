@@ -199,6 +199,19 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 实测（本机，2026-09-29）：共 14 份 npm —— 1 份 Homebrew（npm 11.17.0 / Node v26.5.0，`isPathDefault=true`）+ 13 份 nvm 版本（v12 到 v24）。关键现象：14 份 npm 上报的 cache **全部是同一个目录** `~/Desktop/osdk-home/cache/pkg/npm`，因为本 shell 注入了全局 `NPM_CONFIG_CACHE`；其 `cacheLastActiveAt` 都是扫描当下。这说明“多份 npm”在本机并不等于“多份 cache”——是否真有多份 cache 取决于配置，盘点的价值正是把“安装多份”和“cache 多份”分开呈现，而不是按安装数臆造垃圾。若未注入该变量，各 nvm 版本默认共享 `~/.npm`，自定义 per-install cache 才会产生多份。
 
+## 已集成的第三批：Application Support 侧浏览器派生缓存
+
+实测发现 macOS 的 Chromium 派生缓存主要不在 `~/Library/Caches`，而在 `~/Library/Application Support/<browser>` 下，分两类：
+
+- 与 profile 并列、整个安装共享：`ShaderCache`、`GrShaderCache`、`GraphiteDawnCache`、`GPUPersistentCache`、`component_crx_cache`、`extensions_crx_cache`；
+- 每个 profile 内部：`GPUCache`、`DawnGraphiteCache`、`DawnWebGPUCache`。
+
+为避免“一个浏览器一个代码分支”，规则新增数据结构 `browserCaches`（`BrowserCacheSpec`：anchor + userData 路径 + sharedCaches + profileCaches），由统一发现逻辑展开；profile 名（`Default` / `Profile N`）从磁盘枚举而非写死。新增 matchKind `verified_browser_cache`、rootKind `macos_browser_derived_cache`。
+
+新增 report-only 规则 `macos.browser-derived-cache`，一条规则内用 7 个 spec 覆盖 Chrome、Edge、Brave、Arc、Vivaldi、Opera、Chromium。仅当目录真实存在时报告；`Cookies`、`History`、`Login Data`、`Bookmarks`、`Local Storage`、`IndexedDB`、Service Worker `CacheStorage` 等持久数据一律不进入任何 spec，并有测试强制。
+
+实测（本机，2026-09-29）：Chrome 与 Edge 都齐了 6 个共享缓存 + Default 下 3 个 profile 缓存；目录内部为 blockfile（`data_0..3` + `index`）或内容寻址（`f_*` / 哈希目录），符合“可由 GPU 进程与组件更新器重建”的判定。Arc/Brave/Vivaldi/Opera/Chromium 在本机未安装，对应 spec 只是数据、不产生结果——这正是数据驱动的目的，装上即自动覆盖，无需改代码。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：

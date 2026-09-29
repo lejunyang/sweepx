@@ -416,6 +416,120 @@
     ]
   },
   {
+    "id": "macos.browser-derived-cache",
+    "platform": "macos",
+    "rootKind": "macos_browser_derived_cache",
+    "matchKind": "verified_browser_cache",
+    "names": [],
+    "requiredMarkers": [],
+    "browserCaches": [
+      {
+        "base": "application_support",
+        "userData": ["Google", "Chrome"],
+        "sharedCaches": [
+          "ShaderCache",
+          "GrShaderCache",
+          "GraphiteDawnCache",
+          "GPUPersistentCache",
+          "component_crx_cache",
+          "extensions_crx_cache"
+        ],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Microsoft Edge"],
+        "sharedCaches": [
+          "ShaderCache",
+          "GrShaderCache",
+          "GraphiteDawnCache",
+          "GPUPersistentCache",
+          "component_crx_cache",
+          "extensions_crx_cache"
+        ],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["BraveSoftware", "Brave-Browser"],
+        "sharedCaches": ["GrShaderCache", "GraphiteDawnCache"],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Arc", "User Data"],
+        "sharedCaches": [
+          "ShaderCache",
+          "GrShaderCache",
+          "GraphiteDawnCache",
+          "component_crx_cache",
+          "extensions_crx_cache"
+        ],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["com.vivaldi.Vivaldi"],
+        "sharedCaches": [
+          "ShaderCache",
+          "GrShaderCache",
+          "GraphiteDawnCache",
+          "component_crx_cache",
+          "extensions_crx_cache"
+        ],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["com.operasoftware.Opera"],
+        "sharedCaches": ["GrShaderCache", "GraphiteDawnCache"],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Chromium"],
+        "sharedCaches": ["GrShaderCache", "GraphiteDawnCache"],
+        "profileCaches": [
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "These are Chromium-family derived GPU/shader/component caches sitting in Application Support beside and inside enumerated profiles, so they sit outside the ~/Library/Caches tree the user-cache rule covers. They are rebuilt by the GPU process and component/extension updaters; cookies, history, passwords, bookmarks, Local Storage, IndexedDB and Service Worker CacheStorage are never selected. Profiles are enumerated from disk and only existing directories are reported.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://chromium.googlesource.com/chromium/src/+/main/docs/user_data_dir.md",
+      "https://source.chromium.org/chromium/chromium/src/+/main:gpu/ipc/host/gpu_disk_cache.cc"
+    ]
+  },
+  {
     "id": "windows.packaged-app-cache",
     "platform": "windows",
     "rootKind": "windows_packages",

@@ -960,6 +960,31 @@ struct KnownRoot {
     components: Vec<String>,
 }
 
+/// Declarative layout of one Chromium-family browser's derived GPU/network caches.
+///
+/// A browser keeps caches in two places: shared directories sitting beside the profiles, and one
+/// directory per enumerated profile. Encoding this in the rule data lets SweepX discover caches
+/// for any browser without a code branch per browser or a hardcoded profile-name list (profiles
+/// are expanded from disk). Only derived cache directory names belong in the lists; cookies,
+/// history, passwords, bookmarks, Local Storage and IndexedDB are never named.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserCacheSpec {
+    /// Anchor `userData` is resolved against: `application_support` (`~/Library/Application
+    /// Support`), `local_app_data` (`%LOCALAPPDATA%`), or `home`.
+    base: String,
+    /// Components from `base` to the browser's user-data directory.
+    user_data: Vec<String>,
+    /// Cache directories that live directly under the user-data directory, shared by all
+    /// profiles, for example `GrShaderCache`.
+    #[serde(default)]
+    shared_caches: Vec<String>,
+    /// Cache directories that live inside each profile, for example `GPUCache`. Profiles named
+    /// `Default` and `Profile N` are enumerated from the user-data directory.
+    #[serde(default)]
+    profile_caches: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlatformJunkRule {
@@ -977,6 +1002,10 @@ struct PlatformJunkRule {
     /// which keeps location knowledge in the rule data instead of in code keyed on rule id.
     #[serde(default)]
     known_roots: Vec<KnownRoot>,
+    /// Browser-cache layouts a `verified_browser_cache` rule expands. One entry per browser;
+    /// discovery walks shared and per-profile cache directories from each, in the rule data.
+    #[serde(default)]
+    browser_caches: Vec<BrowserCacheSpec>,
     depth: usize,
     risk: String,
     evidence: String,
@@ -1946,6 +1975,11 @@ fn platform_junk_candidates(
                 // instead of by asking a tool. The marker is rechecked here because discovery
                 // and classification see the path through different readers.
                 "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
+                // The scan root itself, expanded from the rule's declarative browser layouts. No
+                // marker is required: sitting inside a known browser user-data tree under a
+                // derived-cache name is the evidence, and the directories are blockfile/scratch
+                // roots that can be empty yet still occupy scaffolding.
+                "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
                 "verified_known_root" => depth == 0 && known_macos_root_matches(rule, entry),
                 #[cfg(target_os = "linux")]
                 "stale_inactive_direct_child" => false,
@@ -2297,6 +2331,98 @@ fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 fn known_macos_roots(_rule: &PlatformJunkRule) -> Vec<PathBuf> {
     Vec::new()
+}
+
+/// Resolves a browser-cache spec's anchor to an absolute base directory.
+///
+/// `application_support` is the macOS `~/Library/Application Support`, `local_app_data` is the
+/// Windows `%LOCALAPPDATA%`, and `home` is the user home. An unknown or unresolvable anchor
+/// yields `None` rather than a guessed path.
+fn browser_base_dir(base: &str) -> Option<PathBuf> {
+    let home = user_home_dir()?;
+    match base {
+        "home" => Some(home),
+        "application_support" => Some(home.join("Library").join("Application Support")),
+        "local_app_data" => std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()),
+        _ => None,
+    }
+}
+
+/// Every derived cache directory a rule's browser specs expand to.
+///
+/// Walks each browser's shared caches beside the profiles and the profile caches inside every
+/// `Default`/`Profile N` directory enumerated from disk, so no browser needs a code branch and no
+/// profile name is assumed. Only existing real directories are returned and duplicates are folded
+/// by filesystem identity, because two browsers (or an injected config) can resolve to one path.
+fn browser_cache_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for spec in &rule.browser_caches {
+        let Some(base) = browser_base_dir(&spec.base) else {
+            continue;
+        };
+        let mut user_data = base;
+        for component in &spec.user_data {
+            user_data.push(component);
+        }
+        if !is_existing_real_directory(&user_data) {
+            continue;
+        }
+        for name in &spec.shared_caches {
+            let candidate = user_data.join(name);
+            push_browser_root(&candidate, &mut roots);
+        }
+        // Profiles are read from the directory: a fixed list would silently miss extra profiles.
+        let Ok(entries) = std::fs::read_dir(&user_data) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name != "Default" && !name.starts_with("Profile ") {
+                continue;
+            }
+            let profile = user_data.join(name);
+            if !is_existing_real_directory(&profile) {
+                continue;
+            }
+            for cache in &spec.profile_caches {
+                push_browser_root(&profile.join(cache), &mut roots);
+            }
+        }
+    }
+    roots
+}
+
+fn push_browser_root(candidate: &Path, roots: &mut Vec<PathBuf>) {
+    if is_existing_real_directory(candidate)
+        && !roots
+            .iter()
+            .any(|existing| same_directory(existing, candidate))
+    {
+        roots.push(candidate.to_path_buf());
+    }
+}
+
+/// Whether a scanned root is one of the derived caches this rule's browser specs expand to.
+///
+/// Comparison uses the captured native path, never the display string: display paths are not
+/// classification authority in this codebase. The directory's position inside a known browser
+/// user-data tree, together with its derived-cache name, is the evidence; the marker-bearing
+/// network caches elsewhere are a different rule.
+fn browser_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+    let Some(locator) = entry.native_locator.as_ref() else {
+        return false;
+    };
+    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
+        return false;
+    };
+    browser_cache_roots(rule)
+        .iter()
+        .any(|root| captured.equals_path(root).unwrap_or(false))
 }
 
 /// One origin's share of a browser storage subsystem, with the bytes it holds.
@@ -3375,6 +3501,18 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
             }
         }
     }
+    // Browser derived caches are declared in rule data (one spec per browser) and expanded here,
+    // so the same mechanism serves any platform whose spec anchor resolves.
+    for rule in &rules {
+        for root in browser_cache_roots(rule) {
+            if !roots
+                .iter()
+                .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
+            {
+                roots.push(root);
+            }
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         // XDG_CACHE_HOME is valid only as an absolute path. Falling back to ~/.cache follows the
@@ -3959,6 +4097,11 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 "macos_user_caches" => ("macos_user_caches", "direct_children", 1),
                 "macos_developer_cache" => ("macos_developer_cache", "verified_known_root", 0),
                 "macos_browser_cache" => ("macos_browser_cache", "verified_known_root", 0),
+                // Derived GPU/shader caches that live in Application Support, outside the
+                // ~/Library/Caches tree; expanded from the rule's declarative browser layouts.
+                "macos_browser_derived_cache" => {
+                    ("macos_browser_derived_cache", "verified_browser_cache", 0)
+                }
                 "macos_app_cache" => ("macos_app_cache", "verified_known_root", 0),
                 _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
             },
@@ -4033,6 +4176,13 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
             || (rule.match_kind == "verified_known_root"
                 && (!rule.names.is_empty() || rule.known_roots.is_empty()))
             || (rule.match_kind != "verified_known_root" && !rule.known_roots.is_empty())
+            // A verified_browser_cache rule must declare at least one browser spec, and no other
+            // kind may carry them.
+            || (rule.match_kind == "verified_browser_cache"
+                && (!rule.names.is_empty()
+                    || rule.browser_caches.is_empty()
+                    || !rule.required_markers.is_empty()))
+            || (rule.match_kind != "verified_browser_cache" && !rule.browser_caches.is_empty())
             || !rule
                 .known_roots
                 .iter()
@@ -4043,6 +4193,25 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                             .components
                             .iter()
                             .all(|component| safe_rule_component(component))
+                })
+            || !rule
+                .browser_caches
+                .iter()
+                .all(|spec| {
+                    let valid_anchor =
+                        matches!(spec.base.as_str(), "application_support" | "local_app_data" | "home");
+                    let has_at_least_one_cache =
+                        !spec.shared_caches.is_empty() || !spec.profile_caches.is_empty();
+                    let safe_components = spec
+                        .user_data
+                        .iter()
+                        .chain(spec.shared_caches.iter())
+                        .chain(spec.profile_caches.iter())
+                        .all(|component| safe_rule_component(component));
+                    valid_anchor
+                        && !spec.user_data.is_empty()
+                        && has_at_least_one_cache
+                        && safe_components
                 })
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
@@ -4319,7 +4488,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 24);
+        assert_eq!(rules.len(), 25);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -4345,7 +4514,7 @@ mod tests {
             .iter()
             .filter(|rule| rule.platform == "macos")
             .collect();
-        assert_eq!(macos_rules.len(), 15);
+        assert_eq!(macos_rules.len(), 16);
         let integrated_macos_ids = [
             "macos.xcode-derived-data",
             "macos.cargo-registry-cache",
@@ -4361,6 +4530,7 @@ mod tests {
             "macos.gradle-cache",
             "macos.jetbrains-cache",
             "macos.deno-cache",
+            "macos.browser-derived-cache",
         ];
         for id in integrated_macos_ids {
             assert!(rules.iter().any(|rule| rule.id == id), "missing {id}");
@@ -4397,6 +4567,34 @@ mod tests {
             .unwrap();
         assert_eq!(windows.names, ["LocalCache", "TempState"]);
         assert_eq!(windows.depth, 2);
+
+        // The derived browser rule must describe several browsers purely in data, and no spec
+        // may name durable profile storage.
+        let derived = rules
+            .iter()
+            .find(|rule| rule.id == "macos.browser-derived-cache")
+            .unwrap();
+        assert_eq!(derived.match_kind, "verified_browser_cache");
+        assert!(derived.browser_caches.len() >= 5);
+        let forbidden = [
+            "Cookies",
+            "History",
+            "Login Data",
+            "Bookmarks",
+            "Local Storage",
+            "IndexedDB",
+        ];
+        for spec in &derived.browser_caches {
+            assert!(spec.base == "application_support");
+            assert!(!spec.user_data.is_empty());
+            assert!(!spec.shared_caches.is_empty() || !spec.profile_caches.is_empty());
+            for name in spec.shared_caches.iter().chain(spec.profile_caches.iter()) {
+                assert!(
+                    !forbidden.contains(&name.as_str()),
+                    "rule selects durable {name}"
+                );
+            }
+        }
     }
 
     /// Every tool-reported rule must be resolvable and structurally guarded.
