@@ -2704,6 +2704,9 @@ fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
+// The only caller sits inside the `#[cfg(target_os = "macos")]` root-discovery block, so this
+// stub exists purely to keep the not-macOS build resolving and is dead on linux/Windows.
+#[allow(dead_code)]
 fn known_macos_roots(_rule: &PlatformJunkRule) -> Vec<PathBuf> {
     Vec::new()
 }

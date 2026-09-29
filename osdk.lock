@@ -20,6 +20,46 @@ version = "1.98.0"
 [platforms.linux-x64.tools.rust.options]
 components = "rustfmt,clippy"
 
+[platforms.macos-arm64.tools.bun]
+request = "1.4.0"
+version = "1.4.0"
+
+[platforms.macos-arm64.tools.bun.artifact]
+url = "https://registry.npmjs.org/@oven/bun-darwin-aarch64/-/bun-darwin-aarch64-1.4.0.tgz"
+file_name = "bun-1.4.0.tgz"
+checksum = "sha512:182a5ff10b852ecca2a156b03f91eb331035651065bba1eaf5136749cdd44d4580cc8c41b28f6dae3a19733c351dd829a92b2c164b337c8576ce63b31538e193"
+
+[platforms.macos-arm64.tools.python]
+request = "3.12"
+version = "3.12.14"
+
+[platforms.macos-arm64.tools.python.options]
+implementation = "cpython"
+python-version = "3.12.14"
+variant = "default"
+
+[platforms.macos-arm64.tools.python.artifact]
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20260814/cpython-3.12.14+20260814-aarch64-apple-darwin-install_only_stripped.tar.gz"
+file_name = "cpython-3.12.14+20260814-aarch64-apple-darwin-install_only_stripped.tar.gz"
+checksum = "sha256:dd5b76ab11451a4a4367c17c61d944dded56b425396b07f102922a7ebef7d55f"
+
+[platforms.macos-arm64.tools.rust]
+request = "1.98.0"
+version = "1.98.0"
+
+[platforms.macos-arm64.tools.rust.options]
+components = "rustfmt,clippy"
+targets = "x86_64-unknown-linux-gnu"
+
+[platforms.macos-arm64.tools.zig]
+request = "0.16.0"
+version = "0.16.0"
+
+[platforms.macos-arm64.tools.zig.artifact]
+url = "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz"
+file_name = "zig-aarch64-macos-0.16.0.tar.xz"
+checksum = "sha256:b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+
 [deps.bun]
 installer = "bun"
 installer_version = "1.4.0"
@@ -36,5 +76,5 @@ sha256 = "362721877041d5a70bea450e40bfdd55eb1421014d553925d435f25aaa30f645"
 installer = "cargo"
 installer_version = "1.98.0"
 manifest = "Cargo.toml"
-manifest_sha256 = "328e6b53605509b3c6d77c44e8371561a37d785ca2fd1f0c5fd3d33782a64720"
+manifest_sha256 = "45ae1b3278ee7730d673fffd0ed48e3b3a25e8f9f6af897ae96fc6bde265c87d"
 run = "cargo.exe fetch --locked"

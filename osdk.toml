@@ -1,8 +1,12 @@
 # Project toolchain versions. Keep the Rust and Bun pins aligned with
 # rust-toolchain.toml and the GitHub Actions workflows respectively.
 [tools]
-rust = { version = "1.98.0", components = "rustfmt,clippy" }
+rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-unknown-linux-gnu" }
 bun = "1.4.0"
+# Zig is the cross C toolchain for non-host targets on macOS. The bundled SQLite
+# dependency (rusqlite) compiles C for the target, so linting the linux target
+# off macOS needs a libc-bearing C compiler even though that binary only runs in CI.
+zig = "0.16.0"
 # The repository's Python utilities use tomllib, which requires Python 3.11+.
 python = "3.12"
 
@@ -22,3 +26,7 @@ roots = ["schemas", "site"]
 "dnf:gcc" = { version = "latest", os = "linux" }
 "pacman:gcc" = { version = "latest", os = "linux" }
 "apk:build-base" = { version = "latest", os = "linux" }
+
+[tasks.cross-lint]
+run = "scripts/cross-lint.sh"
+description = "Lint a crate against a non-host Rust target using Zig as the cross C toolchain; args: <rust-target> <crate>"
