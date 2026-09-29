@@ -387,10 +387,9 @@ mod backend {
             parent: &OpenDirectory,
             child: &DirectoryEntryRecord,
             observed_before: &ObservedMetadata,
-        ) -> Result<OpenDirectory, PlatformError> {
-            let parent_fd = Self::dirfd(parent)
-                .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
-            let child_name = Self::name_c_string(&child.file_name)?;
+        ) -> Result<OpenDirectory, io::Error> {
+            let parent_fd = Self::dirfd(parent).map_err(io::Error::other)?;
+            let child_name = Self::name_c_string(&child.file_name).map_err(io::Error::other)?;
 
             // SAFETY: `parent_fd` is live, `child_name` is NUL-terminated, and flags refuse
             // following a symlink in the final component while requiring a directory.
@@ -402,26 +401,23 @@ mod backend {
                 )
             };
             if raw_fd < 0 {
-                let error = io::Error::last_os_error();
-                return ok_error_changed_or_io(parent, child, error);
+                // Preserve the original error (TCC EPERM, a vanished child, ...). The caller
+                // decides this is a skipped subtree rather than a fatal scan error; do not
+                // rewrap it here, or the access-denied kind would be lost.
+                return Err(io::Error::last_os_error());
             }
 
             // SAFETY: `openat` returned a fresh owned descriptor.
             let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-            let observed_after =
-                Self::fstat(&fd).map_err(|error| PlatformError::io(child.path.clone(), error))?;
+            let observed_after = Self::fstat(&fd)?;
             if observed_before.identity() != observed_after.identity() {
-                return Err(PlatformError::io(
-                    child.path.clone(),
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "directory identity changed between fstatat and openat",
-                    ),
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory identity changed between fstatat and openat",
                 ));
             }
 
             Self::open_directory_from_fd(fd, child.path.clone())
-                .map_err(|error| PlatformError::io(child.path.clone(), error))
         }
 
         fn metadata_to_entry(
@@ -698,32 +694,6 @@ mod backend {
         }
     }
 
-    fn ok_error_changed_or_io(
-        parent: &OpenDirectory,
-        child: &DirectoryEntryRecord,
-        error: io::Error,
-    ) -> Result<OpenDirectory, PlatformError> {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::NotFound
-                | io::ErrorKind::NotADirectory
-                | io::ErrorKind::PermissionDenied
-        ) || matches!(error.raw_os_error(), Some(libc::ELOOP))
-        {
-            return Err(PlatformError::io(
-                child.path.clone(),
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "directory changed between no-follow stat and open under {}: {error}",
-                        parent.path.display()
-                    ),
-                ),
-            ));
-        }
-        Err(PlatformError::io(child.path.clone(), error))
-    }
-
     impl PlatformScanner for MacosPlatformScanner {
         type DirectoryHandle = OpenDirectory;
 
@@ -900,7 +870,21 @@ mod backend {
                             detail: "frontier limit exceeded".to_string(),
                         }));
                     }
-                    let handle = Self::open_child_directory(parent, child, &observed)?;
+                    let handle = match Self::open_child_directory(parent, child, &observed) {
+                        Ok(handle) => handle,
+                        // A directory that cannot be opened (TCC refusal, a child that vanished,
+                        // a stat/open race) is a skipped subtree, not a fatal scan error: report
+                        // it as an error record so the totals covering it become lower bounds and
+                        // an ancestor delete still fails closed on the incomplete coverage.
+                        Err(error) => {
+                            return Ok(WalkEntry::Error(ErrorRecord {
+                                path: child.path.clone(),
+                                kind: sweepx_platform::error_kind_for_io(&error),
+                                reason: sweepx_platform::reason_for_io(&error),
+                                detail: error.to_string(),
+                            }));
+                        }
+                    };
                     let metadata = Self::metadata_to_entry(
                         &child.path,
                         child.file_name.clone(),
@@ -1516,6 +1500,42 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(entry, WalkEntry::Error(_)));
+    }
+
+    #[test]
+    fn unopenable_child_directory_is_skipped_as_walk_error_not_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new("unopenable-dir");
+        // A real directory with no permission to open it, standing in for a TCC refusal. It is
+        // writable by root only, and the test runs unprivileged; root's open would succeed, so
+        // skip the assertion there rather than pass for the wrong reason.
+        let blocked = temp.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let scanner = MacosPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let inspected = scanner.inspect_child(
+            &admission.directory,
+            &child_record(temp.path(), b"blocked"),
+            &CancellationToken::new(),
+        );
+        // The scan must not abort; an unwrapped walk entry of the Error kind is the contract.
+        match inspected {
+            Ok(WalkEntry::Error(record)) => {
+                assert!(record.path == blocked);
+                assert!(matches!(
+                    record.kind,
+                    sweepx_platform::ErrorKind::AccessDenied
+                ));
+            }
+            other => panic!("expected an access-denied walk error, got {other:?}"),
+        }
     }
 
     #[test]
