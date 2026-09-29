@@ -538,22 +538,31 @@ impl ScanSink for CollectingScanSink<'_> {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError> {
         if self.classifier.is_some() {
-            // The aggregate id names the now-complete directory: classify its pending row
-            // before/around retaining the aggregate. When the aggregate cap overflows the
-            // evidence loss is still an overflow below; the pending row is dropped with it.
+            // The aggregate id names the now-complete directory: classify its pending row first,
+            // and retain the aggregate only when this directory is itself a junk candidate.
+            let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
+            self.classify_pending(&id);
+            if !self.decisions.contains_key(&id) {
+                // A non-candidate directory's bytes are not needed for any total: file entries are
+                // folded into every ancestor's state as they are visited (`propagate_file_entry`
+                // walks the full ancestor chain), so parent totals never read a child's retained
+                // aggregate. Discarding here is what keeps retained aggregates proportional to
+                // the classified set instead of the whole tree. Keeping them previously made a
+                // large walk overflow `max_retained_aggregates`, dropping evidence for real
+                // candidates, which then reported `unknown` sizes intermittently.
+                return Ok(());
+            }
             if self.summary.aggregates.len() >= self.limits.max_retained_aggregates {
-                self.pending_directories.remove(&ScanEntryId::from_loaded(
-                    aggregate.directory_identity.clone(),
-                ));
+                // The classified set itself exceeded the cap: this is real evidence loss, so it
+                // stays an overflow rather than silently shrinking the result.
+                self.decisions.remove(&id);
                 self.mark_overflow(
                     root,
                     root,
-                    "retained aggregate cap exceeded across scan roots",
+                    "retained aggregate cap exceeded across classified candidates",
                 );
                 return Ok(());
             }
-            let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
-            self.classify_pending(&id);
             self.summary.aggregates.push(aggregate);
             return Ok(());
         }
@@ -3015,7 +3024,7 @@ mod tests {
     }
 
     /// A classified scan retains only rows the classifier accepts and records their rule ids;
-    /// aggregates for the whole tree are still retained.
+    /// aggregates are likewise retained only for the classified directories.
     #[test]
     fn classified_scan_keeps_only_matching_directory_rows() {
         let fan_out = 8;
@@ -3054,8 +3063,10 @@ mod tests {
         )
         .unwrap();
 
-        // Root + branches + leaves: 1 + 2*fan aggregates regardless of row filtering.
-        assert_eq!(result.summary.aggregates.len(), 1 + fan_out * 2);
+        // Only the fan classified branches retain aggregates: non-candidate directories (the
+        // root and the leaves) drop theirs because no total reads them. Each branch's retained
+        // aggregate still carries that whole subtree's measured size.
+        assert_eq!(result.summary.aggregates.len(), fan_out);
         // Exactly the fan branch rows, each with one decision carrying the rule id.
         assert_eq!(result.decisions.len(), fan_out);
         assert!(
