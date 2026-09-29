@@ -1212,6 +1212,55 @@ impl GitProbeBudget {
 const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
 const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-rules.json");
 
+/// Expensive, rule-derived evidence computed once and shared by every classification.
+///
+/// `tool_cache_candidates` shells out to the developer tool — for npm it additionally enumerates
+/// every installation and runs up to three subprocesses per copy (`npm --version`, `node
+/// --version`, `npm config get cache`). These values depend only on the rule and the host
+/// environment, never on a scanned entry, so asking for them on every `verified_tool_root` check
+/// during the walk turned one scan into hundreds of sequential tool launches. Measured on this
+/// host 2026-09-29: the walk sat blocked in `poll` on tool output for more than six minutes while
+/// using under twenty seconds of CPU. Capturing the answers here once is what keeps the
+/// accelerated walk I/O-bound instead of subprocess-bound.
+struct PlatformRuleEvidence {
+    /// Verified cache locations (markers and structural fingerprint already checked).
+    cache_candidates: Vec<PathBuf>,
+    /// Cache the tool itself currently names, after resolution; `None` for non-tool-reported
+    /// rules or when the tool could not be asked (then liveness is `Unknown`, never `Stale`).
+    reported_root: Option<PathBuf>,
+}
+
+/// Owned, rule-id-keyed table of precomputed platform evidence.
+struct PlatformJunkEvidence {
+    by_rule: BTreeMap<String, PlatformRuleEvidence>,
+}
+
+impl PlatformJunkEvidence {
+    /// Resolves the expensive inputs for every rule once, before the walk begins.
+    fn precompute(rules: &[PlatformJunkRule]) -> Self {
+        let mut by_rule = BTreeMap::new();
+        for rule in rules {
+            let cache_candidates = tool_cache_candidates(rule);
+            let reported_root =
+                tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve());
+            by_rule.insert(
+                rule.id.clone(),
+                PlatformRuleEvidence {
+                    cache_candidates,
+                    reported_root,
+                },
+            );
+        }
+        Self { by_rule }
+    }
+
+    /// Precomputed evidence for one rule, or `None` if the rule set this snapshot was built from
+    /// did not include it (treated as "cannot classify").
+    fn for_rule(&self, rule: &PlatformJunkRule) -> Option<&PlatformRuleEvidence> {
+        self.by_rule.get(&rule.id)
+    }
+}
+
 /// Junk classifier backed by the CLI's loaded project and platform rule sets.
 ///
 /// It is handed to the scanner, which invokes it while the walk runs so non-candidate rows are
@@ -1220,6 +1269,8 @@ const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-
 struct CliJunkClassifier<'a> {
     project_rules: &'a [JunkRule],
     platform_rules: &'a [PlatformJunkRule],
+    /// Precomputed tool evidence shared across all walk-time classifications.
+    evidence: &'a PlatformJunkEvidence,
 }
 
 impl JunkClassifier for CliJunkClassifier<'_> {
@@ -1252,7 +1303,7 @@ impl JunkClassifier for CliJunkClassifier<'_> {
             .iter()
             .filter(|rule| rule.platform == platform || rule.platform == "any")
         {
-            if platform_rule_classifies(rule, entry) {
+            if platform_rule_classifies(rule, entry, self.evidence) {
                 let rank = platform_rule_specificity(rule);
                 if best.is_none_or(|(best_rank, _)| rank < best_rank) {
                     best = Some((rank, rule));
@@ -1306,7 +1357,11 @@ fn project_rule_classifies(
 /// Depth is read from the entry's captured locator. The depth-zero match kinds behave exactly
 /// as before: those directories are still their own scan roots except known roots, which may
 /// legitimately be nested inside a wider root.
-fn platform_rule_classifies(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+fn platform_rule_classifies(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
+    evidence: &PlatformJunkEvidence,
+) -> bool {
     let Some(locator) = entry.native_locator.as_ref() else {
         return false;
     };
@@ -1321,7 +1376,7 @@ fn platform_rule_classifies(rule: &PlatformJunkRule, entry: &sweepx_model::Scann
                         .any(|candidate| normalized_rule_name(candidate) == name)
                 })
         }
-        "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
+        "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry, evidence),
         "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
         "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
         "verified_known_root" => known_macos_root_matches(rule, entry),
@@ -1400,9 +1455,13 @@ fn run_junk_scan(
         false,
         format == OutputFormat::Human,
     );
+    // Resolve every rule's tool caches and live root once, up front, so the walk-time classifier
+    // and the later assembly both read from this snapshot instead of each spawning the tools.
+    let evidence = PlatformJunkEvidence::precompute(&platform_rules);
     let classifier = CliJunkClassifier {
         project_rules: &rules,
         platform_rules: &platform_rules,
+        evidence: &evidence,
     };
     let classified = scan_junk_with_store(
         context,
@@ -1454,7 +1513,12 @@ fn run_junk_scan(
             let Some(rule) = platform_rules.iter().find(|rule| rule.id == rule_id) else {
                 continue;
             };
-            candidates.push(assemble_platform_candidate(rule, entry, &aggregates));
+            candidates.push(assemble_platform_candidate(
+                rule,
+                entry,
+                &aggregates,
+                &evidence,
+            ));
         }
     }
     annotate_project_candidates_with_git(
@@ -2245,6 +2309,7 @@ fn assemble_platform_candidate(
     rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    evidence: &PlatformJunkEvidence,
 ) -> JunkCandidate {
     let identity = entry
         .identity
@@ -2254,8 +2319,9 @@ fn assemble_platform_candidate(
         .native_locator
         .as_ref()
         .expect("matched entry carries a locator");
-    let activity = classify_tool_root(rule, entry).map(|classification| classification.code());
-    let stale_formats = superseded_format_generations(rule, entry);
+    let activity =
+        classify_tool_root(rule, entry, evidence).map(|classification| classification.code());
+    let stale_formats = superseded_format_generations(rule, entry, evidence);
     // Same allocation-versus-logical problem as the project rules, with one extra source: the
     // entry's own estimate, kept ahead of the logical fallback as the scanner's own claim.
     let aggregate = aggregates.get(identity.entry_id.as_str()).copied();
@@ -2328,8 +2394,12 @@ fn assemble_platform_candidate(
 /// markers are then re-checked so a rule only reports a directory that still has the cache's
 /// shape. This is report-only classification and grants no deletion authority; the scanner's
 /// no-follow identity checks remain the authority over what was traversed.
-fn tool_reported_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
-    classify_tool_root(rule, entry).is_some()
+fn tool_reported_root_matches(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
+    evidence: &PlatformJunkEvidence,
+) -> bool {
+    classify_tool_root(rule, entry, evidence).is_some()
 }
 
 /// Whether a matched cache root is the one the tool is currently using.
@@ -2372,6 +2442,7 @@ impl ToolRootActivity {
 fn classify_tool_root(
     rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
+    evidence: &PlatformJunkEvidence,
 ) -> Option<ToolRootActivity> {
     let locator = entry.native_locator.as_ref()?;
     // Without a captured native path there is nothing trustworthy to compare against, so the rule
@@ -2381,8 +2452,13 @@ fn classify_tool_root(
     // structural fingerprint were already checked against real bytes. Re-deriving the check from
     // `display_path` would be wrong twice over: display paths are not classification authority, and
     // the same directory reached through a differently-cased path would be judged a second time.
-    let matched = tool_cache_candidates(rule)
-        .into_iter()
+    //
+    // Candidates and the live resolver are precomputed once (see `PlatformJunkEvidence`) rather
+    // than launched here: doing this per walk entry was the source of the multi-minute stall.
+    let rule_evidence = evidence.for_rule(rule)?;
+    let matched = rule_evidence
+        .cache_candidates
+        .iter()
         .find(|candidate| captured.equals_path(candidate).unwrap_or(false))?;
     // Liveness compares directory identity, not spelling. The resolver and an environment override
     // routinely name one directory with different casing, and comparing the resolver's raw string
@@ -2390,13 +2466,11 @@ fn classify_tool_root(
     //
     // No answer means `Unknown`, never `Stale`: a tool that cannot be asked has not told us this
     // copy is abandoned, and claiming otherwise about a live cache is the worst outcome available.
-    Some(
-        match tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve()) {
-            Some(reported) if same_directory(&matched, &reported) => ToolRootActivity::Live,
-            Some(_) => ToolRootActivity::Stale,
-            None => ToolRootActivity::Unknown,
-        },
-    )
+    Some(match rule_evidence.reported_root {
+        Some(ref reported) if same_directory(matched, reported) => ToolRootActivity::Live,
+        Some(_) => ToolRootActivity::Stale,
+        None => ToolRootActivity::Unknown,
+    })
 }
 
 /// One Chromium-family browser installation whose caches SweepX knows how to find.
@@ -4327,6 +4401,7 @@ fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
 fn superseded_format_generations(
     rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
+    evidence: &PlatformJunkEvidence,
 ) -> Vec<String> {
     let Some(profile) = tool_cache_profile(&rule.root_kind) else {
         return Vec::new();
@@ -4344,8 +4419,13 @@ fn superseded_format_generations(
     else {
         return Vec::new();
     };
-    let Some(root) = tool_cache_candidates(rule)
-        .into_iter()
+    let rule_evidence = match evidence.for_rule(rule) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    let Some(root) = rule_evidence
+        .cache_candidates
+        .iter()
         .find(|candidate| captured.equals_path(candidate).unwrap_or(false))
     else {
         return Vec::new();
