@@ -942,6 +942,23 @@ struct JunkRule {
     references: Vec<String>,
 }
 
+/// A fixed, well-known filesystem location a rule can select without a tool reporting it.
+///
+/// The location is expressed relative to a resolved `base` rather than as a literal absolute
+/// string, so a rule stays portable across users and volumes. Only documented, vendor-published
+/// roots belong here; a directory name guessed from an upstream catalog is not evidence by
+/// itself.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KnownRoot {
+    /// Anchor the components are joined onto. `home` resolves to the current user's home
+    /// directory and must be absolute; unknown bases are rejected.
+    base: String,
+    /// Path components appended to `base`, in order. Every component must be a single non-empty
+    /// name with no separators or parent traversal.
+    components: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlatformJunkRule {
@@ -955,6 +972,10 @@ struct PlatformJunkRule {
     /// For tool-reported roots this is the structural check that the directory really is the
     /// cache the tool described, rather than whatever else now sits at that path.
     required_markers: Vec<String>,
+    /// Fixed locations a `verified_known_root` rule selects. Empty for every other match kind,
+    /// which keeps location knowledge in the rule data instead of in code keyed on rule id.
+    #[serde(default)]
+    known_roots: Vec<KnownRoot>,
     depth: usize,
     risk: String,
     evidence: String,
@@ -2228,79 +2249,22 @@ fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
     let Some(home) = user_home_dir().filter(|home| home.is_absolute()) else {
         return Vec::new();
     };
-    let mut paths = Vec::new();
-    let push = |path: PathBuf, paths: &mut Vec<PathBuf>| {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for known in &rule.known_roots {
+        // Only a home-relative anchor is currently defined. A literal absolute base is refused
+        // rather than trusted, because rules must not encode one machine's layout.
+        if known.base != "home" {
+            continue;
+        }
+        let mut path: PathBuf = home.clone();
+        for component in &known.components {
+            path.push(component);
+        }
         if is_existing_real_directory(&path)
             && !paths.iter().any(|existing| same_directory(existing, &path))
         {
             paths.push(path);
         }
-    };
-    let join_home = |components: &[&str]| {
-        let mut path = home.clone();
-        for component in components {
-            path.push(component);
-        }
-        path
-    };
-    match rule.root_kind.as_str() {
-        "macos_developer_cache" => match rule.id.as_str() {
-            "macos.xcode-derived-data" => {
-                push(
-                    join_home(&["Library", "Developer", "Xcode", "DerivedData"]),
-                    &mut paths,
-                );
-            }
-            "macos.cargo-registry-cache" => {
-                push(
-                    home.join(".cargo").join("registry").join("cache"),
-                    &mut paths,
-                );
-                push(home.join(".cargo").join("git").join("db"), &mut paths);
-            }
-            _ => {}
-        },
-        "macos_browser_cache" => match rule.id.as_str() {
-            "macos.firefox-cache" => {
-                push(
-                    join_home(&["Library", "Caches", "Firefox", "Profiles"]),
-                    &mut paths,
-                );
-            }
-            "macos.chromium-cache" => {
-                push(join_home(&["Library", "Caches", "Chromium"]), &mut paths);
-            }
-            "macos.safari-cache" => {
-                for components in [
-                    &["Library", "Caches", "com.apple.Safari"][..],
-                    &["Library", "Caches", "Metadata", "Safari"],
-                    &[
-                        "Library",
-                        "Containers",
-                        "com.apple.Safari.CacheDeleteExtension",
-                        "Data",
-                    ],
-                    &["Library", "Caches", "com.apple.Safari.SafeBrowsing"],
-                    &["Library", "Caches", "com.apple.safaridavclient"],
-                ] {
-                    push(join_home(components), &mut paths);
-                }
-            }
-            _ => {}
-        },
-        "macos_app_cache" if rule.id == "macos.tencent-meeting-cache" => {
-            push(
-                join_home(&[
-                    "Library",
-                    "Caches",
-                    "com.tencent.meeting",
-                    "WebKit",
-                    "NetworkCache",
-                ]),
-                &mut paths,
-            );
-        }
-        _ => {}
     }
     paths
 }
@@ -4030,7 +3994,20 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
             // happens to sit at that path.
             || (rule.match_kind == "verified_cache_root"
                 && (!rule.names.is_empty() || rule.required_markers.is_empty()))
-            || (rule.match_kind == "verified_known_root" && !rule.names.is_empty())
+            || (rule.match_kind == "verified_known_root"
+                && (!rule.names.is_empty() || rule.known_roots.is_empty()))
+            || (rule.match_kind != "verified_known_root" && !rule.known_roots.is_empty())
+            || !rule
+                .known_roots
+                .iter()
+                .all(|known| {
+                    known.base == "home"
+                        && !known.components.is_empty()
+                        && known
+                            .components
+                            .iter()
+                            .all(|component| safe_rule_component(component))
+                })
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
         }
@@ -4343,6 +4320,31 @@ mod tests {
         ];
         for id in integrated_macos_ids {
             assert!(rules.iter().any(|rule| rule.id == id), "missing {id}");
+        }
+        // Location knowledge must live in the rule data, not in code matched on rule id. Every
+        // verified_known_root rule therefore declares at least one home-relative root, and no
+        // other kind does.
+        for rule in &rules {
+            if rule.match_kind == "verified_known_root" {
+                assert!(
+                    !rule.known_roots.is_empty(),
+                    "rule {} declares no known roots",
+                    rule.id
+                );
+                assert!(
+                    rule.known_roots
+                        .iter()
+                        .all(|known| known.base == "home" && !known.components.is_empty()),
+                    "rule {} uses an unsupported known-root anchor",
+                    rule.id
+                );
+            } else {
+                assert!(
+                    rule.known_roots.is_empty(),
+                    "rule {} must not declare known roots",
+                    rule.id
+                );
+            }
         }
 
         let windows = rules

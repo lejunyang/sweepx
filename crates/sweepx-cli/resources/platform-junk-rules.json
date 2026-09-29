@@ -53,6 +53,17 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [
+          "Library",
+          "Developer",
+          "Xcode",
+          "DerivedData"
+        ]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "Apple identifies Library/Developer/Xcode/DerivedData as generated build products and indexes; project sources, signing material and archives remain outside the root. This report-only rule follows MangoDisk and Lemon Cleaner's Xcode strategy but does not close Xcode automatically.",
@@ -68,6 +79,16 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [".cargo", "registry", "cache"]
+      },
+      {
+        "base": "home",
+        "components": [".cargo", "git", "db"]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "Cargo documents registry/cache and git/db as downloaded dependency caches that can be restored by extraction, checkout, or redownload; credentials, installed binaries and registry/src remain outside the selected cache roots.",
@@ -83,6 +104,12 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "Firefox", "Profiles"]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "Firefox stores its macOS disk cache under Library/Caches/Firefox/Profiles, separate from the Application Support profile that contains bookmarks, credentials, history and settings.",
@@ -99,6 +126,12 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "Chromium"]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "The rule selects Chromium's cache root under Library/Caches/Chromium; cookies, history, passwords, bookmarks, extensions and other durable profile data remain outside the selected root.",
@@ -114,6 +147,33 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "com.apple.Safari"]
+      },
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "Metadata", "Safari"]
+      },
+      {
+        "base": "home",
+        "components": [
+          "Library",
+          "Containers",
+          "com.apple.Safari.CacheDeleteExtension",
+          "Data"
+        ]
+      },
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "com.apple.Safari.SafeBrowsing"]
+      },
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "com.apple.safaridavclient"]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "The rule covers Safari's documented cache, Safari metadata cache, CacheDeleteExtension, SafeBrowsing and safaridavclient roots; bookmarks, history, passwords, settings and other Safari durable data remain excluded.",
@@ -130,6 +190,18 @@
     "matchKind": "verified_known_root",
     "names": [],
     "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [
+          "Library",
+          "Caches",
+          "com.tencent.meeting",
+          "WebKit",
+          "NetworkCache"
+        ]
+      }
+    ],
     "depth": 0,
     "risk": "R2",
     "evidence": "The selected root is Tencent Meeting's WebKit NetworkCache. HSTS, CacheStorage, transport state, accounts, meetings, downloads, databases, preferences, dynamic resources and the sandbox container remain excluded.",
