@@ -212,6 +212,16 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 实测（本机，2026-09-29）：Chrome 与 Edge 都齐了 6 个共享缓存 + Default 下 3 个 profile 缓存；目录内部为 blockfile（`data_0..3` + `index`）或内容寻址（`f_*` / 哈希目录），符合“可由 GPU 进程与组件更新器重建”的判定。Arc/Brave/Vivaldi/Opera/Chromium 在本机未安装，对应 spec 只是数据、不产生结果——这正是数据驱动的目的，装上即自动覆盖，无需改代码。
 
+随后实测本机已装的两款内嵌 Chromium 的应用，发现 profile 约定不止 `Default`/`Profile N`，于是把 `BrowserCacheSpec` 扩展为支持三种 profile 发现方式（仍是纯数据）：
+
+- `profileNames`：显式 profile 名，如 LarkShell 的 `IronDefault`（外加枚举到的 `Default`）；
+- `enumerateNamedProfiles`：是否枚举 `Default`/`Profile N`（默认 true）；
+- `partitionContainers`：容器目录，其每个实目录子项都算一个 partition，适配 Postman 用 UUID 命名的 `Partitions`。
+
+据此在同一条 `macos.browser-derived-cache` 规则里追加了 LarkShell 与 Postman 两个 spec：LarkShell 取安装共享的 `ShaderCache/GrShaderCache/GraphiteDawnCache/CodeCache` 及各 profile 内派生缓存；Postman 取顶层与每个 UUID partition 下的 `Cache/Code Cache/GPUCache/Dawn*`。两者的 `Cookies`、`Local Storage`、`IndexedDB`、`Service Worker` 等仍被排除。
+
+实测（本机，2026-09-29）：展开结果覆盖 Postman 多个 UUID partition 各自的 `Cache`（数量与磁盘一致），并命中 LarkShell 的 `GrShaderCache`；展开结果去重、且不含任何 `/Cookies` 路径，有测试逐项核对。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：

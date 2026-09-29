@@ -518,6 +518,39 @@
           "DawnGraphiteCache",
           "DawnWebGPUCache"
         ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["LarkShell"],
+        "sharedCaches": [
+          "ShaderCache",
+          "GrShaderCache",
+          "GraphiteDawnCache",
+          "CodeCache"
+        ],
+        "profileCaches": [
+          "Cache",
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache",
+          "Code Cache"
+        ],
+        "profileNames": ["IronDefault"],
+        "enumerateNamedProfiles": true
+      },
+      {
+        "base": "application_support",
+        "userData": ["Postman"],
+        "sharedCaches": ["Cache", "Code Cache"],
+        "profileCaches": [
+          "Cache",
+          "Code Cache",
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ],
+        "enumerateNamedProfiles": false,
+        "partitionContainers": ["Partitions"]
       }
     ],
     "depth": 0,

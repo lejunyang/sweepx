@@ -979,10 +979,26 @@ struct BrowserCacheSpec {
     /// profiles, for example `GrShaderCache`.
     #[serde(default)]
     shared_caches: Vec<String>,
-    /// Cache directories that live inside each profile, for example `GPUCache`. Profiles named
-    /// `Default` and `Profile N` are enumerated from the user-data directory.
+    /// Cache directories that live inside each profile, for example `GPUCache`.
     #[serde(default)]
     profile_caches: Vec<String>,
+    /// Explicit profile directory names directly under user-data, for example `IronDefault`.
+    /// Use this when a product does not follow the `Default`/`Profile N` convention.
+    #[serde(default)]
+    profile_names: Vec<String>,
+    /// When true (the default), profiles named `Default` and `Profile N` are enumerated from
+    /// user-data. Set false for products whose only profiles are those in `profileNames` or
+    /// `partition_containers`.
+    #[serde(default = "default_true")]
+    enumerate_named_profiles: bool,
+    /// Directories under user-data whose every real-directory child is a profile/partition. Use
+    /// for products such as Postman that name partitions with UUIDs under `Partitions`.
+    #[serde(default)]
+    partition_containers: Vec<String>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2373,19 +2389,35 @@ fn browser_cache_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
             let candidate = user_data.join(name);
             push_browser_root(&candidate, &mut roots);
         }
-        // Profiles are read from the directory: a fixed list would silently miss extra profiles.
-        let Ok(entries) = std::fs::read_dir(&user_data) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else {
-                continue;
-            };
-            if name != "Default" && !name.starts_with("Profile ") {
-                continue;
+        // Gather every directory that holds a profile/partition, then select its derived caches.
+        let mut profile_dirs: Vec<PathBuf> = Vec::new();
+        for name in &spec.profile_names {
+            profile_dirs.push(user_data.join(name));
+        }
+        if spec.enumerate_named_profiles {
+            // Read from disk: a fixed list would silently miss extra Default/Profile N entries.
+            if let Ok(entries) = std::fs::read_dir(&user_data) {
+                for entry in entries.flatten() {
+                    let file_name = entry.file_name();
+                    if let Some(name) = file_name.to_str()
+                        && (name == "Default" || name.starts_with("Profile "))
+                    {
+                        profile_dirs.push(entry.path());
+                    }
+                }
             }
-            let profile = user_data.join(name);
+        }
+        for container in &spec.partition_containers {
+            let dir = user_data.join(container);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                // Every real-directory child is treated as a partition (UUIDs, hashes, …), so the
+                // product's naming scheme does not need to be encoded.
+                for entry in entries.flatten() {
+                    profile_dirs.push(entry.path());
+                }
+            }
+        }
+        for profile in profile_dirs {
             if !is_existing_real_directory(&profile) {
                 continue;
             }
@@ -4202,15 +4234,24 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                         matches!(spec.base.as_str(), "application_support" | "local_app_data" | "home");
                     let has_at_least_one_cache =
                         !spec.shared_caches.is_empty() || !spec.profile_caches.is_empty();
+                    let can_find_profiles = spec.enumerate_named_profiles
+                        || !spec.profile_names.is_empty()
+                        || !spec.partition_containers.is_empty();
+                    // A profile cache with no way to locate a profile would be silently inert.
+                    let profile_discovery_is_possible =
+                        spec.profile_caches.is_empty() || can_find_profiles;
                     let safe_components = spec
                         .user_data
                         .iter()
                         .chain(spec.shared_caches.iter())
                         .chain(spec.profile_caches.iter())
+                        .chain(spec.profile_names.iter())
+                        .chain(spec.partition_containers.iter())
                         .all(|component| safe_rule_component(component));
                     valid_anchor
                         && !spec.user_data.is_empty()
                         && has_at_least_one_cache
+                        && profile_discovery_is_possible
                         && safe_components
                 })
         {
@@ -4595,6 +4636,47 @@ mod tests {
                 );
             }
         }
+        // On this host Postman and LarkShell are installed. Expansion must reach Postman's UUID
+        // partitions through the container and LarkShell's IronDefault/profile tree, proving the
+        // non-Default discovery forms work rather than only the Default/Profile convention.
+        let mut expanded: Vec<String> = browser_cache_roots(derived)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let home = user_home_dir().unwrap();
+        let postman_partitions = home.join("Library/Application Support/Postman/Partitions");
+        let mut found_partition_cache = 0;
+        if is_existing_real_directory(&postman_partitions) {
+            for entry in std::fs::read_dir(&postman_partitions).unwrap().flatten() {
+                if entry.path().join("Cache").is_dir() {
+                    found_partition_cache += 1;
+                }
+            }
+        }
+        for path in &expanded {
+            assert!(!path.contains("/Cookies"));
+        }
+        let counted = expanded
+            .iter()
+            .filter(|path| path.contains("/Postman/Partitions/") && path.ends_with("/Cache"))
+            .count();
+        assert_eq!(counted, found_partition_cache);
+        let lark_shared = home.join("Library/Application Support/LarkShell/GrShaderCache");
+        if is_existing_real_directory(&lark_shared) {
+            assert!(
+                expanded
+                    .iter()
+                    .any(|path| path == lark_shared.to_str().unwrap())
+            );
+        }
+        expanded.sort();
+        let before = expanded.len();
+        expanded.dedup();
+        assert_eq!(
+            before,
+            expanded.len(),
+            "expanded roots must be deduplicated"
+        );
     }
 
     /// Every tool-reported rule must be resolvable and structurally guarded.
