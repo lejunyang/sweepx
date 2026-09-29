@@ -22,16 +22,21 @@ pub(crate) fn run_cli_trash(
         Ok(candidate) => candidate,
         Err(error) => return print_result(format, locale, None, Err(error)),
     };
-    if format != OutputFormat::Human || !stdin_is_terminal {
-        return print_result(
-            format,
-            locale,
-            Some(candidate.path()),
-            Err(TrashError::ConfirmationRequired),
-        );
-    }
-    if !confirm(candidate.path(), locale) {
-        return print_cancelled(format, locale, candidate.path());
+    // Ordinary targets move straight to the recoverable Trash. Only important/common directories
+    // require an interactive confirmation, and there is no confirmation available outside a human
+    // terminal, so such a path is refused to a non-interactive or scripted caller instead.
+    if candidate.requires_confirmation() {
+        if format != OutputFormat::Human || !stdin_is_terminal {
+            return print_result(
+                format,
+                locale,
+                Some(candidate.path()),
+                Err(TrashError::ConfirmationRequired),
+            );
+        }
+        if !confirm(candidate.path(), locale) {
+            return print_cancelled(format, locale, candidate.path());
+        }
     }
     let path = candidate.path().to_path_buf();
     print_result(format, locale, Some(&path), candidate.submit())
@@ -42,7 +47,10 @@ pub(crate) fn run_tui_trash(entry: &ScannedEntry, locale: Locale) -> ProcessExit
         Ok(candidate) => candidate,
         Err(error) => return print_result(OutputFormat::Human, locale, None, Err(error)),
     };
-    if !io::stdin().is_terminal() || !confirm(candidate.path(), locale) {
+    // A selected cache row is ordinary and moves immediately; important directories still confirm.
+    if candidate.requires_confirmation()
+        && (!io::stdin().is_terminal() || !confirm(candidate.path(), locale))
+    {
         return print_cancelled(OutputFormat::Human, locale, candidate.path());
     }
     let path = candidate.path().to_path_buf();
@@ -64,28 +72,19 @@ pub(crate) struct BulkTrashItem<'a> {
     pub(crate) eligible: bool,
 }
 
-/// Plan body digested before a bulk Trash operation.
-#[derive(serde::Serialize)]
-struct BulkTrashPlan {
-    schema: &'static str,
-    mode: &'static str,
-    items: Vec<BulkTrashPlanItem>,
-}
-
-#[derive(serde::Serialize)]
-struct BulkTrashPlanItem {
-    path: String,
-    rule_id: String,
-    logical_bytes: String,
-}
-
-/// Moves a classified junk set to the operating-system Trash after an exact, typed digest
-/// confirmation.
+/// Moves a classified junk set to the operating-system Trash without a confirmation round-trip.
 ///
-/// Each item goes through [`TrashCandidate::from_scanned_entry`], which revalidates native
-/// identity immediately before the move, so a stale row is skipped rather than trashing a
-/// replacement object. One item failing does not stop the others; the summary names every
-/// failure. Permanent deletion is never used as a fallback.
+/// The targets were already classified as rebuildable/disposable during the walk, and each goes
+/// through [`TrashCandidate::from_scanned_entry`], which revalidates native identity immediately
+/// before the move, so a stale row is skipped rather than trashing a replacement object. An
+/// item classified as an important/common user directory is never auto-moved by a bulk plan even
+/// if a rule produced it; it is reported as guarded. One item failing does not stop the others; the
+/// summary names every failure. Permanent deletion is never used as a fallback.
+///
+/// The plan is listed for transparency, but — unlike a destructive, unrecoverable action — it is
+/// not typed back: the operating-system Trash is itself reversible, and the protected/important
+/// guards plus identity revalidation are the safety boundary. Requiring an exact digest for every
+/// routine cache cleanup made the command effectively unusable.
 pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> ProcessExitCode {
     let eligible: Vec<_> = items.iter().filter(|item| item.eligible).collect();
     let skipped: Vec<_> = items.iter().filter(|item| !item.eligible).collect();
@@ -103,105 +102,78 @@ pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> P
     let total = eligible
         .iter()
         .fold(0u128, |sum, item| sum.saturating_add(item.size));
-    let plan = BulkTrashPlan {
-        schema: "sweepx.junk-trash.plan/v1",
-        mode: "operating_system_trash",
-        items: eligible
-            .iter()
-            .map(|item| BulkTrashPlanItem {
-                path: item.path.clone(),
-                rule_id: item.rule_id.clone(),
-                logical_bytes: item.size.to_string(),
-            })
-            .collect(),
-    };
-    let digest = match sweepx_canonical::plan_digest_hex(&plan) {
-        Ok(digest) => digest,
-        Err(error) => {
-            eprintln!("could not digest Trash plan: {error}");
-            return ProcessExitCode::from(8);
-        }
-    };
-    print_bulk_plan(locale, eligible.len(), skipped.len(), total, &digest, &plan);
-    if !confirm_bulk_digest(&digest) {
-        println!(
-            "{}",
-            match locale {
-                Locale::ZhCn => "已取消；没有移动任何对象。",
-                Locale::EnUs => "Cancelled; no object was moved.",
-            }
-        );
-        return ProcessExitCode::SUCCESS;
-    }
+    print_bulk_intent(locale, eligible.len(), skipped.len(), total, &eligible);
 
     let mut moved = 0usize;
     let mut moved_bytes = 0u128;
+    let mut guarded = 0usize;
     let mut failures: Vec<(String, TrashError)> = Vec::new();
     for item in eligible {
         // Capture and revalidate this exact row; submit re-checks identity a final time.
         match TrashCandidate::from_scanned_entry(item.entry) {
-            Ok(candidate) => match candidate.submit() {
-                Ok(()) => {
-                    moved += 1;
-                    moved_bytes = moved_bytes.saturating_add(item.size);
+            Ok(candidate) => {
+                // Defense in depth: a bulk, zero-confirmation move must never sweep an important
+                // user directory, even if a classifier ever names one.
+                if candidate.requires_confirmation() {
+                    guarded += 1;
+                    continue;
                 }
-                Err(error) => failures.push((item.path.clone(), error)),
-            },
+                match candidate.submit() {
+                    Ok(()) => {
+                        moved += 1;
+                        moved_bytes = moved_bytes.saturating_add(item.size);
+                    }
+                    Err(error) => failures.push((item.path.clone(), error)),
+                }
+            }
             Err(error) => failures.push((item.path.clone(), error)),
         }
     }
-    print_bulk_result(locale, moved, moved_bytes, skipped.len(), &failures);
+    print_bulk_result(
+        locale,
+        moved,
+        moved_bytes,
+        skipped.len(),
+        guarded,
+        &failures,
+    );
     // Partial completion is a distinct exit from full success.
-    if failures.is_empty() && skipped.is_empty() {
+    if failures.is_empty() && skipped.is_empty() && guarded == 0 {
         ProcessExitCode::SUCCESS
     } else {
         ProcessExitCode::from(4)
     }
 }
 
-fn print_bulk_plan(
+fn print_bulk_intent(
     locale: Locale,
     count: usize,
     skipped: usize,
     total: u128,
-    digest: &str,
-    plan: &BulkTrashPlan,
+    items: &[&BulkTrashItem<'_>],
 ) {
     match locale {
         Locale::ZhCn => {
-            println!("垃圾移到回收站计划");
+            println!("移到系统回收站");
             println!("  候选：{count} 个；跳过（覆盖不完整）：{skipped} 个");
             println!("  已统计逻辑大小：{total} 字节");
-            println!("  模式：系统回收站；可恢复；不永久删除");
-            for item in &plan.items {
-                println!(
-                    "    {} [{}]  {} 字节",
-                    item.path, item.rule_id, item.logical_bytes
-                );
+            println!("  模式：系统回收站；可恢复；不永久删除；无需再确认");
+            for item in items {
+                println!("    {} [{}]", item.path, item.rule_id);
             }
-            println!("  完整计划摘要：{digest}");
         }
         Locale::EnUs => {
-            println!("Junk-to-Trash plan");
+            println!("Moving to the operating-system Trash");
             println!("  candidates: {count}; skipped (incomplete coverage): {skipped}");
             println!("  accounted logical size: {total} bytes");
-            println!("  mode: operating-system Trash; recoverable; never permanent");
-            for item in &plan.items {
-                println!(
-                    "    {} [{}]  {} bytes",
-                    item.path, item.rule_id, item.logical_bytes
-                );
+            println!(
+                "  mode: operating-system Trash; recoverable; never permanent; no further prompt"
+            );
+            for item in items {
+                println!("    {} [{}]", item.path, item.rule_id);
             }
-            println!("  full plan digest: {digest}");
         }
     }
-}
-
-fn confirm_bulk_digest(digest: &str) -> bool {
-    print!("Type `trash {digest}` to execute this exact plan: ");
-    let _ = io::stdout().flush();
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer).is_ok() && answer.trim() == format!("trash {digest}")
 }
 
 fn print_bulk_result(
@@ -209,6 +181,7 @@ fn print_bulk_result(
     moved: usize,
     moved_bytes: u128,
     skipped: usize,
+    guarded: usize,
     failures: &[(String, TrashError)],
 ) {
     match locale {
@@ -216,6 +189,9 @@ fn print_bulk_result(
             println!("已移到回收站：{moved} 个，{moved_bytes} 字节。");
             if skipped > 0 {
                 println!("跳过（覆盖不完整）：{skipped} 个。");
+            }
+            if guarded > 0 {
+                println!("未自动删除重要目录：{guarded} 个（如需删除请单独使用 trash 命令）。");
             }
             for (path, error) in failures {
                 eprintln!("未移动 {}：{error}", path);
@@ -225,6 +201,11 @@ fn print_bulk_result(
             println!("Moved to Trash: {moved} items ({moved_bytes} bytes).");
             if skipped > 0 {
                 println!("Skipped (incomplete coverage): {skipped}.");
+            }
+            if guarded > 0 {
+                println!(
+                    "Important directories not auto-removed: {guarded} (use the trash command on one explicitly)."
+                );
             }
             for (path, error) in failures {
                 eprintln!("Not moved {}: {error}", path);
@@ -237,6 +218,9 @@ fn print_bulk_result(
 pub(crate) struct TrashCandidate {
     path: PathBuf,
     metadata: Metadata,
+    /// True when the target is an important/common user directory that needs an explicit
+    /// confirmation before it is moved. System directories are refused earlier instead.
+    important: bool,
     /// Native identity observed at capture time, revalidated immediately before the Trash call.
     ///
     /// Held separately from `metadata` because `std::fs::Metadata` cannot express a Windows file id
@@ -259,9 +243,13 @@ impl TrashCandidate {
         if !path.is_absolute() || path.parent().is_none() || path.file_name().is_none() {
             return Err(TrashError::InvalidPath);
         }
-        if protected_path(&path) {
-            return Err(TrashError::ProtectedPath);
-        }
+        // This is the safety boundary for the zero-confirmation path: system directories are
+        // refused outright, while important/common directories are flagged for confirmation.
+        let important = match classify_path_safety(&path) {
+            PathSafety::Protected => return Err(TrashError::ProtectedPath),
+            PathSafety::Important => true,
+            PathSafety::Ordinary => false,
+        };
         let metadata = std::fs::symlink_metadata(&path).map_err(TrashError::Inspect)?;
         if metadata.file_type().is_symlink()
             || !(metadata.is_file() || metadata.is_dir())
@@ -284,6 +272,7 @@ impl TrashCandidate {
         Ok(Self {
             path,
             metadata,
+            important,
             #[cfg(windows)]
             identity,
         })
@@ -296,6 +285,11 @@ impl TrashCandidate {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether the caller must obtain an explicit confirmation before moving this target.
+    fn requires_confirmation(&self) -> bool {
+        self.important
     }
 
     pub(crate) fn submit(self) -> Result<(), TrashError> {
@@ -399,7 +393,110 @@ fn linux_cross_filesystem_trash(_path: &Path) -> bool {
     false
 }
 
-fn protected_path(path: &Path) -> bool {
+/// Where a path sits relative to the zero-confirmation Trash boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathSafety {
+    /// Filesystem/system roots, the home directory, the Trash, and SweepX state. Never moved.
+    Protected,
+    /// Common directories holding a user's primary files. Moved only after explicit confirmation.
+    Important,
+    /// Everything else, including every classified cache. Moved to Trash without confirmation.
+    Ordinary,
+}
+
+/// Classifies a path into the Trash safety tiers.
+fn classify_path_safety(path: &Path) -> PathSafety {
+    if is_protected_path(path) {
+        return PathSafety::Protected;
+    }
+    // Important directories are matched by exact identity, never as a tree: their ordinary
+    // descendants — a cache nested under `~/Library`, a build folder on `~/Desktop` — must stay
+    // directly trimmable while the directory that holds a user's files still requires a yes.
+    if let Some(home) = user_home_for_safety()
+        && important_user_dirs(&home)
+            .iter()
+            .any(|important| same_path_identity(important, path))
+    {
+        return PathSafety::Important;
+    }
+    PathSafety::Ordinary
+}
+
+/// The home variable is `HOME` on Unix and `USERPROFILE` on Windows.
+#[cfg(unix)]
+fn user_home_for_safety() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// The home variable is `HOME` on Unix and `USERPROFILE` on Windows.
+#[cfg(windows)]
+fn user_home_for_safety() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+
+/// Exact-name directories treated as important/common on this platform.
+///
+/// Names (not full paths) keep the list portable; they are joined to the resolved home. Only these
+/// exact directories are guarded, so adding a name never blocks their contents.
+#[cfg(target_os = "macos")]
+fn important_user_dirs(home: &Path) -> Vec<PathBuf> {
+    const NAMES: &[&str] = &[
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Pictures",
+        "Movies",
+        "Music",
+        "Applications",
+        "Library",
+        ".ssh",
+    ];
+    NAMES.iter().map(|name| home.join(name)).collect()
+}
+
+/// Exact-name directories treated as important/common on this platform.
+#[cfg(target_os = "windows")]
+fn important_user_dirs(home: &Path) -> Vec<PathBuf> {
+    const NAMES: &[&str] = &[
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Pictures",
+        "Videos",
+        "Music",
+        ".ssh",
+    ];
+    NAMES.iter().map(|name| home.join(name)).collect()
+}
+
+/// Exact-name directories treated as important/common on this platform.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn important_user_dirs(home: &Path) -> Vec<PathBuf> {
+    const NAMES: &[&str] = &[
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Pictures",
+        "Videos",
+        "Music",
+        ".ssh",
+    ];
+    NAMES.iter().map(|name| home.join(name)).collect()
+}
+
+/// Compares two paths by resolved identity, falling back to literal equality.
+///
+/// Canonicalization handles case-insensitive volumes and symlinked ancestors (macOS `/var` →
+/// `/private/var`); when either side cannot be resolved there is no identity to trust, so exact
+/// spelling is the weaker fallback rather than a false match.
+fn same_path_identity(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(resolved_left), Ok(resolved_right)) => resolved_left == resolved_right,
+        _ => left == right,
+    }
+}
+
+fn is_protected_path(path: &Path) -> bool {
     if path.parent().is_none() {
         return true;
     }
@@ -430,10 +527,17 @@ fn protected_path(path: &Path) -> bool {
     } else if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         protected_trees.push(home.join(".local/state/sweepx"));
     }
+    // The desktop Trash is platform-specific: `~/.local/share/Trash` under the XDG layout, but
+    // `~/.Trash` on macOS. Trashing the Trash itself (or something already inside it) is refused.
+    #[cfg(not(target_os = "macos"))]
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
         protected_trees.push(data_home.join("Trash"));
     } else if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         protected_trees.push(home.join(".local/share/Trash"));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        protected_trees.push(home.join(".Trash"));
     }
     protected_exact.iter().any(|protected| path == protected)
         || protected_trees
@@ -723,32 +827,88 @@ mod tests {
 
     #[test]
     fn protected_roots_include_filesystem_home_state_and_trash() {
-        assert!(protected_path(Path::new("/")));
+        assert_eq!(classify_path_safety(Path::new("/")), PathSafety::Protected);
         #[cfg(unix)]
         {
-            assert!(protected_path(Path::new("/etc")));
-            assert!(protected_path(Path::new("/tmp")));
+            assert_eq!(
+                classify_path_safety(Path::new("/etc")),
+                PathSafety::Protected
+            );
+            assert_eq!(
+                classify_path_safety(Path::new("/tmp")),
+                PathSafety::Protected
+            );
         }
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            assert!(protected_path(&home));
-            assert!(protected_path(&home.join(".local/state/sweepx")));
-            assert!(protected_path(&home.join(".local/share/Trash")));
+            assert_eq!(classify_path_safety(&home), PathSafety::Protected);
+            assert_eq!(
+                classify_path_safety(&home.join(".local/state/sweepx")),
+                PathSafety::Protected
+            );
         }
     }
 
     #[test]
-    fn ordinary_descendants_are_not_confused_with_protected_roots() {
-        assert!(!protected_path(Path::new("/tmp/sweepx-preview-item")));
+    fn ordinary_paths_are_not_confused_with_guarded_roots() {
+        assert_eq!(
+            classify_path_safety(Path::new("/tmp/sweepx-preview-item")),
+            PathSafety::Ordinary
+        );
     }
 
     #[test]
     fn protected_trees_include_descendants() {
         #[cfg(unix)]
-        assert!(protected_path(Path::new("/etc/sweepx-preview-item")));
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            assert!(protected_path(
-                &home.join(".local/share/Trash/files/already-trashed")
-            ));
+        assert_eq!(
+            classify_path_safety(Path::new("/etc/sweepx-preview-item")),
+            PathSafety::Protected
+        );
+        if let Some(home) = user_home_for_safety() {
+            // The platform trash and anything already inside it are always protected.
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                classify_path_safety(&home.join(".Trash/files/already-trashed")),
+                PathSafety::Protected
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                classify_path_safety(&home.join(".local/share/Trash/files/already-trashed")),
+                PathSafety::Protected
+            );
+        }
+    }
+
+    #[test]
+    fn important_dirs_are_guarded_but_their_descendants_are_ordinary() {
+        let Some(home) = user_home_for_safety() else {
+            return;
+        };
+        // The exact important directory requires confirmation even if it is absent (the identity
+        // helper falls back to literal equality), while anything below it stays zero-confirmation.
+        assert_eq!(
+            classify_path_safety(&home.join("Documents")),
+            PathSafety::Important
+        );
+        assert_eq!(
+            classify_path_safety(&home.join("Documents/rebuildable-cache")),
+            PathSafety::Ordinary
+        );
+        assert_eq!(
+            classify_path_safety(&home.join(".ssh")),
+            PathSafety::Important
+        );
+        // The macOS junk scan roots live inside `~/Library`; the directory itself is important but
+        // its cache descendants must remain directly trimmable.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                classify_path_safety(&home.join("Library")),
+                PathSafety::Important
+            );
+            assert_eq!(
+                classify_path_safety(&home.join("Library/Caches")),
+                PathSafety::Ordinary
+            );
         }
     }
 

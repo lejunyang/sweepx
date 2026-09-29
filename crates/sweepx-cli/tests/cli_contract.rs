@@ -769,18 +769,22 @@ fn cargo_detect_compatibility_gate_does_not_disclose_environment_values() {
 }
 
 #[test]
-fn trash_requires_confirmation_for_machine_invocations() {
+fn trash_moves_ordinary_paths_without_confirmation_in_machine_invocations() {
     let fixture = TempDir::new().unwrap();
     let path = fixture.path().join("keep.txt");
     fs::write(&path, b"keep").unwrap();
 
+    // New policy: an ordinary file goes straight to the recoverable Trash even from a scripted,
+    // non-interactive caller. The protection boundary is the protected/important path guards, not
+    // a confirmation prompt, and permanent deletion is still never a fallback.
     let mut cmd = cli_command();
     cmd.arg("--format").arg("json").arg("trash").arg(&path);
-    let output = cmd.assert().code(8).get_output().clone();
+    let output = cmd.assert().code(0).get_output().clone();
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["status"], "failed");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["recoverable"], true);
     assert_eq!(json["permanentFallback"], false);
-    assert!(path.exists());
+    assert!(!path.exists());
 }
 
 #[test]
