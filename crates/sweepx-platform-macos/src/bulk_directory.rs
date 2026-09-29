@@ -9,11 +9,19 @@ use sweepx_model::NativeName;
 const ATTR_CMN_ERROR: libc::attrgroup_t = 0x2000_0000;
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 
+/// One child decoded from a `getattrlistbulk` page: its native name plus the attributes the
+/// scan needs, already shaped as a `stat` so downstream metadata handling is unchanged.
+#[derive(Debug)]
+pub(super) struct BulkChild {
+    pub(super) name: NativeName,
+    pub(super) stat: libc::stat,
+}
+
 /// Bounded state for Darwin's paged directory-attribute API.
 #[derive(Debug)]
 pub(super) struct BulkDirectoryCursor {
     buffer: Vec<u64>,
-    pending: VecDeque<NativeName>,
+    pending: VecDeque<BulkChild>,
     pages_read: usize,
 }
 
@@ -28,7 +36,7 @@ impl BulkDirectoryCursor {
         }
     }
 
-    pub(super) fn pop(&mut self) -> Option<NativeName> {
+    pub(super) fn pop(&mut self) -> Option<BulkChild> {
         self.pending.pop_front()
     }
 
@@ -37,13 +45,24 @@ impl BulkDirectoryCursor {
     }
 
     pub(super) fn read_page(&mut self, fd: libc::c_int) -> io::Result<bool> {
+        // One page returns every attribute the scan would otherwise issue one fstatat call per
+        // child for. The common-attribute bit numbers also define the in-record packing order.
         let mut attributes = libc::attrlist {
             bitmapcount: libc::ATTR_BIT_MAP_COUNT,
             reserved: 0,
-            commonattr: libc::ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | libc::ATTR_CMN_NAME,
+            commonattr: libc::ATTR_CMN_RETURNED_ATTRS
+                | ATTR_CMN_ERROR
+                | libc::ATTR_CMN_NAME
+                | libc::ATTR_CMN_DEVID
+                | libc::ATTR_CMN_OBJTYPE
+                | libc::ATTR_CMN_OBJID
+                | libc::ATTR_CMN_MODTIME
+                | libc::ATTR_CMN_CHGTIME
+                | libc::ATTR_CMN_ACCESSMASK
+                | libc::ATTR_CMN_FLAGS,
             volattr: 0,
             dirattr: 0,
-            fileattr: 0,
+            fileattr: libc::ATTR_FILE_DATALENGTH,
             forkattr: 0,
         };
         let bytes = self.buffer.len() * size_of::<u64>();
@@ -71,7 +90,7 @@ impl BulkDirectoryCursor {
             // allocation, and parsing performs checked offsets for every record and attribute.
             std::slice::from_raw_parts(self.buffer.as_ptr().cast::<u8>(), bytes)
         };
-        self.pending.extend(parse_name_page(bytes, count)?);
+        self.pending.extend(parse_attribute_page(bytes, count)?);
         self.pages_read = self
             .pages_read
             .checked_add(1)
@@ -87,7 +106,12 @@ pub(super) fn unsupported(error: &io::Error) -> bool {
     )
 }
 
-fn parse_name_page(buffer: &[u8], count: usize) -> io::Result<Vec<NativeName>> {
+/// Parses a page of full child attributes into [`BulkChild`] values.
+///
+/// Attributes appear in each section in common-bit order. Every read is a checked offset, and
+/// an attribute whose data runs past the record fails the whole page rather than producing a
+/// partially populated stat.
+fn parse_attribute_page(buffer: &[u8], count: usize) -> io::Result<Vec<BulkChild>> {
     let mut result = Vec::with_capacity(count);
     let mut offset = 0usize;
     for _ in 0..count {
@@ -117,6 +141,7 @@ fn parse_name_page(buffer: &[u8], count: usize) -> io::Result<Vec<NativeName>> {
         }
         let reference_offset = cursor;
         let reference = read_unaligned::<libc::attrreference_t>(buffer, cursor)?;
+        cursor += size_of::<libc::attrreference_t>();
         let name_start = signed_offset(reference_offset, reference.attr_dataoffset)?;
         let name_length = usize::try_from(reference.attr_length)
             .map_err(|_| invalid_data("bulk name length cannot fit usize"))?;
@@ -127,12 +152,96 @@ fn parse_name_page(buffer: &[u8], count: usize) -> io::Result<Vec<NativeName>> {
         let name = CStr::from_bytes_until_nul(&buffer[name_start..name_end])
             .map_err(|_| invalid_data("bulk name is not terminated"))?
             .to_bytes();
-        if name != b"." && name != b".." {
-            result.push(NativeName::unix(name.to_vec()));
+        // The common attributes follow in common-bit order.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if returned.commonattr & libc::ATTR_CMN_DEVID != 0 {
+            // dev_t is a 32-bit value.
+            stat.st_dev = i32::from_ne_bytes(read_array(buffer, &mut cursor)?);
         }
+        if returned.commonattr & libc::ATTR_CMN_OBJTYPE != 0 {
+            // fsobj_type_t is an enum-sized (u32) vnode type; used only to sanity-check mode.
+            let obj_type = read_unaligned::<u32>(buffer, cursor)?;
+            cursor += size_of::<u32>();
+            stat.st_mode = mode_from_vtype(obj_type);
+        }
+        if returned.commonattr & libc::ATTR_CMN_OBJID != 0 {
+            stat.st_ino = read_unaligned::<u64>(buffer, cursor)?;
+            cursor += size_of::<u64>();
+        }
+        if returned.commonattr & libc::ATTR_CMN_MODTIME != 0 {
+            let modified = read_timespec(buffer, &mut cursor)?;
+            stat.st_mtime = modified.0;
+            stat.st_mtime_nsec = modified.1;
+        }
+        if returned.commonattr & libc::ATTR_CMN_CHGTIME != 0 {
+            let changed = read_timespec(buffer, &mut cursor)?;
+            stat.st_ctime = changed.0;
+            stat.st_ctime_nsec = changed.1;
+        }
+        if returned.commonattr & libc::ATTR_CMN_ACCESSMASK != 0 {
+            // mode_t is a 16-bit value; it also carries the type bits.
+            let mode = u16::from_ne_bytes(read_array(buffer, &mut cursor)?);
+            stat.st_mode = libc::mode_t::from(mode);
+        }
+        if returned.commonattr & libc::ATTR_CMN_FLAGS != 0 {
+            stat.st_flags = read_unaligned::<u32>(buffer, cursor)?;
+            cursor += size_of::<u32>();
+        }
+        // The file section follows the common section.
+        if returned.fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
+            stat.st_size = read_unaligned::<libc::off_t>(buffer, cursor)?;
+            cursor += size_of::<libc::off_t>();
+        }
+        if cursor > record_end {
+            return Err(invalid_data("bulk attributes exceeded their record"));
+        }
+
         offset = record_end;
+        if name != b"." && name != b".." {
+            result.push(BulkChild {
+                name: NativeName::unix(name.to_vec()),
+                stat,
+            });
+        }
     }
     Ok(result)
+}
+
+/// Maps Darwin's vnode type back to an `st_mode` type mask.
+fn mode_from_vtype(obj_type: u32) -> libc::mode_t {
+    let type_bits = match obj_type {
+        1 => libc::S_IFREG,
+        2 => libc::S_IFDIR,
+        5 => libc::S_IFLNK,
+        3 => libc::S_IFBLK,
+        4 => libc::S_IFCHR,
+        6 => libc::S_IFSOCK,
+        7 => libc::S_IFIFO,
+        _ => 0,
+    };
+    libc::mode_t::from(type_bits)
+}
+
+/// Reads a Darwin `struct timespec` (16 bytes on 64-bit: i64 seconds + long nanoseconds).
+fn read_timespec(buffer: &[u8], cursor: &mut usize) -> io::Result<(i64, i64)> {
+    let seconds = read_unaligned::<i64>(buffer, *cursor)?;
+    *cursor = cursor
+        .checked_add(size_of::<i64>())
+        .ok_or_else(|| invalid_data("timespec offset overflow"))?;
+    let nanoseconds = read_unaligned::<libc::c_long>(buffer, *cursor)?;
+    *cursor = cursor
+        .checked_add(size_of::<libc::c_long>())
+        .ok_or_else(|| invalid_data("timespec offset overflow"))?;
+    Ok((seconds, nanoseconds as i64))
+}
+
+/// Reads a fixed-width array to convert into an integer's native byte representation.
+fn read_array<const N: usize>(buffer: &[u8], cursor: &mut usize) -> io::Result<[u8; N]> {
+    let value = read_unaligned::<[u8; N]>(buffer, *cursor)?;
+    *cursor = cursor
+        .checked_add(N)
+        .ok_or_else(|| invalid_data("attribute offset overflow"))?;
+    Ok(value)
 }
 
 fn read_unaligned<T: Copy>(buffer: &[u8], offset: usize) -> io::Result<T> {

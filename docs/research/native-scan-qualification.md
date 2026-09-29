@@ -12,11 +12,15 @@ on any development host from claims that require the target operating system and
 
 ## Current implementation state
 
-- macOS `sweepx-platform-macos` now uses a 64 KiB aligned `getattrlistbulk` name page for directory
-  enumeration. It accepts only checked, NUL-terminated native names, keeps the existing no-follow
-  handle-relative metadata inspection as authority, and falls back to `readdir` only when the first
-  bulk call reports a documented unsupported condition. Failure after an accepted page fails closed
-  instead of restarting and risking duplicates or omissions. Native macOS CI exercises the path.
+- macOS `sweepx-platform-macos` now uses a 64 KiB aligned `getattrlistbulk` page for directory
+  enumeration and child metadata in one pass (2026-09-29): each page decodes the name plus device,
+  type, file id, modification/status-change times, mode, flags and data length, so child inspection
+  no longer issues a per-child `fstatat`. It accepts only checked attributes and NUL-terminated
+  names; the bulk page omits the hard-link count, so that field is an honest `unknown` instead of
+  a fabricated value. The existing no-follow handle-relative metadata stays the authority, and
+  fallback to `readdir` + `fstatat` happens only when the first bulk call reports a documented
+  unsupported condition. Failure after an accepted page fails closed rather than restarting and
+  risking duplicates or omissions. Native macOS CI exercises the path.
 - Windows `sweepx-platform-windows` now has independent bounded parsers for
   `QUERY_FILE_LAYOUT_OUTPUT` and USN v2 pages, a fail-closed USN cursor validator, and a read-only
   native probe that opens an NTFS volume, queries the journal, and consumes bounded layout pages.

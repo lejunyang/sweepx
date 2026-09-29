@@ -30,7 +30,7 @@ mod backend {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use sweepx_model::{DecimalU128, NativeName, ReasonCode};
+    use sweepx_model::{CountValue, DecimalU128, NativeName, ReasonCode};
     use sweepx_platform::{
         BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
         EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
@@ -42,6 +42,34 @@ mod backend {
     use super::bulk_directory::{BulkDirectoryCursor, unsupported as bulk_unsupported};
     use super::*;
 
+    // Thin re-exports so external `#[cfg(test)]` helpers can reach the private backend fns.
+    #[cfg(test)]
+    pub(super) fn dirfd_helper(directory: &OpenDirectory) -> io::Result<libc::c_int> {
+        MacosPlatformScanner::dirfd(directory)
+    }
+    #[cfg(test)]
+    pub(super) fn fstatat_helper(
+        parent_fd: libc::c_int,
+        name: &CString,
+    ) -> io::Result<ObservedMetadata> {
+        MacosPlatformScanner::fstatat_raw(parent_fd, name)
+    }
+    #[cfg(test)]
+    pub(super) fn metadata_helper(
+        path: &Path,
+        file_name: NativeName,
+        observed: &ObservedMetadata,
+        mount_identity: Option<MountIdentity>,
+        hard_link_count: CountValue,
+    ) -> EntryMetadata {
+        MacosPlatformScanner::metadata_to_entry(
+            path,
+            file_name,
+            observed,
+            mount_identity,
+            hard_link_count,
+        )
+    }
     const REGULAR_FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +80,8 @@ mod backend {
     }
 
     #[derive(Debug)]
-    struct ObservedMetadata {
-        stat: libc::stat,
+    pub struct ObservedMetadata {
+        pub stat: libc::stat,
     }
 
     impl ObservedMetadata {
@@ -90,6 +118,10 @@ mod backend {
         mount_identity: MountIdentity,
         pending: Option<DirectoryEntryRecord>,
         enumeration: DirectoryEnumeration,
+        /// Attributes decoded from the most recent bulk pages, keyed by the child's raw native
+        /// name bytes. Populated as bulk children are dequeued and read by child inspection,
+        /// avoiding a per-child `fstatat`.
+        bulk_attributes: std::collections::BTreeMap<Vec<u8>, libc::stat>,
     }
 
     #[derive(Debug)]
@@ -272,8 +304,16 @@ mod backend {
                     .map_err(|error| PlatformError::io(parent.clone(), error))?;
                 match &mut directory.enumeration {
                     DirectoryEnumeration::Bulk(cursor) => {
-                        if let Some(name) = cursor.pop() {
-                            return DirectoryEntryRecord::from_parent_and_name(&parent, name)
+                        if let Some(child) = cursor.pop() {
+                            // Stash the page-decoded attributes; inspection prefers them over a
+                            // per-child fstatat.
+                            let NativeName::UnixBytes(name_bytes) = &child.name else {
+                                unreachable!("bulk names on this backend are UnixBytes")
+                            };
+                            directory
+                                .bulk_attributes
+                                .insert(name_bytes.clone(), child.stat);
+                            return DirectoryEntryRecord::from_parent_and_name(&parent, child.name)
                                 .map(Some)
                                 .map_err(|error| PlatformError::InvalidDirectoryEntry {
                                     parent,
@@ -362,6 +402,7 @@ mod backend {
                 mount_identity,
                 pending: None,
                 enumeration: DirectoryEnumeration::Bulk(BulkDirectoryCursor::new()),
+                bulk_attributes: std::collections::BTreeMap::new(),
             })
         }
 
@@ -425,6 +466,7 @@ mod backend {
             file_name: NativeName,
             observed: &ObservedMetadata,
             mount_identity: Option<MountIdentity>,
+            hard_link_count: CountValue,
         ) -> EntryMetadata {
             let kind = kind_from_mode(observed.stat.st_mode);
 
@@ -445,7 +487,6 @@ mod backend {
             let filesystem_identity = Some(FilesystemIdentity { device });
             let hard_link_key =
                 (kind == EntryKind::File).then(|| HardLinkKey::from(identity.clone()));
-            let hard_link_count = known_count(observed.stat.st_nlink as u128);
             let fingerprint = fingerprint_for(Some(&identity), &kind, &logical_bytes);
 
             EntryMetadata {
@@ -732,22 +773,24 @@ mod backend {
                 }
             })?;
             Self::ensure_not_cancelled(cancel)?;
+            let mut stat_storage = MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: `directory.stream` is valid and `dirfd` + `fstat` use the live fd.
+            let fd = unsafe { libc::dirfd(directory.stream) };
+            if fd < 0
+                || unsafe { libc::fstat(fd, stat_storage.as_mut_ptr()) } != 0
+            {
+                return Err(PlatformError::io(root.path(), io::Error::last_os_error()));
+            }
+            // SAFETY: successful fstat initialized the structure.
+            let observed_stat = unsafe { stat_storage.assume_init() };
             let entry = Self::metadata_to_entry(
                 root.path(),
                 Self::native_name(root.path()),
                 &ObservedMetadata {
-                    stat: {
-                        let mut stat = MaybeUninit::<libc::stat>::uninit();
-                        // SAFETY: `directory.stream` is valid and `dirfd` + `fstat` use live fd.
-                        let fd = unsafe { libc::dirfd(directory.stream) };
-                        if fd < 0 || unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-                            return Err(PlatformError::io(root.path(), io::Error::last_os_error()));
-                        }
-                        // SAFETY: successful fstat initialized the structure.
-                        unsafe { stat.assume_init() }
-                    },
+                    stat: observed_stat,
                 },
                 Some(directory.mount_identity.clone()),
+                known_count(observed_stat.st_nlink as u128),
             );
 
             Ok(RootAdmission::new(
@@ -845,19 +888,39 @@ mod backend {
             Self::ensure_not_cancelled(cancel)?;
             Self::assert_directory_identity_current(parent)?;
 
-            let parent_fd = Self::dirfd(parent)
-                .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
-            let child_name = Self::name_c_string(&child.file_name)?;
-            let observed = match Self::fstatat_raw(parent_fd, &child_name) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(WalkEntry::Error(ErrorRecord {
-                        path: child.path.clone(),
-                        kind: sweepx_platform::error_kind_for_io(&error),
-                        reason: sweepx_platform::reason_for_io(&error),
-                        detail: error.to_string(),
-                    }));
+            // A bulk page already supplied this child's attributes; otherwise inspect it
+            // directly with fstatat as before.
+            let NativeName::UnixBytes(child_bytes) = &child.file_name else {
+                unreachable!("this backend only produces UnixBytes child names")
+            };
+            let (observed, from_bulk) = if let Some(stat) =
+                parent.bulk_attributes.get(child_bytes).cloned()
+            {
+                (ObservedMetadata { stat }, true)
+            } else {
+                let parent_fd = Self::dirfd(parent)
+                    .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
+                let child_name = Self::name_c_string(&child.file_name)?;
+                match Self::fstatat_raw(parent_fd, &child_name) {
+                    Ok(value) => (value, false),
+                    Err(error) => {
+                        return Ok(WalkEntry::Error(ErrorRecord {
+                            path: child.path.clone(),
+                            kind: sweepx_platform::error_kind_for_io(&error),
+                            reason: sweepx_platform::reason_for_io(&error),
+                            detail: error.to_string(),
+                        }));
+                    }
                 }
+            };
+            // getattrlistbulk does not report the hard-link count, so a bulk-decoded row carries
+            // an honest unknown instead of a fabricated zero; fstatat rows keep the real count.
+            let link_count = if from_bulk {
+                CountValue::Unknown {
+                    reason: ReasonCode::IncompleteStreamCoverage,
+                }
+            } else {
+                known_count(observed.stat.st_nlink as u128)
             };
 
             match kind_from_mode(observed.stat.st_mode) {
@@ -890,6 +953,7 @@ mod backend {
                         child.file_name.clone(),
                         &observed,
                         Some(handle.mount_identity.clone()),
+                        link_count,
                     );
                     Ok(WalkEntry::Directory(OpenedDirectory { metadata, handle }))
                 }
@@ -898,12 +962,14 @@ mod backend {
                     child.file_name.clone(),
                     &observed,
                     None,
+                    link_count,
                 ))),
                 EntryKind::Symlink => Ok(WalkEntry::Link(Self::metadata_to_entry(
                     &child.path,
                     child.file_name.clone(),
                     &observed,
                     None,
+                    link_count,
                 ))),
                 EntryKind::ReparsePoint => Ok(WalkEntry::Boundary(BoundaryRecord {
                     path: child.path.clone(),
@@ -1103,6 +1169,48 @@ impl PlatformScanner for MacosPlatformScanner {
 }
 
 #[cfg(all(test, target_os = "macos"))]
+use std::path::PathBuf;
+#[cfg(all(test, target_os = "macos"))]
+use sweepx_model::{CountValue, NativeName};
+
+#[cfg(all(test, target_os = "macos"))]
+impl MacosPlatformScanner {
+    /// Test access to a live directory's raw fd.
+    fn dirfd_for_test(&self, directory: &backend::OpenDirectory) -> Result<libc::c_int, std::io::Error> {
+        // The private backend fn is reached through a re-exported helper below.
+        backend::dirfd_helper(directory)
+    }
+
+    /// Test helper: no-follow `fstatat` of one named child.
+    fn fstatat_named(
+        &self,
+        parent_fd: libc::c_int,
+        name: &[u8],
+    ) -> std::io::Result<backend::ObservedMetadata> {
+        let c_name =
+            std::ffi::CString::new(name).expect("test helper name has no interior NUL");
+        backend::fstatat_helper(parent_fd, &c_name)
+    }
+
+    /// Test access to entry construction with a caller-chosen link count.
+    fn metadata_for_test(
+        &self,
+        path: PathBuf,
+        name: NativeName,
+        observed: &backend::ObservedMetadata,
+        hard_link_count: CountValue,
+    ) -> EntryMetadata {
+        backend::metadata_helper(
+            &path,
+            name,
+            observed,
+            None,
+            hard_link_count,
+        )
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
@@ -1114,7 +1222,7 @@ mod tests {
     use sweepx_model::{DecimalU128, EvidenceValue, NativeName, ReasonCode};
     use sweepx_platform::{
         BoundaryKind, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
-        DirectoryReadLimits, read_bound_regular_file,
+        DirectoryReadLimits, known_count, read_bound_regular_file,
     };
 
     use super::*;
@@ -1421,26 +1529,30 @@ mod tests {
             )
             .unwrap();
 
-        let WalkEntry::File(first) = scanner
-            .inspect_child(
-                &admission.directory,
-                &child_record(temp.path(), b"file"),
-                &CancellationToken::new(),
-            )
-            .unwrap()
-        else {
-            panic!("expected file entry");
-        };
-        let WalkEntry::File(second) = scanner
-            .inspect_child(
-                &admission.directory,
-                &child_record(temp.path(), b"second"),
-                &CancellationToken::new(),
-            )
-            .unwrap()
-        else {
-            panic!("expected file entry");
-        };
+        // First the non-bulk path (explicit fstatat-equivalent), so the real link count is
+        // available; the bulk path used by the scan reports an honest unknown instead.
+        let parent_fd = scanner
+            .dirfd_for_test(&admission.directory)
+            .expect("admitted directory has a live dirfd");
+        let observed_file = scanner
+            .fstatat_named(parent_fd, b"file")
+            .expect("file is observable");
+        let observed_second = scanner
+            .fstatat_named(parent_fd, b"second")
+            .expect("second is observable");
+        let first = scanner.metadata_for_test(
+            temp.path().join("file"),
+            NativeName::unix(b"file".to_vec()),
+            &observed_file,
+            known_count(observed_file.stat.st_nlink as u128),
+        );
+        let second = scanner.metadata_for_test(
+            temp.path().join("second"),
+            NativeName::unix(b"second".to_vec()),
+            &observed_second,
+            known_count(observed_second.stat.st_nlink as u128),
+        );
+
         let WalkEntry::Link(link) = scanner
             .inspect_child(
                 &admission.directory,
