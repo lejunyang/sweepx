@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 mod linux_temp;
 #[cfg(target_os = "linux")]
 mod permanent_delete_command;
+#[cfg(target_os = "macos")]
+mod tcc_access;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
 mod tool_installations;
@@ -146,6 +148,15 @@ struct Cli {
     /// file as administrator" primitive.
     #[arg(long, global = true, hide = true, value_name = "ABSOLUTE_FILE")]
     relay_stdout_to: Option<PathBuf>,
+    /// On macOS, open System Settings and wait for Full Disk Access before scanning.
+    ///
+    /// Without this flag SweepX only *detects* whether access is already held and never opens
+    /// settings. macOS has no API to grant access programmatically, so with this flag SweepX opens
+    /// the Full Disk Access pane, prints guidance, and proceeds automatically once the user
+    /// enables it (or continues without it if they do not). On non-macOS hosts the flag is
+    /// accepted for portable scripts but has no effect.
+    #[arg(long, global = true)]
+    full_disk_access: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -305,6 +316,14 @@ fn main() -> ProcessExitCode {
                 eprintln!("{notice}");
             }
         }
+    }
+
+    // Full Disk Access is settled after privilege elevation (both must precede any scan), but
+    // only on macOS and only when requested: detection alone never opens settings. Access is a
+    // guard for reading protected areas, never authority to widen deletion.
+    #[cfg(target_os = "macos")]
+    {
+        tcc_access::ensure(cli.full_disk_access);
     }
 
     let explicit_locale = match cli.locale.as_deref() {
