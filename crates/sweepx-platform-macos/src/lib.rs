@@ -776,9 +776,7 @@ mod backend {
             let mut stat_storage = MaybeUninit::<libc::stat>::uninit();
             // SAFETY: `directory.stream` is valid and `dirfd` + `fstat` use the live fd.
             let fd = unsafe { libc::dirfd(directory.stream) };
-            if fd < 0
-                || unsafe { libc::fstat(fd, stat_storage.as_mut_ptr()) } != 0
-            {
+            if fd < 0 || unsafe { libc::fstat(fd, stat_storage.as_mut_ptr()) } != 0 {
                 return Err(PlatformError::io(root.path(), io::Error::last_os_error()));
             }
             // SAFETY: successful fstat initialized the structure.
@@ -893,26 +891,25 @@ mod backend {
             let NativeName::UnixBytes(child_bytes) = &child.file_name else {
                 unreachable!("this backend only produces UnixBytes child names")
             };
-            let (observed, from_bulk) = if let Some(stat) =
-                parent.bulk_attributes.get(child_bytes).cloned()
-            {
-                (ObservedMetadata { stat }, true)
-            } else {
-                let parent_fd = Self::dirfd(parent)
-                    .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
-                let child_name = Self::name_c_string(&child.file_name)?;
-                match Self::fstatat_raw(parent_fd, &child_name) {
-                    Ok(value) => (value, false),
-                    Err(error) => {
-                        return Ok(WalkEntry::Error(ErrorRecord {
-                            path: child.path.clone(),
-                            kind: sweepx_platform::error_kind_for_io(&error),
-                            reason: sweepx_platform::reason_for_io(&error),
-                            detail: error.to_string(),
-                        }));
+            let (observed, from_bulk) =
+                if let Some(stat) = parent.bulk_attributes.get(child_bytes).cloned() {
+                    (ObservedMetadata { stat }, true)
+                } else {
+                    let parent_fd = Self::dirfd(parent)
+                        .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
+                    let child_name = Self::name_c_string(&child.file_name)?;
+                    match Self::fstatat_raw(parent_fd, &child_name) {
+                        Ok(value) => (value, false),
+                        Err(error) => {
+                            return Ok(WalkEntry::Error(ErrorRecord {
+                                path: child.path.clone(),
+                                kind: sweepx_platform::error_kind_for_io(&error),
+                                reason: sweepx_platform::reason_for_io(&error),
+                                detail: error.to_string(),
+                            }));
+                        }
                     }
-                }
-            };
+                };
             // getattrlistbulk does not report the hard-link count, so a bulk-decoded row carries
             // an honest unknown instead of a fabricated zero; fstatat rows keep the real count.
             let link_count = if from_bulk {
@@ -1176,7 +1173,10 @@ use sweepx_model::{CountValue, NativeName};
 #[cfg(all(test, target_os = "macos"))]
 impl MacosPlatformScanner {
     /// Test access to a live directory's raw fd.
-    fn dirfd_for_test(&self, directory: &backend::OpenDirectory) -> Result<libc::c_int, std::io::Error> {
+    fn dirfd_for_test(
+        &self,
+        directory: &backend::OpenDirectory,
+    ) -> Result<libc::c_int, std::io::Error> {
         // The private backend fn is reached through a re-exported helper below.
         backend::dirfd_helper(directory)
     }
@@ -1187,8 +1187,7 @@ impl MacosPlatformScanner {
         parent_fd: libc::c_int,
         name: &[u8],
     ) -> std::io::Result<backend::ObservedMetadata> {
-        let c_name =
-            std::ffi::CString::new(name).expect("test helper name has no interior NUL");
+        let c_name = std::ffi::CString::new(name).expect("test helper name has no interior NUL");
         backend::fstatat_helper(parent_fd, &c_name)
     }
 
@@ -1200,13 +1199,7 @@ impl MacosPlatformScanner {
         observed: &backend::ObservedMetadata,
         hard_link_count: CountValue,
     ) -> EntryMetadata {
-        backend::metadata_helper(
-            &path,
-            name,
-            observed,
-            None,
-            hard_link_count,
-        )
+        backend::metadata_helper(&path, name, observed, None, hard_link_count)
     }
 }
 

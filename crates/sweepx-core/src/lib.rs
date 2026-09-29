@@ -1470,8 +1470,7 @@ fn scan_roots_only<S: SnapshotStore>(
 }
 
 /// Per classified entry: entry id to the id of the rule that selected it.
-type JunkDecisions =
-    std::collections::BTreeMap<sweepx_model::ScanEntryId, String>;
+type JunkDecisions = std::collections::BTreeMap<sweepx_model::ScanEntryId, String>;
 /// Recorded directory children per parent: child name to child entry id.
 type DirectoryMarkers = std::collections::BTreeMap<
     sweepx_model::ScanEntryId,
