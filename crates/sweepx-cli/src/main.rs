@@ -2023,7 +2023,9 @@ fn platform_junk_candidates(
                 // derived-cache name is the evidence, and the directories are blockfile/scratch
                 // roots that can be empty yet still occupy scaffolding.
                 "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
-                "verified_known_root" => depth == 0 && known_macos_root_matches(rule, entry),
+                // A known root is matched at whatever depth it was really observed, including
+                // when a wider scan root (typically ~/Library/Caches) already covers it.
+                "verified_known_root" => known_macos_root_matches(rule, entry),
                 #[cfg(target_os = "linux")]
                 "stale_inactive_direct_child" => false,
                 _ => false,
@@ -2332,13 +2334,54 @@ fn known_macos_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::Scann
     let Some(locator) = entry.native_locator.as_ref() else {
         return false;
     };
-    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
+    let Some(entry_path) = entry_native_absolute_path(locator) else {
         return false;
     };
+    // Exact, full-length match against each declared known root. The components are taken from
+    // the captured native chain, never from `display_path`, and an exact component count is
+    // required so a directory *inside* a known root (for example a Homebrew download) is not
+    // promoted.
     known_macos_roots(rule)
         .into_iter()
-        .find(|root| captured.equals_path(root).unwrap_or(false))
+        .find(|root| entry_path.equals_path(root).unwrap_or(false))
         .is_some_and(|root| root_has_required_markers(&root, &rule.required_markers))
+}
+
+/// Reconstructs an entry's own absolute native path from its locator chain.
+///
+/// The locator stores only the scan root as an absolute path; intermediate and entry components
+/// are retained natively. `parent_reopen_recipe` starts with a component duplicating the scan
+/// root (the locator invariant), so it is skipped; every remaining intermediate basename and
+/// the entry basename are appended byte-for-byte without normalization. This is what lets a
+/// known root nested inside a wider scan root (Homebrew/Yarn under `~/Library/Caches`) be
+/// classified at its real depth instead of only when it is a depth-0 root.
+#[cfg(target_os = "macos")]
+fn entry_native_absolute_path(
+    locator: &sweepx_model::NativeLocatorEvidence,
+) -> Option<sweepx_model::NativeAbsolutePath> {
+    let sweepx_model::NativeAbsolutePath::UnixBytes(root) =
+        locator.scan_root_absolute_path.as_ref()?
+    else {
+        return None;
+    };
+    let mut bytes = root.clone();
+    let append = |bytes: &mut Vec<u8>, name: &sweepx_model::NativeName| {
+        let sweepx_model::NativeName::UnixBytes(component) = name else {
+            return false;
+        };
+        bytes.push(b'/');
+        bytes.extend_from_slice(component);
+        true
+    };
+    for component in locator.parent_reopen_recipe.iter().skip(1) {
+        if !append(&mut bytes, &component.native_basename) {
+            return None;
+        }
+    }
+    if !append(&mut bytes, &locator.entry.native_basename) {
+        return None;
+    }
+    Some(sweepx_model::NativeAbsolutePath::unix(bytes))
 }
 
 #[cfg(not(target_os = "macos"))]
