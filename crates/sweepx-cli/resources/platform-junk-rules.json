@@ -551,6 +551,72 @@
         ],
         "enumerateNamedProfiles": false,
         "partitionContainers": ["Partitions"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["discord"],
+        "sharedCaches": [
+          "Cache",
+          "Code Cache",
+          "GPUCache",
+          "DawnCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache",
+          "GrShaderCache",
+          "GraphiteDawnCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Slack"],
+        "sharedCaches": ["Cache", "Code Cache", "GPUCache"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Figma"],
+        "sharedCaches": ["Cache", "Code Cache", "GPUCache"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Claude"],
+        "sharedCaches": [
+          "Cache",
+          "Code Cache",
+          "GPUCache",
+          "DawnCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache",
+          "GrShaderCache",
+          "GraphiteDawnCache"
+        ],
+        "profileCaches": [
+          "Cache",
+          "Code Cache",
+          "GPUCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache"
+        ],
+        "enumerateNamedProfiles": false,
+        "partitionContainers": ["Partitions"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Manus"],
+        "sharedCaches": [
+          "Cache",
+          "Code Cache",
+          "GPUCache",
+          "DawnCache",
+          "DawnGraphiteCache",
+          "DawnWebGPUCache",
+          "GrShaderCache",
+          "GraphiteDawnCache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Microsoft", "Teams"],
+        "sharedCaches": ["Cache", "Code Cache", "GPUCache"]
       }
     ],
     "depth": 0,

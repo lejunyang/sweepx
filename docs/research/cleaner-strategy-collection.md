@@ -222,6 +222,25 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 实测（本机，2026-09-29）：展开结果覆盖 Postman 多个 UUID partition 各自的 `Cache`（数量与磁盘一致），并命中 LarkShell 的 `GrShaderCache`；展开结果去重、且不含任何 `/Cookies` 路径，有测试逐项核对。
 
+### WeChat 容器：暂不纳入（实测不可读 + 数据持久）
+
+实测（本机，2026-09-29）尝试枚举 `~/Library/Containers/com.tencent.xinWeChat/Data` 与 Group Container `5A4RE8SF68.com.tencent.xinWeChat`：该容器为 TCC 保护，无完全磁盘访问时所有列目录调用都挂起/被拒（`ls`、Python `listdir`、Glob 均超时），且 `Data` 不是普通符号链接（疑似 firmlink 到 app group）。
+
+结论：在用户显式授予完全磁盘访问、且能真实读到结构之前，不为 WeChat 加规则。原因有二：(1) 读不到真实结构就无法把派生缓存与微信的消息数据库分开，而消息/联系人/聊天记录是持久数据，绝不能按“腾讯容器整体”处理——这与 Lemon filter 里 `~/Library/Containers/com.tencent.xinWeChat` 的防护一致；(2) MangoDisk 的 WeChat 规则也只选特定 `avatar`/缓存子目录而非消息库，需要进入容器逐目录核对，当前环境做不到。等授权后，应在容器内定位固定的 avatar/缩略图缓存目录，复用 `profileNames`/`partitionContainers` 形式精确选择，并保留消息库排除。
+
+### 其他 Electron 应用：数据占位，装上即覆盖
+
+2026-09-29 又按 MangoDisk 应用类规则，向同一条 `macos.browser-derived-cache` 规则补入 6 个未在本机安装的 Electron 应用 spec：Discord、Slack、Figma、Claude（含 `Partitions` 容器）、Manus、Microsoft Teams。只取 `Application Support/<app>` 下派生缓存（`Cache/Code Cache/GPUCache/Dawn*/GrShaderCache/GraphiteDawnCache`）。
+
+刻意未采纳 MangoDisk 同名规则里的这几类 root：
+
+- `Service Worker/CacheStorage`：是 PWA/应用离线状态，非可重取的网络响应，按持久数据排除（即便名字叫 cache）；
+- `Shared Dictionary/cache`：压缩字典会影响后续会话，且跨应用语义不一，留待单独评估；
+- `logs`、`Crashpad/reports`：崩溃报告/日志可能含用户想保留的诊断信息，不与 GPU 缓存混在一条规则里，将来单列；
+- `~/Library/Caches/...` 侧 root：已被 `macos.user-caches` 的 direct_children 覆盖，不重复。
+
+这些 spec 当前不产生结果（应用未安装），属于纯数据占位；安装对应应用后无需改代码即自动纳入，且仍受“禁止持久存储名”的校验约束。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：
