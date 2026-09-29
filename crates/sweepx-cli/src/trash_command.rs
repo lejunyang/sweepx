@@ -49,6 +49,190 @@ pub(crate) fn run_tui_trash(entry: &ScannedEntry, locale: Locale) -> ProcessExit
     print_result(OutputFormat::Human, locale, Some(&path), candidate.submit())
 }
 
+/// One candidate in a bulk junk-to-Trash plan.
+pub(crate) struct BulkTrashItem<'a> {
+    /// Display path, shown in the plan only.
+    pub(crate) path: String,
+    /// Classified rule id, shown for attribution.
+    pub(crate) rule_id: String,
+    /// Logical bytes measured by the scan.
+    pub(crate) size: u128,
+    /// Retained scanned row carrying the executable native locator.
+    pub(crate) entry: &'a ScannedEntry,
+    /// True when the directory aggregate reports complete coverage. Ineligible items are
+    /// surfaced as skipped rather than moved.
+    pub(crate) eligible: bool,
+}
+
+/// Plan body digested before a bulk Trash operation.
+#[derive(serde::Serialize)]
+struct BulkTrashPlan {
+    schema: &'static str,
+    mode: &'static str,
+    items: Vec<BulkTrashPlanItem>,
+}
+
+#[derive(serde::Serialize)]
+struct BulkTrashPlanItem {
+    path: String,
+    rule_id: String,
+    logical_bytes: String,
+}
+
+/// Moves a classified junk set to the operating-system Trash after an exact, typed digest
+/// confirmation.
+///
+/// Each item goes through [`TrashCandidate::from_scanned_entry`], which revalidates native
+/// identity immediately before the move, so a stale row is skipped rather than trashing a
+/// replacement object. One item failing does not stop the others; the summary names every
+/// failure. Permanent deletion is never used as a fallback.
+pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> ProcessExitCode {
+    let eligible: Vec<_> = items.iter().filter(|item| item.eligible).collect();
+    let skipped: Vec<_> = items.iter().filter(|item| !item.eligible).collect();
+    if eligible.is_empty() {
+        eprintln!(
+            "{}",
+            match locale {
+                Locale::ZhCn => "没有覆盖完整、可以移到回收站的候选。",
+                Locale::EnUs => "No candidate with complete coverage is eligible for Trash.",
+            }
+        );
+        return ProcessExitCode::from(8);
+    }
+
+    let total = eligible
+        .iter()
+        .fold(0u128, |sum, item| sum.saturating_add(item.size));
+    let plan = BulkTrashPlan {
+        schema: "sweepx.junk-trash.plan/v1",
+        mode: "operating_system_trash",
+        items: eligible
+            .iter()
+            .map(|item| BulkTrashPlanItem {
+                path: item.path.clone(),
+                rule_id: item.rule_id.clone(),
+                logical_bytes: item.size.to_string(),
+            })
+            .collect(),
+    };
+    let digest = match sweepx_canonical::plan_digest_hex(&plan) {
+        Ok(digest) => digest,
+        Err(error) => {
+            eprintln!("could not digest Trash plan: {error}");
+            return ProcessExitCode::from(8);
+        }
+    };
+    print_bulk_plan(locale, eligible.len(), skipped.len(), total, &digest, &plan);
+    if !confirm_bulk_digest(&digest) {
+        println!(
+            "{}",
+            match locale {
+                Locale::ZhCn => "已取消；没有移动任何对象。",
+                Locale::EnUs => "Cancelled; no object was moved.",
+            }
+        );
+        return ProcessExitCode::SUCCESS;
+    }
+
+    let mut moved = 0usize;
+    let mut moved_bytes = 0u128;
+    let mut failures: Vec<(String, TrashError)> = Vec::new();
+    for item in eligible {
+        // Capture and revalidate this exact row; submit re-checks identity a final time.
+        match TrashCandidate::from_scanned_entry(item.entry) {
+            Ok(candidate) => match candidate.submit() {
+                Ok(()) => {
+                    moved += 1;
+                    moved_bytes = moved_bytes.saturating_add(item.size);
+                }
+                Err(error) => failures.push((item.path.clone(), error)),
+            },
+            Err(error) => failures.push((item.path.clone(), error)),
+        }
+    }
+    print_bulk_result(locale, moved, moved_bytes, skipped.len(), &failures);
+    // Partial completion is a distinct exit from full success.
+    if failures.is_empty() && skipped.is_empty() {
+        ProcessExitCode::SUCCESS
+    } else {
+        ProcessExitCode::from(4)
+    }
+}
+
+fn print_bulk_plan(
+    locale: Locale,
+    count: usize,
+    skipped: usize,
+    total: u128,
+    digest: &str,
+    plan: &BulkTrashPlan,
+) {
+    match locale {
+        Locale::ZhCn => {
+            println!("垃圾移到回收站计划");
+            println!("  候选：{count} 个；跳过（覆盖不完整）：{skipped} 个");
+            println!("  已统计逻辑大小：{total} 字节");
+            println!("  模式：系统回收站；可恢复；不永久删除");
+            for item in &plan.items {
+                println!(
+                    "    {} [{}]  {} 字节",
+                    item.path, item.rule_id, item.logical_bytes
+                );
+            }
+            println!("  完整计划摘要：{digest}");
+        }
+        Locale::EnUs => {
+            println!("Junk-to-Trash plan");
+            println!("  candidates: {count}; skipped (incomplete coverage): {skipped}");
+            println!("  accounted logical size: {total} bytes");
+            println!("  mode: operating-system Trash; recoverable; never permanent");
+            for item in &plan.items {
+                println!(
+                    "    {} [{}]  {} bytes",
+                    item.path, item.rule_id, item.logical_bytes
+                );
+            }
+            println!("  full plan digest: {digest}");
+        }
+    }
+}
+
+fn confirm_bulk_digest(digest: &str) -> bool {
+    print!("Type `trash {digest}` to execute this exact plan: ");
+    let _ = io::stdout().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok() && answer.trim() == format!("trash {digest}")
+}
+
+fn print_bulk_result(
+    locale: Locale,
+    moved: usize,
+    moved_bytes: u128,
+    skipped: usize,
+    failures: &[(String, TrashError)],
+) {
+    match locale {
+        Locale::ZhCn => {
+            println!("已移到回收站：{moved} 个，{moved_bytes} 字节。");
+            if skipped > 0 {
+                println!("跳过（覆盖不完整）：{skipped} 个。");
+            }
+            for (path, error) in failures {
+                eprintln!("未移动 {}：{error}", path);
+            }
+        }
+        Locale::EnUs => {
+            println!("Moved to Trash: {moved} items ({moved_bytes} bytes).");
+            if skipped > 0 {
+                println!("Skipped (incomplete coverage): {skipped}.");
+            }
+            for (path, error) in failures {
+                eprintln!("Not moved {}: {error}", path);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct TrashCandidate {
     path: PathBuf,

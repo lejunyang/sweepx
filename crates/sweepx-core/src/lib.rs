@@ -1334,7 +1334,7 @@ pub fn scan_with_store<S: SnapshotStore>(
     store: Option<&S>,
 ) -> Result<ScanSuccess, CoreError> {
     scan_with_store_options(context, request, store, ScannerOptions::default(), None)
-        .map(|(scan, _decisions)| scan)
+        .map(|(scan, _decisions, _directory_markers)| scan)
 }
 
 /// Runs the junk scan: traversal classifies each directory against `classifier` while walking,
@@ -1349,14 +1349,18 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
     store: Option<&S>,
     classifier: &dyn JunkClassifier,
 ) -> Result<JunkScanSuccess, CoreError> {
-    let (scan, decisions) = scan_with_store_options(
+    let (scan, decisions, directory_markers) = scan_with_store_options(
         context,
         request,
         store,
         ScannerOptions::default(),
         Some(classifier),
     )?;
-    Ok(JunkScanSuccess { scan, decisions })
+    Ok(JunkScanSuccess {
+        scan,
+        decisions,
+        directory_markers,
+    })
 }
 
 /// Result of a junk scan: the scan output and the per-entry rule decisions.
@@ -1364,8 +1368,11 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
 pub struct JunkScanSuccess {
     /// Scan envelope, snapshot and pruned summary (junk directory rows only).
     pub scan: ScanSuccess,
-    /// Entry id to the rule id returned by the classifier, for candidate assembly.
-    pub decisions: std::collections::BTreeMap<sweepx_model::ScanEntryId, String>,
+    /// Rule id returned per entry, for candidate assembly.
+    pub decisions: JunkDecisions,
+    /// Recorded directory children per parent, for post-scan checks on directories whose own
+    /// rows were dropped.
+    pub directory_markers: DirectoryMarkers,
 }
 
 /// Builds the lightweight first TUI screen by admitting roots without enumerating descendants.
@@ -1462,19 +1469,22 @@ fn scan_roots_only<S: SnapshotStore>(
     })
 }
 
+/// Per classified entry: entry id to the id of the rule that selected it.
+type JunkDecisions =
+    std::collections::BTreeMap<sweepx_model::ScanEntryId, String>;
+/// Recorded directory children per parent: child name to child entry id.
+type DirectoryMarkers = std::collections::BTreeMap<
+    sweepx_model::ScanEntryId,
+    std::collections::BTreeMap<String, sweepx_model::ScanEntryId>,
+>;
+
 fn scan_with_store_options<S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
     store: Option<&S>,
     scanner_options: ScannerOptions,
     classifier: Option<&dyn JunkClassifier>,
-) -> Result<
-    (
-        ScanSuccess,
-        std::collections::BTreeMap<sweepx_model::ScanEntryId, String>,
-    ),
-    CoreError,
-> {
+) -> Result<(ScanSuccess, JunkDecisions, DirectoryMarkers), CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
     }
@@ -1547,13 +1557,18 @@ fn scan_with_store_options<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         // In junk mode classify during the walk; otherwise retain every row as before.
-        let (summary, decisions) = match classifier {
+        let (summary, decisions, directory_markers) = match classifier {
             Some(classifier) => {
                 let classified = scanner.scan_classified(&roots, &cancel, classifier)?;
-                (classified.summary, classified.decisions)
+                (
+                    classified.summary,
+                    classified.decisions,
+                    classified.directory_markers,
+                )
             }
             None => (
                 scanner.scan(&roots, &cancel)?,
+                std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
             ),
         };
@@ -1652,6 +1667,7 @@ fn scan_with_store_options<S: SnapshotStore>(
                 summary,
             },
             decisions,
+            directory_markers,
         ))
     }
 }

@@ -39,8 +39,7 @@ use sweepx_core::{
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
 use sweepx_model::{
-    ByteValue, EvidenceValue, HumanSizeUnit, IdentityEvidence, ObjectType, ReasonCode, ScanEntryId,
-    ScanSort,
+    ByteValue, EvidenceValue, HumanSizeUnit, IdentityEvidence, ReasonCode, ScanEntryId, ScanSort,
 };
 use sweepx_platform::{
     ElevatedRelaunch, ElevationPolicy, PrivilegeProvider, StartupPrivilegeDecision,
@@ -208,6 +207,13 @@ enum Commands {
         /// must be typed back exactly. This never falls back to permanent deletion.
         #[arg(long, requires = "system", conflicts_with = "roots")]
         clean_temp: bool,
+        /// Move classified junk candidates to the operating-system Trash.
+        ///
+        /// One explicit confirmation covers the exact plan. Each target is revalidated by
+        /// native identity immediately before it is moved. This never falls back to permanent
+        /// deletion.
+        #[arg(long, conflicts_with = "clean_temp")]
+        trash: bool,
         /// Absolute quarantine base on a filesystem different from `/tmp`.
         ///
         /// Defaults to `$XDG_DATA_HOME/sweepx/quarantine` or
@@ -584,6 +590,7 @@ fn main() -> ProcessExitCode {
         Commands::Junk {
             system,
             clean_temp,
+            trash,
             quarantine_dir,
             roots,
         } => {
@@ -606,6 +613,7 @@ fn main() -> ProcessExitCode {
                     quarantine_dir: quarantine_dir.as_deref(),
                     stdin_is_terminal: std::io::stdin().is_terminal(),
                 },
+                trash,
             );
         }
         Commands::SiteStorage {
@@ -1323,6 +1331,7 @@ fn platform_rule_classifies(rule: &PlatformJunkRule, entry: &sweepx_model::Scann
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_junk_scan(
     context: &CoreContext,
@@ -1332,11 +1341,16 @@ fn run_junk_scan(
     temp_requested_roots: Vec<PathBuf>,
     include_platform_rules: bool,
     clean: JunkCleanOptions<'_>,
+    move_to_trash: bool,
 ) -> ProcessExitCode {
     if clean.enabled && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
         eprintln!(
             "junk --system --clean-temp requires human output and a foreground interactive terminal"
         );
+        return ProcessExitCode::from(2);
+    }
+    if move_to_trash && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
+        eprintln!("junk --trash requires human output and a foreground interactive terminal");
         return ProcessExitCode::from(2);
     }
     let rules = match load_project_junk_rules() {
@@ -1443,7 +1457,12 @@ fn run_junk_scan(
             candidates.push(assemble_platform_candidate(rule, entry, &aggregates));
         }
     }
-    annotate_project_candidates_with_git(&scan.scan.summary, &aggregates, &mut candidates);
+    annotate_project_candidates_with_git(
+        &scan.scan.summary,
+        &aggregates,
+        &scan.directory_markers,
+        &mut candidates,
+    );
     #[cfg(target_os = "linux")]
     if let Some((rule, discovery)) = &temp_discovery {
         candidates.extend(linux_temp_candidates(rule, discovery));
@@ -1474,6 +1493,43 @@ fn run_junk_scan(
             .then_with(|| left.path.cmp(&right.path))
     });
     let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
+    if move_to_trash {
+        // Index the retained scanned rows; the bulk trash path revalidates each one by its
+        // own captured native locator rather than trusting candidate display paths.
+        let entry_index: BTreeMap<ScanEntryId, &sweepx_model::ScannedEntry> = scan
+            .scan
+            .summary
+            .roots
+            .iter()
+            .chain(scan.scan.summary.entries.iter())
+            .filter_map(|entry| {
+                entry
+                    .identity
+                    .as_ref()
+                    .map(|identity| (identity.entry_id.clone(), entry))
+            })
+            .collect();
+        let mut items = Vec::new();
+        for candidate in &candidates {
+            let Some(entry) = entry_index.get(&candidate.entry_id) else {
+                continue;
+            };
+            let eligible = aggregates
+                .get(candidate.entry_id.as_str())
+                .copied()
+                .is_some_and(|aggregate| {
+                    aggregate.coverage.complete && !aggregate.coverage.details_lost
+                });
+            items.push(trash_command::BulkTrashItem {
+                path: candidate.path.clone(),
+                size: junk_evidence_bytes(&candidate.reclaimable).unwrap_or(0),
+                rule_id: candidate.rule_id.clone(),
+                entry,
+                eligible,
+            });
+        }
+        return trash_command::run_bulk_trash(context.locale(), items);
+    }
     #[cfg(target_os = "linux")]
     let temp_discovery_complete = temp_discovery
         .as_ref()
@@ -1792,6 +1848,7 @@ fn assemble_project_candidate(
 fn annotate_project_candidates_with_git(
     summary: &sweepx_core::ScanSummary,
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
     candidates: &mut [JunkCandidate],
 ) {
     if summary
@@ -1804,7 +1861,7 @@ fn annotate_project_candidates_with_git(
         }
         return;
     }
-    let repositories = git_repositories(summary, aggregates);
+    let repositories = git_repositories(summary, aggregates, directory_markers);
     let mut budget = GitProbeBudget::new();
     for candidate in candidates.iter_mut() {
         let Some(repository) = repositories
@@ -1829,12 +1886,43 @@ fn annotate_project_candidates_with_git(
             candidate.blockers.push("git_scan_evidence_incomplete");
             continue;
         }
-        let Some(path) = path_from_scanned_entry_id(summary, &candidate.entry_id) else {
+        let Some(candidate_row) = summary
+            .roots
+            .iter()
+            .chain(summary.entries.iter())
+            .find(|row| {
+                row.identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.entry_id == candidate.entry_id)
+            })
+        else {
             candidate.blockers.push("git_path_binding_unavailable");
             continue;
         };
-        if !scanned_identity_matches_path(summary, &repository.entry_id, &repository.path)
-            || !scanned_identity_matches_path(summary, &candidate.entry_id, &path)
+        let Some(candidate_locator) = candidate_row.native_locator.as_ref() else {
+            candidate.blockers.push("git_path_binding_unavailable");
+            continue;
+        };
+        let Some(path) = path_from_scanned_entry(candidate_row) else {
+            candidate.blockers.push("git_path_binding_unavailable");
+            continue;
+        };
+        // A repository row is usually absent in a classified scan (it is not itself junk),
+        // so identities are read from the candidate row's captured locator chain: the scan
+        // root or the matching reopen component names the repository, and the entry component
+        // names the candidate. This compares the same native evidence the old summary-based
+        // check used, without requiring the non-junk rows to have been retained.
+        let Some(repo_evidence) =
+            locator_component_identity(candidate_locator, &repository.entry_id)
+        else {
+            candidate.blockers.push("git_identity_changed");
+            continue;
+        };
+        if !identity_evidence_matches_path(repo_evidence, &repository.path)
+            || !identity_evidence_matches_path(
+                &candidate_locator.entry.platform_file_identity,
+                &path,
+            )
         {
             candidate.blockers.push("git_identity_changed");
             continue;
@@ -1874,24 +1962,29 @@ fn annotate_project_candidates_with_git(
     }
 }
 
-#[cfg(unix)]
-fn scanned_identity_matches_path(
-    summary: &sweepx_core::ScanSummary,
+/// Finds a directory component's platform identity inside a captured locator chain.
+///
+/// The component may be the scan root, an intermediate reopen component, or the entry itself.
+fn locator_component_identity<'a>(
+    locator: &'a sweepx_model::NativeLocatorEvidence,
     entry_id: &ScanEntryId,
+) -> Option<&'a IdentityEvidence<sweepx_model::PlatformFileIdentity>> {
+    std::iter::once(&locator.scan_root)
+        .chain(locator.parent_reopen_recipe.iter())
+        .chain(std::iter::once(&locator.entry))
+        .find(|component| &component.entry_id == entry_id)
+        .map(|component| &component.platform_file_identity)
+}
+
+/// Whether captured identity evidence still names the directory currently at `path`.
+#[cfg(unix)]
+fn identity_evidence_matches_path(
+    evidence: &IdentityEvidence<sweepx_model::PlatformFileIdentity>,
     path: &Path,
 ) -> bool {
     use std::os::unix::fs::MetadataExt;
 
-    let Some(expected) = summary
-        .roots
-        .iter()
-        .chain(summary.entries.iter())
-        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
-        .and_then(|entry| entry.identity.as_ref())
-    else {
-        return false;
-    };
-    let IdentityEvidence::Known { value } = &expected.platform_file_identity else {
+    let IdentityEvidence::Known { value } = evidence else {
         return false;
     };
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
@@ -1902,22 +1995,13 @@ fn scanned_identity_matches_path(
         && value.inode.0 == u128::from(metadata.ino())
 }
 
+/// Whether captured identity evidence still names the directory currently at `path`.
 #[cfg(windows)]
-fn scanned_identity_matches_path(
-    summary: &sweepx_core::ScanSummary,
-    entry_id: &ScanEntryId,
+fn identity_evidence_matches_path(
+    evidence: &IdentityEvidence<sweepx_model::PlatformFileIdentity>,
     path: &Path,
 ) -> bool {
-    let Some(expected) = summary
-        .roots
-        .iter()
-        .chain(summary.entries.iter())
-        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
-        .and_then(|entry| entry.identity.as_ref())
-    else {
-        return false;
-    };
-    let IdentityEvidence::Known { value } = &expected.platform_file_identity else {
+    let IdentityEvidence::Known { value } = evidence else {
         return false;
     };
     matches!(
@@ -1930,63 +2014,133 @@ fn scanned_identity_matches_path(
 fn git_repositories(
     summary: &sweepx_core::ScanSummary,
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
 ) -> Vec<GitRepository> {
-    // Index markers once. Re-scanning every retained entry for every directory turns repository
-    // discovery quadratic on the large trees this feature is meant to explain.
-    let git_markers = summary
-        .entries
-        .iter()
-        .filter(|entry| native_name_for_rule(&entry.native_basename).as_deref() == Some(".git"))
-        .filter(|entry| matches!(entry.object_type, ObjectType::Directory | ObjectType::File))
-        .filter_map(|entry| {
-            Some((
-                entry.identity.as_ref()?.parent_id.clone()?,
-                entry.object_type.clone(),
-            ))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut repositories = Vec::new();
-    for entry in summary
-        .roots
-        .iter()
-        .chain(summary.entries.iter())
-        .filter(|entry| entry.object_type == ObjectType::Directory)
-    {
-        if entry.coverage.details_lost || !entry.coverage.complete {
-            continue;
+    // In a classified scan only junk directory rows survive, so a `.git` row is absent even
+    // when its name was recorded as a directory marker. Repositories are therefore the parent
+    // ids whose recorded children include `.git`. Flatten the markers into a child→parent map
+    // so the full ancestor chain is reconstructible without the dropped rows.
+    let mut child_parent: BTreeMap<ScanEntryId, ScanEntryId> = BTreeMap::new();
+    // child id → its own native basename, used to reconstruct paths for dropped rows.
+    let mut child_names: BTreeMap<ScanEntryId, String> = BTreeMap::new();
+    for (parent_id, children) in directory_markers {
+        for (name, child_id) in children {
+            child_parent.insert(child_id.clone(), parent_id.clone());
+            child_names.insert(child_id.clone(), name.clone());
         }
-        let Some(identity) = entry.identity.as_ref() else {
+    }
+    let mut root_paths: BTreeMap<ScanEntryId, PathBuf> = BTreeMap::new();
+    for row in summary.roots.iter().chain(summary.entries.iter()) {
+        let Some(locator) = row.native_locator.as_ref() else {
             continue;
         };
+        let Some(absolute) = locator.scan_root_absolute_path.as_ref() else {
+            continue;
+        };
+        let key = locator.scan_root.entry_id.clone();
+        if root_paths.contains_key(&key) {
+            continue;
+        }
+        if let Some(path) = native_absolute_path_for_git(absolute) {
+            root_paths.insert(key, path);
+        }
+    }
+    let mut repositories = Vec::new();
+    for (parent_id, children) in directory_markers {
+        if !children.contains_key(".git") {
+            continue;
+        }
         if aggregates
-            .get(identity.entry_id.as_str())
+            .get(parent_id.as_str())
             .is_none_or(|aggregate| !aggregate.coverage.complete)
         {
             continue;
         }
-        let Some(locator) = entry.native_locator.as_ref() else {
+        // Prefer the parent's own retained row (carries the real locator). Rows for nested
+        // non-junk directories were dropped, so reconstruct the path from recorded names:
+        // walk child→parent collecting basenames, then append them to the root path.
+        let row = summary
+            .roots
+            .iter()
+            .chain(summary.entries.iter())
+            .find(|row| {
+                row.identity
+                    .as_ref()
+                    .is_some_and(|identity| &identity.entry_id == parent_id)
+            });
+        let Some(path) = row
+            .as_ref()
+            .and_then(|row| path_from_scanned_entry(row))
+            .or_else(|| {
+                reconstruct_marker_path(parent_id, &child_parent, &child_names, &root_paths)
+            })
+        else {
             continue;
         };
-        let entry_id = identity.entry_id.clone();
-        let Some(git_marker_type) = git_markers.get(&entry_id) else {
-            continue;
-        };
-        let Some(path) = path_from_scanned_entry(entry) else {
-            continue;
-        };
+        // A `.git` *file* (gitfile/submodule pointer) is a boundary even though the marker
+        // index only records directory names; verify against the live path.
+        let uses_gitfile = std::fs::symlink_metadata(path.join(".git"))
+            .is_ok_and(|metadata| metadata.file_type().is_file());
+        // Build the ancestor chain from child→parent; stop at the scan root (no parent
+        // recorded). When the row survives, its locator gives the same chain directly.
+        let (depth, ancestor_ids) = row
+            .as_ref()
+            .and_then(|row| row.native_locator.as_ref())
+            .map(|locator| {
+                (
+                    locator.parent_reopen_recipe.len(),
+                    locator
+                        .parent_reopen_recipe
+                        .iter()
+                        .map(|component| component.entry_id.clone())
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .unwrap_or_else(|| {
+                let mut chain: BTreeSet<ScanEntryId> = BTreeSet::new();
+                let mut current = child_parent.get(parent_id).cloned();
+                while let Some(parent) = current {
+                    let next = child_parent.get(&parent).cloned();
+                    chain.insert(parent);
+                    current = next;
+                }
+                let depth = chain.len();
+                (depth, chain)
+            });
         repositories.push(GitRepository {
-            entry_id,
+            entry_id: parent_id.clone(),
             path,
-            depth: locator.parent_reopen_recipe.len(),
-            ancestor_ids: locator
-                .parent_reopen_recipe
-                .iter()
-                .map(|component| component.entry_id.clone())
-                .collect(),
-            uses_gitfile: *git_marker_type == ObjectType::File,
+            depth,
+            ancestor_ids,
+            uses_gitfile,
         });
     }
     repositories
+}
+
+/// Reconstructs a dropped directory row's path from the recorded marker chain.
+///
+/// Follows child→parent to the scan root, collecting each child's recorded native basename,
+/// then appends the names in root order to the root path. Returns `None` if the chain does
+/// not terminate at a known scan root (markers incomplete).
+fn reconstruct_marker_path(
+    target_id: &ScanEntryId,
+    child_parent: &BTreeMap<ScanEntryId, ScanEntryId>,
+    child_names: &BTreeMap<ScanEntryId, String>,
+    root_paths: &BTreeMap<ScanEntryId, PathBuf>,
+) -> Option<PathBuf> {
+    let mut names: Vec<String> = Vec::new();
+    let mut current = target_id.clone();
+    while !root_paths.contains_key(&current) {
+        let parent = child_parent.get(&current)?.clone();
+        names.push(child_names.get(&current)?.clone());
+        current = parent;
+    }
+    let mut path = root_paths.get(&current)?.clone();
+    for name in names.into_iter().rev() {
+        path.push(name);
+    }
+    Some(path)
 }
 
 fn repository_contains(repository: &GitRepository, candidate: &JunkCandidate) -> bool {
@@ -2002,18 +2156,6 @@ fn candidate_contains_nested_repository(
     repositories.iter().any(|nested| {
         nested.entry_id != owning_repository.entry_id && nested.ancestor_ids.contains(candidate_id)
     })
-}
-
-fn path_from_scanned_entry_id(
-    summary: &sweepx_core::ScanSummary,
-    entry_id: &ScanEntryId,
-) -> Option<PathBuf> {
-    summary
-        .roots
-        .iter()
-        .chain(summary.entries.iter())
-        .find(|entry| entry.identity.as_ref().map(|identity| &identity.entry_id) == Some(entry_id))
-        .and_then(path_from_scanned_entry)
 }
 
 fn path_from_scanned_entry(entry: &sweepx_model::ScannedEntry) -> Option<PathBuf> {

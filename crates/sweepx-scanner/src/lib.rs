@@ -210,6 +210,9 @@ pub struct ClassifiedScan {
     pub summary: ScanSummary,
     /// Entry id to the rule id returned by the classifier, keyed for candidate assembly.
     pub decisions: BTreeMap<ScanEntryId, String>,
+    /// Native names of directory children observed under each parent mapped to the child
+    /// entry id, even when the child directory itself was not classified and its row dropped.
+    pub directory_markers: BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
 }
 
 // Manual `Debug`: the classifier trait object intentionally carries no Debug bound.
@@ -247,6 +250,10 @@ struct CollectingScanSink<'a> {
     /// Native basenames of file rows observed directly under a directory, keyed by the
     /// parent's entry id. Cheap names only -- rows themselves are dropped.
     file_markers: BTreeMap<ScanEntryId, BTreeSet<String>>,
+    /// Native names of *directory* rows directly under a directory, mapped to the child's own
+    /// entry id. Non-junk directory rows are dropped too, but post-scan checks need both to
+    /// know the name existed (e.g. `.git`) and to reconstruct the parent chain.
+    directory_markers: BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
 }
@@ -271,6 +278,7 @@ impl<'a> CollectingScanSink<'a> {
             pending_directories: BTreeMap::new(),
             pending_root_ids: BTreeSet::new(),
             file_markers: BTreeMap::new(),
+            directory_markers: BTreeMap::new(),
             decisions: BTreeMap::new(),
         }
     }
@@ -295,6 +303,7 @@ impl<'a> CollectingScanSink<'a> {
         ClassifiedScan {
             summary: self.summary,
             decisions: self.decisions,
+            directory_markers: self.directory_markers,
         }
     }
 
@@ -307,17 +316,17 @@ impl<'a> CollectingScanSink<'a> {
         let Some(entry) = self.pending_directories.remove(id) else {
             return;
         };
+        // Marker sets are retained until the sink drops: a directory's own markers are read by
+        // its child directories' parent-marker checks, and aggregates are pushed in identity
+        // order -- parents before children -- so eager removal made project rules miss their
+        // parent markers. Names-only state is cheap (the full row was already dropped).
         let Some(rule_id) = self
             .classifier
             .expect("classified sink carries a classifier")
             .classify(&entry, &self.file_markers)
         else {
-            // No rule matched; this directory's own marker set will never be queried again
-            // because every descendant was classified before it.
-            self.file_markers.remove(id);
             return;
         };
-        self.file_markers.remove(id);
         self.decisions.insert(id.clone(), rule_id);
         if self.pending_root_ids.remove(id) {
             self.summary.roots.push(entry);
@@ -420,10 +429,20 @@ impl ScanSink for CollectingScanSink<'_> {
         if self.classifier.is_some() {
             match entry.object_type {
                 ObjectType::Directory => {
-                    // Wait for the aggregate; the classifier needs the complete marker set.
+                    // Record the directory child's name first: post-scan checks may need to
+                    // know it existed even though its row itself is dropped unless classified.
                     let Some(identity) = entry.identity.as_ref() else {
                         return Ok(());
                     };
+                    if let Some(parent_id) = identity.parent_id.as_ref()
+                        && let Some(name) = native_basename_marker(&entry.native_basename)
+                    {
+                        self.directory_markers
+                            .entry(parent_id.clone())
+                            .or_default()
+                            .insert(name, identity.entry_id.clone());
+                    }
+                    // Wait for the aggregate; the classifier needs the complete marker set.
                     self.pending_directories
                         .insert(identity.entry_id.clone(), entry);
                 }
