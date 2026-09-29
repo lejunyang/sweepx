@@ -182,6 +182,11 @@ fn parse_attribute_page(buffer: &[u8], count: usize) -> io::Result<Vec<BulkChild
             // mode_t is a 16-bit value; it also carries the type bits.
             let mode = u16::from_ne_bytes(read_array(buffer, &mut cursor)?);
             stat.st_mode = libc::mode_t::from(mode);
+            // The next common attribute (FLAGS) is 32-bit, and Darwin pads fixed attributes to
+            // their natural alignment within a record. Skipping this pad left every later read
+            // two bytes early; the 8-byte file data length then decoded as `real << 16`, which
+            // inflated every reported file size by exactly 65536.
+            align4(&mut cursor)?;
         }
         if returned.commonattr & libc::ATTR_CMN_FLAGS != 0 {
             stat.st_flags = read_unaligned::<u32>(buffer, cursor)?;
@@ -242,6 +247,21 @@ fn read_array<const N: usize>(buffer: &[u8], cursor: &mut usize) -> io::Result<[
         .checked_add(N)
         .ok_or_else(|| invalid_data("attribute offset overflow"))?;
     Ok(value)
+}
+
+/// Rounds `cursor` up to the next 4-byte boundary.
+///
+/// Darwin attribute records pack fixed-size attributes at natural alignment with a minimum of
+/// four bytes. Only the 16-bit ACCESSMASK can leave the cursor on a 2-byte boundary; the value
+/// below is the padding bytes, not the next attribute. A checked add keeps a corrupt record
+/// length from wrapping the offset.
+fn align4(cursor: &mut usize) -> io::Result<()> {
+    let aligned = cursor
+        .checked_add(3)
+        .map(|padded| padded & !3)
+        .ok_or_else(|| invalid_data("attribute offset overflow"))?;
+    *cursor = aligned;
+    Ok(())
 }
 
 fn read_unaligned<T: Copy>(buffer: &[u8], offset: usize) -> io::Result<T> {
