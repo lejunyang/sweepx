@@ -951,6 +951,15 @@ impl ScanEntryId {
         &self.0
     }
 
+    /// Rebinds an entry id from a previously scanner-issued string.
+    ///
+    /// This never mints new authority: it is used only to join an aggregate's stored
+    /// `directory_identity` back to the pending row produced earlier in the same scan. Callers
+    /// must not use it to construct ids from display paths or other untrusted text.
+    pub fn from_loaded(value: String) -> Self {
+        Self(value)
+    }
+
     pub fn belongs_to(&self, scan_id: &ScanId) -> bool {
         if scan_id.is_empty() {
             return false;

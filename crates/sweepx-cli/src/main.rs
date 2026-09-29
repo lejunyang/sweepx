@@ -26,12 +26,13 @@ use serde_json::json;
 use sweepx_core::{CacheStatusRequest, cache_status, cache_status_state_error};
 use sweepx_core::{
     CancelRequest, CancellationToken, CleanerCargoDetectInvocation, CleanerCargoDetectRequest,
-    CleanerShowRequest, CoreContext, ExplainRequest, OutputFormat, SCAN_NDJSON_UNAVAILABLE_MESSAGE,
-    ScanRequest, StateError, StatusRequest, cache_status_usage_error, cancel_with_store,
-    capabilities, cleaner_cargo_detect_with_invocation_and_cancel, cleaner_list, cleaner_show,
+    CleanerShowRequest, CoreContext, ExplainRequest, JunkClassifier, OutputFormat,
+    SCAN_NDJSON_UNAVAILABLE_MESSAGE, ScanRequest, StateError, StatusRequest,
+    cache_status_usage_error, cancel_with_store, capabilities,
+    cleaner_cargo_detect_with_invocation_and_cancel, cleaner_list, cleaner_show,
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
-    scan_for_tui_with_store, scan_ndjson_supported, scan_with_store, serialize_json,
-    serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
+    scan_for_tui_with_store, scan_junk_with_store, scan_ndjson_supported, scan_with_store,
+    serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
     tui_detail_rescan_provider, usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
@@ -1203,6 +1204,125 @@ impl GitProbeBudget {
 const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
 const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-rules.json");
 
+/// Junk classifier backed by the CLI's loaded project and platform rule sets.
+///
+/// It is handed to the scanner, which invokes it while the walk runs so non-candidate rows are
+/// never buffered. Decisions are namespaced (`project:` / `platform:`) because the two sets
+/// have separate id namespaces.
+struct CliJunkClassifier<'a> {
+    project_rules: &'a [JunkRule],
+    platform_rules: &'a [PlatformJunkRule],
+}
+
+impl JunkClassifier for CliJunkClassifier<'_> {
+    fn classify(
+        &self,
+        entry: &sweepx_model::ScannedEntry,
+        markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+    ) -> Option<String> {
+        for rule in self.project_rules {
+            if project_rule_classifies(rule, entry, markers) {
+                return Some(format!("project:{}", rule.id));
+            }
+        }
+        let platform = if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "unsupported"
+        };
+        // Specific, root-identifying rules win over generic catch-all rules when several
+        // match one directory; ties keep file order. Measured: without this, the earlier
+        // `macos.user-caches` (direct_children) shadowed `macos.homebrew-cache`/`yarn-cache`
+        // and the directory lost its specific attribution.
+        let mut best: Option<(u8, &PlatformJunkRule)> = None;
+        for rule in self
+            .platform_rules
+            .iter()
+            .filter(|rule| rule.platform == platform || rule.platform == "any")
+        {
+            if platform_rule_classifies(rule, entry) {
+                let rank = platform_rule_specificity(rule);
+                if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                    best = Some((rank, rule));
+                }
+            }
+        }
+        best.map(|(_, rule)| format!("platform:{}", rule.id))
+    }
+}
+
+/// Specificity rank of a platform rule's match kind; lower wins.
+///
+/// Rules that identify an exact root (tool-reported, known layout or declared known root) are
+/// the most specific. `named_descendant` pins name and depth; `direct_children` is a generic
+/// depth bucket that merely inherits everything underneath.
+fn platform_rule_specificity(rule: &PlatformJunkRule) -> u8 {
+    match rule.match_kind.as_str() {
+        "verified_tool_root"
+        | "verified_cache_root"
+        | "verified_browser_cache"
+        | "verified_known_root" => 0,
+        "named_descendant" => 1,
+        "direct_children" => 2,
+        _ => 3,
+    }
+}
+
+/// Whether a project rule matches an observed directory.
+///
+/// Same conditions as the former post-scan builder: a name in the rule and identity-based
+/// parent-marker applicability.
+fn project_rule_classifies(
+    rule: &JunkRule,
+    entry: &sweepx_model::ScannedEntry,
+    markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+) -> bool {
+    let Some(identity) = entry.identity.as_ref() else {
+        return false;
+    };
+    let Some(name) = native_name_for_rule(&entry.native_basename) else {
+        return false;
+    };
+    rule.names
+        .iter()
+        .any(|candidate| normalized_rule_name(candidate) == name)
+        && junk_rule_applies(rule, identity, markers)
+}
+
+/// Whether a platform rule matches an observed directory, evaluated at walk time.
+///
+/// Depth is read from the entry's captured locator. The depth-zero match kinds behave exactly
+/// as before: those directories are still their own scan roots except known roots, which may
+/// legitimately be nested inside a wider root.
+fn platform_rule_classifies(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
+    let Some(locator) = entry.native_locator.as_ref() else {
+        return false;
+    };
+    let depth = locator.parent_reopen_recipe.len();
+    match rule.match_kind.as_str() {
+        "direct_children" => depth == rule.depth,
+        "named_descendant" => {
+            depth == rule.depth
+                && native_name_for_rule(&entry.native_basename).is_some_and(|name| {
+                    rule.names
+                        .iter()
+                        .any(|candidate| normalized_rule_name(candidate) == name)
+                })
+        }
+        "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
+        "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
+        "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
+        "verified_known_root" => known_macos_root_matches(rule, entry),
+        #[cfg(target_os = "linux")]
+        "stale_inactive_direct_child" => false,
+        _ => false,
+    }
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_junk_scan(
     context: &CoreContext,
@@ -1266,105 +1386,68 @@ fn run_junk_scan(
         false,
         format == OutputFormat::Human,
     );
-    let scan = scan_with_store(
+    let classifier = CliJunkClassifier {
+        project_rules: &rules,
+        platform_rules: &platform_rules,
+    };
+    let classified = scan_junk_with_store(
         context,
         &ScanRequest {
             roots: scan_roots,
             state_dir: None,
         },
         Option::<&sweepx_core::MemorySnapshotStore>::None,
+        &classifier,
     );
     progress.finish();
-    let scan = match scan {
+    let scan = match classified {
         Ok(scan) => scan,
         Err(error) => {
             eprintln!("{error}");
             return ProcessExitCode::from(core_error_exit_code(&error) as u8);
         }
     };
-    // Applicability is joined through scan identities and lossless native names. Display paths
-    // remain presentation-only and are never reused to probe the filesystem.
-    let markers_by_parent = scan
-        .summary
-        .entries
-        .iter()
-        .filter(|entry| entry.object_type == ObjectType::File)
-        .filter_map(|entry| {
-            let identity = entry.identity.as_ref()?;
-            let parent_id = identity.parent_id.clone()?;
-            let name = native_name_for_rule(&entry.native_basename)?;
-            Some((parent_id, name))
-        })
-        .fold(
-            BTreeMap::<ScanEntryId, BTreeSet<String>>::new(),
-            |mut index, (parent_id, name)| {
-                index.entry(parent_id).or_default().insert(name);
-                index
-            },
-        );
+    // Aggregates are retained in full; only directory rows were filtered, and their sizes stay
+    // available here. Applicability was joined during the walk through scan identities and
+    // lossless native names.
     let aggregates = scan
+        .scan
         .summary
         .aggregates
         .iter()
         .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
         .collect::<BTreeMap<_, _>>();
-    let mut candidates = scan
+    let mut candidates = Vec::with_capacity(scan.decisions.len());
+    for entry in scan
+        .scan
         .summary
-        .entries
+        .roots
         .iter()
-        .filter(|entry| entry.object_type == ObjectType::Directory)
-        .filter_map(|entry| {
-            let identity = entry.identity.as_ref()?;
-            let locator = entry.native_locator.as_ref()?;
-            let name = native_name_for_rule(&entry.native_basename)?;
-            rules.iter().find_map(|rule| {
-                (rule
-                    .names
-                    .iter()
-                    .any(|candidate| normalized_rule_name(candidate) == name)
-                    && junk_rule_applies(rule, identity, &markers_by_parent))
-                .then(|| {
-                    let size = junk_size_for(aggregates.get(identity.entry_id.as_str()).copied());
-                    JunkCandidate {
-                        path: entry.display_path.clone(),
-                        #[cfg(target_os = "linux")]
-                        native_path: None,
-                        rule_id: rule.id.clone(),
-                        risk: rule.risk.clone(),
-                        reclaimable: size.value,
-                        evidence: rule.evidence.clone(),
-                        source_reviewed_at: rule.source_reviewed_at.clone(),
-                        references: rule.references.clone(),
-                        entry_id: identity.entry_id.clone(),
-                        ancestor_ids: locator
-                            .parent_reopen_recipe
-                            .iter()
-                            .map(|component| component.entry_id.clone())
-                            .collect(),
-                        // A project build output has no "which copy is the tool using" question: it
-                        // belongs to the tree it sits in. Claiming an activity here would be noise.
-                        activity: None,
-                        stale_formats: Vec::new(),
-                        size_is_logical: size.is_logical_fallback,
-                        git: None,
-                        classification: Some("known_generated"),
-                        confidence: Some("medium"),
-                        blockers: Vec::new(),
-                    }
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    annotate_project_candidates_with_git(&scan.summary, &aggregates, &mut candidates);
+        .chain(scan.scan.summary.entries.iter())
+    {
+        let Some(identity) = entry.identity.as_ref() else {
+            continue;
+        };
+        let Some(decision) = scan.decisions.get(&identity.entry_id) else {
+            continue;
+        };
+        if let Some(rule_id) = decision.strip_prefix("project:") {
+            let Some(rule) = rules.iter().find(|rule| rule.id == rule_id) else {
+                continue;
+            };
+            candidates.push(assemble_project_candidate(rule, entry, &aggregates));
+        } else if let Some(rule_id) = decision.strip_prefix("platform:") {
+            let Some(rule) = platform_rules.iter().find(|rule| rule.id == rule_id) else {
+                continue;
+            };
+            candidates.push(assemble_platform_candidate(rule, entry, &aggregates));
+        }
+    }
+    annotate_project_candidates_with_git(&scan.scan.summary, &aggregates, &mut candidates);
     #[cfg(target_os = "linux")]
     if let Some((rule, discovery)) = &temp_discovery {
         candidates.extend(linux_temp_candidates(rule, discovery));
     }
-    candidates.extend(platform_junk_candidates(
-        &scan.summary,
-        &aggregates,
-        &platform_rules,
-    ));
     candidates.sort_by(|left, right| {
         left.ancestor_ids
             .len()
@@ -1536,7 +1619,7 @@ fn run_junk_scan(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
-                "status": if scan.output.status == sweepx_protocol::OutputStatus::Ok && temp_discovery_complete { "ok" } else { "partial" },
+                "status": if scan.scan.output.status == sweepx_protocol::OutputStatus::Ok && temp_discovery_complete { "ok" } else { "partial" },
                 "readOnly": true,
                 "tempDiscovery": temp_discovery_json,
                 "candidateCount": candidates.len(),
@@ -1599,7 +1682,7 @@ fn run_junk_scan(
             return ProcessExitCode::from(3);
         }
     }
-    ProcessExitCode::from(scan.output.conservative_exit_code() as u8)
+    ProcessExitCode::from(scan.scan.output.conservative_exit_code() as u8)
 }
 
 fn load_project_junk_rules() -> Result<Vec<JunkRule>, String> {
@@ -1656,6 +1739,49 @@ fn junk_rule_applies(
                 .any(|marker| markers.contains(&normalized_rule_name(marker)))
         })
     })
+}
+
+/// Assembles one project junk candidate for an entry the classifier already matched.
+fn assemble_project_candidate(
+    rule: &JunkRule,
+    entry: &sweepx_model::ScannedEntry,
+    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+) -> JunkCandidate {
+    let identity = entry
+        .identity
+        .as_ref()
+        .expect("matched entry carries identity");
+    let locator = entry
+        .native_locator
+        .as_ref()
+        .expect("matched entry carries a locator");
+    let size = junk_size_for(aggregates.get(identity.entry_id.as_str()).copied());
+    JunkCandidate {
+        path: entry.display_path.clone(),
+        #[cfg(target_os = "linux")]
+        native_path: None,
+        rule_id: rule.id.clone(),
+        risk: rule.risk.clone(),
+        reclaimable: size.value,
+        evidence: rule.evidence.clone(),
+        source_reviewed_at: rule.source_reviewed_at.clone(),
+        references: rule.references.clone(),
+        entry_id: identity.entry_id.clone(),
+        ancestor_ids: locator
+            .parent_reopen_recipe
+            .iter()
+            .map(|component| component.entry_id.clone())
+            .collect(),
+        // A project build output has no "which copy is the tool using" question: it belongs to
+        // the tree it sits in. Claiming an activity here would be noise.
+        activity: None,
+        stale_formats: Vec::new(),
+        size_is_logical: size.is_logical_fallback,
+        git: None,
+        classification: Some("known_generated"),
+        confidence: Some("medium"),
+        blockers: Vec::new(),
+    }
 }
 
 /// Adds bounded Git evidence to already-classified project candidates.
@@ -1968,138 +2094,85 @@ fn git_path_has_tracked_descendant(
     }
 }
 
-fn platform_junk_candidates(
-    summary: &sweepx_core::ScanSummary,
+/// Assembles one platform junk candidate for an entry the classifier already matched.
+///
+/// This is the former body of `platform_junk_candidates` without the rule/entry loops: the
+/// classification decision was made during the walk, but activity, size and evidence are
+/// assembled here from the retained aggregate.
+fn assemble_platform_candidate(
+    rule: &PlatformJunkRule,
+    entry: &sweepx_model::ScannedEntry,
     aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
-    rules: &[PlatformJunkRule],
-) -> Vec<JunkCandidate> {
-    let platform = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
+) -> JunkCandidate {
+    let identity = entry
+        .identity
+        .as_ref()
+        .expect("matched entry carries identity");
+    let locator = entry
+        .native_locator
+        .as_ref()
+        .expect("matched entry carries a locator");
+    let activity = classify_tool_root(rule, entry).map(|classification| classification.code());
+    let stale_formats = superseded_format_generations(rule, entry);
+    // Same allocation-versus-logical problem as the project rules, with one extra source: the
+    // entry's own estimate, kept ahead of the logical fallback as the scanner's own claim.
+    let aggregate = aggregates.get(identity.entry_id.as_str()).copied();
+    debug_assert!(
+        !(rule.root_kind == "linux_tmp")
+            || aggregate.is_some_and(|aggregate| {
+                aggregate.coverage.complete && !aggregate.coverage.details_lost
+            }),
+        "linux tmp candidates are filtered before assembly"
+    );
+    let size = if aggregate.is_some() {
+        junk_size_for(aggregate)
     } else {
-        "unsupported"
-    };
-    let mut candidates = Vec::new();
-    for rule in rules
-        .iter()
-        .filter(|rule| rule.platform == platform || rule.platform == "any")
-    {
-        for entry in summary
-            .roots
-            .iter()
-            .chain(summary.entries.iter())
-            .filter(|entry| entry.object_type == ObjectType::Directory)
-        {
-            let Some(identity) = entry.identity.as_ref() else {
-                continue;
-            };
-            let Some(locator) = entry.native_locator.as_ref() else {
-                continue;
-            };
-            let depth = locator.parent_reopen_recipe.len();
-            let matched = match rule.match_kind.as_str() {
-                "direct_children" => depth == rule.depth,
-                "named_descendant" => {
-                    depth == rule.depth
-                        && native_name_for_rule(&entry.native_basename).is_some_and(|name| {
-                            rule.names
-                                .iter()
-                                .any(|candidate| normalized_rule_name(candidate) == name)
-                        })
-                }
-                // The scan root itself is the candidate. Root discovery already confirmed the
-                // markers and structural fingerprint, so the rule reports one aggregate for the
-                // whole cache rather than per-file rows.
-                "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry),
-                // Also the scan root itself, but discovered by walking a known browser layout
-                // instead of by asking a tool. The marker is rechecked here because discovery
-                // and classification see the path through different readers.
-                "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
-                // The scan root itself, expanded from the rule's declarative browser layouts. No
-                // marker is required: sitting inside a known browser user-data tree under a
-                // derived-cache name is the evidence, and the directories are blockfile/scratch
-                // roots that can be empty yet still occupy scaffolding.
-                "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
-                // A known root is matched at whatever depth it was really observed, including
-                // when a wider scan root (typically ~/Library/Caches) already covers it.
-                "verified_known_root" => known_macos_root_matches(rule, entry),
-                #[cfg(target_os = "linux")]
-                "stale_inactive_direct_child" => false,
-                _ => false,
-            };
-            if !matched {
-                continue;
-            }
-            let activity =
-                classify_tool_root(rule, entry).map(|classification| classification.code());
-            let stale_formats = superseded_format_generations(rule, entry);
-            // Same allocation-versus-logical problem as the project rules, with one extra source:
-            // the entry's own estimate, which is kept ahead of the logical fallback because it is
-            // the scanner's own claim about this specific entry.
-            let aggregate = aggregates.get(identity.entry_id.as_str()).copied();
-            if rule.root_kind == "linux_tmp"
-                && aggregate.is_none_or(|aggregate| {
-                    !aggregate.coverage.complete || aggregate.coverage.details_lost
-                })
-            {
-                continue;
-            }
-            let size = if aggregate.is_some() {
-                junk_size_for(aggregate)
-            } else {
-                JunkSize {
-                    value: entry.reclaimable_estimate.clone(),
-                    is_logical_fallback: false,
-                }
-            };
-            candidates.push(JunkCandidate {
-                path: entry.display_path.clone(),
-                #[cfg(target_os = "linux")]
-                native_path: None,
-                rule_id: rule.id.clone(),
-                risk: rule.risk.clone(),
-                reclaimable: size.value,
-                evidence: rule.evidence.clone(),
-                source_reviewed_at: rule.source_reviewed_at.clone(),
-                references: rule.references.clone(),
-                entry_id: identity.entry_id.clone(),
-                ancestor_ids: locator
-                    .parent_reopen_recipe
-                    .iter()
-                    .map(|component| component.entry_id.clone())
-                    .collect(),
-                #[cfg(target_os = "linux")]
-                activity: if rule.root_kind == "linux_tmp" {
-                    Some(linux_temp::ACTIVITY_CODE)
-                } else {
-                    activity
-                },
-                #[cfg(not(target_os = "linux"))]
-                activity,
-                stale_formats,
-                size_is_logical: size.is_logical_fallback,
-                git: None,
-                #[cfg(target_os = "linux")]
-                classification: (rule.root_kind == "linux_tmp")
-                    .then_some(linux_temp::CLASSIFICATION),
-                #[cfg(not(target_os = "linux"))]
-                classification: None,
-                confidence: (rule.root_kind == "linux_tmp").then_some("medium"),
-                #[cfg(target_os = "linux")]
-                blockers: if rule.root_kind == "linux_tmp" {
-                    vec![linux_temp::REFERENCE_BLOCKER]
-                } else {
-                    Vec::new()
-                },
-                #[cfg(not(target_os = "linux"))]
-                blockers: Vec::new(),
-            });
+        JunkSize {
+            value: entry.reclaimable_estimate.clone(),
+            is_logical_fallback: false,
         }
+    };
+    JunkCandidate {
+        path: entry.display_path.clone(),
+        #[cfg(target_os = "linux")]
+        native_path: None,
+        rule_id: rule.id.clone(),
+        risk: rule.risk.clone(),
+        reclaimable: size.value,
+        evidence: rule.evidence.clone(),
+        source_reviewed_at: rule.source_reviewed_at.clone(),
+        references: rule.references.clone(),
+        entry_id: identity.entry_id.clone(),
+        ancestor_ids: locator
+            .parent_reopen_recipe
+            .iter()
+            .map(|component| component.entry_id.clone())
+            .collect(),
+        #[cfg(target_os = "linux")]
+        activity: if rule.root_kind == "linux_tmp" {
+            Some(linux_temp::ACTIVITY_CODE)
+        } else {
+            activity
+        },
+        #[cfg(not(target_os = "linux"))]
+        activity,
+        stale_formats,
+        size_is_logical: size.is_logical_fallback,
+        git: None,
+        #[cfg(target_os = "linux")]
+        classification: (rule.root_kind == "linux_tmp").then_some(linux_temp::CLASSIFICATION),
+        #[cfg(not(target_os = "linux"))]
+        classification: None,
+        confidence: (rule.root_kind == "linux_tmp").then_some("medium"),
+        #[cfg(target_os = "linux")]
+        blockers: if rule.root_kind == "linux_tmp" {
+            vec![linux_temp::REFERENCE_BLOCKER]
+        } else {
+            Vec::new()
+        },
+        #[cfg(not(target_os = "linux"))]
+        blockers: Vec::new(),
     }
-    candidates
 }
 
 /// Confirms a scanned root is the one this rule's tool reported.

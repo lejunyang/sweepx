@@ -180,8 +180,51 @@ pub trait ScanSink {
     }
 }
 
-#[derive(Debug)]
-struct CollectingScanSink {
+/// Classifies a directory as junk while its walk is still running.
+///
+/// Implemented by the CLI against its loaded rule sets. The scanner calls it once per
+/// directory, at the moment that directory's own aggregate is pushed -- i.e. after every
+/// object directly under the directory has been observed, which is the earliest point marker
+/// checks are complete. Only a directory the classifier returns a rule id for is retained as a
+/// row; everything else is dropped on purpose rather than buffered for a post-scan pass. This
+/// is what keeps the result envelope small on a machine that produces hundreds of thousands
+/// of entries.
+pub trait JunkClassifier {
+    /// Returns the stable id of the rule that makes this directory a junk candidate, or
+    /// `None` when no rule matches.
+    ///
+    /// `markers` maps a directory entry id to the native basenames of file entries observed
+    /// directly under it. Rules may need the directory's own markers or its parent's, so the
+    /// whole index is passed rather than one set. The classifier must base its decision on
+    /// captured identity, locator and these markers, never on the display path.
+    fn classify(
+        &self,
+        entry: &ScannedEntry,
+        markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+    ) -> Option<String>;
+}
+
+/// Result of a classified scan: the pruned summary plus the rule id chosen per entry.
+pub struct ClassifiedScan {
+    /// Summary whose directory rows contain only classified candidates.
+    pub summary: ScanSummary,
+    /// Entry id to the rule id returned by the classifier, keyed for candidate assembly.
+    pub decisions: BTreeMap<ScanEntryId, String>,
+}
+
+// Manual `Debug`: the classifier trait object intentionally carries no Debug bound.
+impl std::fmt::Debug for CollectingScanSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CollectingScanSink")
+            .field("summary", &self.summary)
+            .field("limits", &self.limits)
+            .field("overflow_count", &self.overflow_count)
+            .field("detail_overflow_count", &self.detail_overflow_count)
+            .field("classified", &self.classifier.is_some())
+            .finish_non_exhaustive()
+    }
+}
+struct CollectingScanSink<'a> {
     summary: ScanSummary,
     limits: ScanResourceLimits,
     overflowed_roots: BTreeSet<PathBuf>,
@@ -192,9 +235,23 @@ struct CollectingScanSink {
     /// evidence (junk rules match directories), so they are admitted against their own count
     /// rather than sharing a pool that file rows could exhaust.
     retained_directories: usize,
+    /// When present, the sink runs in junk mode: non-directory rows feed only the marker index,
+    /// and directory rows are classified when their aggregate is pushed.
+    classifier: Option<&'a dyn JunkClassifier>,
+    /// Directory rows observed but not yet classified (the aggregate arrives after the subtree
+    /// walk completes). Keyed by the row's entry id.
+    pending_directories: BTreeMap<ScanEntryId, ScannedEntry>,
+    /// Ids of rows that entered through `push_root`, so a classified root is routed back to
+    /// `summary.roots` rather than `summary.entries`.
+    pending_root_ids: BTreeSet<ScanEntryId>,
+    /// Native basenames of file rows observed directly under a directory, keyed by the
+    /// parent's entry id. Cheap names only -- rows themselves are dropped.
+    file_markers: BTreeMap<ScanEntryId, BTreeSet<String>>,
+    /// Rule id chosen per classified directory, returned with the finished scan.
+    decisions: BTreeMap<ScanEntryId, String>,
 }
 
-impl CollectingScanSink {
+impl<'a> CollectingScanSink<'a> {
     fn new(limits: ScanResourceLimits) -> Self {
         Self {
             summary: ScanSummary {
@@ -210,11 +267,63 @@ impl CollectingScanSink {
             detail_overflowed_roots: BTreeSet::new(),
             detail_overflow_count: 0,
             retained_directories: 0,
+            classifier: None,
+            pending_directories: BTreeMap::new(),
+            pending_root_ids: BTreeSet::new(),
+            file_markers: BTreeMap::new(),
+            decisions: BTreeMap::new(),
         }
+    }
+
+    /// Constructs a sink in junk classification mode driven by `classifier`.
+    fn new_classified(limits: ScanResourceLimits, classifier: &'a dyn JunkClassifier) -> Self {
+        let mut sink = Self::new(limits);
+        sink.classifier = Some(classifier);
+        sink
     }
 
     fn finish(self) -> ScanSummary {
         self.summary
+    }
+
+    /// Finishes a classified scan.
+    ///
+    /// Rows left pending are directories whose aggregate never arrived (mount/refused
+    /// boundaries already recorded elsewhere); dropping them is consistent with their
+    /// subtree not having been traversed.
+    fn finish_classified(self) -> ClassifiedScan {
+        ClassifiedScan {
+            summary: self.summary,
+            decisions: self.decisions,
+        }
+    }
+
+    /// Classifies a pending directory whose aggregate has just been pushed, then routes its
+    /// row to `roots` or `entries`. Called only in junk mode.
+    ///
+    /// The marker set is removed afterwards to keep retained state proportional to open
+    /// directories: every child marker keyed its own parent id, and the parent is now done.
+    fn classify_pending(&mut self, id: &ScanEntryId) {
+        let Some(entry) = self.pending_directories.remove(id) else {
+            return;
+        };
+        let Some(rule_id) = self
+            .classifier
+            .expect("classified sink carries a classifier")
+            .classify(&entry, &self.file_markers)
+        else {
+            // No rule matched; this directory's own marker set will never be queried again
+            // because every descendant was classified before it.
+            self.file_markers.remove(id);
+            return;
+        };
+        self.file_markers.remove(id);
+        self.decisions.insert(id.clone(), rule_id);
+        if self.pending_root_ids.remove(id) {
+            self.summary.roots.push(entry);
+        } else {
+            self.summary.entries.push(entry);
+        }
     }
 
     /// Records loss of evidence a total or coverage claim depends on.
@@ -286,8 +395,19 @@ impl CollectingScanSink {
     }
 }
 
-impl ScanSink for CollectingScanSink {
+impl ScanSink for CollectingScanSink<'_> {
     fn push_root(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError> {
+        if self.classifier.is_some() {
+            // Hold the root until its aggregate arrives; it is classified there like every
+            // directory, then routed to `summary.roots`.
+            let Some(identity) = entry.identity.as_ref() else {
+                return Ok(());
+            };
+            let id = identity.entry_id.clone();
+            self.pending_root_ids.insert(id.clone());
+            self.pending_directories.insert(id, entry);
+            return Ok(());
+        }
         if self.summary.roots.len() >= self.limits.max_retained_entries {
             self.mark_overflow(root, root, "retained root cap exceeded");
             return Ok(());
@@ -297,6 +417,38 @@ impl ScanSink for CollectingScanSink {
     }
 
     fn push_entry(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError> {
+        if self.classifier.is_some() {
+            match entry.object_type {
+                ObjectType::Directory => {
+                    // Wait for the aggregate; the classifier needs the complete marker set.
+                    let Some(identity) = entry.identity.as_ref() else {
+                        return Ok(());
+                    };
+                    self.pending_directories
+                        .insert(identity.entry_id.clone(), entry);
+                }
+                ObjectType::File => {
+                    // Record only the marker name; the row is dropped intentionally. Junk
+                    // candidates never include file rows, and marker checks need the basename.
+                    let Some(identity) = entry.identity.as_ref() else {
+                        return Ok(());
+                    };
+                    let Some(parent_id) = identity.parent_id.as_ref() else {
+                        return Ok(());
+                    };
+                    if let Some(name) = native_basename_marker(&entry.native_basename) {
+                        self.file_markers
+                            .entry(parent_id.clone())
+                            .or_default()
+                            .insert(name);
+                    }
+                }
+                // Symlinks and reparse/other rows feed no junk rule; symlinks are already
+                // recorded as boundaries.
+                ObjectType::Symlink | ObjectType::ReparsePoint | ObjectType::Other => {}
+            }
+            return Ok(());
+        }
         // Directory rows are classified against junk rules, so they must not be crowded out by
         // file rows: measured on a real machine, ~/Library/Caches held 81,459 directories and
         // 579,576 files, and a single shared 16,384 cap retained only 425 directory rows --
@@ -366,6 +518,26 @@ impl ScanSink for CollectingScanSink {
         root: &Path,
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError> {
+        if self.classifier.is_some() {
+            // The aggregate id names the now-complete directory: classify its pending row
+            // before/around retaining the aggregate. When the aggregate cap overflows the
+            // evidence loss is still an overflow below; the pending row is dropped with it.
+            if self.summary.aggregates.len() >= self.limits.max_retained_aggregates {
+                self.pending_directories.remove(&ScanEntryId::from_loaded(
+                    aggregate.directory_identity.clone(),
+                ));
+                self.mark_overflow(
+                    root,
+                    root,
+                    "retained aggregate cap exceeded across scan roots",
+                );
+                return Ok(());
+            }
+            let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
+            self.classify_pending(&id);
+            self.summary.aggregates.push(aggregate);
+            return Ok(());
+        }
         if self.summary.aggregates.len() >= self.limits.max_retained_aggregates {
             self.mark_overflow(
                 root,
@@ -732,6 +904,22 @@ where
         let mut sink = CollectingScanSink::new(self.options.resource_limits);
         self.scan_with_sink(roots, cancel, &mut sink)?;
         Ok(sink.finish())
+    }
+
+    /// Runs the walk in junk classification mode.
+    ///
+    /// Only directories the `classifier` returns a rule id for are retained as rows, so the
+    /// caller can build a small result even when the scanned trees contain hundreds of
+    /// thousands of entries. Aggregates and boundaries are retained as in [`Self::scan`].
+    pub fn scan_classified(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+        classifier: &dyn JunkClassifier,
+    ) -> Result<ClassifiedScan, ScanError> {
+        let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        self.scan_with_sink(roots, cancel, &mut sink)?;
+        Ok(sink.finish_classified())
     }
 
     /// Admits only the requested roots. This is the fast first frame for progressive TUI mode;
@@ -2259,6 +2447,19 @@ fn native_basename_for_path(path: &Path) -> NativeName {
     NativeName::unix(path.display().to_string().into_bytes())
 }
 
+/// Converts a retained native basename into the marker string rules compare against.
+///
+/// Matches the CLI's `native_name_for_rule`: UTF-8 on Unix, lowercased UTF-16 on Windows.
+/// A non-UTF-8 Unix name returns `None` -- no marker is recorded rather than a lossy guess.
+fn native_basename_marker(name: &NativeName) -> Option<String> {
+    match name {
+        NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+        NativeName::WindowsUtf16(units) => String::from_utf16(units)
+            .ok()
+            .map(|name| name.to_ascii_lowercase()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2792,6 +2993,72 @@ mod tests {
             boundary.kind == BoundaryKind::ResourceLimit
                 && boundary.detail == "retained entry cap exceeded"
         }));
+    }
+
+    /// A classified scan retains only rows the classifier accepts and records their rule ids;
+    /// aggregates for the whole tree are still retained.
+    #[test]
+    fn classified_scan_keeps_only_matching_directory_rows() {
+        let fan_out = 8;
+        let platform = NestedFanOutPlatform::new(fan_out);
+        let root = platform.root.clone();
+
+        /// Matches branch directories only (`dir-NNN`), rejecting leaf directories.
+        struct BranchOnly;
+        impl JunkClassifier for BranchOnly {
+            fn classify(
+                &self,
+                entry: &ScannedEntry,
+                _markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                match &entry.native_basename {
+                    NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-") => {
+                        Some("rule:branch".to_string())
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                scan_id: ScanId::new("classified"),
+                max_workers: 4,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified(
+            &[ScanRoot::new(root).unwrap()],
+            &CancellationToken::new(),
+            &BranchOnly,
+        )
+        .unwrap();
+
+        // Root + branches + leaves: 1 + 2*fan aggregates regardless of row filtering.
+        assert_eq!(result.summary.aggregates.len(), 1 + fan_out * 2);
+        // Exactly the fan branch rows, each with one decision carrying the rule id.
+        assert_eq!(result.decisions.len(), fan_out);
+        assert!(
+            result
+                .decisions
+                .values()
+                .all(|rule_id| rule_id == "rule:branch")
+        );
+        assert_eq!(result.summary.entries.len(), fan_out);
+        assert!(result.summary.entries.iter().all(|entry| {
+            matches!(&entry.native_basename,
+                NativeName::UnixBytes(bytes) if bytes.starts_with(b"dir-"))
+        }));
+        // Leaf directories must not have been retained as rows.
+        assert!(
+            !result
+                .summary
+                .entries
+                .iter()
+                .any(|entry| matches!(&entry.native_basename,
+                NativeName::UnixBytes(bytes) if bytes.as_slice() == b"leaf"))
+        );
     }
 
     /// Losing a *boundary* record is different in kind, and must still degrade the totals.

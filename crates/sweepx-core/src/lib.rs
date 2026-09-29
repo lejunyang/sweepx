@@ -48,6 +48,8 @@ use sweepx_protocol::{
     QualificationKey, QualificationScope, QualificationValidity, QualificationValidityStatus,
     RuntimePrivilegeProfile,
 };
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub use sweepx_scanner::JunkClassifier;
 pub use sweepx_scanner::ScanSummary;
 use sweepx_scanner::{ProgressEvent, ScanError};
 use sweepx_tui::{
@@ -1331,7 +1333,39 @@ pub fn scan_with_store<S: SnapshotStore>(
     request: &ScanRequest,
     store: Option<&S>,
 ) -> Result<ScanSuccess, CoreError> {
-    scan_with_store_options(context, request, store, ScannerOptions::default())
+    scan_with_store_options(context, request, store, ScannerOptions::default(), None)
+        .map(|(scan, _decisions)| scan)
+}
+
+/// Runs the junk scan: traversal classifies each directory against `classifier` while walking,
+/// so only candidate rows are retained and the resulting envelope stays small regardless of the
+/// scanned tree's entry count.
+///
+/// Returns the ordinary [`ScanSuccess`] plus the rule id chosen per retained entry id.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn scan_junk_with_store<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    classifier: &dyn JunkClassifier,
+) -> Result<JunkScanSuccess, CoreError> {
+    let (scan, decisions) = scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        Some(classifier),
+    )?;
+    Ok(JunkScanSuccess { scan, decisions })
+}
+
+/// Result of a junk scan: the scan output and the per-entry rule decisions.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub struct JunkScanSuccess {
+    /// Scan envelope, snapshot and pruned summary (junk directory rows only).
+    pub scan: ScanSuccess,
+    /// Entry id to the rule id returned by the classifier, for candidate assembly.
+    pub decisions: std::collections::BTreeMap<sweepx_model::ScanEntryId, String>,
 }
 
 /// Builds the lightweight first TUI screen by admitting roots without enumerating descendants.
@@ -1433,7 +1467,14 @@ fn scan_with_store_options<S: SnapshotStore>(
     request: &ScanRequest,
     store: Option<&S>,
     scanner_options: ScannerOptions,
-) -> Result<ScanSuccess, CoreError> {
+    classifier: Option<&dyn JunkClassifier>,
+) -> Result<
+    (
+        ScanSuccess,
+        std::collections::BTreeMap<sweepx_model::ScanEntryId, String>,
+    ),
+    CoreError,
+> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
     }
@@ -1471,18 +1512,21 @@ fn scan_with_store_options<S: SnapshotStore>(
             &started_at,
             monotonic.elapsed(),
         );
-        Ok(ScanSuccess {
-            output,
-            events,
-            snapshot,
-            summary: ScanSummary {
-                roots: Vec::new(),
-                entries: Vec::new(),
-                aggregates: Vec::new(),
-                boundaries: Vec::new(),
-                progress: Vec::new(),
+        Ok((
+            ScanSuccess {
+                output,
+                events,
+                snapshot,
+                summary: ScanSummary {
+                    roots: Vec::new(),
+                    entries: Vec::new(),
+                    aggregates: Vec::new(),
+                    boundaries: Vec::new(),
+                    progress: Vec::new(),
+                },
             },
-        })
+            std::collections::BTreeMap::new(),
+        ))
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1502,7 +1546,17 @@ fn scan_with_store_options<S: SnapshotStore>(
             },
         );
         let cancel = CancellationToken::new();
-        let summary = scanner.scan(&roots, &cancel)?;
+        // In junk mode classify during the walk; otherwise retain every row as before.
+        let (summary, decisions) = match classifier {
+            Some(classifier) => {
+                let classified = scanner.scan_classified(&roots, &cancel, classifier)?;
+                (classified.summary, classified.decisions)
+            }
+            None => (
+                scanner.scan(&roots, &cancel)?,
+                std::collections::BTreeMap::new(),
+            ),
+        };
         let stored_preview =
             store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
         let finished_at = timestamp_now();
@@ -1590,12 +1644,15 @@ fn scan_with_store_options<S: SnapshotStore>(
             store.save(&snapshot)?;
         }
 
-        Ok(ScanSuccess {
-            output,
-            events,
-            snapshot,
-            summary,
-        })
+        Ok((
+            ScanSuccess {
+                output,
+                events,
+                snapshot,
+                summary,
+            },
+            decisions,
+        ))
     }
 }
 
