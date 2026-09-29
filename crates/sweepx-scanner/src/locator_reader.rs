@@ -1794,6 +1794,9 @@ fn map_boundary_failure(kind: sweepx_platform::BoundaryKind) -> LocatorReadFailu
         sweepx_platform::BoundaryKind::Mount => LocatorReadFailure::MountChanged,
         sweepx_platform::BoundaryKind::ResourceLimit => LocatorReadFailure::ResourceLimit,
         sweepx_platform::BoundaryKind::Cancelled => LocatorReadFailure::Cancelled,
+        // An access-denied boundary is a failed read, matching how the walk's ErrorKind::
+        // AccessDenied is mapped below.
+        sweepx_platform::BoundaryKind::AccessDenied => LocatorReadFailure::ReadFailed,
         sweepx_platform::BoundaryKind::OtherFilesystem => LocatorReadFailure::Unavailable,
     }
 }

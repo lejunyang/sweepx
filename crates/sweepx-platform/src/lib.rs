@@ -96,6 +96,9 @@ pub enum BoundaryKind {
     Mount,
     ResourceLimit,
     Cancelled,
+    /// The host refused to read the entry (macOS TCC, an unreadable directory). The subtree was
+    /// skipped rather than traversed, so totals covering it are lower bounds.
+    AccessDenied,
     OtherFilesystem,
 }
 
@@ -1013,6 +1016,22 @@ impl PlatformError {
             detail,
             io_kind,
         }
+    }
+
+    /// Whether this error records a host refusal to read an existing object (a TCC denial or a
+    /// permission failure), rather than a structural-validation failure or another I/O error.
+    ///
+    /// Traversal uses this to distinguish a subtree that may be skipped and marked incomplete
+    /// from one that must fail the whole scan. Only the retained `io_kind` is trusted; the
+    /// display string is not parsed.
+    pub fn is_access_denied(&self) -> bool {
+        matches!(
+            self,
+            Self::Io {
+                io_kind: Some(kind),
+                ..
+            } if *kind == std::io::ErrorKind::PermissionDenied
+        )
     }
 }
 

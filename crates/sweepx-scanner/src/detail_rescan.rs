@@ -1256,6 +1256,8 @@ fn map_boundary(kind: &BoundaryKind) -> DetailRescanError {
         BoundaryKind::Mount => DetailRescanError::MountChanged,
         BoundaryKind::ResourceLimit => DetailRescanError::ResourceLimit,
         BoundaryKind::Cancelled => DetailRescanError::Cancelled,
+        // Match the walk-error mapping: a denied subtree leaves its identity unavailable.
+        BoundaryKind::AccessDenied => DetailRescanError::IdentityUnavailable,
         BoundaryKind::OtherFilesystem => DetailRescanError::Unavailable,
     }
 }

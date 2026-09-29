@@ -4109,6 +4109,7 @@ fn boundary_kind_from_str(kind: Option<&str>) -> BoundaryKind {
         Some("mount") => BoundaryKind::Mount,
         Some("resource_limit") => BoundaryKind::ResourceLimit,
         Some("cancelled") => BoundaryKind::Cancelled,
+        Some("access_denied") => BoundaryKind::AccessDenied,
         Some("other_filesystem") => BoundaryKind::OtherFilesystem,
         _ => BoundaryKind::ResourceLimit,
     }
@@ -5752,6 +5753,7 @@ fn boundary_label(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Mount => "mount",
         BoundaryKind::ResourceLimit => "resource_limit",
         BoundaryKind::Cancelled => "cancelled",
+        BoundaryKind::AccessDenied => "access_denied",
         BoundaryKind::OtherFilesystem => "other_filesystem",
     }
 }

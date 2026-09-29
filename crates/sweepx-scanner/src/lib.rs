@@ -727,7 +727,32 @@ where
         };
         let mut next_entry_ordinal = Some(1u128);
         for root in roots {
-            let admission = self.platform.admit_root(root, cancel)?;
+            let admission = match self.platform.admit_root(root, cancel) {
+                Ok(admission) => admission,
+                Err(error) if error.is_access_denied() => {
+                    // First frame mirrors the full walk: a denied root is an incomplete root
+                    // rather than a reason to refuse the whole root set. Its detail rescan later
+                    // re-reports the same boundary.
+                    let root_entry_id =
+                        allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
+                    summary.progress.push(ProgressEvent::Error {
+                        path: root.path().to_path_buf(),
+                        reason: ReasonCode::StrictReadOnly,
+                    });
+                    summary.boundaries.push(BoundaryRecord {
+                        path: root.path().to_path_buf(),
+                        kind: BoundaryKind::AccessDenied,
+                        reason: ReasonCode::StrictReadOnly,
+                        detail: error.to_string(),
+                    });
+                    summary.aggregates.push(access_denied_root_aggregate(
+                        &self.options.scan_id,
+                        root_entry_id,
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             admission.validate_for_root(root).map_err(|error| {
                 PlatformError::InvalidDirectoryEntry {
                     parent: root.path().to_path_buf(),
@@ -834,6 +859,36 @@ where
                     if cancel.is_cancelled() {
                         break;
                     }
+                    continue;
+                }
+                Err(error) if error.is_access_denied() => {
+                    // A root the host refuses to open (TCC) is skipped and marked incomplete,
+                    // exactly like an unopenable child: emit an error record, an access-denied
+                    // boundary and a zero lower-bound aggregate, then scan the remaining roots.
+                    // Other I/O failures below still abort; swallowing e.g. EIO would hide a
+                    // real volume fault.
+                    let root_entry_id =
+                        allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
+                    sink.push_progress(
+                        root.path(),
+                        ProgressEvent::Error {
+                            path: root.path().to_path_buf(),
+                            reason: ReasonCode::StrictReadOnly,
+                        },
+                    )?;
+                    sink.push_boundary(
+                        root.path(),
+                        BoundaryRecord {
+                            path: root.path().to_path_buf(),
+                            kind: BoundaryKind::AccessDenied,
+                            reason: ReasonCode::StrictReadOnly,
+                            detail: error.to_string(),
+                        },
+                    )?;
+                    sink.push_aggregate(
+                        root.path(),
+                        access_denied_root_aggregate(&self.options.scan_id, root_entry_id),
+                    )?;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -2103,23 +2158,36 @@ fn complete_coverage() -> Coverage {
 }
 
 fn cancelled_root_aggregate(scan_id: &ScanId, entry_id: ScanEntryId) -> DirectoryAggregate {
+    incomplete_root_aggregate(scan_id, entry_id, ReasonCode::IncompleteStreamCoverage)
+}
+
+/// Aggregate for a root whose admission failed because the host refused to read it (a TCC
+/// denial). Every quantity is a zero lower bound: no object under the root was observed, so
+/// even a direct child count would be invented rather than measured. The `reason` records why
+/// coverage is absent so an ancestor total and any delete decision stay fail-closed.
+fn access_denied_root_aggregate(scan_id: &ScanId, entry_id: ScanEntryId) -> DirectoryAggregate {
+    incomplete_root_aggregate(scan_id, entry_id, ReasonCode::StrictReadOnly)
+}
+
+fn incomplete_root_aggregate(
+    scan_id: &ScanId,
+    entry_id: ScanEntryId,
+    reason: ReasonCode,
+) -> DirectoryAggregate {
     DirectoryAggregate {
         scan_id: scan_id.clone(),
         directory_identity: entry_id.to_string(),
         revision: DecimalU128::new(1),
-        apparent_logical_bytes: lower_bound_u128(0, ReasonCode::IncompleteStreamCoverage),
-        unique_logical_bytes: lower_bound_u128(0, ReasonCode::IncompleteStreamCoverage),
-        filesystem_reported_allocated_bytes: lower_bound_u128(
-            0,
-            ReasonCode::IncompleteStreamCoverage,
-        ),
-        potentially_reclaimable_bytes: lower_bound_u128(0, ReasonCode::IncompleteStreamCoverage),
+        apparent_logical_bytes: lower_bound_u128(0, reason.clone()),
+        unique_logical_bytes: lower_bound_u128(0, reason.clone()),
+        filesystem_reported_allocated_bytes: lower_bound_u128(0, reason.clone()),
+        potentially_reclaimable_bytes: lower_bound_u128(0, reason.clone()),
         direct_child_count: known_count(0),
         recursive_entry_count: known_count(0),
         coverage: Coverage {
             state: CoverageState::Incomplete,
             complete: false,
-            incomplete_reasons: vec![ReasonCode::IncompleteStreamCoverage],
+            incomplete_reasons: vec![reason],
             details_lost: false,
             provenance: live_provenance(),
         },
@@ -3728,6 +3796,8 @@ mod tests {
         let scanner = Scanner::new(
             MultiRootIdentityPlatform {
                 cancelled_root: cancelled.clone(),
+                // No root is denied in this test.
+                denied_root: test_path("not-denied"),
             },
             ScannerOptions {
                 scan_id: ScanId::new("multi-root"),
@@ -3770,6 +3840,76 @@ mod tests {
             entry.display_path == first.display().to_string()
                 || entry.display_path == third.display().to_string()
         }));
+    }
+
+    #[test]
+    fn access_denied_root_is_skipped_and_remaining_roots_still_scan() {
+        let first = test_path("first");
+        let denied = test_path("denied");
+        let third = test_path("third");
+        let scanner = Scanner::new(
+            MultiRootIdentityPlatform {
+                cancelled_root: test_path("not-cancelled"),
+                denied_root: denied.clone(),
+            },
+            ScannerOptions {
+                scan_id: ScanId::new("denied-root"),
+                ..ScannerOptions::default()
+            },
+        );
+        let roots = [
+            ScanRoot::new(first.clone()).unwrap(),
+            ScanRoot::new(denied.clone()).unwrap(),
+            ScanRoot::new(third.clone()).unwrap(),
+        ];
+
+        // Full walk: the denial must not be fatal, the sibling roots must scan.
+        let result = scanner.scan(&roots, &CancellationToken::new()).unwrap();
+        assert_eq!(result.roots.len(), 2);
+        assert!(result.roots.iter().all(|entry| {
+            entry.display_path == first.display().to_string()
+                || entry.display_path == third.display().to_string()
+        }));
+        assert!(result.boundaries.iter().any(|boundary| {
+            boundary.path == denied
+                && boundary.kind == BoundaryKind::AccessDenied
+                && boundary.reason == ReasonCode::StrictReadOnly
+        }));
+        assert!(result.progress.iter().any(|event| {
+            matches!(event, ProgressEvent::Error { path, reason }
+                if path == denied.as_path() && reason == &ReasonCode::StrictReadOnly)
+        }));
+        // The denied root keeps an incomplete, lower-bound aggregate so its totals can never be
+        // read as "zero junk"; the two admitted roots stay complete. Its StrictReadOnly reason
+        // uniquely identifies it among the three aggregates.
+        let denied_aggregate = result
+            .aggregates
+            .iter()
+            .find(|aggregate| {
+                aggregate
+                    .coverage
+                    .incomplete_reasons
+                    .contains(&ReasonCode::StrictReadOnly)
+            })
+            .expect("an incomplete aggregate for the denied root");
+        assert!(!denied_aggregate.coverage.complete);
+        assert_eq!(
+            denied_aggregate.arithmetic_state,
+            ArithmeticState::LowerBound
+        );
+        assert_eq!(result.aggregates.len(), 3);
+
+        // The root-only first frame applies the same skip rather than failing the root set.
+        let frame = scanner
+            .scan_roots_only(&roots, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(frame.roots.len(), 2);
+        assert!(frame.boundaries.iter().any(|boundary| {
+            boundary.path == denied && boundary.kind == BoundaryKind::AccessDenied
+        }));
+        assert!(frame.progress.iter().any(
+            |event| matches!(event, ProgressEvent::Error { path, .. } if path == denied.as_path())
+        ));
     }
 
     #[test]
@@ -4337,6 +4477,7 @@ mod tests {
     #[derive(Debug)]
     struct MultiRootIdentityPlatform {
         cancelled_root: PathBuf,
+        denied_root: PathBuf,
     }
 
     impl PlatformScanner for MultiRootIdentityPlatform {
@@ -4353,6 +4494,18 @@ mod tests {
         ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError> {
             if root.path == self.cancelled_root {
                 return Err(PlatformError::Cancelled);
+            }
+            if root.path == self.denied_root {
+                // A TCC-style refusal: an existing root the host will not open. The retained
+                // PermissionDenied kind is what marks it as skippable rather than a fatal I/O
+                // fault.
+                return Err(PlatformError::io(
+                    root.path.clone(),
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Operation not permitted",
+                    ),
+                ));
             }
             let root_locator = root
                 .native_absolute_path()
