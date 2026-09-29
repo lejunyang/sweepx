@@ -629,6 +629,99 @@
     ]
   },
   {
+    "id": "macos.browser-state-diagnostics",
+    "platform": "macos",
+    "rootKind": "macos_browser_state",
+    "matchKind": "verified_browser_cache",
+    "names": [],
+    "requiredMarkers": [],
+    "browserCaches": [
+      {
+        "base": "application_support",
+        "userData": ["Google", "Chrome"],
+        "sharedPaths": ["Crashpad/reports"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Microsoft Edge"],
+        "sharedPaths": ["Crashpad/reports"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Postman"],
+        "sharedPaths": ["logs", "Crashpad/pending"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ],
+        "enumerateNamedProfiles": false,
+        "partitionContainers": ["Partitions"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["LarkShell"],
+        "sharedPaths": ["Crashpad/reports"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ],
+        "profileNames": ["IronDefault"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["discord"],
+        "sharedPaths": ["logs", "Crashpad/reports"],
+        "profilePaths": ["Service Worker/CacheStorage"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Slack"],
+        "profilePaths": ["Service Worker/CacheStorage"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Claude"],
+        "sharedPaths": ["Crashpad/reports"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ],
+        "enumerateNamedProfiles": false,
+        "partitionContainers": ["Partitions"]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Manus"],
+        "sharedPaths": ["Crashpad/reports"],
+        "profilePaths": [
+          "Service Worker/CacheStorage",
+          "Shared Dictionary/cache"
+        ]
+      },
+      {
+        "base": "application_support",
+        "userData": ["Microsoft", "Teams"],
+        "profilePaths": ["Service Worker/CacheStorage"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R3",
+    "evidence": "Unlike the R2 derived-cache rule, these items are application/site state or diagnostics, not refetchable network responses: Service Worker CacheStorage holds offline PWA/app state, Shared Dictionary holds compression dictionaries for later sessions, and logs/Crashpad hold diagnostics the user may want to keep. They are reported separately at R3 and never pre-selected or bulk-cleared; removal is an individual user choice after review, and bookmarks/history/passwords/private browsing data remain outside even this rule.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://developer.chrome.com/docs/workbox/modules/workbox-cacheable-response",
+      "https://chromium.googlesource.com/crashpad/crashpad/+/HEAD/doc/overview.md"
+    ]
+  },
+  {
     "id": "windows.packaged-app-cache",
     "platform": "windows",
     "rootKind": "windows_packages",

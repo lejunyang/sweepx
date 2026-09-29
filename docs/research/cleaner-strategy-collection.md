@@ -232,14 +232,26 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 2026-09-29 又按 MangoDisk 应用类规则，向同一条 `macos.browser-derived-cache` 规则补入 6 个未在本机安装的 Electron 应用 spec：Discord、Slack、Figma、Claude（含 `Partitions` 容器）、Manus、Microsoft Teams。只取 `Application Support/<app>` 下派生缓存（`Cache/Code Cache/GPUCache/Dawn*/GrShaderCache/GraphiteDawnCache`）。
 
-刻意未采纳 MangoDisk 同名规则里的这几类 root：
+刻意**不放进 R2 派生缓存规则**的这几类 root（它们不是可重取的网络响应），改为按下一节的 R3 规则单独扫描并报告：
 
-- `Service Worker/CacheStorage`：是 PWA/应用离线状态，非可重取的网络响应，按持久数据排除（即便名字叫 cache）；
-- `Shared Dictionary/cache`：压缩字典会影响后续会话，且跨应用语义不一，留待单独评估；
-- `logs`、`Crashpad/reports`：崩溃报告/日志可能含用户想保留的诊断信息，不与 GPU 缓存混在一条规则里，将来单列；
-- `~/Library/Caches/...` 侧 root：已被 `macos.user-caches` 的 direct_children 覆盖，不重复。
+- `Service Worker/CacheStorage`：PWA/应用离线状态；
+- `Shared Dictionary/cache`：影响后续会话的压缩字典；
+- `logs`、`Crashpad/reports|pending`：可能含用户想保留的诊断信息；
+- `~/Library/Caches/...` 侧 root：已被 `macos.user-caches` 覆盖，不重复。
 
-这些 spec 当前不产生结果（应用未安装），属于纯数据占位；安装对应应用后无需改代码即自动纳入，且仍受“禁止持久存储名”的校验约束。
+## 已集成的第四批：浏览器/应用状态与诊断（R3，单独报告）
+
+2026-09-29 按“固定排除的内容也要扫描报告、删不删由用户选”的要求，把原先排除的离线状态与诊断项纳入新规则 `macos.browser-state-diagnostics`（rootKind `macos_browser_state`，仍走 `verified_browser_cache`）。为支持多级目录，`BrowserCacheSpec` 新增 `sharedPaths`/`profilePaths`（`/` 分隔的相对路径）。
+
+分级与提示：
+
+- **R3（应用/站点状态或诊断，非可再生缓存）**：删除可能导致离线内容丢失、下次会话需要重建状态，或丢掉用户想留存的诊断信息；
+- 与 R2 派生缓存**分开成条**，不预选、不批量清理，报告中明确“这不是可重取的网络响应”；
+- 即便在这条 R3 规则里，`Cookies/History/Login Data/Bookmarks/Local Storage/IndexedDB` 等仍不出现（校验 + 测试强制）。
+
+覆盖 9 个浏览器/应用：Chrome、Edge、Postman（含 6 个 UUID partition）、LarkShell（含 IronDefault）、Discord、Slack、Claude（含 Partitions）、Manus、Teams。
+
+实测（本机，2026-09-29）：Chrome/Edge 的 `Default/Service Worker/CacheStorage`、`Shared Dictionary/cache` 均存在并被报告；Postman 的 `logs`、`Crashpad/pending` 及各 partition 的状态目录被报告；展开路径全部真实存在、去重，且不含任何持久浏览数据名，有测试逐项核对。
 
 ## 落地要求
 

@@ -982,6 +982,14 @@ struct BrowserCacheSpec {
     /// Cache directories that live inside each profile, for example `GPUCache`.
     #[serde(default)]
     profile_caches: Vec<String>,
+    /// Multi-component `/`-separated paths relative to user-data for non-derived-cache state,
+    /// for example `Crashpad/reports` or `Shared Dictionary/cache`.
+    #[serde(default)]
+    shared_paths: Vec<String>,
+    /// Multi-component `/`-separated paths relative to each profile, for example
+    /// `Service Worker/CacheStorage`.
+    #[serde(default)]
+    profile_paths: Vec<String>,
     /// Explicit profile directory names directly under user-data, for example `IronDefault`.
     /// Use this when a product does not follow the `Default`/`Profile N` convention.
     #[serde(default)]
@@ -2389,6 +2397,15 @@ fn browser_cache_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
             let candidate = user_data.join(name);
             push_browser_root(&candidate, &mut roots);
         }
+        // Non-derived state paths resolved relative to user-data, split on `/` so the platform
+        // separator is applied consistently.
+        for relative in &spec.shared_paths {
+            let mut candidate = user_data.clone();
+            for component in relative.split('/') {
+                candidate.push(component);
+            }
+            push_browser_root(&candidate, &mut roots);
+        }
         // Gather every directory that holds a profile/partition, then select its derived caches.
         let mut profile_dirs: Vec<PathBuf> = Vec::new();
         for name in &spec.profile_names {
@@ -2423,6 +2440,14 @@ fn browser_cache_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
             }
             for cache in &spec.profile_caches {
                 push_browser_root(&profile.join(cache), &mut roots);
+            }
+            // Profile-relative multi-component state paths.
+            for relative in &spec.profile_paths {
+                let mut candidate = profile.clone();
+                for component in relative.split('/') {
+                    candidate.push(component);
+                }
+                push_browser_root(&candidate, &mut roots);
             }
         }
     }
@@ -4134,6 +4159,8 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 "macos_browser_derived_cache" => {
                     ("macos_browser_derived_cache", "verified_browser_cache", 0)
                 }
+                // R3 application/site state and diagnostics expanded through the same layout.
+                "macos_browser_state" => ("macos_browser_state", "verified_browser_cache", 0),
                 "macos_app_cache" => ("macos_app_cache", "verified_known_root", 0),
                 _ => return Err(format!("invalid platform junk rule: {}", rule.id)),
             },
@@ -4232,15 +4259,18 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                 .all(|spec| {
                     let valid_anchor =
                         matches!(spec.base.as_str(), "application_support" | "local_app_data" | "home");
-                    let has_at_least_one_cache =
-                        !spec.shared_caches.is_empty() || !spec.profile_caches.is_empty();
+                    let has_any_target = !spec.shared_caches.is_empty()
+                        || !spec.profile_caches.is_empty()
+                        || !spec.shared_paths.is_empty()
+                        || !spec.profile_paths.is_empty();
                     let can_find_profiles = spec.enumerate_named_profiles
                         || !spec.profile_names.is_empty()
                         || !spec.partition_containers.is_empty();
-                    // A profile cache with no way to locate a profile would be silently inert.
+                    // A profile-scoped target with no way to locate a profile would be inert.
                     let profile_discovery_is_possible =
-                        spec.profile_caches.is_empty() || can_find_profiles;
-                    let safe_components = spec
+                        (spec.profile_caches.is_empty() && spec.profile_paths.is_empty())
+                            || can_find_profiles;
+                    let safe_single_components = spec
                         .user_data
                         .iter()
                         .chain(spec.shared_caches.iter())
@@ -4248,11 +4278,23 @@ fn load_platform_junk_rules() -> Result<Vec<PlatformJunkRule>, String> {
                         .chain(spec.profile_names.iter())
                         .chain(spec.partition_containers.iter())
                         .all(|component| safe_rule_component(component));
+                    // Every segment of a multi-component path must also be a safe component.
+                    let safe_path_segments = spec
+                        .shared_paths
+                        .iter()
+                        .chain(spec.profile_paths.iter())
+                        .all(|relative| {
+                            !relative.is_empty()
+                                && relative
+                                    .split('/')
+                                    .all(safe_rule_component)
+                        });
                     valid_anchor
                         && !spec.user_data.is_empty()
-                        && has_at_least_one_cache
+                        && has_any_target
                         && profile_discovery_is_possible
-                        && safe_components
+                        && safe_single_components
+                        && safe_path_segments
                 })
         {
             return Err(format!("invalid platform junk rule: {}", rule.id));
@@ -4529,7 +4571,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 25);
+        assert_eq!(rules.len(), 26);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -4555,7 +4597,7 @@ mod tests {
             .iter()
             .filter(|rule| rule.platform == "macos")
             .collect();
-        assert_eq!(macos_rules.len(), 16);
+        assert_eq!(macos_rules.len(), 17);
         let integrated_macos_ids = [
             "macos.xcode-derived-data",
             "macos.cargo-registry-cache",
@@ -4677,6 +4719,56 @@ mod tests {
             expanded.len(),
             "expanded roots must be deduplicated"
         );
+    }
+
+    #[test]
+    fn browser_state_rule_reports_offline_state_and_diagnostics_at_r3() {
+        let rules = load_platform_junk_rules().unwrap();
+        let state = rules
+            .iter()
+            .find(|rule| rule.id == "macos.browser-state-diagnostics")
+            .unwrap();
+        assert_eq!(state.root_kind, "macos_browser_state");
+        assert_eq!(state.match_kind, "verified_browser_cache");
+        assert_eq!(state.risk, "R3");
+        // Every expanded path must exist and be one of the documented state/diagnostic kinds;
+        // durable browsing data is still excluded.
+        let forbidden = [
+            "Cookies",
+            "History",
+            "Login Data",
+            "Bookmarks",
+            "Local Storage",
+            "IndexedDB",
+        ];
+        let home = user_home_dir().unwrap();
+        let expanded = browser_cache_roots(state);
+        for path in &expanded {
+            assert!(path.is_dir(), "reports a missing path {path:?}");
+            let rendered = path.to_string_lossy();
+            for name in forbidden {
+                assert!(
+                    !rendered.contains(&format!("/{name}")),
+                    "state rule selects durable {name}"
+                );
+            }
+        }
+        // On this host Chrome/Edge CacheStorage and Postman logs exist and must be reported.
+        let must_exist = [
+            home.join(
+                "Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage",
+            ),
+            home.join(
+                "Library/Application Support/Microsoft Edge/Default/Service Worker/CacheStorage",
+            ),
+            home.join("Library/Application Support/Postman/logs"),
+        ];
+        for expected in must_exist {
+            assert!(
+                expanded.iter().any(|path| same_directory(path, &expected)),
+                "missing {expected:?}"
+            );
+        }
     }
 
     /// Every tool-reported rule must be resolvable and structurally guarded.
