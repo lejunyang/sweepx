@@ -188,6 +188,10 @@ struct CollectingScanSink {
     overflow_count: usize,
     detail_overflowed_roots: BTreeSet<PathBuf>,
     detail_overflow_count: usize,
+    /// Number of retained rows that are directories. Directory rows carry classification
+    /// evidence (junk rules match directories), so they are admitted against their own count
+    /// rather than sharing a pool that file rows could exhaust.
+    retained_directories: usize,
 }
 
 impl CollectingScanSink {
@@ -205,6 +209,7 @@ impl CollectingScanSink {
             overflow_count: 0,
             detail_overflowed_roots: BTreeSet::new(),
             detail_overflow_count: 0,
+            retained_directories: 0,
         }
     }
 
@@ -292,15 +297,33 @@ impl ScanSink for CollectingScanSink {
     }
 
     fn push_entry(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError> {
-        if self.summary.entries.len() >= self.limits.max_retained_entries {
-            // Detail truncation: this entry's bytes were already folded into its directory
-            // aggregate by the traversal, so the totals stay exact and only the row is lost.
+        // Directory rows are classified against junk rules, so they must not be crowded out by
+        // file rows: measured on a real machine, ~/Library/Caches held 81,459 directories and
+        // 579,576 files, and a single shared 16,384 cap retained only 425 directory rows --
+        // every later cache directory silently stopped being a candidate. Directories are
+        // therefore admitted against their own count; files and other non-directory rows use
+        // the overall length and never evict a directory. Dropped rows in either pool stay
+        // detail overflows: the bytes were already folded into the exact directory aggregate.
+        let is_directory = entry.object_type == ObjectType::Directory;
+        let pool_full = if is_directory {
+            self.retained_directories >= self.limits.max_retained_entries
+        } else {
+            self.summary.entries.len() >= self.limits.max_retained_entries
+        };
+        if pool_full {
             self.mark_detail_overflow(
                 root,
                 Path::new(&entry.display_path),
-                "retained entry cap exceeded",
+                if is_directory {
+                    "retained directory entry cap exceeded"
+                } else {
+                    "retained entry cap exceeded"
+                },
             );
             return Ok(());
+        }
+        if is_directory {
+            self.retained_directories += 1;
         }
         self.summary.entries.push(entry);
         Ok(())
@@ -2685,10 +2708,16 @@ mod tests {
             retained_entries,
             "the cap must actually have truncated the listing"
         );
+        // Directory rows now have their own admission pool, so the overflow that fires first is
+        // named by whichever pool the depth-first traversal filled. Either message proves the
+        // truncation stayed visible; the ordering between pools is not a contract.
         assert!(
             summary.boundaries.iter().any(|boundary| {
                 boundary.kind == BoundaryKind::ResourceLimit
-                    && boundary.detail == "retained entry cap exceeded"
+                    && matches!(
+                        boundary.detail.as_str(),
+                        "retained entry cap exceeded" | "retained directory entry cap exceeded"
+                    )
             }),
             "truncation must stay visible so the listing is not mistaken for complete"
         );
@@ -2718,6 +2747,51 @@ mod tests {
             root_aggregate.recursive_entry_count,
             known_count((fan_out as u128) * 3)
         );
+    }
+
+    /// File rows must not consume the cap directory classification needs.
+    ///
+    /// The fixture holds 32 directory rows and 16 file rows. With a 40-row cap the old single
+    /// pool could retain as few as 24 directory rows once files were admitted, silently
+    /// removing cache directories from junk classification. Directory rows now carry their
+    /// own count, so every directory row is retained even when the overall cap is spent on
+    /// files; only surplus file rows are dropped as detail overflow.
+    #[test]
+    fn directory_rows_are_retained_even_when_file_rows_fill_the_cap() {
+        let fan_out = 16;
+        let platform = NestedFanOutPlatform::new(fan_out);
+        let root = platform.root.clone();
+        let retained_entries = 40;
+
+        let summary = Scanner::new(
+            platform,
+            ScannerOptions {
+                scan_id: ScanId::new("directory-pool"),
+                max_workers: 4,
+                resource_limits: ScanResourceLimits {
+                    max_retained_entries: retained_entries,
+                    ..ScanResourceLimits::default()
+                },
+            },
+        )
+        .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+        .unwrap();
+
+        let retained_directory_rows = summary
+            .entries
+            .iter()
+            .filter(|entry| entry.object_type == ObjectType::Directory)
+            .count();
+        assert_eq!(
+            retained_directory_rows,
+            fan_out * 2,
+            "file rows must not crowd directory rows out of the listing"
+        );
+        assert_eq!(summary.entries.len(), retained_entries);
+        assert!(summary.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::ResourceLimit
+                && boundary.detail == "retained entry cap exceeded"
+        }));
     }
 
     /// Losing a *boundary* record is different in kind, and must still degrade the totals.

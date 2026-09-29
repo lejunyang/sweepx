@@ -980,7 +980,11 @@ impl Default for ScanResourceLimits {
             max_frontier_entries: 32_768,
             max_visited_entries: 131_072,
             max_retained_aggregates: 131_072,
-            max_retained_entries: 16_384,
+            // Raised from 16,384 on 2026-09-29: a real-machine scan measured 81,459
+            // directories under ~/Library/Caches. Directory rows now have their own admission
+            // pool because they carry junk-classification evidence, so the cap must cover the
+            // directory count; surplus file rows stay detail overflow with totals still exact.
+            max_retained_entries: 131_072,
             max_retained_boundaries: 16_384,
             max_progress_events: 16_384,
         }
