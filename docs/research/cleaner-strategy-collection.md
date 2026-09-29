@@ -171,6 +171,21 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 这些规则仍然只产生报告，不会自动删除；删除能力必须另走不可变计划、实时重验和用户确认。
 
+## 已集成的第二批 macOS 开发缓存
+
+2026-09-29 继续从 MangoDisk 开发类规则改编 8 条，同样以 `knownRoots` 声明、report-only 运行：
+
+- `macos.homebrew-cache`：`~/Library/Caches/Homebrew`。
+- `macos.go-cache`：`~/Library/Caches/go-build` 与 `~/go/pkg/mod/cache/download`（不含 `pkg/mod` 中已解出的源码）。
+- `macos.uv-cache`：`~/.cache/uv` 与 `~/Library/Caches/uv`。
+- `macos.bun-cache`：`~/.bun/install/cache`。
+- `macos.yarn-cache`：`~/Library/Caches/Yarn` 与 `~/.yarn/berry/cache`。
+- `macos.gradle-cache`：`~/.gradle` 下 `caches`、`daemon`、`workers`、`notifications`、`wrapper/dists`、`.tmp`。
+- `macos.jetbrains-cache`：`~/Library/Caches/JetBrains`。
+- `macos.deno-cache`：`~/Library/Caches/deno`。
+
+仍未纳入：npm 走已有跨平台 `tool.npm-cache`（按 `npm config get cache` 实测），MangoDisk 中硬编码 `~/.npm/_cacache` 的等价规则不重复收录；Maven `~/.m2/repository`、NuGet `~/.nuget/packages`、pnpm store 等被项目硬链接或属于依赖存储而非纯下载缓存的条目，按更高风险留待单独评估。
+
 ## 落地要求
 
 每条进入 SweepX 的策略必须同时满足：

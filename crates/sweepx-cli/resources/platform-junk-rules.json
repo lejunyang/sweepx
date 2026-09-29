@@ -212,6 +212,210 @@
     ]
   },
   {
+    "id": "macos.homebrew-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "Homebrew"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Homebrew documents its cache as downloaded bottle and artifact downloads and ships `brew cleanup` to prune it; installed formulae, casks, taps and configuration remain outside the root.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://docs.brew.sh/Manpage#cleanup-options-formulacask-"
+    ]
+  },
+  {
+    "id": "macos.go-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "go-build"]
+      },
+      {
+        "base": "home",
+        "components": ["go", "pkg", "mod", "cache", "download"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "The go command documents go-build as the operating-system build cache and GOMODCACHE's cache/download tree as downloaded module content; both are repopulated by later builds or downloads, while module source extracted under pkg/mod outside cache/download is not selected.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://go.dev/cmd/go/#hdr-Build_and_test_caching",
+      "https://go.dev/ref/mod#module-cache"
+    ]
+  },
+  {
+    "id": "macos.uv-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [".cache", "uv"]
+      },
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "uv"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "uv documents its cache directory as disposable derived data and provides `uv cache clean`/`cache prune`; persistent installed tools, managed Python interpreters, configuration and project environments remain outside the selected cache roots.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://docs.astral.sh/uv/reference/storage/#cache-directory",
+      "https://docs.astral.sh/uv/concepts/cache/#clearing-the-cache"
+    ]
+  },
+  {
+    "id": "macos.bun-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [".bun", "install", "cache"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Bun documents the global package cache as downloaded registry content that is repopulated on the next package install; globally linked packages and configuration remain outside the cache root.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://bun.sh/docs/pm/global-cache"
+    ]
+  },
+  {
+    "id": "macos.yarn-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "Yarn"]
+      },
+      {
+        "base": "home",
+        "components": [".yarn", "berry", "cache"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Yarn documents the classic global cache and the modern Berry cacheFolder as downloaded package archives repopulated on install; project manifests, yarnrc configuration and the unplugged packages selected for direct execution are not part of the cache roots.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://classic.yarnpkg.com/lang/en/docs/cli/cache/",
+      "https://yarnpkg.com/configuration/yarnrc/#cacheFolder"
+    ]
+  },
+  {
+    "id": "macos.gradle-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": [".gradle", "caches"]
+      },
+      {
+        "base": "home",
+        "components": [".gradle", "daemon"]
+      },
+      {
+        "base": "home",
+        "components": [".gradle", "workers"]
+      },
+      {
+        "base": "home",
+        "components": [".gradle", "notifications"]
+      },
+      {
+        "base": "home",
+        "components": [".gradle", "wrapper", "dists"]
+      },
+      {
+        "base": "home",
+        "components": [".gradle", ".tmp"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Gradle documents caches, daemon/worker state, notifications and wrapper-downloaded distributions as derived data rebuilt after the daemon stops; projects, gradle.properties, init scripts and any JDK provisioned outside the wrapper remain excluded.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://docs.gradle.org/current/userguide/directory_layout.html"
+    ]
+  },
+  {
+    "id": "macos.jetbrains-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "JetBrains"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "JetBrains documents the IDE system directory's caches and indexes as generated content rebuilt on next startup; user settings, plugins, opened projects and Local History remain outside the selected cache root.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://www.jetbrains.com/help/idea/tuning-the-ide.html#system-directory"
+    ]
+  },
+  {
+    "id": "macos.deno-cache",
+    "platform": "macos",
+    "rootKind": "macos_developer_cache",
+    "matchKind": "verified_known_root",
+    "names": [],
+    "requiredMarkers": [],
+    "knownRoots": [
+      {
+        "base": "home",
+        "components": ["Library", "Caches", "deno"]
+      }
+    ],
+    "depth": 0,
+    "risk": "R2",
+    "evidence": "Deno documents DENO_DIR as the shared cache for downloaded remote dependencies and compiled artifacts and ships `deno cache` to manage it; project source and configuration remain outside the cache root.",
+    "sourceReviewedAt": "2026-09-29",
+    "references": [
+      "https://docs.deno.com/runtime/getting_started/installation/#cache-location",
+      "https://docs.deno.com/runtime/reference/cli/clean/"
+    ]
+  },
+  {
     "id": "windows.packaged-app-cache",
     "platform": "windows",
     "rootKind": "windows_packages",

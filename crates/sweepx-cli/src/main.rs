@@ -4283,7 +4283,7 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 16);
+        assert_eq!(rules.len(), 24);
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -4309,7 +4309,7 @@ mod tests {
             .iter()
             .filter(|rule| rule.platform == "macos")
             .collect();
-        assert_eq!(macos_rules.len(), 7);
+        assert_eq!(macos_rules.len(), 15);
         let integrated_macos_ids = [
             "macos.xcode-derived-data",
             "macos.cargo-registry-cache",
@@ -4317,6 +4317,14 @@ mod tests {
             "macos.chromium-cache",
             "macos.safari-cache",
             "macos.tencent-meeting-cache",
+            "macos.homebrew-cache",
+            "macos.go-cache",
+            "macos.uv-cache",
+            "macos.bun-cache",
+            "macos.yarn-cache",
+            "macos.gradle-cache",
+            "macos.jetbrains-cache",
+            "macos.deno-cache",
         ];
         for id in integrated_macos_ids {
             assert!(rules.iter().any(|rule| rule.id == id), "missing {id}");
