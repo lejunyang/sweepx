@@ -1591,9 +1591,12 @@ fn run_junk_scan(
             Some(cache) => {
                 let mut hits = Vec::new();
                 let mut misses = Vec::new();
-                for (index, root) in canonical_roots.iter().enumerate() {
-                    match junk_cache::load(cache, root) {
-                        Some(record) if record.is_current(root) => hits.push(record),
+                for (index, record) in junk_cache::load_current_roots(cache, &canonical_roots)
+                    .into_iter()
+                    .enumerate()
+                {
+                    match record {
+                        Some(record) => hits.push(record),
                         _ => misses.push(index),
                     }
                 }
@@ -1627,6 +1630,9 @@ fn run_junk_scan(
         &miss_roots,
     );
 
+    // Capture before traversal: writes during the scan must invalidate the next reuse.
+    #[cfg(target_os = "macos")]
+    let scan_event_id = sweepx_core::current_event_id();
     let classified = if miss_roots.is_empty() {
         None
     } else {
@@ -1714,13 +1720,19 @@ fn run_junk_scan(
     if let Some(cache) = &cache_dir {
         for index in &miss_indexes {
             let root = &canonical_roots[*index];
+            // Incomplete scans (including denied roots) must be retried, never frozen as hits.
+            if !scan.as_ref().is_some_and(|scan| {
+                scan.covered_paths.get(&root.display().to_string()) == Some(&true)
+            }) {
+                continue;
+            }
             let mut stored = Vec::new();
             for candidate in &fresh_candidates {
                 if deepest_root_for(&candidate.path, &canonical_roots) == Some(*index) {
                     stored.push(junk_candidate_to_stored(candidate));
                 }
             }
-            match junk_cache::StoredJunkRoot::capture(root, stored)
+            match junk_cache::StoredJunkRoot::capture(root, stored, scan_event_id)
                 .and_then(|record| junk_cache::write(cache, &record))
             {
                 Ok(()) => {}
@@ -1779,6 +1791,7 @@ fn run_junk_scan(
             let store_result = miss_roots.first().map(|scan_root| {
                 subtree_provider.store_index(
                     scan_root,
+                    scan_event_id,
                     scan.covered_paths.clone(),
                     listings,
                     directories,

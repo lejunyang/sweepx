@@ -64,8 +64,8 @@ const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 /// Most recent event id the system has produced.
 ///
-/// Captured *after* a scan so it can only over-invalidate: an id taken before the walk would miss
-/// writes racing with the scan.
+/// Capture *before* a scan so the next validation includes writes racing with the walk.
+/// A cursor taken after traversal would silently hide those writes.
 pub fn current_event_id() -> EventId {
     // SAFETY: FSEventsGetCurrentEventId takes no arguments and returns a scalar.
     unsafe { FSEventsGetCurrentEventId() }

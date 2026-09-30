@@ -464,3 +464,5 @@ stuttered every second step.
 
 The pinned path is for reading only. It is not execution authority; native identity is still
 revalidated immediately before any Trash operation.
+
+On macOS, `junk` validates cached roots in one FSEvents batch instead of waiting separately for every root. A pre-scan cursor preserves changes during traversal for the next refresh. Incomplete scans are not saved as reusable root records. Older cache schemas trigger a fresh scan.

@@ -3,7 +3,7 @@
 //! # What is stored
 //!
 //! For every scan root we persist the exact classified candidates it produced together with the
-//! FSEvents event id reached *after* the scan. On the next run the root is only reused when
+//! FSEvents event id captured *before* the scan. On the next run the root is only reused when
 //! FSEvents reports no change at or below it since that id; any event under the root, a
 //! dropped/lost-history signal, or a root identity change invalidates it and it is rescanned.
 //!
@@ -30,11 +30,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use sweepx_core::{FsEventId, current_event_id, events_since};
+#[cfg(test)]
+use sweepx_core::current_event_id;
+use sweepx_core::{FsEventId, events_since};
 use sweepx_model::{ByteValue, DirectoryAggregate, ScanEntryId, ScannedEntry};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v1";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v2";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -47,7 +49,7 @@ pub struct StoredJunkRoot {
     /// Native identity of the root directory at capture.
     root_device: String,
     root_inode: String,
-    /// FSEvents id reached after the root was scanned.
+    /// FSEvents id captured before the root was scanned.
     since_event_id: FsEventId,
     candidates: Vec<StoredJunkCandidate>,
 }
@@ -90,6 +92,7 @@ impl StoredJunkRoot {
     pub fn capture(
         canonical_root: &Path,
         candidates: Vec<StoredJunkCandidate>,
+        since_event_id: FsEventId,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(canonical_root)?;
         Ok(Self {
@@ -97,8 +100,8 @@ impl StoredJunkRoot {
             root: canonical_root.display().to_string(),
             root_device: metadata.dev().to_string(),
             root_inode: metadata.ino().to_string(),
-            // Read after the scan so it can only over-invalidate.
-            since_event_id: current_event_id(),
+            // A pre-scan cursor preserves writes racing with the walk for the next validation.
+            since_event_id,
             candidates,
         })
     }
@@ -114,36 +117,78 @@ impl StoredJunkRoot {
         self.candidates
     }
 
-    /// Whether this record still names an unchanged root the cache may reuse.
-    ///
-    /// Re-reads the root identity and asks FSEvents for the history since the stored id. A record
-    /// is only current when the identity matches, the history drained cleanly, and no event
-    /// occurred at or below the root.
-    pub fn is_current(&self, canonical_root: &Path) -> bool {
+    /// Checks the root binding independently of event history.
+    fn matches_root(&self, canonical_root: &Path) -> bool {
         if self.schema != STORED_SCHEMA || self.root != canonical_root.display().to_string() {
             return false;
         }
         let Ok(metadata) = fs::symlink_metadata(canonical_root) else {
             return false;
         };
-        if metadata.dev().to_string() != self.root_device
-            || metadata.ino().to_string() != self.root_inode
-        {
-            return false;
-        }
-        let Ok(log) = events_since(&[canonical_root], self.since_event_id, FSEVENTS_TIMEOUT) else {
-            return false;
-        };
-        if log.must_rescan {
-            return false;
-        }
-        let root_text = canonical_root.display().to_string();
-        let prefix = format!("{root_text}/");
-        !log.events.iter().any(|event| {
-            let path = event.path.trim_end_matches('/');
-            path == root_text || path.starts_with(&prefix)
-        })
+        metadata.is_dir()
+            && metadata.dev().to_string() == self.root_device
+            && metadata.ino().to_string() == self.root_inode
     }
+
+    #[cfg(test)]
+    fn is_current(&self, root: &Path) -> bool {
+        validate_records(&[root.to_path_buf()], vec![Some(self.clone())])[0].is_some()
+    }
+}
+
+/// Loads and validates all roots with one historical drain, rather than one wait per root.
+pub fn load_current_roots(cache_dir: &Path, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+    let records = roots.iter().map(|root| load(cache_dir, root)).collect();
+    validate_records(roots, records)
+}
+
+fn validate_records(
+    roots: &[PathBuf],
+    mut records: Vec<Option<StoredJunkRoot>>,
+) -> Vec<Option<StoredJunkRoot>> {
+    for (root, record) in roots.iter().zip(&mut records) {
+        if !record
+            .as_ref()
+            .is_some_and(|record| record.matches_root(root))
+        {
+            *record = None;
+        }
+    }
+    let Some(since) = records
+        .iter()
+        .flatten()
+        .map(|record| record.since_event_id)
+        .min()
+    else {
+        return records;
+    };
+    let paths: Vec<&Path> = roots
+        .iter()
+        .zip(&records)
+        .filter(|(_, record)| record.is_some())
+        .map(|(root, _)| root.as_path())
+        .collect();
+    // Query from the oldest cursor, then filter each root by its own cursor. A failure affects
+    // the whole batch; partial history never establishes freshness.
+    let log = events_since(&paths, since, FSEVENTS_TIMEOUT);
+    for record in &mut records {
+        let valid = match (&log, record.as_ref()) {
+            (Ok(log), Some(stored)) if !log.must_rescan => !log.events.iter().any(|event| {
+                event.id > stored.since_event_id
+                    && paths_overlap(Path::new(&event.path), Path::new(&stored.root))
+            }),
+            _ => false,
+        };
+        if !valid {
+            *record = None;
+        }
+    }
+    records
+}
+
+/// Ancestor events cannot be discarded: a parent change may rename or replace a cached root.
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 /// Loads a stored record for `canonical_root`, returning `None` on any failure or absence.
@@ -228,7 +273,7 @@ fn temp_path(destination: &Path) -> PathBuf {
 }
 
 /// Schema marker for the per-device subtree index.
-const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v1";
+const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v2";
 
 /// Per-device index captured after a classified scan.
 ///
@@ -240,7 +285,7 @@ const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v1";
 pub struct StoredSubtreeIndex {
     schema: String,
     device: String,
-    /// FSEvents id reached after the scan that produced this index.
+    /// FSEvents id captured before the scan that produced this index.
     since_event_id: FsEventId,
     /// Canonical path → fully covered, for every directory the scan completed.
     ///
@@ -398,23 +443,58 @@ mod tests {
     }
 
     #[test]
+    fn pre_scan_cursor_survives_capture_and_old_schema_is_refused() {
+        let cache = temp_cache();
+        let mut stored = StoredJunkRoot::capture(&cache, vec![], 42).unwrap();
+        assert_eq!(stored.since_event_id, 42);
+        assert!(stored.matches_root(&cache));
+        stored.schema = "sweepx.junk-cache/v1".into();
+        assert!(!stored.matches_root(&cache));
+        fs::remove_dir_all(cache).unwrap();
+    }
+
+    #[test]
+    fn invalidation_uses_path_components_and_includes_ancestors() {
+        assert!(paths_overlap(Path::new("/root"), Path::new("/root/cache")));
+        assert!(paths_overlap(
+            Path::new("/root/cache/file"),
+            Path::new("/root/cache")
+        ));
+        assert!(!paths_overlap(
+            Path::new("/root/cache-other"),
+            Path::new("/root/cache")
+        ));
+    }
+
+    #[test]
     fn an_untouched_root_round_trips_as_current() {
         let cache = temp_cache();
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
-
-        let stored = StoredJunkRoot::capture(&canonical, vec![sample_candidate("a")]).unwrap();
-        write(&cache, &stored).unwrap();
-
-        let loaded = load(&cache, &canonical).expect("stored");
-        assert_eq!(loaded.candidates_len(), 1);
-        assert!(
-            loaded.is_current(&canonical),
-            "nothing changed under the root"
-        );
-
-        let _ = fs::remove_dir_all(&cache);
+        // Creation events are asynchronous and can be coalesced after HistoryDone. Wait for
+        // a quiet fixture instead of incorrectly requiring immediate cache acceptance.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let stored = StoredJunkRoot::capture(
+                &canonical,
+                vec![sample_candidate("a")],
+                current_event_id(),
+            )
+            .unwrap();
+            write(&cache, &stored).unwrap();
+            let loaded = load(&cache, &canonical).expect("stored");
+            assert_eq!(loaded.candidates_len(), 1);
+            if loaded.is_current(&canonical) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture history did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        fs::remove_dir_all(cache).unwrap();
     }
 
     #[test]
@@ -423,19 +503,12 @@ mod tests {
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
-
-        let stored = StoredJunkRoot::capture(&canonical, vec![]).unwrap();
+        let stored = StoredJunkRoot::capture(&canonical, vec![], current_event_id()).unwrap();
         write(&cache, &stored).unwrap();
-
-        // A write strictly after capture must invalidate.
         fs::write(canonical.join("new.txt"), b"x").unwrap();
         let loaded = load(&cache, &canonical).expect("stored");
-        assert!(
-            !loaded.is_current(&canonical),
-            "a new file under the root must invalidate"
-        );
-
-        let _ = fs::remove_dir_all(&cache);
+        assert!(!loaded.is_current(&canonical), "a new file must invalidate");
+        fs::remove_dir_all(cache).unwrap();
     }
 
     #[test]
@@ -450,7 +523,7 @@ mod tests {
         let gone = fs::canonicalize(&gone).unwrap();
 
         for root in [&keep, &gone] {
-            let stored = StoredJunkRoot::capture(root, vec![]).unwrap();
+            let stored = StoredJunkRoot::capture(root, vec![], current_event_id()).unwrap();
             write(&cache, &stored).unwrap();
         }
         prune(&cache, std::slice::from_ref(&keep)).unwrap();

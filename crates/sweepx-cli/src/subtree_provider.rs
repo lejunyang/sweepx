@@ -22,7 +22,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sweepx_core::{PlannedEntry, ReusedDirectory, SubtreeReuse, current_event_id, events_since};
+use sweepx_core::{FsEventId, PlannedEntry, ReusedDirectory, SubtreeReuse, events_since};
 use sweepx_platform::CachedFileEntry;
 
 use crate::junk_cache::{self, StoredDirListing, StoredSubtreeDirectory, StoredSubtreeIndex};
@@ -35,7 +35,7 @@ struct DeviceState {
     /// Stored index: carries coverage of every scanned directory and the candidate directories.
     index: StoredSubtreeIndex,
     /// Raw absolute paths FSEvents reported since the index event id.
-    changed: Vec<String>,
+    changed: BTreeSet<PathBuf>,
     /// The drain asked for a full rescan (dropped/lost history) or failed; reuse is disabled.
     unusable: bool,
 }
@@ -74,13 +74,17 @@ impl SubtreeCacheProvider {
             let state = match events_since(&paths, index.since_event_id(), DRAIN_TIMEOUT) {
                 Ok(log) => DeviceState {
                     index,
-                    changed: log.events.iter().map(|event| event.path.clone()).collect(),
+                    changed: log
+                        .events
+                        .iter()
+                        .map(|event| PathBuf::from(&event.path))
+                        .collect(),
                     unusable: log.must_rescan,
                 },
                 // A drain error/timeout must not reuse anything on this device.
                 Err(_) => DeviceState {
                     index,
-                    changed: Vec::new(),
+                    changed: BTreeSet::new(),
                     unusable: true,
                 },
             };
@@ -98,6 +102,7 @@ impl SubtreeCacheProvider {
     pub fn store_index(
         &self,
         scan_root: &Path,
+        since_event_id: FsEventId,
         covered: BTreeMap<String, bool>,
         listings: BTreeMap<String, StoredDirListing>,
         directories: Vec<StoredSubtreeDirectory>,
@@ -106,7 +111,7 @@ impl SubtreeCacheProvider {
             .ok_or_else(|| std::io::Error::other("could not determine device for subtree index"))?;
         let index = StoredSubtreeIndex::new(
             device.clone(),
-            current_event_id(),
+            since_event_id,
             covered,
             listings,
             directories,
@@ -129,27 +134,9 @@ impl SubtreeReuse for SubtreeCacheProvider {
             return None;
         }
         let prefix = format!("{path_text}/");
-        // Reduce changed paths to their most specific ("leaf") events: an event that has another
-        // changed path strictly under it is redundant, because directory-granularity FSEvents
-        // repeat every ancestor of the actual change. Only a remaining event at or under this
-        // directory invalidates it; events on ancestors/siblings do not. This attributes changes
-        // precisely instead of invalidating siblings when their parent changed.
-        let leaf_events: Vec<&str> = state
-            .changed
-            .iter()
-            .map(|changed| changed.trim_end_matches('/'))
-            .filter(|changed| {
-                let ancestor_prefix = format!("{changed}/");
-                !state
-                    .changed
-                    .iter()
-                    .any(|other| other.trim_end_matches('/').starts_with(&ancestor_prefix))
-            })
-            .collect();
-        if leaf_events
-            .iter()
-            .any(|event| *event == path_text || event.starts_with(&prefix))
-        {
+        // Keep ancestor events even when descendants also changed. Coalesced events can cover
+        // additional sibling changes, so reducing history to leaves silently drops invalidations.
+        if overlaps_changes(&state.changed, dir_path) {
             return None;
         }
 
@@ -187,18 +174,11 @@ impl SubtreeReuse for SubtreeCacheProvider {
         }
         let listing = state.index.listing(&path_text)?;
 
-        // Exact changed paths. With file-level events these name the changed items themselves.
-        let changed: BTreeSet<&str> = state
-            .changed
-            .iter()
-            .map(|changed| changed.trim_end_matches('/'))
-            .collect();
-        // A changed event on this directory or a strict ancestor (e.g. a directory rename) cannot
-        // be attributed to one child, so the whole directory is inspected.
-        if changed.contains(path_text.as_str())
-            || changed
-                .iter()
-                .any(|event| path_text.starts_with(&format!("{event}/")))
+        // The set is built once during preparation, not once per visited directory. Ancestor
+        // events invalidate the entire listing; descendant events invalidate their own children.
+        if dir_path
+            .ancestors()
+            .any(|ancestor| state.changed.contains(ancestor))
         {
             return None;
         }
@@ -213,9 +193,7 @@ impl SubtreeReuse for SubtreeCacheProvider {
                     // Reuse only a regular file recorded in the listing whose exact path is
                     // unchanged. Directories, unknown/new children and changed files are inspected.
                     match listing.files.get(&name) {
-                        Some(logical_bytes)
-                            if !changed.contains(child.path.display().to_string().as_str()) =>
-                        {
+                        Some(logical_bytes) if !overlaps_changes(&state.changed, &child.path) => {
                             PlannedEntry::ReuseFile(CachedFileEntry {
                                 path: child.path.clone(),
                                 file_name: child.file_name.clone(),
@@ -230,6 +208,16 @@ impl SubtreeReuse for SubtreeCacheProvider {
     }
 }
 
+// Path ordering keeps descendants contiguous; query costs depth + log(events), without
+// allocating a second copy of the event history for every directory or child.
+fn overlaps_changes(changed: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    path.ancestors().any(|ancestor| changed.contains(ancestor))
+        || changed
+            .range(path.to_path_buf()..)
+            .next()
+            .is_some_and(|event| event.starts_with(path))
+}
+
 /// Converts a native child name to the same marker string the scanner used when building listings.
 /// On macOS names are Unix bytes; UTF-8 is required (matches `native_basename_marker`).
 fn name_marker(name: &sweepx_model::NativeName) -> Option<String> {
@@ -242,4 +230,23 @@ fn name_marker(name: &sweepx_model::NativeName) -> Option<String> {
 fn device_key(path: &Path) -> Option<String> {
     let metadata = fs::symlink_metadata(path).ok()?;
     Some(metadata.dev().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_preserves_ancestors_and_component_boundaries() {
+        let changed = ["/root/a", "/root/a/child", "/root/b/file"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        for path in ["/", "/root", "/root/a/sibling", "/root/b", "/root/b/file"] {
+            assert!(overlaps_changes(&changed, Path::new(path)), "{path}");
+        }
+        for path in ["/root/ab", "/root/b/other", "/other"] {
+            assert!(!overlaps_changes(&changed, Path::new(path)), "{path}");
+        }
+    }
 }
