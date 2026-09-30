@@ -980,6 +980,10 @@ impl<P: PlatformScanner> LocatorReader<P> {
             WalkEntry::Error(error) => {
                 return Err(map_walk_failure(error.kind));
             }
+            // Locator reads never use the cache; a cached file is not an inspected regular file.
+            WalkEntry::CachedFile(_) => {
+                return Err(LocatorReadFailure::IdentityMismatch);
+            }
         };
         let (Some(identity), Some(filesystem), Some(mount)) = (
             metadata.identity,
@@ -1055,6 +1059,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
             }
             WalkEntry::Boundary(boundary) => return Err(map_boundary_failure(boundary.kind)),
             WalkEntry::Error(error) => return Err(map_walk_failure(error.kind)),
+            WalkEntry::CachedFile(_) => return Err(LocatorReadFailure::IdentityMismatch),
         };
         let (Some(_identity), Some(filesystem), Some(mount)) = (
             metadata.identity,
@@ -1175,6 +1180,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 WalkEntry::Error(error) => map_walk_failure(error.kind),
                 WalkEntry::Directory(_) => LocatorReadFailure::NotRegular,
                 WalkEntry::File(_) => unreachable!(),
+                WalkEntry::CachedFile(_) => LocatorReadFailure::IdentityMismatch,
             }));
         };
         let identity = metadata
@@ -1321,6 +1327,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
             }
             WalkEntry::File(_) => Err(ReadAttempt::Failed(LocatorReadFailure::NotRegular)),
             WalkEntry::Error(error) => Err(ReadAttempt::Failed(map_walk_failure(error.kind))),
+            WalkEntry::CachedFile(_) => {
+                Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch))
+            }
         }
     }
 
@@ -1361,6 +1370,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
                             WalkEntry::Error(error) => map_walk_failure(error.kind),
                             WalkEntry::File(_) => LocatorReadFailure::NotRegular,
                             WalkEntry::Directory(_) => unreachable!(),
+                            WalkEntry::CachedFile(_) => LocatorReadFailure::IdentityMismatch,
                         }));
                     };
                     let filesystem = opened

@@ -1761,11 +1761,26 @@ fn run_junk_scan(
                     });
                 }
             }
+            // Convert the scanner's captured child listings into the persisted form.
+            let listings: BTreeMap<String, junk_cache::StoredDirListing> = scan
+                .dir_listings
+                .iter()
+                .map(|(path, listing)| {
+                    (
+                        path.clone(),
+                        junk_cache::StoredDirListing {
+                            files: listing.files.clone(),
+                            dirs: listing.dirs.clone(),
+                        },
+                    )
+                })
+                .collect();
             // One index per device; use the first scanned root only to identify the device.
             let store_result = miss_roots.first().map(|scan_root| {
                 subtree_provider.store_index(
                     scan_root,
                     scan.covered_paths.clone(),
+                    listings,
                     directories,
                 )
             });

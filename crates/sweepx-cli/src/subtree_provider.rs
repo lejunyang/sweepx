@@ -16,15 +16,16 @@
 
 #![cfg(target_os = "macos")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sweepx_core::{ReusedDirectory, SubtreeReuse, current_event_id, events_since};
+use sweepx_core::{PlannedEntry, ReusedDirectory, SubtreeReuse, current_event_id, events_since};
+use sweepx_platform::CachedFileEntry;
 
-use crate::junk_cache::{self, StoredSubtreeDirectory, StoredSubtreeIndex};
+use crate::junk_cache::{self, StoredDirListing, StoredSubtreeDirectory, StoredSubtreeIndex};
 
 /// Bounded wall time for the per-device FSEvents drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,12 +99,18 @@ impl SubtreeCacheProvider {
         &self,
         scan_root: &Path,
         covered: BTreeMap<String, bool>,
+        listings: BTreeMap<String, StoredDirListing>,
         directories: Vec<StoredSubtreeDirectory>,
     ) -> std::io::Result<()> {
         let device = device_key(scan_root)
             .ok_or_else(|| std::io::Error::other("could not determine device for subtree index"))?;
-        let index =
-            StoredSubtreeIndex::new(device.clone(), current_event_id(), covered, directories);
+        let index = StoredSubtreeIndex::new(
+            device.clone(),
+            current_event_id(),
+            covered,
+            listings,
+            directories,
+        );
         junk_cache::write_subtree_index(&self.cache_dir, &index)
     }
 }
@@ -160,6 +167,75 @@ impl SubtreeReuse for SubtreeCacheProvider {
             }
         }
         Some(reused)
+    }
+
+    fn plan_entries(
+        &self,
+        dir_path: &Path,
+        children: &[sweepx_platform::DirectoryEntryRecord],
+    ) -> Option<Vec<PlannedEntry>> {
+        let device = device_key(dir_path)?;
+        let state = self.devices.get(&device)?;
+        if state.unusable {
+            return None;
+        }
+        let path_text = dir_path.display().to_string();
+        // The directory must be recorded as fully covered and have a stored child listing; without
+        // either we cannot classify children without stating them.
+        if !state.index.is_covered(&path_text) {
+            return None;
+        }
+        let listing = state.index.listing(&path_text)?;
+
+        // Exact changed paths. With file-level events these name the changed items themselves.
+        let changed: BTreeSet<&str> = state
+            .changed
+            .iter()
+            .map(|changed| changed.trim_end_matches('/'))
+            .collect();
+        // A changed event on this directory or a strict ancestor (e.g. a directory rename) cannot
+        // be attributed to one child, so the whole directory is inspected.
+        if changed.contains(path_text.as_str())
+            || changed
+                .iter()
+                .any(|event| path_text.starts_with(&format!("{event}/")))
+        {
+            return None;
+        }
+
+        Some(
+            children
+                .iter()
+                .map(|child| {
+                    let Some(name) = name_marker(&child.file_name) else {
+                        return PlannedEntry::Inspect(child.clone());
+                    };
+                    // Reuse only a regular file recorded in the listing whose exact path is
+                    // unchanged. Directories, unknown/new children and changed files are inspected.
+                    match listing.files.get(&name) {
+                        Some(logical_bytes)
+                            if !changed.contains(child.path.display().to_string().as_str()) =>
+                        {
+                            PlannedEntry::ReuseFile(CachedFileEntry {
+                                path: child.path.clone(),
+                                file_name: child.file_name.clone(),
+                                logical_bytes: *logical_bytes,
+                            })
+                        }
+                        _ => PlannedEntry::Inspect(child.clone()),
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Converts a native child name to the same marker string the scanner used when building listings.
+/// On macOS names are Unix bytes; UTF-8 is required (matches `native_basename_marker`).
+fn name_marker(name: &sweepx_model::NativeName) -> Option<String> {
+    match name {
+        sweepx_model::NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+        sweepx_model::NativeName::WindowsUtf16(_) => None,
     }
 }
 

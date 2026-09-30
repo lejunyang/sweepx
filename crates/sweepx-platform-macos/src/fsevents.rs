@@ -54,6 +54,10 @@ const FLAG_ROOT_CHANGED: u32 = 0x0000_0020;
 /// `kFSEventStreamCreateFlagNoDefer`: deliver the historical batch promptly rather than waiting
 /// out the latency to coalesce. We want a one-shot drain, not a live stream.
 const CREATE_FLAG_NO_DEFER: u32 = 0x0000_0002;
+/// `kFSEventStreamCreateFlagFileEvents`: report the exact file for every change instead of only
+/// the containing directory. This is the input for file-level cache reuse: a change to one file
+/// then invalidates just that file, not its whole parent directory.
+const CREATE_FLAG_FILE_EVENTS: u32 = 0x0000_0010;
 
 /// UTF-8 text encoding id for `CFStringCreateWithBytes`.
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
@@ -149,9 +153,9 @@ pub fn events_since(
             &mut context,
             paths_array,
             since,
-            // Latency 0 plus NoDefer: drain historical events immediately.
+            // Latency 0 plus NoDefer and FileEvents: drain exact-file historical events at once.
             0.0,
-            CREATE_FLAG_NO_DEFER,
+            CREATE_FLAG_NO_DEFER | CREATE_FLAG_FILE_EVENTS,
         )
     };
     if stream.is_null() {

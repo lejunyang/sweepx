@@ -392,11 +392,26 @@ pub struct OpenedDirectory<D> {
     pub handle: D,
 }
 
+/// A regular file reused from a validated cache without a fresh stat.
+///
+/// Carries only what the classified scan needs: the path and native name (taken from the live
+/// enumeration, so they are trustworthy) and the logical size captured earlier. It never carries
+/// identity beyond the path; file rows are dropped in classified mode, and the cached size is
+/// folded into the directory aggregate exactly as a freshly stated file would be.
+#[derive(Debug, Clone)]
+pub struct CachedFileEntry {
+    pub path: PathBuf,
+    pub file_name: NativeName,
+    pub logical_bytes: u128,
+}
+
 #[derive(Debug)]
 pub enum WalkEntry<D> {
     Directory(OpenedDirectory<D>),
     File(EntryMetadata),
     Link(EntryMetadata),
+    /// An unchanged file supplied from cache; no syscall was made for it.
+    CachedFile(CachedFileEntry),
     Boundary(BoundaryRecord),
     Error(ErrorRecord),
 }
@@ -430,6 +445,13 @@ impl<D> WalkEntry<D> {
                 validate_inspected_metadata(child, &opened.metadata, EntryKind::Directory)
             }
             Self::File(metadata) => validate_inspected_metadata(child, metadata, EntryKind::File),
+            Self::CachedFile(cached) => {
+                validate_inspected_path(child, &cached.path)?;
+                if cached.file_name != child.file_name {
+                    return Err(DirectoryEntryInvariantError::InspectedNameMismatch);
+                }
+                Ok(())
+            }
             Self::Link(metadata) => {
                 validate_inspected_metadata(child, metadata, EntryKind::Symlink)
             }

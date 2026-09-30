@@ -51,6 +51,7 @@ use sweepx_protocol::{
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use sweepx_scanner::JunkClassifier;
 pub use sweepx_scanner::ScanSummary;
+pub use sweepx_scanner::{DirListing, PlannedEntry};
 #[cfg(target_os = "macos")]
 pub use sweepx_scanner::{FsEventId, current_event_id, events_since};
 use sweepx_scanner::{ProgressEvent, ScanError};
@@ -1344,7 +1345,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         None,
         None,
     )
-    .map(|(scan, _decisions, _directory_markers, _coverages, _covered_paths)| scan)
+    .map(|(scan, _decisions, _directory_markers, _coverages, _covered_paths, _dir_listings)| scan)
 }
 
 /// Runs the junk scan: traversal classifies each directory against `classifier` while walking,
@@ -1360,20 +1361,22 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
     classifier: &dyn JunkClassifier,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
 ) -> Result<JunkScanSuccess, CoreError> {
-    let (scan, decisions, directory_markers, coverages, covered_paths) = scan_with_store_options(
-        context,
-        request,
-        store,
-        ScannerOptions::default(),
-        Some(classifier),
-        reuse,
-    )?;
+    let (scan, decisions, directory_markers, coverages, covered_paths, dir_listings) =
+        scan_with_store_options(
+            context,
+            request,
+            store,
+            ScannerOptions::default(),
+            Some(classifier),
+            reuse,
+        )?;
     Ok(JunkScanSuccess {
         scan,
         decisions,
         directory_markers,
         coverages,
         covered_paths,
+        dir_listings,
     })
 }
 
@@ -1391,6 +1394,8 @@ pub struct JunkScanSuccess {
     pub coverages: std::collections::BTreeMap<sweepx_model::ScanEntryId, Coverage>,
     /// Canonical path → fully covered for every directory scanned, for building the reuse index.
     pub covered_paths: std::collections::BTreeMap<String, bool>,
+    /// Captured child listings of every directory scanned, for file-level reuse.
+    pub dir_listings: std::collections::BTreeMap<String, sweepx_scanner::DirListing>,
 }
 
 /// Builds the lightweight first TUI screen by admitting roots without enumerating descendants.
@@ -1496,10 +1501,12 @@ type DirectoryMarkers = std::collections::BTreeMap<
 >;
 
 /// Per-entry-id coverage of every directory a classified walk completed.
-type DirectoryCoverageMap =
-    std::collections::BTreeMap<sweepx_model::ScanEntryId, Coverage>;
+type DirectoryCoverageMap = std::collections::BTreeMap<sweepx_model::ScanEntryId, Coverage>;
 /// Canonical path → whether the directory was fully covered.
 type CoveredPathMap = std::collections::BTreeMap<String, bool>;
+
+/// Canonical path → captured child listing of a directory.
+type DirListingMap = std::collections::BTreeMap<String, sweepx_scanner::DirListing>;
 
 fn scan_with_store_options<S: SnapshotStore>(
     context: &CoreContext,
@@ -1509,7 +1516,14 @@ fn scan_with_store_options<S: SnapshotStore>(
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
 ) -> Result<
-    (ScanSuccess, JunkDecisions, DirectoryMarkers, DirectoryCoverageMap, CoveredPathMap),
+    (
+        ScanSuccess,
+        JunkDecisions,
+        DirectoryMarkers,
+        DirectoryCoverageMap,
+        CoveredPathMap,
+        DirListingMap,
+    ),
     CoreError,
 > {
     if request.state_dir.is_some() && !durable_state_supported() {
@@ -1565,6 +1579,8 @@ fn scan_with_store_options<S: SnapshotStore>(
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         ))
     }
 
@@ -1586,25 +1602,28 @@ fn scan_with_store_options<S: SnapshotStore>(
         );
         let cancel = CancellationToken::new();
         // In junk mode classify during the walk; otherwise retain every row as before.
-        let (summary, decisions, directory_markers, coverages, covered_paths) = match classifier {
-            Some(classifier) => {
-                let classified = scanner.scan_classified(&roots, &cancel, classifier, reuse)?;
-                (
-                    classified.summary,
-                    classified.decisions,
-                    classified.directory_markers,
-                    classified.coverages,
-                    classified.covered_paths,
-                )
-            }
-            None => (
-                scanner.scan(&roots, &cancel)?,
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeMap::new(),
-            ),
-        };
+        let (summary, decisions, directory_markers, coverages, covered_paths, dir_listings) =
+            match classifier {
+                Some(classifier) => {
+                    let classified = scanner.scan_classified(&roots, &cancel, classifier, reuse)?;
+                    (
+                        classified.summary,
+                        classified.decisions,
+                        classified.directory_markers,
+                        classified.coverages,
+                        classified.covered_paths,
+                        classified.dir_listings,
+                    )
+                }
+                None => (
+                    scanner.scan(&roots, &cancel)?,
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                ),
+            };
         let stored_preview =
             store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
         let finished_at = timestamp_now();
@@ -1703,6 +1722,7 @@ fn scan_with_store_options<S: SnapshotStore>(
             directory_markers,
             coverages,
             covered_paths,
+            dir_listings,
         ))
     }
 }

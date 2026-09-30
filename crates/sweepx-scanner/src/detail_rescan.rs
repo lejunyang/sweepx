@@ -384,6 +384,8 @@ where
                 WalkEntry::Boundary(boundary) => return Err(map_boundary(&boundary.kind)),
                 WalkEntry::Error(error) => return Err(map_walk_error(error.kind)),
                 WalkEntry::File(_) => return Err(DetailRescanError::IdentityMismatch),
+                // Detail rescan never uses the cache; a cached file here is an invariant break.
+                WalkEntry::CachedFile(_) => return Err(DetailRescanError::IdentityMismatch),
             };
             let expected_identity = if is_target {
                 request.source_directory_identity.clone()
@@ -671,6 +673,11 @@ where
                             }
                             aggregate.mark_incomplete(error.reason);
                         }
+                        // Detail rescan does not use the cache; treat a cached file as an invariant
+                        // violation rather than silently accepting it.
+                        WalkEntry::CachedFile(_) => {
+                            return Err(DetailRescanError::IdentityMismatch);
+                        }
                     }
                 }
                 if batch.end_of_directory {
@@ -874,6 +881,9 @@ where
                             }
                             aggregates.target.mark_incomplete(error.reason.clone());
                             direct.mark_incomplete(error.reason);
+                        }
+                        WalkEntry::CachedFile(_) => {
+                            return Err(DetailRescanError::IdentityMismatch);
                         }
                     }
                     progress_dirty = true;

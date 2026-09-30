@@ -230,12 +230,12 @@ fn temp_path(destination: &Path) -> PathBuf {
 /// Schema marker for the per-device subtree index.
 const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v1";
 
-/// Per-device index of candidate directories captured after a scan.
+/// Per-device index captured after a classified scan.
 ///
-/// Only candidate directories are stored, but the index's `since_event_id` plus one FSEvents drain
-/// lets the provider decide that a whole subtree (including non-candidate directories) is unchanged
-/// and may be skipped. Each stored directory keeps its scanned row and aggregate so it goes through
-/// the normal sink lifecycle when reused.
+/// It stores the candidate directories (so they re-enter the sink lifecycle when reused) and, for
+/// file-level reuse, the captured child listing of every covered directory. The `since_event_id`
+/// plus one FSEvents drain lets the provider decide precisely which files changed: unchanged
+/// files keep their recorded size with no syscall.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSubtreeIndex {
     schema: String,
@@ -247,7 +247,21 @@ pub struct StoredSubtreeIndex {
     /// This is the record that a non-candidate subtree existed and was scanned completely, which is
     /// what lets it be skipped later even though it has no candidate entry of its own.
     covered: BTreeMap<String, bool>,
+    /// Canonical directory path → its captured file/directory children, for file-level reuse.
+    #[serde(default)]
+    listings: BTreeMap<String, StoredDirListing>,
     directories: Vec<StoredSubtreeDirectory>,
+}
+
+/// Persisted child listing of one directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredDirListing {
+    /// Regular file child name → logical size.
+    #[serde(default)]
+    pub files: BTreeMap<String, u128>,
+    /// Child directory names.
+    #[serde(default)]
+    pub dirs: BTreeSet<String>,
 }
 
 /// One candidate directory in a subtree index.
@@ -263,6 +277,7 @@ impl StoredSubtreeIndex {
         device: String,
         since_event_id: FsEventId,
         covered: BTreeMap<String, bool>,
+        listings: BTreeMap<String, StoredDirListing>,
         directories: Vec<StoredSubtreeDirectory>,
     ) -> Self {
         Self {
@@ -270,6 +285,7 @@ impl StoredSubtreeIndex {
             device,
             since_event_id,
             covered,
+            listings,
             directories,
         }
     }
@@ -281,6 +297,11 @@ impl StoredSubtreeIndex {
     /// Whether the canonical path was recorded as fully covered during the index's scan.
     pub fn is_covered(&self, path: &str) -> bool {
         self.covered.get(path).copied().unwrap_or(false)
+    }
+
+    /// Captured child listing for a directory, if one was stored.
+    pub fn listing(&self, path: &str) -> Option<&StoredDirListing> {
+        self.listings.get(path)
     }
 
     pub fn directories(&self) -> &[StoredSubtreeDirectory] {

@@ -168,6 +168,12 @@ pub trait ScanSink {
     /// precondition for reusing that subtree later. Default no-op for sinks that do not cache.
     fn note_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
+    /// Records the native name of an unchanged file supplied from cache, under its parent id.
+    ///
+    /// The classified sink uses it to keep the parent's file-marker set complete for marker-based
+    /// rules; no row is buffered. Default no-op for sinks that do not classify.
+    fn note_cached_file_marker(&mut self, _parent_id: &ScanEntryId, _name: &NativeName) {}
+
     /// Number of times evidence was lost because a retention cap was reached.
     ///
     /// "Evidence" means data a total or a coverage claim is computed from: aggregates and
@@ -203,6 +209,18 @@ pub trait ScanSink {
 /// row; everything else is dropped on purpose rather than buffered for a post-scan pass. This
 /// is what keeps the result envelope small on a machine that produces hundreds of thousands
 /// of entries.
+/// The children of one directory captured during a scan, for file-level reuse.
+///
+/// `files` maps a regular file's name to its logical size; `dirs` is the set of child directory
+/// names. This is exactly what the reuse provider needs to distinguish unchanged files (reuse
+/// size, no syscall) from directories and unknown entries (inspect). Only regular files with a
+/// known size are recorded.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct DirListing {
+    pub files: BTreeMap<String, u128>,
+    pub dirs: BTreeSet<String>,
+}
+
 /// One directory reused wholesale from a prior scan.
 ///
 /// Carries the directory's scanned row, the rule id that classifies it as junk (only candidate
@@ -214,6 +232,15 @@ pub struct ReusedDirectory {
     pub aggregate: DirectoryAggregate,
 }
 
+/// One enumerated child about to be inspected, resolved against the cache before any syscall.
+#[derive(Debug)]
+pub enum PlannedEntry {
+    /// An unchanged regular file present in the cache; the scanner uses its size without stating.
+    ReuseFile(sweepx_platform::CachedFileEntry),
+    /// The child must be inspected normally (a directory, a changed/new file, or unknown type).
+    Inspect(sweepx_platform::DirectoryEntryRecord),
+}
+
 /// Supplies whole subtrees from a validated cache so the scanner can skip traversing them.
 ///
 /// Called when the scanner has identified a child directory but before it opens the subtree.
@@ -221,10 +248,24 @@ pub struct ReusedDirectory {
 /// directories (possibly none for a clean subtree with no candidates) and never recurses. `None`
 /// means the cache cannot vouch for it, so it is traversed normally. Every uncertainty must
 /// produce `None`; this never causes a directory to be skipped on weak evidence.
-pub trait SubtreeReuse {
+pub trait SubtreeReuse: Sync {
     fn reuse_subtree(&self, dir_path: &Path) -> Option<Vec<ReusedDirectory>>;
-}
 
+    /// Plans the inspection of a directory's enumerated children before any are stated.
+    ///
+    /// Returns a vector aligned entry-for-entry with `children`: each is reused from cache (only
+    /// unchanged regular files) or inspected. `None` means no plan is available for this
+    /// directory, so the scanner states every child — the safe fallback. Implementors must not
+    /// reuse a file unless the directory was recorded as fully covered and file-level evidence
+    /// proves that exact file unchanged.
+    fn plan_entries(
+        &self,
+        _dir_path: &Path,
+        _children: &[sweepx_platform::DirectoryEntryRecord],
+    ) -> Option<Vec<PlannedEntry>> {
+        None
+    }
+}
 pub trait JunkClassifier {
     /// Returns the stable id of the rule that makes this directory a junk candidate, or
     /// `None` when no rule matches.
@@ -258,6 +299,8 @@ pub struct ClassifiedScan {
     pub coverages: BTreeMap<ScanEntryId, Coverage>,
     /// Canonical path → whether the directory was fully covered, for every directory scanned.
     pub covered_paths: BTreeMap<String, bool>,
+    /// Canonical directory path → its captured file/directory children, for file-level reuse.
+    pub dir_listings: BTreeMap<String, DirListing>,
 }
 
 // Manual `Debug`: the classifier trait object intentionally carries no Debug bound.
@@ -303,6 +346,8 @@ struct CollectingScanSink<'a> {
     coverages: BTreeMap<ScanEntryId, Coverage>,
     /// Canonical path of every fully covered directory, even non-candidates, for the reuse index.
     covered_paths: BTreeMap<String, bool>,
+    /// Captured file/directory children keyed by canonical directory path, for file-level reuse.
+    dir_listings: BTreeMap<String, DirListing>,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
 }
@@ -330,6 +375,7 @@ impl<'a> CollectingScanSink<'a> {
             directory_markers: BTreeMap::new(),
             coverages: BTreeMap::new(),
             covered_paths: BTreeMap::new(),
+            dir_listings: BTreeMap::new(),
             decisions: BTreeMap::new(),
         }
     }
@@ -357,6 +403,7 @@ impl<'a> CollectingScanSink<'a> {
             directory_markers: self.directory_markers,
             coverages: self.coverages,
             covered_paths: self.covered_paths,
+            dir_listings: self.dir_listings,
         }
     }
 
@@ -493,7 +540,15 @@ impl ScanSink for CollectingScanSink<'_> {
                         self.directory_markers
                             .entry(parent_id.clone())
                             .or_default()
-                            .insert(name, identity.entry_id.clone());
+                            .insert(name.clone(), identity.entry_id.clone());
+                        // Record the child directory under its parent's reuse listing.
+                        if let Some(parent_path) = Path::new(&entry.display_path).parent() {
+                            self.dir_listings
+                                .entry(parent_path.display().to_string())
+                                .or_default()
+                                .dirs
+                                .insert(name);
+                        }
                     }
                     // Wait for the aggregate; the classifier needs the complete marker set.
                     self.pending_directories
@@ -512,7 +567,18 @@ impl ScanSink for CollectingScanSink<'_> {
                         self.file_markers
                             .entry(parent_id.clone())
                             .or_default()
-                            .insert(name);
+                            .insert(name.clone());
+                        // Capture name → logical size under the parent's reuse listing, only when
+                        // the size was measured exactly.
+                        if let Some(parent_path) = Path::new(&entry.display_path).parent()
+                            && let Some(size) = extract_known_u128(&entry.logical_bytes)
+                        {
+                            self.dir_listings
+                                .entry(parent_path.display().to_string())
+                                .or_default()
+                                .files
+                                .insert(name, size);
+                        }
                     }
                 }
                 // Symlinks and reparse/other rows feed no junk rule; symlinks are already
@@ -654,6 +720,17 @@ impl ScanSink for CollectingScanSink<'_> {
                 .insert(path.display().to_string(), coverage.complete);
         }
     }
+
+    fn note_cached_file_marker(&mut self, parent_id: &ScanEntryId, name: &NativeName) {
+        if self.classifier.is_some()
+            && let Some(marker) = native_basename_marker(name)
+        {
+            self.file_markers
+                .entry(parent_id.clone())
+                .or_default()
+                .insert(marker);
+        }
+    }
 }
 
 pub struct Scanner<P> {
@@ -757,6 +834,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     task: DirectoryTask<P::DirectoryHandle>,
     cancel: &CancellationToken,
     limits: ScanResourceLimits,
+    reuse: Option<&dyn SubtreeReuse>,
 ) -> DirectoryTaskResult<P::DirectoryHandle> {
     let DirectoryTask {
         ticket,
@@ -887,6 +965,10 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         };
     }
     current.started = true;
+    // File-level reuse plan, obtained before any child is stated and aligned to batch entries.
+    // `None` for the directory (no cache/coverage) means every child is inspected.
+    let plan: Option<Vec<PlannedEntry>> =
+        reuse.and_then(|provider| provider.plan_entries(&path, &batch.entries));
     let end_of_directory = batch.end_of_directory;
     let directory_limit_blocks_continuation = !end_of_directory
         && (current.consumed_entries >= limits.max_directory_entries
@@ -916,6 +998,14 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
         if !permit_available && may_defer {
             deferred.reserve(batch_entries - index);
             deferred.push(directory_entry);
+            continue;
+        }
+        // Cached unchanged file: push without a syscall; it is folded into the aggregate by the
+        // sequencer like a freshly stated file.
+        if let Some(PlannedEntry::ReuseFile(cached)) =
+            plan.as_ref().and_then(|entries| entries.get(index))
+        {
+            inspected.push(WalkEntry::CachedFile(cached.clone()));
             continue;
         }
         match inspect_directory_entry(
@@ -1354,6 +1444,7 @@ where
                 let result_tx = result_tx.clone();
                 let platform = &self.platform;
                 let limits = self.options.resource_limits;
+                // `reuse` is `Copy` (an optional shared reference) and is captured per worker.
                 scope.spawn(move || {
                     loop {
                         let task = {
@@ -1369,7 +1460,7 @@ where
                         let path = task.current.path.clone();
                         let child_directory_permits = task.child_directory_permits;
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            prepare_directory_task(platform, task, cancel, limits)
+                            prepare_directory_task(platform, task, cancel, limits, reuse)
                         }))
                         .unwrap_or(DirectoryTaskResult {
                             ticket,
@@ -1819,6 +1910,26 @@ where
                                 });
                                 active_frontier_entries += 1;
                             }
+                            WalkEntry::CachedFile(cached) => {
+                                // File reused from cache: fold its size and record its marker, but
+                                // make no syscall and keep no row (dropped in classified mode).
+                                sink.push_progress(
+                                    &root_path,
+                                    ProgressEvent::EntryObserved {
+                                        path: cached.path.clone(),
+                                        kind: ObjectType::File,
+                                    },
+                                )?;
+                                propagate_cached_file(
+                                    &mut directory_states,
+                                    &cached.path,
+                                    cached.logical_bytes,
+                                );
+                                sink.note_cached_file_marker(
+                                    &current.identity.entry_id,
+                                    &cached.file_name,
+                                );
+                            }
                             WalkEntry::File(metadata) => {
                                 let identity = scan_object_identity(
                                     entry_id,
@@ -2234,6 +2345,11 @@ impl EvidenceAccumulator {
         };
     }
 
+    fn add_known(&mut self, value: u128) {
+        // Reuse the ByteValue merge rules for an exact, known quantity.
+        self.add(&known_u128(value));
+    }
+
     fn into_value(self, complete: bool) -> sweepx_platform::ByteValue {
         match self {
             Self::Known(value) if complete => known_u128(value),
@@ -2320,6 +2436,29 @@ fn propagate_file_entry(
                         reason: ReasonCode::UnknownIdentity,
                     };
                 }
+            }
+        }
+    }
+}
+
+/// Folds an unchanged regular file's cached size into every ancestor state.
+///
+/// Mirrors `propagate_file_entry` for a file taken from cache: counts the recursive/direct child
+/// and adds the logical size to both the apparent and reclaimable accumulators. Cached files have
+/// no hard-link key, but only regular files (not hard-linked) are eligible for reuse, so this is
+/// equivalent to the single-link live path.
+fn propagate_cached_file(
+    states: &mut BTreeMap<PathBuf, DirectoryState>,
+    path: &Path,
+    logical: u128,
+) {
+    for ancestor in ancestors_for_entry(path) {
+        if let Some(state) = states.get_mut(&ancestor) {
+            state.note_recursive_entry();
+            state.apparent_logical_bytes += logical;
+            state.reclaimable_bytes.add_known(logical);
+            if path.parent() == Some(ancestor.as_path()) {
+                state.note_direct_child();
             }
         }
     }
@@ -5979,6 +6118,8 @@ mod tests {
                 Some(WalkEntry::Link(metadata)) => Ok(WalkEntry::Link(metadata.clone())),
                 Some(WalkEntry::Boundary(boundary)) => Ok(WalkEntry::Boundary(boundary.clone())),
                 Some(WalkEntry::Error(error)) => Ok(WalkEntry::Error(error.clone())),
+                // The fake scanner never produces a cache entry in these tests; pass it through.
+                Some(WalkEntry::CachedFile(cached)) => Ok(WalkEntry::CachedFile(cached.clone())),
                 None => Err(PlatformError::Unsupported("missing fake entry".to_string())),
             }
         }
