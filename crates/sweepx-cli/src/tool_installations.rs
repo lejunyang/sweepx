@@ -134,6 +134,18 @@ fn manager_layouts() -> Vec<ManagerLayout> {
 /// layout recognizes but sit on `PATH` are still admitted under the `path` manager, so a custom
 /// build is never silently dropped.
 pub fn discover_npm_installations() -> Vec<ToolInstallation> {
+    discover_npm(true)
+}
+
+/// Discovers cache roots without launching npm/node version probes needed only by inventory UI.
+pub fn discover_npm_cache_roots() -> Vec<PathBuf> {
+    discover_npm(false)
+        .into_iter()
+        .filter_map(|installation| installation.cache)
+        .collect()
+}
+
+fn discover_npm(include_versions: bool) -> Vec<ToolInstallation> {
     let path_executables = path_resolved_executables("npm");
     let default_executable = path_executables.first().cloned();
 
@@ -182,15 +194,19 @@ pub fn discover_npm_installations() -> Vec<ToolInstallation> {
         if !seen.insert(identity) {
             continue;
         }
-        let tool_version = run_trimmed(&executable, &["--version"]);
-        let runtime_version = executable
-            .parent()
+        let tool_version = include_versions
+            .then(|| run_trimmed(&executable, &["--version"]))
+            .flatten();
+        let runtime_version = include_versions
+            .then_some(&executable)
+            .and_then(|executable| executable.parent())
             .map(|bin| bin.join(if cfg!(windows) { "node.exe" } else { "node" }))
             .filter(|node| is_executable_file(node))
             .and_then(|node| run_trimmed(&node, &["--version"]));
         let cache = run_trimmed(&executable, &["config", "get", "cache"]).map(PathBuf::from);
         let cache_last_active_at = cache
             .as_ref()
+            .filter(|_| include_versions)
             .and_then(|cache| directory_newest_mtime(cache))
             .and_then(rfc3339);
         let is_path_default = default_executable

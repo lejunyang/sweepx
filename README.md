@@ -234,3 +234,5 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 最重要的当前结论是：**SweepX 已有可运行的扫描/TUI、单对象 Trash、Linux 陈旧临时对象隔离和 Linux 有界文件/目录 Permanent preview，但还没有通用计划执行、link Permanent 或跨平台 Permanent。**
 
 macOS 的 `junk` 缓存按批次校验根目录，避免逐根等待 FSEvents；游标在扫描前记录，扫描中发生的修改会触发后续刷新。不完整扫描不保存为可复用的根记录。旧版缓存会自动冷扫重建。
+
+`junk --system` 的根发现与分类共用本次调用的工具探测结果；缓存扫描不再查询每份 npm/node 的版本。独立的工具安装清单仍保留版本信息。

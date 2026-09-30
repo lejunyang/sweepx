@@ -466,3 +466,5 @@ The pinned path is for reading only. It is not execution authority; native ident
 revalidated immediately before any Trash operation.
 
 On macOS, `junk` validates cached roots in one FSEvents batch instead of waiting separately for every root. A pre-scan cursor preserves changes during traversal for the next refresh. Incomplete scans are not saved as reusable root records. Older cache schemas trigger a fresh scan.
+
+`junk --system` shares one invocation-scoped tool-discovery snapshot between root selection and classification. Cache discovery skips npm/node version probes; the separate tool inventory still includes versions.

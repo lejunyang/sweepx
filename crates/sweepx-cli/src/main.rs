@@ -599,6 +599,12 @@ fn main() -> ProcessExitCode {
             quarantine_dir,
             roots,
         } => {
+            let discovery_progress = ScanProgress::start(
+                context.locale(),
+                roots.len(),
+                false,
+                format == OutputFormat::Human,
+            );
             let normalized_roots = match normalize_junk_roots(system, &roots) {
                 Ok(roots) => roots,
                 Err(error) => {
@@ -606,6 +612,7 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
+            discovery_progress.finish();
             // Resolve the state directory for the per-root junk cache. A cache is best-effort: if
             // no state directory is available the scan simply runs uncached rather than failing.
             let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
@@ -618,7 +625,7 @@ fn main() -> ProcessExitCode {
                 size_unit,
                 normalized_roots.scan_roots,
                 normalized_roots.temp_roots,
-                system,
+                normalized_roots.platform,
                 JunkCleanOptions {
                     enabled: clean_temp,
                     quarantine_dir: quarantine_dir.as_deref(),
@@ -1230,9 +1237,8 @@ const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-
 
 /// Expensive, rule-derived evidence computed once and shared by every classification.
 ///
-/// `tool_cache_candidates` shells out to the developer tool — for npm it additionally enumerates
-/// every installation and runs up to three subprocesses per copy (`npm --version`, `node
-/// --version`, `npm config get cache`). These values depend only on the rule and the host
+/// Tool discovery shells out to the developer tool — for npm it additionally enumerates
+/// every installation and asks each copy for its cache. Version queries belong only to inventory. These values depend only on the rule and the host
 /// environment, never on a scanned entry, so asking for them on every `verified_tool_root` check
 /// during the walk turned one scan into hundreds of sequential tool launches. Measured on this
 /// host 2026-09-29: the walk sat blocked in `poll` on tool output for more than six minutes while
@@ -1247,6 +1253,7 @@ struct PlatformRuleEvidence {
 }
 
 /// Owned, rule-id-keyed table of precomputed platform evidence.
+#[derive(Default)]
 struct PlatformJunkEvidence {
     by_rule: BTreeMap<String, PlatformRuleEvidence>,
 }
@@ -1254,11 +1261,19 @@ struct PlatformJunkEvidence {
 impl PlatformJunkEvidence {
     /// Resolves the expensive inputs for every rule once, before the walk begins.
     fn precompute(rules: &[PlatformJunkRule]) -> Self {
+        Self::precompute_with(rules, |rule| {
+            tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve())
+        })
+    }
+
+    fn precompute_with(
+        rules: &[PlatformJunkRule],
+        mut resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
+    ) -> Self {
         let mut by_rule = BTreeMap::new();
         for rule in rules {
-            let cache_candidates = tool_cache_candidates(rule);
-            let reported_root =
-                tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve());
+            let reported_root = resolve(rule);
+            let cache_candidates = tool_cache_candidates_with_root(rule, reported_root.as_deref());
             by_rule.insert(
                 rule.id.clone(),
                 PlatformRuleEvidence {
@@ -1503,7 +1518,7 @@ fn run_junk_scan(
     size_unit: HumanSizeUnit,
     roots: Vec<PathBuf>,
     temp_requested_roots: Vec<PathBuf>,
-    include_platform_rules: bool,
+    platform: Option<PlatformJunkSetup>,
     clean: JunkCleanOptions<'_>,
     move_to_trash: bool,
     // Directory holding the per-root junk cache (`<state>/junk-cache`); `None` when caching is
@@ -1527,17 +1542,10 @@ fn run_junk_scan(
             return ProcessExitCode::from(12);
         }
     };
-    let platform_rules = if include_platform_rules {
-        match load_platform_junk_rules() {
-            Ok(rules) => rules,
-            Err(error) => {
-                eprintln!("invalid built-in platform junk rules: {error}");
-                return ProcessExitCode::from(12);
-            }
-        }
-    } else {
-        Vec::new()
-    };
+    let PlatformJunkSetup {
+        rules: platform_rules,
+        evidence,
+    } = platform.unwrap_or_default();
     let scan_roots = roots;
     #[cfg(target_os = "linux")]
     let temp_root = linux_temp::report_temp_root();
@@ -1569,7 +1577,6 @@ fn run_junk_scan(
     );
     // Resolve every rule's tool caches and live root once, up front, so the walk-time classifier
     // and the later assembly both read from this snapshot instead of each spawning the tools.
-    let evidence = PlatformJunkEvidence::precompute(&platform_rules);
     let classifier = CliJunkClassifier {
         project_rules: &rules,
         platform_rules: &platform_rules,
@@ -4111,6 +4118,15 @@ impl ScanProgress {
     }
 }
 
+impl Drop for ScanProgress {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_core::CoreError> {
     if raw_roots.is_empty() {
         Ok(default_full_scan_roots())
@@ -4119,7 +4135,24 @@ fn normalize_scan_roots(raw_roots: &[OsString]) -> Result<Vec<PathBuf>, sweepx_c
     }
 }
 
+/// One invocation's discovery facts, shared by root selection and classification. Keeping this
+/// scoped to the invocation avoids persistent tool-configuration caches with stale live roots.
+#[derive(Default)]
+struct PlatformJunkSetup {
+    rules: Vec<PlatformJunkRule>,
+    evidence: PlatformJunkEvidence,
+}
+
+impl PlatformJunkSetup {
+    fn discover() -> Result<Self, String> {
+        let rules = load_platform_junk_rules()?;
+        let evidence = PlatformJunkEvidence::precompute(&rules);
+        Ok(Self { rules, evidence })
+    }
+}
+
 struct NormalizedJunkRoots {
+    platform: Option<PlatformJunkSetup>,
     scan_roots: Vec<PathBuf>,
     temp_roots: Vec<PathBuf>,
 }
@@ -4130,6 +4163,7 @@ fn normalize_junk_roots(
 ) -> Result<NormalizedJunkRoots, String> {
     if !system {
         return Ok(NormalizedJunkRoots {
+            platform: None,
             scan_roots: normalize_scan_roots(raw_roots).map_err(|error| error.to_string())?,
             temp_roots: Vec::new(),
         });
@@ -4152,9 +4186,11 @@ fn normalize_junk_roots(
                 .filter(|root| root.as_path() != temp_root.as_path())
                 .cloned()
                 .collect::<Vec<_>>();
+            let platform = PlatformJunkSetup::discover()?;
             return Ok(NormalizedJunkRoots {
-                scan_roots: default_platform_junk_roots()?,
+                scan_roots: default_platform_junk_roots(&platform),
                 temp_roots,
+                platform: Some(platform),
             });
         }
         return Err(
@@ -4166,28 +4202,35 @@ fn normalize_junk_roots(
         return Err("junk --system cannot be combined with explicit roots".to_string());
     }
 
-    let scan_roots = default_platform_junk_roots()?;
+    let platform = PlatformJunkSetup::discover()?;
+    let scan_roots = default_platform_junk_roots(&platform);
     if scan_roots.is_empty() {
         return Err("no supported platform junk root is available".to_string());
     }
     Ok(NormalizedJunkRoots {
+        platform: Some(platform),
         scan_roots,
         temp_roots: Vec::new(),
     })
 }
 
-fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
-    let rules = load_platform_junk_rules()?;
+fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf> {
+    let rules = &platform.rules;
     let mut roots = Vec::new();
     // Tool-reported roots come first because they are platform-independent. Every plausible
     // location is enumerated, not just the one the tool named: an abandoned cache at a documented
     // default is exactly what a resolver-only pass misses, and on this host it was the larger copy.
     // Each candidate is verified by markers and structural fingerprint before admission.
-    for rule in &rules {
+    for rule in rules {
         if tool_reported_root_for(&rule.root_kind).is_none() {
             continue;
         }
-        for root in tool_cache_candidates(rule) {
+        for root in platform
+            .evidence
+            .for_rule(rule)
+            .into_iter()
+            .flat_map(|evidence| evidence.cache_candidates.iter().cloned())
+        {
             // Identity, not spelling: two rules can name one directory, and a scan given the same
             // directory twice reports it twice.
             if !roots
@@ -4200,7 +4243,7 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
     }
     // Browser derived caches are declared in rule data (one spec per browser) and expanded here,
     // so the same mechanism serves any platform whose spec anchor resolves.
-    for rule in &rules {
+    for rule in rules {
         for root in browser_cache_roots(rule) {
             if !roots
                 .iter()
@@ -4281,7 +4324,7 @@ fn default_platform_junk_roots() -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    Ok(roots)
+    roots
 }
 
 #[cfg(target_os = "linux")]
@@ -4595,7 +4638,10 @@ fn matches_structural_fingerprint(root: &Path, fingerprint: &StructuralFingerpri
 /// defaults. Each candidate must exist, be a real directory, and carry both the rule's markers and
 /// the profile's structural fingerprint before it is admitted — otherwise a rule keyed to a default
 /// would report whatever unrelated directory now sits there.
-fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
+fn tool_cache_candidates_with_root(
+    rule: &PlatformJunkRule,
+    reported_root: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     // Deduplication asks the filesystem, not the string. `%LOCALAPPDATA%\pip\Cache` and
     // `…\pip\cache` are one directory on a case-insensitive volume and two on a case-sensitive one,
@@ -4614,10 +4660,8 @@ fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
             out.push(path);
         }
     };
-    if let Some(tool) = tool_reported_root_for(&rule.root_kind)
-        && let Some(reported) = tool.resolve()
-    {
-        push(reported, &mut candidates);
+    if let Some(reported) = reported_root {
+        push(reported.to_path_buf(), &mut candidates);
     }
     let Some(profile) = tool_cache_profile(&rule.root_kind) else {
         return candidates;
@@ -4632,10 +4676,8 @@ fn tool_cache_candidates(rule: &PlatformJunkRule) -> Vec<PathBuf> {
     // non-default npm was explicitly configured to use would be missed. Ask every discovered
     // installation for its own cache; the marker/fingerprint checks below still verify each.
     if rule.root_kind == "npm_reported_cache" {
-        for installation in tool_installations::discover_npm_installations() {
-            if let Some(cache) = installation.cache {
-                push(cache, &mut candidates);
-            }
+        for cache in tool_installations::discover_npm_cache_roots() {
+            push(cache, &mut candidates);
         }
     }
     // Defaults are relative to the platform's per-user cache base. On Windows that is
@@ -5076,6 +5118,33 @@ fn replay_error_exit_code(error: &sweepx_core::CoreError) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_root_selection_reuses_the_classifiers_tool_probe() {
+        let fixture = tempfile::tempdir().unwrap();
+        let cache = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(cache.join("wheels")).unwrap();
+        let rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.root_kind == "pip_reported_cache")
+            .unwrap();
+        let rules = vec![rule];
+        let mut probes = 0;
+        let evidence = PlatformJunkEvidence::precompute_with(&rules, |_| {
+            probes += 1;
+            Some(cache.clone())
+        });
+        let platform = PlatformJunkSetup { rules, evidence };
+        let roots = default_platform_junk_roots(&platform);
+        assert_eq!(probes, 1);
+        // This synthetic resolver root cannot be discovered by the host's actual pip. If root
+        // discovery probes again instead of using the snapshot, it will omit this directory.
+        assert!(roots.contains(&cache));
+        let observed = platform.evidence.for_rule(&platform.rules[0]).unwrap();
+        assert_eq!(observed.reported_root.as_ref(), Some(&cache));
+        assert!(observed.cache_candidates.contains(&cache));
+    }
 
     #[test]
     fn format_arg_maps_to_core_format() {
