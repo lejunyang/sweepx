@@ -117,6 +117,8 @@ cargo run -p sweepx-cli -- junk --system --clean-temp
 
 ```
 
+项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
+
 当显式根中能完整识别 Git 工作区时，`junk` 会通过有界、非交互的 Git 查询给现有
 `target`、`node_modules`、Python cache 与常见 build-output 候选补充 ignore/tracked 证据。
 只有既命中独立项目规则、又未跟踪且被 ignore、同时没有嵌套仓库或不完整扫描证据的

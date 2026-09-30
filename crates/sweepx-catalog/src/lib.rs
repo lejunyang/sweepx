@@ -1,3 +1,4 @@
+pub mod junk;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Deserializer;
 use sha2::{Digest, Sha256};

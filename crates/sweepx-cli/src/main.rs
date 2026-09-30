@@ -21,6 +21,12 @@ mod subtree_provider;
 mod tcc_access;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
+#[cfg(test)]
+use sweepx_core::junk::load_project_rules as load_project_junk_rules;
+use sweepx_core::junk::{
+    JunkService, ProjectJunkRule as JunkRule, is_safe_rule_component as safe_rule_component,
+    native_rule_name as native_name_for_rule, normalize_rule_name as normalized_rule_name,
+};
 use sweepx_core::tools as tool_installations;
 use sweepx_core::tools::{ProbeLimits, ProbeRunner};
 mod trash_command;
@@ -980,18 +986,6 @@ fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct JunkRule {
-    id: String,
-    names: Vec<String>,
-    risk: String,
-    required_parent_markers: Vec<String>,
-    evidence: String,
-    source_reviewed_at: String,
-    references: Vec<String>,
-}
-
 /// A fixed, well-known filesystem location a rule can select without a tool reporting it.
 ///
 /// The location is expressed relative to a resolved `base` rather than as a literal absolute
@@ -1234,7 +1228,8 @@ impl GitProbeBudget {
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
 // rebuild contract. MangoDisk's broader inventory is research input, not license-compatible code
 // or automatic authority. Each future rule must carry its own source and safety review.
-const PROJECT_JUNK_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
+#[cfg(target_os = "macos")]
+use sweepx_core::junk::PROJECT_RULES_JSON as PROJECT_JUNK_RULES_JSON;
 const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../resources/platform-junk-rules.json");
 
 /// Expensive, rule-derived evidence computed once and shared by every classification.
@@ -1338,7 +1333,7 @@ impl PlatformJunkEvidence {
 /// never buffered. Decisions are namespaced (`project:` / `platform:`) because the two sets
 /// have separate id namespaces.
 struct CliJunkClassifier<'a> {
-    project_rules: &'a [JunkRule],
+    project: &'a JunkService,
     platform_rules: &'a [PlatformJunkRule],
     /// Precomputed tool evidence shared across all walk-time classifications.
     evidence: &'a PlatformJunkEvidence,
@@ -1350,10 +1345,8 @@ impl JunkClassifier for CliJunkClassifier<'_> {
         entry: &sweepx_model::ScannedEntry,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<String> {
-        for rule in self.project_rules {
-            if project_rule_classifies(rule, entry, markers) {
-                return Some(format!("project:{}", rule.id));
-            }
+        if let Some(decision) = self.project.classify(entry, markers) {
+            return Some(decision);
         }
         let platform = if cfg!(target_os = "linux") {
             "linux"
@@ -1400,27 +1393,6 @@ fn platform_rule_specificity(rule: &PlatformJunkRule) -> u8 {
         "direct_children" => 2,
         _ => 3,
     }
-}
-
-/// Whether a project rule matches an observed directory.
-///
-/// Same conditions as the former post-scan builder: a name in the rule and identity-based
-/// parent-marker applicability.
-fn project_rule_classifies(
-    rule: &JunkRule,
-    entry: &sweepx_model::ScannedEntry,
-    markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
-) -> bool {
-    let Some(identity) = entry.identity.as_ref() else {
-        return false;
-    };
-    let Some(name) = native_name_for_rule(&entry.native_basename) else {
-        return false;
-    };
-    rule.names
-        .iter()
-        .any(|candidate| normalized_rule_name(candidate) == name)
-        && junk_rule_applies(rule, identity, markers)
 }
 
 /// Whether a platform rule matches an observed directory, evaluated at walk time.
@@ -1575,13 +1547,14 @@ fn run_junk_scan(
         eprintln!("junk --trash requires human output and a foreground interactive terminal");
         return ProcessExitCode::from(2);
     }
-    let rules = match load_project_junk_rules() {
+    let project_service = match JunkService::built_in() {
         Ok(rules) => rules,
         Err(error) => {
             eprintln!("invalid built-in project junk rules: {error}");
             return ProcessExitCode::from(12);
         }
     };
+    let rules = project_service.project_rules();
     let PlatformJunkSetup {
         rules: platform_rules,
         evidence,
@@ -1618,7 +1591,7 @@ fn run_junk_scan(
     // Resolve every rule's tool caches and live root once, up front, so the walk-time classifier
     // and the later assembly both read from this snapshot instead of each spawning the tools.
     let classifier = CliJunkClassifier {
-        project_rules: &rules,
+        project: &project_service,
         platform_rules: &platform_rules,
         evidence: &evidence,
     };
@@ -2085,62 +2058,6 @@ fn run_junk_scan(
     ProcessExitCode::from(scan.as_ref().map_or(0, |result| {
         result.scan.output.conservative_exit_code() as u8
     }))
-}
-
-fn load_project_junk_rules() -> Result<Vec<JunkRule>, String> {
-    let rules: Vec<JunkRule> =
-        serde_json::from_str(PROJECT_JUNK_RULES_JSON).map_err(|error| error.to_string())?;
-    let mut ids = BTreeSet::new();
-    for rule in &rules {
-        if !ids.insert(rule.id.as_str())
-            || rule.id.trim().is_empty()
-            || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
-            || rule.names.is_empty()
-            || rule.evidence.trim().is_empty()
-            || !valid_verification_date(&rule.source_reviewed_at)
-            || rule.references.is_empty()
-            || !rule
-                .references
-                .iter()
-                .all(|reference| reference.starts_with("https://"))
-            || !rule
-                .names
-                .iter()
-                .chain(rule.required_parent_markers.iter())
-                .all(|name| safe_rule_component(name))
-        {
-            return Err(format!("invalid project junk rule: {}", rule.id));
-        }
-    }
-    Ok(rules)
-}
-
-fn safe_rule_component(value: &str) -> bool {
-    !value.is_empty()
-        && !matches!(value, "." | "..")
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value.contains('\0')
-}
-
-fn junk_rule_applies(
-    rule: &JunkRule,
-    identity: &sweepx_model::ScanObjectIdentity,
-    markers_by_parent: &BTreeMap<ScanEntryId, BTreeSet<String>>,
-) -> bool {
-    if rule.required_parent_markers.is_empty() {
-        return true;
-    }
-    // Marker checks are applicability filters only. They reduce obvious false positives such as
-    // dependency-internal `dist` directories and never grant mutation authority. The join is
-    // identity-based so a lossy display path cannot redirect even this read-only classification.
-    identity.parent_id.as_ref().is_some_and(|parent_id| {
-        markers_by_parent.get(parent_id).is_some_and(|markers| {
-            rule.required_parent_markers
-                .iter()
-                .any(|marker| markers.contains(&normalized_rule_name(marker)))
-        })
-    })
 }
 
 /// Assembles one project junk candidate for an entry the classifier already matched.
@@ -3857,23 +3774,6 @@ fn junk_size_for(aggregate: Option<&sweepx_model::DirectoryAggregate>) -> JunkSi
         },
     }
 }
-fn native_name_for_rule(name: &sweepx_model::NativeName) -> Option<String> {
-    match name {
-        sweepx_model::NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
-        sweepx_model::NativeName::WindowsUtf16(units) => String::from_utf16(units)
-            .ok()
-            .map(|name| name.to_ascii_lowercase()),
-    }
-}
-
-fn normalized_rule_name(name: &str) -> String {
-    if cfg!(windows) {
-        name.to_ascii_lowercase()
-    } else {
-        name.to_string()
-    }
-}
-
 fn junk_evidence_bytes(value: &ByteValue) -> Option<u128> {
     match value {
         EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => Some(value.0),

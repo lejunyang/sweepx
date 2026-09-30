@@ -156,6 +156,8 @@ sweepx --format json junk .
 sweepx --format json junk --system
 ```
 
+项目产物规则统一由 catalog 加载、core 的 `JunkService` 使用现有 cleaner VM 评估，CLI 与后续交互界面可共享该入口。规则匹配只形成报告候选。
+
 显式根继续识别明确可重建的项目产物：Rust `target`、Node `node_modules`、Python `__pycache__/.pytest_cache/.mypy_cache/.ruff_cache`，以及常见 `dist/build/out/.next/.turbo`。若扫描结果中能完整识别 Git 工作区，`junk` 还会以有界、非交互的 Git 查询检查这些**已有规则候选**：未跟踪、被 ignore 且不含嵌套仓库时，JSON 将其标为 `classification=known_generated_ignored`、`confidence=high`；存在 tracked descendant、gitfile/嵌套仓库、扫描证据不完整或 Git 查询失败时保守保留原分类并给出 `blockers[]`。Git ignore 只增强解释，不单独发现或授权删除任意路径；`.env.local` 等本地状态不会仅因被 ignore 而成为候选。
 
 不传显式根并加 `--system` 时，Linux 除报告 `XDG_CACHE_HOME` 外，还会枚举 `/tmp` 的任意直接子对象，名称不参与判断。候选必须是当前用户拥有、与 `/tmp` 同设备、可从 sticky 父目录删除且递归 atime/mtime/ctime 至少 7 天未更新的目录、普通文件、符号链接、FIFO 或无绑定 Unix socket；目录会 no-follow 递归统计分配大小和最新活动时间。SweepX 拒绝其他用户对象、跨设备/挂载边界、外部硬链接、设备 inode、已绑定 socket，以及在当前用户可读的 `cwd`/`root`/`exe`/`fd`（含 FIFO 的 `pipe:[inode]` 引用）/`map_files`/`mountinfo` 或可观测网络命名空间 Unix socket 表中出现的对象。其他用户私有进程或挂载/网络命名空间仍可能不可见；只要当前用户视图读取不完整，报告标记 partial 且清理拒绝执行。macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。Linux `/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未纳入。

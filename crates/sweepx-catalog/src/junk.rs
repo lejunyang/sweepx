@@ -1,0 +1,135 @@
+//! Project artifact rules admitted through the catalog, independent of CLI rendering.
+
+use serde::Deserialize;
+use std::collections::BTreeSet;
+
+/// Built-in project rule bytes; consumers use these exact bytes when binding cache validity.
+pub const PROJECT_RULES_JSON: &str = include_str!("../resources/project-junk-rules.json");
+
+/// Report-only project artifact rule. Matching never grants mutation authority.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectJunkRule {
+    /// Stable machine identifier, preserved across locales.
+    pub id: String,
+    /// Native basename alternatives for the artifact directory.
+    pub names: Vec<String>,
+    /// Stable risk tier (`R1`, `R2` or `R3`).
+    pub risk: String,
+    /// At least one must occur among the observed parent's files; empty means no parent filter.
+    pub required_parent_markers: Vec<String>,
+    /// Human-readable explanation of the rebuild/disposability evidence.
+    pub evidence: String,
+    /// Source review date in YYYY-MM-DD notation.
+    pub source_reviewed_at: String,
+    /// HTTPS primary-source references supporting the rule.
+    pub references: Vec<String>,
+}
+
+/// Admission failure for the project-artifact catalog.
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectRuleError {
+    /// Invalid JSON or an unknown/missing field.
+    #[error("invalid project rule JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    /// Input exceeded the catalog's byte, rule or list count limit.
+    #[error("project rule catalog exceeds its resource limit")]
+    ResourceLimit,
+    /// A rule has invalid names, risk, references or review metadata, or a duplicate identifier.
+    #[error("invalid or duplicate project junk rule: {0}")]
+    InvalidRule(String),
+}
+
+/// Loads the built-in rules through the same admission path as caller-supplied bytes.
+pub fn load_project_rules() -> Result<Vec<ProjectJunkRule>, ProjectRuleError> {
+    load_project_rule_bytes(PROJECT_RULES_JSON.as_bytes())
+}
+
+/// Admits bounded, strict project-rule JSON. No paths are inspected and no tools are executed.
+pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, ProjectRuleError> {
+    // Admission bounds allocation before parsing. Catalog rules are small data; an arbitrary
+    // rule stream must not become another unbounded scan-time index.
+    if bytes.len() > 32 * 1024 {
+        return Err(ProjectRuleError::ResourceLimit);
+    }
+    let rules: Vec<ProjectJunkRule> = serde_json::from_slice(bytes)?;
+    if rules.is_empty() || rules.len() > 64 {
+        return Err(ProjectRuleError::ResourceLimit);
+    }
+    let mut ids = BTreeSet::new();
+    for rule in &rules {
+        if rule.names.len() > 64
+            || rule.required_parent_markers.len() > 64
+            || rule.references.len() > 64
+        {
+            return Err(ProjectRuleError::ResourceLimit);
+        }
+        let date = &rule.source_reviewed_at;
+        let valid_date = date.len() == 10
+            && date.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 4 | 7) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+        if rule.id.trim().is_empty()
+            || !ids.insert(&rule.id)
+            || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
+            || rule.names.is_empty()
+            || rule.evidence.trim().is_empty()
+            || !valid_date
+            || rule.references.is_empty()
+            || !rule
+                .references
+                .iter()
+                .all(|reference| reference.starts_with("https://"))
+            || !rule
+                .names
+                .iter()
+                .chain(&rule.required_parent_markers)
+                .all(|name| is_safe_rule_component(name))
+        {
+            return Err(ProjectRuleError::InvalidRule(rule.id.clone()));
+        }
+    }
+    Ok(rules)
+}
+
+/// Checks that a rule name is one component, never traversal or a path separator.
+pub fn is_safe_rule_component(value: &str) -> bool {
+    !value.is_empty() && !matches!(value, "." | "..") && !value.contains(['/', '\\', '\0'])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_rules_cannot_enter_through_the_byte_loader() {
+        let original: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        for (field, value) in [
+            ("names", serde_json::json!(["../target"])),
+            ("risk", serde_json::json!("safe")),
+            ("references", serde_json::json!([])),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut edited = original.clone();
+            edited[0][field] = value;
+            assert!(
+                load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let mut duplicate = original;
+        duplicate[1]["id"] = duplicate[0]["id"].clone();
+        assert!(matches!(
+            load_project_rule_bytes(&serde_json::to_vec(&duplicate).unwrap()),
+            Err(ProjectRuleError::InvalidRule(_))
+        ));
+        assert!(matches!(
+            load_project_rule_bytes(&vec![b' '; 32769]),
+            Err(ProjectRuleError::ResourceLimit)
+        ));
+    }
+}
