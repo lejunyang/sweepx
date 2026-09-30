@@ -9,10 +9,14 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+mod junk_cache;
 #[cfg(target_os = "linux")]
 mod linux_temp;
 #[cfg(target_os = "linux")]
 mod permanent_delete_command;
+#[cfg(target_os = "macos")]
+mod subtree_provider;
 #[cfg(target_os = "macos")]
 mod tcc_access;
 #[cfg(target_os = "linux")]
@@ -39,7 +43,8 @@ use sweepx_core::{
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
 use sweepx_model::{
-    ByteValue, EvidenceValue, HumanSizeUnit, IdentityEvidence, ReasonCode, ScanEntryId, ScanSort,
+    ByteValue, Coverage, EvidenceValue, HumanSizeUnit, IdentityEvidence, ReasonCode, ScanEntryId,
+    ScanSort,
 };
 use sweepx_platform::{
     ElevatedRelaunch, ElevationPolicy, PrivilegeProvider, StartupPrivilegeDecision,
@@ -601,6 +606,12 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
+            // Resolve the state directory for the per-root junk cache. A cache is best-effort: if
+            // no state directory is available the scan simply runs uncached rather than failing.
+            let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
+                .ok()
+                .flatten()
+                .map(|state_dir| state_dir.join("junk-cache"));
             return run_junk_scan(
                 &context,
                 format,
@@ -614,6 +625,7 @@ fn main() -> ProcessExitCode {
                     stdin_is_terminal: std::io::stdin().is_terminal(),
                 },
                 trash,
+                cache_dir,
             );
         }
         Commands::SiteStorage {
@@ -1084,7 +1096,7 @@ struct JunkCandidate {
     /// A marker only. A stale cache is not deleted, pre-selected, or ranked differently here;
     /// platform junk classification is report-only and this simply records which copy the tool is
     /// using, so the reader can tell an abandoned cache from the working one.
-    activity: Option<&'static str>,
+    activity: Option<String>,
     /// Superseded format generations found inside this root, largest evidence first.
     ///
     /// Distinct from `activity`: a live root can still hold an obsolete format that nothing writes
@@ -1099,18 +1111,22 @@ struct JunkCandidate {
     /// Git evidence augments project-rule confidence but never grants mutation authority.
     git: Option<GitIgnoreEvidence>,
     /// Stable report classification; platform candidates predate Git enrichment and omit it.
-    classification: Option<&'static str>,
+    classification: Option<String>,
     /// Stable confidence label for the classification, independent of the risk tier.
-    confidence: Option<&'static str>,
+    confidence: Option<String>,
     /// Conditions that prevent this report-only candidate from being promoted.
-    blockers: Vec<&'static str>,
+    blockers: Vec<String>,
+    /// The scanned source row, retained for the bulk Trash path's identity revalidation. Present
+    /// for freshly scanned candidates and for candidates restored from cache; `None` for the Linux
+    /// temporary-object candidates, which use a different cleanup flow.
+    source_entry: Option<sweepx_model::ScannedEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct GitIgnoreEvidence {
-    status: &'static str,
+    status: String,
     repository_entry_id: String,
-    check: &'static str,
+    check: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1386,6 +1402,99 @@ fn platform_rule_classifies(
     }
 }
 
+/// Index of the deepest canonical root that is an ancestor of `path`, or `None`.
+///
+/// "Deepest" = the longest matching root, so a candidate under `…/Caches/Yarn` attributes to the
+/// Yarn root rather than the wider `…/Caches` root. Matching is by exact path component, with a
+/// trailing separator, so a prefix directory name cannot partially match.
+#[cfg(target_os = "macos")]
+fn deepest_root_for(path: &str, roots: &[PathBuf]) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None;
+    for (index, root) in roots.iter().enumerate() {
+        let root_text = root.display().to_string();
+        let matches = path == root_text || path.starts_with(&format!("{root_text}/"));
+        if matches && best.is_none_or(|(_, len)| root_text.len() > len) {
+            best = Some((index, root_text.len()));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// Converts an in-memory candidate into the cache record's owned form.
+#[cfg(target_os = "macos")]
+fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunkCandidate {
+    junk_cache::StoredJunkCandidate {
+        path: candidate.path.clone(),
+        rule_id: candidate.rule_id.clone(),
+        risk: candidate.risk.clone(),
+        reclaimable: candidate.reclaimable.clone(),
+        evidence: candidate.evidence.clone(),
+        source_reviewed_at: candidate.source_reviewed_at.clone(),
+        references: candidate.references.clone(),
+        entry_id: candidate.entry_id.clone(),
+        ancestor_ids: candidate.ancestor_ids.clone(),
+        activity: candidate.activity.clone(),
+        stale_formats: candidate.stale_formats.clone(),
+        size_is_logical: candidate.size_is_logical,
+        git: candidate
+            .git
+            .as_ref()
+            .map(|git| junk_cache::StoredGitIgnoreEvidence {
+                status: git.status.clone(),
+                repository_entry_id: git.repository_entry_id.clone(),
+                check: git.check.clone(),
+            }),
+        classification: candidate.classification.clone(),
+        confidence: candidate.confidence.clone(),
+        blockers: candidate.blockers.clone(),
+        source_entry: candidate.source_entry.clone(),
+    }
+}
+
+/// Converts a cache record back into an in-memory candidate.
+///
+/// Returns `None` only so it can be used directly in a `filter_map`; the conversion is infallible.
+#[cfg(target_os = "macos")]
+fn stored_candidate_to_junk(stored: junk_cache::StoredJunkCandidate) -> Option<JunkCandidate> {
+    let source_entry = source_entry_from_stored(&stored);
+    Some(JunkCandidate {
+        path: stored.path,
+        #[cfg(target_os = "linux")]
+        native_path: None,
+        rule_id: stored.rule_id,
+        risk: stored.risk,
+        reclaimable: stored.reclaimable,
+        evidence: stored.evidence,
+        source_reviewed_at: stored.source_reviewed_at,
+        references: stored.references,
+        entry_id: stored.entry_id,
+        ancestor_ids: stored.ancestor_ids,
+        activity: stored.activity,
+        stale_formats: stored.stale_formats,
+        size_is_logical: stored.size_is_logical,
+        git: stored.git.map(|git| GitIgnoreEvidence {
+            status: git.status,
+            repository_entry_id: git.repository_entry_id,
+            check: git.check,
+        }),
+        classification: stored.classification,
+        confidence: stored.confidence,
+        blockers: stored.blockers,
+        source_entry,
+    })
+}
+
+/// Reads the source `ScannedEntry` carried by a cached candidate.
+///
+/// Records written before the row was persisted (or by a path that had none) return `None`; that
+/// candidate then cannot be bulk-trashed from cache while its report stays accurate.
+#[cfg(target_os = "macos")]
+fn source_entry_from_stored(
+    stored: &junk_cache::StoredJunkCandidate,
+) -> Option<sweepx_model::ScannedEntry> {
+    stored.source_entry.clone()
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_junk_scan(
@@ -1397,6 +1506,9 @@ fn run_junk_scan(
     include_platform_rules: bool,
     clean: JunkCleanOptions<'_>,
     move_to_trash: bool,
+    // Directory holding the per-root junk cache (`<state>/junk-cache`); `None` when caching is
+    // unavailable (non-macOS, or no usable state directory).
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cache_dir: Option<PathBuf>,
 ) -> ProcessExitCode {
     if clean.enabled && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
         eprintln!(
@@ -1463,74 +1575,208 @@ fn run_junk_scan(
         platform_rules: &platform_rules,
         evidence: &evidence,
     };
-    let classified = scan_junk_with_store(
-        context,
-        &ScanRequest {
-            roots: scan_roots,
-            state_dir: None,
-        },
-        Option::<&sweepx_core::MemorySnapshotStore>::None,
-        &classifier,
+
+    // Resolve every root to its canonical (symlink-free) path; FSEvents reports canonical paths
+    // and the per-root cache is keyed on them. A root that cannot be canonicalized is passed
+    // through unchanged so the scanner reports the real error for it.
+    let canonical_roots: Vec<PathBuf> = scan_roots
+        .iter()
+        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .collect();
+
+    // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
+    #[cfg(target_os = "macos")]
+    let (hit_records, miss_indexes): (Vec<junk_cache::StoredJunkRoot>, Vec<usize>) =
+        match &cache_dir {
+            Some(cache) => {
+                let mut hits = Vec::new();
+                let mut misses = Vec::new();
+                for (index, root) in canonical_roots.iter().enumerate() {
+                    match junk_cache::load(cache, root) {
+                        Some(record) if record.is_current(root) => hits.push(record),
+                        _ => misses.push(index),
+                    }
+                }
+                (hits, misses)
+            }
+            None => (Vec::new(), (0..canonical_roots.len()).collect()),
+        };
+    // Off macOS there is no FSEvents validity source; every root is scanned.
+    #[cfg(not(target_os = "macos"))]
+    let miss_indexes: Vec<usize> = (0..canonical_roots.len()).collect();
+
+    #[cfg(target_os = "macos")]
+    let cached_candidates: Vec<JunkCandidate> = hit_records
+        .into_iter()
+        .flat_map(junk_cache::StoredJunkRoot::into_candidates)
+        .filter_map(stored_candidate_to_junk)
+        .collect();
+    // Caching is macOS-only; other platforms have no restored candidates.
+    #[cfg(not(target_os = "macos"))]
+    let cached_candidates: Vec<JunkCandidate> = Vec::new();
+    let miss_roots: Vec<PathBuf> = miss_indexes
+        .iter()
+        .map(|index| canonical_roots[*index].clone())
+        .collect();
+
+    // Build the subtree-reuse provider for the roots being scanned. On a cache-validated run the
+    // scanner skips whole unchanged child subtrees through it.
+    #[cfg(target_os = "macos")]
+    let subtree_provider = subtree_provider::SubtreeCacheProvider::prepare(
+        cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
+        &miss_roots,
     );
+
+    let classified = if miss_roots.is_empty() {
+        None
+    } else {
+        Some(scan_junk_with_store(
+            context,
+            &ScanRequest {
+                roots: miss_roots.clone(),
+                state_dir: None,
+            },
+            Option::<&sweepx_core::MemorySnapshotStore>::None,
+            &classifier,
+            #[cfg(target_os = "macos")]
+            Some(&subtree_provider),
+            #[cfg(not(target_os = "macos"))]
+            None,
+        ))
+    };
     progress.finish();
     let scan = match classified {
-        Ok(scan) => scan,
-        Err(error) => {
+        Some(Ok(scan)) => Some(scan),
+        Some(Err(error)) => {
             eprintln!("{error}");
             return ProcessExitCode::from(core_error_exit_code(&error) as u8);
         }
+        None => None,
     };
-    // Aggregates are retained in full; only directory rows were filtered, and their sizes stay
-    // available here. Applicability was joined during the walk through scan identities and
-    // lossless native names.
-    let aggregates = scan
-        .scan
-        .summary
-        .aggregates
-        .iter()
-        .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
-        .collect::<BTreeMap<_, _>>();
-    let mut candidates = Vec::with_capacity(scan.decisions.len());
-    for entry in scan
-        .scan
-        .summary
-        .roots
-        .iter()
-        .chain(scan.scan.summary.entries.iter())
-    {
-        let Some(identity) = entry.identity.as_ref() else {
-            continue;
-        };
-        let Some(decision) = scan.decisions.get(&identity.entry_id) else {
-            continue;
-        };
-        if let Some(rule_id) = decision.strip_prefix("project:") {
-            let Some(rule) = rules.iter().find(|rule| rule.id == rule_id) else {
+
+    // Assemble freshly scanned candidates. Applicability was joined during the walk through scan
+    // identities and lossless native names; aggregates carry each directory's size.
+    let mut fresh_candidates = Vec::new();
+    if let Some(scan) = &scan {
+        let aggregates = scan
+            .scan
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect::<BTreeMap<_, _>>();
+        for entry in scan
+            .scan
+            .summary
+            .roots
+            .iter()
+            .chain(scan.scan.summary.entries.iter())
+        {
+            let Some(identity) = entry.identity.as_ref() else {
                 continue;
             };
-            candidates.push(assemble_project_candidate(rule, entry, &aggregates));
-        } else if let Some(rule_id) = decision.strip_prefix("platform:") {
-            let Some(rule) = platform_rules.iter().find(|rule| rule.id == rule_id) else {
+            let Some(decision) = scan.decisions.get(&identity.entry_id) else {
                 continue;
             };
-            candidates.push(assemble_platform_candidate(
-                rule,
-                entry,
-                &aggregates,
-                &evidence,
-            ));
+            if let Some(rule_id) = decision.strip_prefix("project:") {
+                let Some(rule) = rules.iter().find(|rule| rule.id == rule_id) else {
+                    continue;
+                };
+                fresh_candidates.push(assemble_project_candidate(rule, entry, &aggregates));
+            } else if let Some(rule_id) = decision.strip_prefix("platform:") {
+                let Some(rule) = platform_rules.iter().find(|rule| rule.id == rule_id) else {
+                    continue;
+                };
+                fresh_candidates.push(assemble_platform_candidate(
+                    rule,
+                    entry,
+                    &aggregates,
+                    &evidence,
+                ));
+            }
         }
+        annotate_project_candidates_with_git(
+            &scan.scan.summary,
+            &scan.coverages,
+            &scan.directory_markers,
+            &mut fresh_candidates,
+        );
     }
-    annotate_project_candidates_with_git(
-        &scan.scan.summary,
-        &aggregates,
-        &scan.directory_markers,
-        &mut candidates,
-    );
     #[cfg(target_os = "linux")]
     if let Some((rule, discovery)) = &temp_discovery {
-        candidates.extend(linux_temp_candidates(rule, discovery));
+        fresh_candidates.extend(linux_temp_candidates(rule, discovery));
     }
+
+    // Persist every scanned (miss) root with the candidates attributed to its deepest root, then
+    // drop cache entries for roots no longer present. A root with zero candidates is still
+    // written so an empty-but-scanned root stays a hit next time.
+    #[cfg(target_os = "macos")]
+    if let Some(cache) = &cache_dir {
+        for index in &miss_indexes {
+            let root = &canonical_roots[*index];
+            let mut stored = Vec::new();
+            for candidate in &fresh_candidates {
+                if deepest_root_for(&candidate.path, &canonical_roots) == Some(*index) {
+                    stored.push(junk_candidate_to_stored(candidate));
+                }
+            }
+            match junk_cache::StoredJunkRoot::capture(root, stored)
+                .and_then(|record| junk_cache::write(cache, &record))
+            {
+                Ok(()) => {}
+                // A cache write failure never fails the report; the root simply rescans next run.
+                Err(error) => eprintln!(
+                    "could not update junk cache for {}: {error}",
+                    root.display()
+                ),
+            }
+        }
+        let _ = junk_cache::prune(cache, &canonical_roots);
+
+        // Write the per-device subtree index from every freshly scanned candidate, so unchanged
+        // child subtrees can be skipped on the next run even when this root itself is rescanned.
+        if let Some(scan) = &scan {
+            let aggregate_by_id: BTreeMap<ScanEntryId, &sweepx_model::DirectoryAggregate> = scan
+                .scan
+                .summary
+                .aggregates
+                .iter()
+                .map(|aggregate| {
+                    (
+                        ScanEntryId::from_loaded(aggregate.directory_identity.clone()),
+                        aggregate,
+                    )
+                })
+                .collect();
+            let mut directories = Vec::new();
+            for candidate in &fresh_candidates {
+                if let (Some(entry), Some(aggregate)) = (
+                    candidate.source_entry.as_ref(),
+                    aggregate_by_id.get(&candidate.entry_id),
+                ) {
+                    directories.push(junk_cache::StoredSubtreeDirectory {
+                        entry: entry.clone(),
+                        rule_id: candidate.rule_id.clone(),
+                        aggregate: (*aggregate).clone(),
+                    });
+                }
+            }
+            // One index per device; use the first scanned root only to identify the device.
+            let store_result = miss_roots.first().map(|scan_root| {
+                subtree_provider.store_index(
+                    scan_root,
+                    scan.covered_paths.clone(),
+                    directories,
+                )
+            });
+            if let Some(Err(error)) = store_result {
+                eprintln!("could not update subtree index: {error}");
+            }
+        }
+    }
+
+    let mut candidates = cached_candidates;
+    candidates.append(&mut fresh_candidates);
     candidates.sort_by(|left, right| {
         left.ancestor_ids
             .len()
@@ -1558,32 +1804,17 @@ fn run_junk_scan(
     });
     let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
     if move_to_trash {
-        // Index the retained scanned rows; the bulk trash path revalidates each one by its
-        // own captured native locator rather than trusting candidate display paths.
-        let entry_index: BTreeMap<ScanEntryId, &sweepx_model::ScannedEntry> = scan
-            .scan
-            .summary
-            .roots
-            .iter()
-            .chain(scan.scan.summary.entries.iter())
-            .filter_map(|entry| {
-                entry
-                    .identity
-                    .as_ref()
-                    .map(|identity| (identity.entry_id.clone(), entry))
-            })
-            .collect();
         let mut items = Vec::new();
         for candidate in &candidates {
-            let Some(entry) = entry_index.get(&candidate.entry_id) else {
+            // The source row comes from a fresh scan or from the cache; the bulk trash path
+            // revalidates each one by its own captured native locator rather than trusting the
+            // candidate display path. Linux temp candidates carry none and use another flow.
+            let Some(entry) = candidate.source_entry.as_ref() else {
                 continue;
             };
-            let eligible = aggregates
-                .get(candidate.entry_id.as_str())
-                .copied()
-                .is_some_and(|aggregate| {
-                    aggregate.coverage.complete && !aggregate.coverage.details_lost
-                });
+            // Eligibility is the row's own coverage: a directory that was scanned completely can
+            // be reclaimed; an incomplete row stays ineligible so the move fails closed.
+            let eligible = entry.coverage.complete && !entry.coverage.details_lost;
             items.push(trash_command::BulkTrashItem {
                 path: candidate.path.clone(),
                 size: junk_evidence_bytes(&candidate.reclaimable).unwrap_or(0),
@@ -1735,11 +1966,15 @@ fn run_junk_scan(
         Vec::new()
     };
     if format != OutputFormat::Human {
+        // All-cache runs (no fresh scan) are treated as ok; otherwise use the fresh scan's status.
+        let scan_status_ok = scan
+            .as_ref()
+            .is_none_or(|result| result.scan.output.status == sweepx_protocol::OutputStatus::Ok);
         println!(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
-                "status": if scan.scan.output.status == sweepx_protocol::OutputStatus::Ok && temp_discovery_complete { "ok" } else { "partial" },
+                "status": if scan_status_ok && temp_discovery_complete { "ok" } else { "partial" },
                 "readOnly": true,
                 "tempDiscovery": temp_discovery_json,
                 "candidateCount": candidates.len(),
@@ -1802,7 +2037,11 @@ fn run_junk_scan(
             return ProcessExitCode::from(3);
         }
     }
-    ProcessExitCode::from(scan.scan.output.conservative_exit_code() as u8)
+    // An all-cache run (no fresh scan) reports success; a run that scanned uses the fresh output's
+    // conservative exit code so any partial coverage still degrades the code.
+    ProcessExitCode::from(scan.as_ref().map_or(0, |result| {
+        result.scan.output.conservative_exit_code() as u8
+    }))
 }
 
 fn load_project_junk_rules() -> Result<Vec<JunkRule>, String> {
@@ -1898,9 +2137,10 @@ fn assemble_project_candidate(
         stale_formats: Vec::new(),
         size_is_logical: size.is_logical_fallback,
         git: None,
-        classification: Some("known_generated"),
-        confidence: Some("medium"),
+        classification: Some("known_generated".to_string()),
+        confidence: Some("medium".to_string()),
         blockers: Vec::new(),
+        source_entry: Some(entry.clone()),
     }
 }
 
@@ -1911,7 +2151,7 @@ fn assemble_project_candidate(
 /// failure leaves the existing candidate at its original confidence; it never makes it safer.
 fn annotate_project_candidates_with_git(
     summary: &sweepx_core::ScanSummary,
-    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    coverages: &BTreeMap<ScanEntryId, Coverage>,
     directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
     candidates: &mut [JunkCandidate],
 ) {
@@ -1921,11 +2161,13 @@ fn annotate_project_candidates_with_git(
         .any(|boundary| boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit)
     {
         for candidate in candidates {
-            candidate.blockers.push("git_scan_evidence_incomplete");
+            candidate
+                .blockers
+                .push("git_scan_evidence_incomplete".to_string());
         }
         return;
     }
-    let repositories = git_repositories(summary, aggregates, directory_markers);
+    let repositories = git_repositories(summary, coverages, directory_markers);
     let mut budget = GitProbeBudget::new();
     for candidate in candidates.iter_mut() {
         let Some(repository) = repositories
@@ -1936,18 +2178,22 @@ fn annotate_project_candidates_with_git(
             continue;
         };
         if repository.uses_gitfile {
-            candidate.blockers.push("gitfile_repository_boundary");
+            candidate
+                .blockers
+                .push("gitfile_repository_boundary".to_string());
             continue;
         }
         if candidate_contains_nested_repository(&repositories, repository, &candidate.entry_id) {
-            candidate.blockers.push("nested_repository");
+            candidate.blockers.push("nested_repository".to_string());
             continue;
         }
-        if aggregates
-            .get(candidate.entry_id.as_str())
-            .is_none_or(|aggregate| !aggregate.coverage.complete || aggregate.coverage.details_lost)
+        if coverages
+            .get(&candidate.entry_id)
+            .is_none_or(|coverage| !coverage.complete || coverage.details_lost)
         {
-            candidate.blockers.push("git_scan_evidence_incomplete");
+            candidate
+                .blockers
+                .push("git_scan_evidence_incomplete".to_string());
             continue;
         }
         let Some(candidate_row) = summary
@@ -1960,15 +2206,21 @@ fn annotate_project_candidates_with_git(
                     .is_some_and(|identity| identity.entry_id == candidate.entry_id)
             })
         else {
-            candidate.blockers.push("git_path_binding_unavailable");
+            candidate
+                .blockers
+                .push("git_path_binding_unavailable".to_string());
             continue;
         };
         let Some(candidate_locator) = candidate_row.native_locator.as_ref() else {
-            candidate.blockers.push("git_path_binding_unavailable");
+            candidate
+                .blockers
+                .push("git_path_binding_unavailable".to_string());
             continue;
         };
         let Some(path) = path_from_scanned_entry(candidate_row) else {
-            candidate.blockers.push("git_path_binding_unavailable");
+            candidate
+                .blockers
+                .push("git_path_binding_unavailable".to_string());
             continue;
         };
         // A repository row is usually absent in a classified scan (it is not itself junk),
@@ -1979,7 +2231,7 @@ fn annotate_project_candidates_with_git(
         let Some(repo_evidence) =
             locator_component_identity(candidate_locator, &repository.entry_id)
         else {
-            candidate.blockers.push("git_identity_changed");
+            candidate.blockers.push("git_identity_changed".to_string());
             continue;
         };
         if !identity_evidence_matches_path(repo_evidence, &repository.path)
@@ -1988,40 +2240,44 @@ fn annotate_project_candidates_with_git(
                 &path,
             )
         {
-            candidate.blockers.push("git_identity_changed");
+            candidate.blockers.push("git_identity_changed".to_string());
             continue;
         }
         if budget.exhausted() {
-            candidate.blockers.push("git_query_budget_exhausted");
+            candidate
+                .blockers
+                .push("git_query_budget_exhausted".to_string());
             continue;
         }
         match git_path_has_tracked_descendant(&mut budget, &repository.path, &path) {
             Ok(true) => {
-                candidate.blockers.push("tracked_descendant");
+                candidate.blockers.push("tracked_descendant".to_string());
                 continue;
             }
             Ok(false) => {}
             Err(()) => {
-                candidate.blockers.push("git_query_failed");
+                candidate.blockers.push("git_query_failed".to_string());
                 continue;
             }
         }
         if budget.exhausted() {
-            candidate.blockers.push("git_query_budget_exhausted");
+            candidate
+                .blockers
+                .push("git_query_budget_exhausted".to_string());
             continue;
         }
         match git_path_is_ignored(&mut budget, &repository.path, &path) {
             Ok(true) => {
                 candidate.git = Some(GitIgnoreEvidence {
-                    status: "ignored",
+                    status: "ignored".to_string(),
                     repository_entry_id: repository.entry_id.to_string(),
-                    check: "git.check-ignore.v1",
+                    check: "git.check-ignore.v1".to_string(),
                 });
-                candidate.classification = Some("known_generated_ignored");
-                candidate.confidence = Some("high");
+                candidate.classification = Some("known_generated_ignored".to_string());
+                candidate.confidence = Some("high".to_string());
             }
             Ok(false) => {}
-            Err(()) => candidate.blockers.push("git_query_failed"),
+            Err(()) => candidate.blockers.push("git_query_failed".to_string()),
         }
     }
 }
@@ -2077,7 +2333,7 @@ fn identity_evidence_matches_path(
 
 fn git_repositories(
     summary: &sweepx_core::ScanSummary,
-    aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+    coverages: &BTreeMap<ScanEntryId, Coverage>,
     directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
 ) -> Vec<GitRepository> {
     // In a classified scan only junk directory rows survive, so a `.git` row is absent even
@@ -2114,9 +2370,9 @@ fn git_repositories(
         if !children.contains_key(".git") {
             continue;
         }
-        if aggregates
-            .get(parent_id.as_str())
-            .is_none_or(|aggregate| !aggregate.coverage.complete)
+        if coverages
+            .get(parent_id)
+            .is_none_or(|coverage| !coverage.complete)
         {
             continue;
         }
@@ -2319,8 +2575,8 @@ fn assemble_platform_candidate(
         .native_locator
         .as_ref()
         .expect("matched entry carries a locator");
-    let activity =
-        classify_tool_root(rule, entry, evidence).map(|classification| classification.code());
+    let activity = classify_tool_root(rule, entry, evidence)
+        .map(|classification| classification.code().to_string());
     let stale_formats = superseded_format_generations(rule, entry, evidence);
     // Same allocation-versus-logical problem as the project rules, with one extra source: the
     // entry's own estimate, kept ahead of the logical fallback as the scanner's own claim.
@@ -2358,7 +2614,7 @@ fn assemble_platform_candidate(
             .collect(),
         #[cfg(target_os = "linux")]
         activity: if rule.root_kind == "linux_tmp" {
-            Some(linux_temp::ACTIVITY_CODE)
+            Some(linux_temp::ACTIVITY_CODE.to_string())
         } else {
             activity
         },
@@ -2368,18 +2624,20 @@ fn assemble_platform_candidate(
         size_is_logical: size.is_logical_fallback,
         git: None,
         #[cfg(target_os = "linux")]
-        classification: (rule.root_kind == "linux_tmp").then_some(linux_temp::CLASSIFICATION),
+        classification: (rule.root_kind == "linux_tmp")
+            .then(|| linux_temp::CLASSIFICATION.to_string()),
         #[cfg(not(target_os = "linux"))]
         classification: None,
-        confidence: (rule.root_kind == "linux_tmp").then_some("medium"),
+        confidence: (rule.root_kind == "linux_tmp").then(|| "medium".to_string()),
         #[cfg(target_os = "linux")]
         blockers: if rule.root_kind == "linux_tmp" {
-            vec![linux_temp::REFERENCE_BLOCKER]
+            vec![linux_temp::REFERENCE_BLOCKER.to_string()]
         } else {
             Vec::new()
         },
         #[cfg(not(target_os = "linux"))]
         blockers: Vec::new(),
+        source_entry: Some(entry.clone()),
     }
 }
 
@@ -4010,9 +4268,9 @@ fn linux_temp_candidates(
         .iter()
         .filter_map(|candidate| {
             let metadata = &candidate.measurement.top;
-            let mut blockers = vec![linux_temp::REFERENCE_BLOCKER];
+            let mut blockers = vec![linux_temp::REFERENCE_BLOCKER.to_string()];
             if !discovery.complete {
-                blockers.push("linux_tmp_discovery_incomplete");
+                blockers.push("linux_tmp_discovery_incomplete".to_string());
             }
             Some(JunkCandidate {
                 path: candidate.path.display().to_string(),
@@ -4031,13 +4289,14 @@ fn linux_temp_candidates(
                 )
                 .ok()?,
                 ancestor_ids: BTreeSet::new(),
-                activity: Some(linux_temp::ACTIVITY_CODE),
+                activity: Some(linux_temp::ACTIVITY_CODE.to_string()),
                 stale_formats: Vec::new(),
                 size_is_logical: false,
                 git: None,
-                classification: Some(linux_temp::CLASSIFICATION),
-                confidence: Some("medium"),
+                classification: Some(linux_temp::CLASSIFICATION.to_string()),
+                confidence: Some("medium".to_string()),
                 blockers,
+                source_entry: None,
             })
         })
         .collect()

@@ -52,6 +52,13 @@ pub use sweepx_platform_windows::{
     read_volume_journal_bounds,
 };
 
+/// FSEvents change-log query, re-exported through the scanner edge so consumers (the junk cache)
+/// do not take a second dependency on the macOS platform crate.
+#[cfg(all(target_os = "macos", feature = "platform-macos"))]
+pub use sweepx_platform_macos::fsevents::{
+    ChangeEvent, ChangeLog, EventId as FsEventId, current_event_id, events_since,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannerOptions {
     pub scan_id: ScanId,
@@ -154,6 +161,13 @@ pub trait ScanSink {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError>;
 
+    /// Notes the canonical path of a directory the walk completed, with its coverage.
+    ///
+    /// Called for every directory, candidate or not, just before the aggregate may be dropped. A
+    /// classified sink uses it to record that a subtree existed and was fully scanned, which is the
+    /// precondition for reusing that subtree later. Default no-op for sinks that do not cache.
+    fn note_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
+
     /// Number of times evidence was lost because a retention cap was reached.
     ///
     /// "Evidence" means data a total or a coverage claim is computed from: aggregates and
@@ -189,6 +203,28 @@ pub trait ScanSink {
 /// row; everything else is dropped on purpose rather than buffered for a post-scan pass. This
 /// is what keeps the result envelope small on a machine that produces hundreds of thousands
 /// of entries.
+/// One directory reused wholesale from a prior scan.
+///
+/// Carries the directory's scanned row, the rule id that classifies it as junk (only candidate
+/// directories appear), and its already-computed aggregate. The scanner pushes these through the
+/// normal sink lifecycle, so the classified sink makes the same decision it would on a live row.
+pub struct ReusedDirectory {
+    pub entry: ScannedEntry,
+    pub rule_id: String,
+    pub aggregate: DirectoryAggregate,
+}
+
+/// Supplies whole subtrees from a validated cache so the scanner can skip traversing them.
+///
+/// Called when the scanner has identified a child directory but before it opens the subtree.
+/// Returning `Some` means the path was verified unchanged: the scanner pushes the returned
+/// directories (possibly none for a clean subtree with no candidates) and never recurses. `None`
+/// means the cache cannot vouch for it, so it is traversed normally. Every uncertainty must
+/// produce `None`; this never causes a directory to be skipped on weak evidence.
+pub trait SubtreeReuse {
+    fn reuse_subtree(&self, dir_path: &Path) -> Option<Vec<ReusedDirectory>>;
+}
+
 pub trait JunkClassifier {
     /// Returns the stable id of the rule that makes this directory a junk candidate, or
     /// `None` when no rule matches.
@@ -213,6 +249,15 @@ pub struct ClassifiedScan {
     /// Native names of directory children observed under each parent mapped to the child
     /// entry id, even when the child directory itself was not classified and its row dropped.
     pub directory_markers: BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
+    /// Coverage of *every* directory the walk completed, not just classified candidates.
+    ///
+    /// The retained aggregates only cover candidate directories now, but post-scan checks (the
+    /// Git repository evidence) still must know whether a non-candidate parent was scanned
+    /// completely. Keeping just the small Coverage, rather than the whole aggregate, preserves
+    /// that distinction without re-retaining the aggregate.
+    pub coverages: BTreeMap<ScanEntryId, Coverage>,
+    /// Canonical path → whether the directory was fully covered, for every directory scanned.
+    pub covered_paths: BTreeMap<String, bool>,
 }
 
 // Manual `Debug`: the classifier trait object intentionally carries no Debug bound.
@@ -254,6 +299,10 @@ struct CollectingScanSink<'a> {
     /// entry id. Non-junk directory rows are dropped too, but post-scan checks need both to
     /// know the name existed (e.g. `.git`) and to reconstruct the parent chain.
     directory_markers: BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
+    /// Coverage per completed directory, retained for every directory and returned with the scan.
+    coverages: BTreeMap<ScanEntryId, Coverage>,
+    /// Canonical path of every fully covered directory, even non-candidates, for the reuse index.
+    covered_paths: BTreeMap<String, bool>,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
 }
@@ -279,6 +328,8 @@ impl<'a> CollectingScanSink<'a> {
             pending_root_ids: BTreeSet::new(),
             file_markers: BTreeMap::new(),
             directory_markers: BTreeMap::new(),
+            coverages: BTreeMap::new(),
+            covered_paths: BTreeMap::new(),
             decisions: BTreeMap::new(),
         }
     }
@@ -304,6 +355,8 @@ impl<'a> CollectingScanSink<'a> {
             summary: self.summary,
             decisions: self.decisions,
             directory_markers: self.directory_markers,
+            coverages: self.coverages,
+            covered_paths: self.covered_paths,
         }
     }
 
@@ -541,6 +594,10 @@ impl ScanSink for CollectingScanSink<'_> {
             // The aggregate id names the now-complete directory: classify its pending row first,
             // and retain the aggregate only when this directory is itself a junk candidate.
             let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
+            // Retain coverage for every completed directory, candidate or not, before the aggregate
+            // is dropped or kept; downstream evidence checks read this rather than the aggregate.
+            self.coverages
+                .insert(id.clone(), aggregate.coverage.clone());
             self.classify_pending(&id);
             if !self.decisions.contains_key(&id) {
                 // A non-candidate directory's bytes are not needed for any total: file entries are
@@ -588,6 +645,14 @@ impl ScanSink for CollectingScanSink<'_> {
 
     fn retained_aggregate_count(&self) -> usize {
         self.summary.aggregates.len()
+    }
+
+    fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+        // Only classified scans build the reuse index; an ordinary scan records nothing here.
+        if self.classifier.is_some() {
+            self.covered_paths
+                .insert(path.display().to_string(), coverage.complete);
+        }
     }
 }
 
@@ -930,7 +995,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<ScanSummary, ScanError> {
         let mut sink = CollectingScanSink::new(self.options.resource_limits);
-        self.scan_with_sink(roots, cancel, &mut sink)?;
+        self.scan_with_sink(roots, cancel, None, &mut sink)?;
         Ok(sink.finish())
     }
 
@@ -944,9 +1009,10 @@ where
         roots: &[ScanRoot],
         cancel: &CancellationToken,
         classifier: &dyn JunkClassifier,
+        reuse: Option<&dyn SubtreeReuse>,
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
-        self.scan_with_sink(roots, cancel, &mut sink)?;
+        self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
     }
 
@@ -1030,6 +1096,7 @@ where
         &self,
         roots: &[ScanRoot],
         cancel: &CancellationToken,
+        reuse: Option<&dyn SubtreeReuse>,
         sink: &mut S,
     ) -> Result<(), ScanError> {
         if self.options.max_workers == 0 {
@@ -1175,6 +1242,7 @@ where
                 &mut next_entry_ordinal,
                 cancel,
                 overflow_count_before,
+                reuse,
                 sink,
             )?;
             if cancel.is_cancelled() {
@@ -1186,6 +1254,7 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_root<S: ScanSink>(
         &self,
         admission: RootAdmission<P::DirectoryHandle>,
@@ -1193,6 +1262,7 @@ where
         next_entry_ordinal: &mut Option<u128>,
         cancel: &CancellationToken,
         overflow_count_before: usize,
+        reuse: Option<&dyn SubtreeReuse>,
         sink: &mut S,
     ) -> Result<(), ScanError> {
         let RootAdmission {
@@ -1599,6 +1669,25 @@ where
                                 }
                                 opened_child_permits -= 1;
                                 let metadata = opened.metadata;
+                                // Subtree reuse: if a validated cache can vouch for this whole
+                                // child directory, push its stored directories and skip the mount
+                                // checks, state creation and frontier push entirely.
+                                if let Some(reused) = reuse
+                                    .and_then(|provider| provider.reuse_subtree(&metadata.path))
+                                {
+                                    for dir in reused {
+                                        sink.push_progress(
+                                            &root_path,
+                                            ProgressEvent::EntryObserved {
+                                                path: dir.entry.display_path.clone().into(),
+                                                kind: ObjectType::Directory,
+                                            },
+                                        )?;
+                                        sink.push_entry(&root_path, dir.entry)?;
+                                        sink.push_aggregate(&root_path, dir.aggregate)?;
+                                    }
+                                    continue;
+                                }
                                 let same_mount = if root_metadata.mount_identity.is_none()
                                     || metadata.mount_identity.is_none()
                                 {
@@ -1950,12 +2039,17 @@ where
             mark_all_open_incomplete(&mut directory_states, ReasonCode::ResourceLimit);
         }
 
-        let mut aggregates: Vec<_> = directory_states
-            .into_values()
-            .map(|state| state.into_aggregate(&self.options.scan_id))
+        let mut aggregates: Vec<(PathBuf, DirectoryAggregate)> = directory_states
+            .into_iter()
+            .map(|(path, state)| (path, state.into_aggregate(&self.options.scan_id)))
             .collect();
-        aggregates.sort_by(|left, right| left.directory_identity.cmp(&right.directory_identity));
-        for aggregate in aggregates {
+        aggregates.sort_by(|(_, left), (_, right)| {
+            left.directory_identity.cmp(&right.directory_identity)
+        });
+        for (path, aggregate) in aggregates {
+            // Report the directory path and its coverage before the sink possibly drops the
+            // aggregate; used to record full subtree coverage for the reuse index.
+            sink.note_directory_coverage(&path, &aggregate.coverage);
             sink.push_aggregate(&root_path, aggregate)?;
         }
         Ok(())
@@ -3060,6 +3154,7 @@ mod tests {
             &[ScanRoot::new(root).unwrap()],
             &CancellationToken::new(),
             &BranchOnly,
+            None,
         )
         .unwrap();
 
