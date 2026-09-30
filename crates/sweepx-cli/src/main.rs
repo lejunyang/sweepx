@@ -1460,30 +1460,56 @@ fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunk
         references: candidate.references.clone(),
         entry_id: candidate.entry_id.clone(),
         ancestor_ids: candidate.ancestor_ids.clone(),
-        activity: candidate.activity.clone(),
-        stale_formats: candidate.stale_formats.clone(),
         size_is_logical: candidate.size_is_logical,
-        git: candidate
-            .git
-            .as_ref()
-            .map(|git| junk_cache::StoredGitIgnoreEvidence {
-                status: git.status.clone(),
-                repository_entry_id: git.repository_entry_id.clone(),
-                check: git.check.clone(),
-            }),
-        classification: candidate.classification.clone(),
-        confidence: candidate.confidence.clone(),
-        blockers: candidate.blockers.clone(),
         source_entry: candidate.source_entry.clone(),
     }
 }
 
 /// Converts a cache record back into an in-memory candidate.
 ///
-/// Returns `None` only so it can be used directly in a `filter_map`; the conversion is infallible.
+/// Tool interpretation is rebuilt from this invocation. Git metadata is not retained in the
+/// root facts, so project candidates revert to base confidence with an explicit blocker.
 #[cfg(target_os = "macos")]
-fn stored_candidate_to_junk(stored: junk_cache::StoredJunkCandidate) -> Option<JunkCandidate> {
+fn stored_candidate_to_junk(
+    stored: junk_cache::StoredJunkCandidate,
+    project_rules: &[JunkRule],
+    platform_rules: &[PlatformJunkRule],
+    evidence: &PlatformJunkEvidence,
+) -> Option<JunkCandidate> {
     let source_entry = source_entry_from_stored(&stored);
+    let is_project = project_rules.iter().any(|rule| rule.id == stored.rule_id);
+    let platform_rule = platform_rules.iter().find(|rule| rule.id == stored.rule_id);
+    if !is_project && platform_rule.is_none() {
+        return None;
+    }
+    let mut blockers = Vec::new();
+    let (activity, stale_formats) = match platform_rule {
+        Some(rule) if tool_reported_root_for(&rule.root_kind).is_some() => {
+            let current = source_entry
+                .as_ref()
+                .and_then(|entry| classify_tool_root(rule, entry, evidence));
+            if current.is_none() {
+                blockers.push("tool_evidence_not_revalidated".into());
+            }
+            let formats = source_entry
+                .as_ref()
+                .map(|entry| superseded_format_generations(rule, entry, evidence))
+                .unwrap_or_default();
+            (
+                Some(
+                    current
+                        .unwrap_or(ToolRootActivity::Unknown)
+                        .code()
+                        .to_string(),
+                ),
+                formats,
+            )
+        }
+        _ => (None, Vec::new()),
+    };
+    if is_project {
+        blockers.push("git_evidence_not_revalidated".into());
+    }
     Some(JunkCandidate {
         path: stored.path,
         #[cfg(target_os = "linux")]
@@ -1496,17 +1522,13 @@ fn stored_candidate_to_junk(stored: junk_cache::StoredJunkCandidate) -> Option<J
         references: stored.references,
         entry_id: stored.entry_id,
         ancestor_ids: stored.ancestor_ids,
-        activity: stored.activity,
-        stale_formats: stored.stale_formats,
+        activity,
+        stale_formats,
         size_is_logical: stored.size_is_logical,
-        git: stored.git.map(|git| GitIgnoreEvidence {
-            status: git.status,
-            repository_entry_id: git.repository_entry_id,
-            check: git.check,
-        }),
-        classification: stored.classification,
-        confidence: stored.confidence,
-        blockers: stored.blockers,
+        git: None,
+        classification: is_project.then(|| "known_generated".to_string()),
+        confidence: is_project.then(|| "medium".to_string()),
+        blockers,
         source_entry,
     })
 }
@@ -1636,7 +1658,7 @@ fn run_junk_scan(
     let cached_candidates: Vec<JunkCandidate> = hit_records
         .into_iter()
         .flat_map(junk_cache::StoredJunkRoot::into_candidates)
-        .filter_map(stored_candidate_to_junk)
+        .filter_map(|stored| stored_candidate_to_junk(stored, rules, &platform_rules, &evidence))
         .collect();
     // Caching is macOS-only; other platforms have no restored candidates.
     #[cfg(not(target_os = "macos"))]
@@ -5026,6 +5048,113 @@ fn replay_error_exit_code(error: &sweepx_core::CoreError) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    fn observed_cache_root(root: &Path) -> sweepx_model::ScannedEntry {
+        let context = CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        sweepx_core::scan_for_tui_with_store::<sweepx_core::MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![root.to_path_buf()],
+                state_dir: None,
+            },
+            None,
+        )
+        .unwrap()
+        .summary
+        .roots
+        .remove(0)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_tool_activity_uses_current_evidence_without_replaying_old_claims() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.root_kind == "pip_reported_cache")
+            .unwrap();
+        let entry = observed_cache_root(&root);
+        let current = PlatformJunkEvidence {
+            npm_installations: Vec::new(),
+            by_rule: BTreeMap::from([(
+                rule.id.clone(),
+                PlatformRuleEvidence {
+                    reported_root: Some(root.clone()),
+                    cache_candidates: vec![root.clone()],
+                },
+            )]),
+        };
+        let mut prior = assemble_platform_candidate(&rule, &entry, &BTreeMap::new(), &current);
+        prior.activity = Some("stale".into());
+        prior.stale_formats = vec!["invented-old-format".into()];
+        prior.classification = Some("known_generated_ignored".into());
+        prior.confidence = Some("high".into());
+        let stored = junk_candidate_to_stored(&prior);
+        let json = serde_json::to_value(&stored).unwrap();
+        for field in [
+            "activity",
+            "stale_formats",
+            "git",
+            "classification",
+            "confidence",
+            "blockers",
+        ] {
+            assert!(
+                json.get(field).is_none(),
+                "transient claim persisted: {field}"
+            );
+        }
+        let rules = [rule];
+        let live = stored_candidate_to_junk(stored.clone(), &[], &rules, &current).unwrap();
+        assert_eq!(live.activity.as_deref(), Some("live"));
+        assert!(live.stale_formats.is_empty());
+        assert!(live.confidence.is_none());
+        let failed = PlatformJunkEvidence::default();
+        let unknown = stored_candidate_to_junk(stored, &[], &rules, &failed).unwrap();
+        assert_eq!(unknown.activity.as_deref(), Some("unknown"));
+        assert!(
+            unknown
+                .blockers
+                .iter()
+                .any(|value| value == "tool_evidence_not_revalidated")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_project_facts_do_not_preserve_git_confidence() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let entry = observed_cache_root(&root);
+        let rules = load_project_junk_rules().unwrap();
+        let mut prior = assemble_project_candidate(&rules[0], &entry, &BTreeMap::new());
+        prior.git = Some(GitIgnoreEvidence {
+            status: "ignored".into(),
+            repository_entry_id: prior.entry_id.to_string(),
+            check: "git.check-ignore.v1".into(),
+        });
+        prior.classification = Some("known_generated_ignored".into());
+        prior.confidence = Some("high".into());
+        let restored = stored_candidate_to_junk(
+            junk_candidate_to_stored(&prior),
+            &rules,
+            &[],
+            &PlatformJunkEvidence::default(),
+        )
+        .unwrap();
+        assert!(restored.git.is_none());
+        assert_eq!(restored.classification.as_deref(), Some("known_generated"));
+        assert_eq!(restored.confidence.as_deref(), Some("medium"));
+        assert_eq!(restored.blockers, ["git_evidence_not_revalidated"]);
+        assert_eq!(restored.reclaimable, prior.reclaimable);
+        assert_eq!(restored.source_entry, prior.source_entry);
+    }
 
     #[test]
     fn system_root_selection_reuses_the_classifiers_tool_probe() {

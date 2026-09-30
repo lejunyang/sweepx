@@ -2,7 +2,8 @@
 //!
 //! # What is stored
 //!
-//! For every scan root we persist the exact classified candidates it produced together with the
+//! For every scan root we persist its filesystem and rule-match facts (without tool activity or
+//! Git confidence) together with the
 //! FSEvents event id captured *before* the scan. On the next run the root is only reused when
 //! FSEvents reports no change at or below it since that id; any event under the root, a
 //! dropped/lost-history signal, or a root identity change invalidates it and it is rescanned.
@@ -36,7 +37,7 @@ use sweepx_core::{FsEventId, events_since};
 use sweepx_model::{ByteValue, ScanEntryId};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v3";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v4";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -56,7 +57,7 @@ pub struct StoredJunkRoot {
     candidates: Vec<StoredJunkCandidate>,
 }
 
-/// Round-trippable, fully owned copy of the CLI's `JunkCandidate`.
+/// Validated filesystem and rule-match facts, excluding transient tool and Git interpretations.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredJunkCandidate {
     pub path: String,
@@ -68,25 +69,11 @@ pub struct StoredJunkCandidate {
     pub references: Vec<String>,
     pub entry_id: ScanEntryId,
     pub ancestor_ids: BTreeSet<ScanEntryId>,
-    pub activity: Option<String>,
-    pub stale_formats: Vec<String>,
     pub size_is_logical: bool,
-    pub git: Option<StoredGitIgnoreEvidence>,
-    pub classification: Option<String>,
-    pub confidence: Option<String>,
-    pub blockers: Vec<String>,
     /// The source scanned row, restored so a cached candidate can be bulk-trashed with the same
     /// identity revalidation as a fresh one. `None` for records that never carried a row.
     #[serde(default)]
     pub source_entry: Option<sweepx_model::ScannedEntry>,
-}
-
-/// Owned form of `GitIgnoreEvidence`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StoredGitIgnoreEvidence {
-    pub status: String,
-    pub repository_entry_id: String,
-    pub check: String,
 }
 
 impl StoredJunkRoot {
@@ -435,13 +422,7 @@ mod tests {
             references: Vec::new(),
             entry_id: ScanEntryId::for_scan_ordinal(&sweepx_model::ScanId::new("test"), 1).unwrap(),
             ancestor_ids: BTreeSet::new(),
-            activity: None,
-            stale_formats: Vec::new(),
             size_is_logical: true,
-            git: None,
-            classification: None,
-            confidence: None,
-            blockers: Vec::new(),
             source_entry: None,
         }
     }

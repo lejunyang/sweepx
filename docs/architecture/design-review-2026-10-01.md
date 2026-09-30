@@ -30,7 +30,7 @@
 1. **规则系统统一（部分落地）。** `sweepx-catalog` / `sweepx-cleaner-vm` 与 CLI 的 `project-junk-rules.json` / `platform-junk-rules.json` 各自承担发现、匹配或解释。项目规则已迁入 `sweepx-catalog::junk`，由 `sweepx-core::junk::JunkService` 统一校验并调用已有 cleaner VM；CLI 不再维护另一套项目匹配逻辑。规则字节、机器 ID、风险和匹配行为保持一致，输入规模有界。平台规则发现与候选解释暂时仍在 CLI，需要继续扩展这个服务：输入扫描事实与本次探测证据，输出候选、依据、风险和 blockers。先统一内部类型与评估入口，不急于新增插件框架。
 2. **缓存不止一种。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，尚缺统一字节预算及逐根淘汰。不能因为结果行少就认为内存也少。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
-4. **缓存的活动状态解释。** 文件系统未变化不代表工具配置或进程活动未变化。整根结果中的 activity/Git 解释仍需要与最新本次探测事实分层，后续应缓存扫描事实，再重新分类；不要把上次的 stale 当成本次删除授权。
+4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
 5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；junk 当前仍是收集完再拼报告。`ScanSink` 已有事件入口，但这不是可直接订阅的、带背压的 junk 会话接口。
 
 ## 支撑后续 TUI 的目标接口
