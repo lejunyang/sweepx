@@ -1591,6 +1591,10 @@ fn run_junk_scan(
         .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
         .collect();
 
+    // Capture before cache validation and traversal: writes during the scan must invalidate the next reuse.
+    #[cfg(target_os = "macos")]
+    let scan_event_id = sweepx_core::current_event_id();
+
     // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
     #[cfg(target_os = "macos")]
     let (hit_records, miss_indexes): (Vec<junk_cache::StoredJunkRoot>, Vec<usize>) =
@@ -1630,16 +1634,13 @@ fn run_junk_scan(
         .collect();
 
     // Build the subtree-reuse provider for the roots being scanned. On a cache-validated run the
-    // scanner skips whole unchanged child subtrees through it.
+    // scanner reuses unchanged file lengths while traversing directories with current identities.
     #[cfg(target_os = "macos")]
     let subtree_provider = subtree_provider::SubtreeCacheProvider::prepare(
         cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
         &miss_roots,
     );
 
-    // Capture before traversal: writes during the scan must invalidate the next reuse.
-    #[cfg(target_os = "macos")]
-    let scan_event_id = sweepx_core::current_event_id();
     let classified = if miss_roots.is_empty() {
         None
     } else {
@@ -1752,34 +1753,9 @@ fn run_junk_scan(
         }
         let _ = junk_cache::prune(cache, &canonical_roots);
 
-        // Write the per-device subtree index from every freshly scanned candidate, so unchanged
-        // child subtrees can be skipped on the next run even when this root itself is rescanned.
+        // Persist file lengths only. Candidate rows cannot reconstruct subtree accounting or
+        // current scan identities; directories are always traversed on a root-cache miss.
         if let Some(scan) = &scan {
-            let aggregate_by_id: BTreeMap<ScanEntryId, &sweepx_model::DirectoryAggregate> = scan
-                .scan
-                .summary
-                .aggregates
-                .iter()
-                .map(|aggregate| {
-                    (
-                        ScanEntryId::from_loaded(aggregate.directory_identity.clone()),
-                        aggregate,
-                    )
-                })
-                .collect();
-            let mut directories = Vec::new();
-            for candidate in &fresh_candidates {
-                if let (Some(entry), Some(aggregate)) = (
-                    candidate.source_entry.as_ref(),
-                    aggregate_by_id.get(&candidate.entry_id),
-                ) {
-                    directories.push(junk_cache::StoredSubtreeDirectory {
-                        entry: entry.clone(),
-                        rule_id: candidate.rule_id.clone(),
-                        aggregate: (*aggregate).clone(),
-                    });
-                }
-            }
             // Convert the scanner's captured child listings into the persisted form.
             let listings: BTreeMap<String, junk_cache::StoredDirListing> = scan
                 .dir_listings
@@ -1801,7 +1777,6 @@ fn run_junk_scan(
                     scan_event_id,
                     scan.covered_paths.clone(),
                     listings,
-                    directories,
                 )
             });
             if let Some(Err(error)) = store_result {

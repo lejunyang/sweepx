@@ -1,18 +1,8 @@
 //! CLI implementation of [`SubtreeReuse`], backed by the per-device subtree index and FSEvents.
 //!
-//! # How a subtree is validated
-//!
-//! At construction the provider groups the roots about to be scanned by device, loads each
-//! device's [`StoredSubtreeIndex`], and performs exactly one FSEvents drain per device (from the
-//! index's event id) to learn which paths changed. During the walk, `reuse_subtree(path)` answers
-//! from that in-memory evidence: a directory is reused only when its device has an index, the
-//! drain found no event at or under the path and reported no global rescan. The stored candidate
-//! directories under the path are then returned and pushed through the normal sink lifecycle.
-//!
-//! # Failure direction
-//!
-//! A missing index, an FSEvents drain error/timeout, a must-rescan flag, or any event touching
-//! the path all produce `None`, so the directory is traversed. Nothing is skipped on uncertainty.
+//! One event-history drain per device indexes invalidations for cached file lengths. Directories
+//! are always traversed so current identities, rule markers and ancestor accounting are rebuilt.
+//! Missing history or uncertain coverage falls back to live metadata inspection.
 
 #![cfg(target_os = "macos")]
 
@@ -22,17 +12,17 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sweepx_core::{FsEventId, PlannedEntry, ReusedDirectory, SubtreeReuse, events_since};
+use sweepx_core::{FsEventId, PlannedEntry, SubtreeReuse, events_since};
 use sweepx_platform::CachedFileEntry;
 
-use crate::junk_cache::{self, StoredDirListing, StoredSubtreeDirectory, StoredSubtreeIndex};
+use crate::junk_cache::{self, StoredDirListing, StoredSubtreeIndex};
 
 /// Bounded wall time for the per-device FSEvents drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-device validated state used to answer reuse queries.
 struct DeviceState {
-    /// Stored index: carries coverage of every scanned directory and the candidate directories.
+    /// Stored index: carries directory coverage and cached file lengths.
     index: StoredSubtreeIndex,
     /// Raw absolute paths FSEvents reported since the index event id.
     changed: BTreeSet<PathBuf>,
@@ -97,65 +87,23 @@ impl SubtreeCacheProvider {
         }
     }
 
-    /// Persists a fresh subtree index for the device of `scan_root` from the candidate rows the
-    /// scan produced. A write failure is surfaced so the caller can log it; it never fails the run.
+    /// Persists directory coverage and file lengths for the device of `scan_root`.
+    /// A write failure is surfaced so the caller can log it; it never fails the run.
     pub fn store_index(
         &self,
         scan_root: &Path,
         since_event_id: FsEventId,
         covered: BTreeMap<String, bool>,
         listings: BTreeMap<String, StoredDirListing>,
-        directories: Vec<StoredSubtreeDirectory>,
     ) -> std::io::Result<()> {
         let device = device_key(scan_root)
             .ok_or_else(|| std::io::Error::other("could not determine device for subtree index"))?;
-        let index = StoredSubtreeIndex::new(
-            device.clone(),
-            since_event_id,
-            covered,
-            listings,
-            directories,
-        );
+        let index = StoredSubtreeIndex::new(device.clone(), since_event_id, covered, listings);
         junk_cache::write_subtree_index(&self.cache_dir, &index)
     }
 }
 
 impl SubtreeReuse for SubtreeCacheProvider {
-    fn reuse_subtree(&self, dir_path: &Path) -> Option<Vec<ReusedDirectory>> {
-        let device = device_key(dir_path)?;
-        let state = self.devices.get(&device)?;
-        if state.unusable {
-            return None;
-        }
-        let path_text = dir_path.display().to_string();
-        // The index must have recorded this exact directory as fully covered. A directory absent
-        // from that record (e.g. created after the prior scan) cannot be skipped.
-        if !state.index.is_covered(&path_text) {
-            return None;
-        }
-        let prefix = format!("{path_text}/");
-        // Keep ancestor events even when descendants also changed. Coalesced events can cover
-        // additional sibling changes, so reducing history to leaves silently drops invalidations.
-        if overlaps_changes(&state.changed, dir_path) {
-            return None;
-        }
-
-        // Return every stored candidate directory at or under the path. A covered subtree with no
-        // candidates returns Some(empty), which is a verified skip.
-        let mut reused = Vec::new();
-        for stored in state.index.directories() {
-            let candidate_path = &stored.entry.display_path;
-            if candidate_path == &path_text || candidate_path.starts_with(&prefix) {
-                reused.push(ReusedDirectory {
-                    entry: stored.entry.clone(),
-                    rule_id: stored.rule_id.clone(),
-                    aggregate: stored.aggregate.clone(),
-                });
-            }
-        }
-        Some(reused)
-    }
-
     fn plan_entries(
         &self,
         dir_path: &Path,

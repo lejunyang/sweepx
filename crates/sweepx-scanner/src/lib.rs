@@ -168,11 +168,16 @@ pub trait ScanSink {
     /// precondition for reusing that subtree later. Default no-op for sinks that do not cache.
     fn note_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
-    /// Records the native name of an unchanged file supplied from cache, under its parent id.
+    /// Records an unchanged cached file under its current parent, including its next-generation listing.
     ///
     /// The classified sink uses it to keep the parent's file-marker set complete for marker-based
     /// rules; no row is buffered. Default no-op for sinks that do not classify.
-    fn note_cached_file_marker(&mut self, _parent_id: &ScanEntryId, _name: &NativeName) {}
+    fn note_cached_file(
+        &mut self,
+        _parent_id: &ScanEntryId,
+        _file: &sweepx_platform::CachedFileEntry,
+    ) {
+    }
 
     /// Number of times evidence was lost because a retention cap was reached.
     ///
@@ -221,17 +226,6 @@ pub struct DirListing {
     pub dirs: BTreeSet<String>,
 }
 
-/// One directory reused wholesale from a prior scan.
-///
-/// Carries the directory's scanned row, the rule id that classifies it as junk (only candidate
-/// directories appear), and its already-computed aggregate. The scanner pushes these through the
-/// normal sink lifecycle, so the classified sink makes the same decision it would on a live row.
-pub struct ReusedDirectory {
-    pub entry: ScannedEntry,
-    pub rule_id: String,
-    pub aggregate: DirectoryAggregate,
-}
-
 /// One enumerated child about to be inspected, resolved against the cache before any syscall.
 #[derive(Debug)]
 pub enum PlannedEntry {
@@ -241,16 +235,11 @@ pub enum PlannedEntry {
     Inspect(sweepx_platform::DirectoryEntryRecord),
 }
 
-/// Supplies whole subtrees from a validated cache so the scanner can skip traversing them.
+/// Supplies validated file metadata while directories remain live-enumerated.
 ///
-/// Called when the scanner has identified a child directory but before it opens the subtree.
-/// Returning `Some` means the path was verified unchanged: the scanner pushes the returned
-/// directories (possibly none for a clean subtree with no candidates) and never recurses. `None`
-/// means the cache cannot vouch for it, so it is traversed normally. Every uncertainty must
-/// produce `None`; this never causes a directory to be skipped on weak evidence.
+/// Whole-subtree skipping cannot use candidate rows alone: it would lose ancestor accounting,
+/// current scan identities and parent markers needed by classification.
 pub trait SubtreeReuse: Sync {
-    fn reuse_subtree(&self, dir_path: &Path) -> Option<Vec<ReusedDirectory>>;
-
     /// Plans the inspection of a directory's enumerated children before any are stated.
     ///
     /// Returns a vector aligned entry-for-entry with `children`: each is reused from cache (only
@@ -721,14 +710,27 @@ impl ScanSink for CollectingScanSink<'_> {
         }
     }
 
-    fn note_cached_file_marker(&mut self, parent_id: &ScanEntryId, name: &NativeName) {
+    fn note_cached_file(
+        &mut self,
+        parent_id: &ScanEntryId,
+        file: &sweepx_platform::CachedFileEntry,
+    ) {
         if self.classifier.is_some()
-            && let Some(marker) = native_basename_marker(name)
+            && let Some(marker) = native_basename_marker(&file.file_name)
         {
             self.file_markers
                 .entry(parent_id.clone())
                 .or_default()
-                .insert(marker);
+                .insert(marker.clone());
+            // Carry validated lengths into the next generation. Dropping reused rows here makes
+            // every other warm scan cold again even when the filesystem never changes.
+            if let Some(parent) = file.path.parent() {
+                self.dir_listings
+                    .entry(parent.display().to_string())
+                    .or_default()
+                    .files
+                    .insert(marker, file.logical_bytes);
+            }
         }
     }
 }
@@ -1760,25 +1762,6 @@ where
                                 }
                                 opened_child_permits -= 1;
                                 let metadata = opened.metadata;
-                                // Subtree reuse: if a validated cache can vouch for this whole
-                                // child directory, push its stored directories and skip the mount
-                                // checks, state creation and frontier push entirely.
-                                if let Some(reused) = reuse
-                                    .and_then(|provider| provider.reuse_subtree(&metadata.path))
-                                {
-                                    for dir in reused {
-                                        sink.push_progress(
-                                            &root_path,
-                                            ProgressEvent::EntryObserved {
-                                                path: dir.entry.display_path.clone().into(),
-                                                kind: ObjectType::Directory,
-                                            },
-                                        )?;
-                                        sink.push_entry(&root_path, dir.entry)?;
-                                        sink.push_aggregate(&root_path, dir.aggregate)?;
-                                    }
-                                    continue;
-                                }
                                 let same_mount = if root_metadata.mount_identity.is_none()
                                     || metadata.mount_identity.is_none()
                                 {
@@ -1925,10 +1908,7 @@ where
                                     &cached.path,
                                     cached.logical_bytes,
                                 );
-                                sink.note_cached_file_marker(
-                                    &current.identity.entry_id,
-                                    &cached.file_name,
-                                );
+                                sink.note_cached_file(&current.identity.entry_id, &cached);
                             }
                             WalkEntry::File(metadata) => {
                                 let identity = scan_object_identity(
@@ -2345,11 +2325,6 @@ impl EvidenceAccumulator {
         };
     }
 
-    fn add_known(&mut self, value: u128) {
-        // Reuse the ByteValue merge rules for an exact, known quantity.
-        self.add(&known_u128(value));
-    }
-
     fn into_value(self, complete: bool) -> sweepx_platform::ByteValue {
         match self {
             Self::Known(value) if complete => known_u128(value),
@@ -2443,10 +2418,8 @@ fn propagate_file_entry(
 
 /// Folds an unchanged regular file's cached size into every ancestor state.
 ///
-/// Mirrors `propagate_file_entry` for a file taken from cache: counts the recursive/direct child
-/// and adds the logical size to both the apparent and reclaimable accumulators. Cached files have
-/// no hard-link key, but only regular files (not hard-linked) are eligible for reuse, so this is
-/// equivalent to the single-link live path.
+/// The cache carries logical length only, not physical allocation or hard-link identity.
+/// Propagate those missing fields as unknown; logical length is never a reclaimable estimate.
 fn propagate_cached_file(
     states: &mut BTreeMap<PathBuf, DirectoryState>,
     path: &Path,
@@ -2456,7 +2429,13 @@ fn propagate_cached_file(
         if let Some(state) = states.get_mut(&ancestor) {
             state.note_recursive_entry();
             state.apparent_logical_bytes += logical;
-            state.reclaimable_bytes.add_known(logical);
+            state.unique_logical_bytes = None;
+            state.allocated_bytes = EvidenceAccumulator::Unknown {
+                reason: ReasonCode::UnknownIdentity,
+            };
+            state.reclaimable_bytes = EvidenceAccumulator::Unknown {
+                reason: ReasonCode::UnknownIdentity,
+            };
             if path.parent() == Some(ancestor.as_path()) {
                 state.note_direct_child();
             }
@@ -4209,6 +4188,73 @@ mod tests {
             aggregate.potentially_reclaimable_bytes,
             lower_bound_u128(11, ReasonCode::UnknownLayout)
         );
+    }
+
+    #[test]
+    fn cached_files_keep_markers_and_survive_the_next_generation() {
+        struct NoCandidates;
+        impl JunkClassifier for NoCandidates {
+            fn classify(
+                &self,
+                _: &ScannedEntry,
+                _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                None
+            }
+        }
+        let mut sink =
+            CollectingScanSink::new_classified(ScanResourceLimits::default(), &NoCandidates);
+        let parent = ScanEntryId::from_loaded("current-parent".into());
+        let root = test_path("root");
+        let file = sweepx_platform::CachedFileEntry {
+            path: root.join("Cargo.toml"),
+            file_name: test_native_name("Cargo.toml"),
+            logical_bytes: 123,
+        };
+        sink.note_cached_file(&parent, &file);
+        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert_eq!(
+            sink.finish_classified().dir_listings[&root.display().to_string()].files["Cargo.toml"],
+            123
+        );
+    }
+
+    #[test]
+    fn cached_logical_size_never_claims_unique_allocated_or_reclaimable_bytes() {
+        let root = test_path("root");
+        let child = root.join("nested");
+        let mut states = BTreeMap::from([
+            (
+                root.clone(),
+                DirectoryState::new(ScanEntryId::from_loaded("root".into())),
+            ),
+            (
+                child.clone(),
+                DirectoryState::new(ScanEntryId::from_loaded("child".into())),
+            ),
+        ]);
+        propagate_cached_file(&mut states, &child.join("sparse-or-linked"), 123);
+        for (path, state) in states {
+            let aggregate = state.into_aggregate(&ScanId::new("test"));
+            assert_eq!(aggregate.apparent_logical_bytes, known_u128(123));
+            assert_eq!(aggregate.recursive_entry_count, known_count(1));
+            assert_eq!(
+                aggregate.direct_child_count,
+                known_count(u128::from(path == child))
+            );
+            assert_eq!(
+                aggregate.unique_logical_bytes,
+                unknown_u128(ReasonCode::UnknownIdentity)
+            );
+            assert_eq!(
+                aggregate.filesystem_reported_allocated_bytes,
+                unknown_u128(ReasonCode::UnknownIdentity)
+            );
+            assert_eq!(
+                aggregate.potentially_reclaimable_bytes,
+                unknown_u128(ReasonCode::UnknownIdentity)
+            );
+        }
     }
 
     #[test]

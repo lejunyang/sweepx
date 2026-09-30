@@ -33,10 +33,10 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use sweepx_core::current_event_id;
 use sweepx_core::{FsEventId, events_since};
-use sweepx_model::{ByteValue, DirectoryAggregate, ScanEntryId, ScannedEntry};
+use sweepx_model::{ByteValue, ScanEntryId};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v2";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v3";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -44,6 +44,8 @@ const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredJunkRoot {
     schema: String,
+    /// Classification data changes invalidate a report even when the filesystem is unchanged.
+    rules_digest: String,
     /// Canonical absolute path of the root at capture; verified before reuse.
     root: String,
     /// Native identity of the root directory at capture.
@@ -97,6 +99,7 @@ impl StoredJunkRoot {
         let metadata = fs::symlink_metadata(canonical_root)?;
         Ok(Self {
             schema: STORED_SCHEMA.to_string(),
+            rules_digest: rules_digest().to_string(),
             root: canonical_root.display().to_string(),
             root_device: metadata.dev().to_string(),
             root_inode: metadata.ino().to_string(),
@@ -119,7 +122,10 @@ impl StoredJunkRoot {
 
     /// Checks the root binding independently of event history.
     fn matches_root(&self, canonical_root: &Path) -> bool {
-        if self.schema != STORED_SCHEMA || self.root != canonical_root.display().to_string() {
+        if self.schema != STORED_SCHEMA
+            || self.rules_digest != rules_digest()
+            || self.root != canonical_root.display().to_string()
+        {
             return false;
         }
         let Ok(metadata) = fs::symlink_metadata(canonical_root) else {
@@ -134,6 +140,17 @@ impl StoredJunkRoot {
     fn is_current(&self, root: &Path) -> bool {
         validate_records(&[root.to_path_buf()], vec![Some(self.clone())])[0].is_some()
     }
+}
+
+fn rules_digest() -> &'static str {
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DIGEST.get_or_init(|| {
+        let mut hash = Sha256::new();
+        hash.update(super::PROJECT_JUNK_RULES_JSON.as_bytes());
+        hash.update([0]);
+        hash.update(super::PLATFORM_JUNK_RULES_JSON.as_bytes());
+        format!("{:x}", hash.finalize())
+    })
 }
 
 /// Loads and validates all roots with one historical drain, rather than one wait per root.
@@ -273,12 +290,12 @@ fn temp_path(destination: &Path) -> PathBuf {
 }
 
 /// Schema marker for the per-device subtree index.
-const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v2";
+const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v3";
 
 /// Per-device index captured after a classified scan.
 ///
-/// It stores the candidate directories (so they re-enter the sink lifecycle when reused) and, for
-/// file-level reuse, the captured child listing of every covered directory. The `since_event_id`
+/// It stores the captured child listing of every covered directory for file-level reuse.
+/// The `since_event_id`
 /// plus one FSEvents drain lets the provider decide precisely which files changed: unchanged
 /// files keep their recorded size with no syscall.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -289,13 +306,12 @@ pub struct StoredSubtreeIndex {
     since_event_id: FsEventId,
     /// Canonical path → fully covered, for every directory the scan completed.
     ///
-    /// This is the record that a non-candidate subtree existed and was scanned completely, which is
-    /// what lets it be skipped later even though it has no candidate entry of its own.
+    /// Only a complete directory listing can supply cached file lengths; directories themselves
+    /// are still traversed to rebuild classification markers and current scan identities.
     covered: BTreeMap<String, bool>,
     /// Canonical directory path → its captured file/directory children, for file-level reuse.
     #[serde(default)]
     listings: BTreeMap<String, StoredDirListing>,
-    directories: Vec<StoredSubtreeDirectory>,
 }
 
 /// Persisted child listing of one directory.
@@ -309,21 +325,13 @@ pub struct StoredDirListing {
     pub dirs: BTreeSet<String>,
 }
 
-/// One candidate directory in a subtree index.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StoredSubtreeDirectory {
-    pub entry: ScannedEntry,
-    pub rule_id: String,
-    pub aggregate: DirectoryAggregate,
-}
-
 impl StoredSubtreeIndex {
+    /// Captures complete listings with the event cursor taken before their validation and scan.
     pub fn new(
         device: String,
         since_event_id: FsEventId,
         covered: BTreeMap<String, bool>,
         listings: BTreeMap<String, StoredDirListing>,
-        directories: Vec<StoredSubtreeDirectory>,
     ) -> Self {
         Self {
             schema: SUBTREE_SCHEMA.to_string(),
@@ -331,10 +339,10 @@ impl StoredSubtreeIndex {
             since_event_id,
             covered,
             listings,
-            directories,
         }
     }
 
+    /// Returns the earliest event cursor the next validation must cover.
     pub fn since_event_id(&self) -> FsEventId {
         self.since_event_id
     }
@@ -347,10 +355,6 @@ impl StoredSubtreeIndex {
     /// Captured child listing for a directory, if one was stored.
     pub fn listing(&self, path: &str) -> Option<&StoredDirListing> {
         self.listings.get(path)
-    }
-
-    pub fn directories(&self) -> &[StoredSubtreeDirectory] {
-        &self.directories
     }
 }
 
@@ -448,6 +452,9 @@ mod tests {
         let mut stored = StoredJunkRoot::capture(&cache, vec![], 42).unwrap();
         assert_eq!(stored.since_event_id, 42);
         assert!(stored.matches_root(&cache));
+        stored.rules_digest = "old-rules".into();
+        assert!(!stored.matches_root(&cache));
+        stored.rules_digest = rules_digest().into();
         stored.schema = "sweepx.junk-cache/v1".into();
         assert!(!stored.matches_root(&cache));
         fs::remove_dir_all(cache).unwrap();
@@ -464,6 +471,59 @@ mod tests {
             Path::new("/root/cache-other"),
             Path::new("/root/cache")
         ));
+    }
+
+    // A manual native microbenchmark; excluded from normal CI because event daemon latency is
+    // host-dependent. Both paths validate exactly the same roots and assert identical hits.
+    #[test]
+    #[ignore = "native FSEvents timing experiment; run explicitly with --nocapture"]
+    fn benchmark_batched_root_validation() {
+        let fixture = temp_cache();
+        let roots: Vec<_> = (0..24)
+            .map(|index| {
+                let root = fixture.join(format!("root-{index}"));
+                fs::create_dir(&root).unwrap();
+                root
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let records = loop {
+            let cursor = current_event_id();
+            let records: Vec<_> = roots
+                .iter()
+                .map(|root| Some(StoredJunkRoot::capture(root, vec![], cursor).unwrap()))
+                .collect();
+            if validate_records(&roots, records.clone())
+                .iter()
+                .all(Option::is_some)
+            {
+                break records;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture history did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let serial: Vec<_> = roots
+                .iter()
+                .zip(&records)
+                .map(|(root, record)| record.as_ref().unwrap().is_current(root))
+                .collect();
+            let serial_elapsed = started.elapsed();
+            let started = std::time::Instant::now();
+            let batch: Vec<_> = validate_records(&roots, records.clone())
+                .iter()
+                .map(Option::is_some)
+                .collect();
+            let batch_elapsed = started.elapsed();
+            assert_eq!(serial, batch);
+            assert!(batch.iter().all(|hit| *hit));
+            eprintln!("24 unchanged roots: serial={serial_elapsed:?}, batch={batch_elapsed:?}");
+        }
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

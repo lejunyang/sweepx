@@ -51,11 +51,11 @@ use sweepx_protocol::{
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use sweepx_scanner::JunkClassifier;
 pub use sweepx_scanner::ScanSummary;
+pub use sweepx_scanner::SubtreeReuse;
 pub use sweepx_scanner::{DirListing, PlannedEntry};
 #[cfg(target_os = "macos")]
 pub use sweepx_scanner::{FsEventId, current_event_id, events_since};
 use sweepx_scanner::{ProgressEvent, ScanError};
-pub use sweepx_scanner::{ReusedDirectory, SubtreeReuse};
 use sweepx_tui::{
     DetailRescanFailure as TuiDetailRescanFailure, DetailRescanProgress as TuiDetailRescanProgress,
     DetailRescanProvider, DetailRescanReason, DetailRescanRequest as TuiDetailRescanRequest,
