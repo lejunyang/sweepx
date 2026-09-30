@@ -467,6 +467,6 @@ revalidated immediately before any Trash operation.
 
 On macOS, `junk` validates cached roots in one FSEvents batch instead of waiting separately for every root. A pre-scan cursor preserves changes during traversal for the next refresh. Incomplete scans are not saved as reusable root records. Older cache schemas trigger a fresh scan.
 
-`junk --system` shares one invocation-scoped tool-discovery snapshot between root selection and classification. Cache discovery skips npm/node version probes; the separate tool inventory still includes versions.
+`junk --system` shares one invocation-scoped snapshot between root selection, classification and tool inventory. Reporting starts no second round of probes. Tool subprocesses share a 10-second budget with a 2-second timeout, a 64 KiB stdout limit per probe, and at most 64 launch attempts. Unavailable, cancelled, oversized or timed-out answers remain unknown; missing inventory fields are null. Explicit project-root scans do not probe unrelated npm installations.
 
 On a root-cache miss, directories are enumerated again to reconstruct current identities and classification markers. File-cache hits reuse logical lengths only; allocation, hard-link uniqueness and reclaimable space remain unknown without that metadata. Old candidate rows never justify skipping an entire subtree.

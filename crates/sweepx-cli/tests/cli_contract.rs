@@ -853,6 +853,37 @@ fn junk_temp_cleanup_requires_system_discovery() {
     cmd.assert().code(2);
 }
 
+#[cfg(unix)]
+#[test]
+fn project_junk_scan_does_not_launch_npm_inventory() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("project");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("Cargo.toml"), b"[workspace]").unwrap();
+    let shim = fixture.path().join("npm");
+    let sentinel = fixture.path().join("npm-was-launched");
+    fs::write(
+        &shim,
+        b"#!/bin/sh\n: > \"$SWEEPX_PROBE_SENTINEL\"\nprintf '/unrelated/cache\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = cli_command();
+    command
+        .env("PATH", fixture.path())
+        .env("SWEEPX_PROBE_SENTINEL", &sentinel)
+        .args(["--format", "json", "junk"])
+        .arg(&root);
+    let output = command.assert().success().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["toolInstallations"], json!([]));
+    assert!(
+        !sentinel.exists(),
+        "project scanning must not invoke unrelated npm"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn junk_scan_reports_only_marker_bound_project_artifacts() {

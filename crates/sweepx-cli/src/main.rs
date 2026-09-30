@@ -21,7 +21,8 @@ mod subtree_provider;
 mod tcc_access;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
-mod tool_installations;
+use sweepx_core::tools as tool_installations;
+use sweepx_core::tools::{ProbeLimits, ProbeRunner};
 mod trash_command;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -204,6 +205,7 @@ enum Commands {
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     Junk {
         /// Scan conservative platform cache roots; conflicts with explicit roots.
+        /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
         #[arg(long)]
         system: bool,
         /// Move approved stale Linux temporary objects to a recoverable quarantine.
@@ -1255,25 +1257,60 @@ struct PlatformRuleEvidence {
 /// Owned, rule-id-keyed table of precomputed platform evidence.
 #[derive(Default)]
 struct PlatformJunkEvidence {
+    npm_installations: Vec<tool_installations::ToolInstallation>,
     by_rule: BTreeMap<String, PlatformRuleEvidence>,
 }
 
 impl PlatformJunkEvidence {
     /// Resolves the expensive inputs for every rule once, before the walk begins.
     fn precompute(rules: &[PlatformJunkRule]) -> Self {
-        Self::precompute_with(rules, |rule| {
-            tool_reported_root_for(&rule.root_kind).and_then(|tool| tool.resolve())
-        })
+        let mut runner = ProbeRunner::new(ProbeLimits::default(), CancellationToken::new());
+        let mut reported = BTreeMap::new();
+        // Resolve non-npm roots first. npm's multi-installation inventory consumes the rest of
+        // the same budget, and supplies both its cache candidates and the PATH default answer.
+        for rule in rules
+            .iter()
+            .filter(|rule| rule.root_kind != "npm_reported_cache")
+        {
+            if let Some(tool) = tool_reported_root_for(&rule.root_kind) {
+                reported.insert(rule.id.clone(), tool.resolve(&mut runner));
+            }
+        }
+        let npm_installations = if rules
+            .iter()
+            .any(|rule| rule.root_kind == "npm_reported_cache")
+        {
+            tool_installations::discover_npm_installations(&mut runner)
+        } else {
+            Vec::new()
+        };
+        let npm_root = npm_installations
+            .iter()
+            .find(|installation| installation.is_path_default)
+            .and_then(|installation| installation.cache.clone());
+        Self::precompute_with(
+            rules,
+            |rule| {
+                if rule.root_kind == "npm_reported_cache" {
+                    npm_root.clone()
+                } else {
+                    reported.get(&rule.id).cloned().flatten()
+                }
+            },
+            npm_installations,
+        )
     }
 
     fn precompute_with(
         rules: &[PlatformJunkRule],
         mut resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
+        npm_installations: Vec<tool_installations::ToolInstallation>,
     ) -> Self {
         let mut by_rule = BTreeMap::new();
         for rule in rules {
             let reported_root = resolve(rule);
-            let cache_candidates = tool_cache_candidates_with_root(rule, reported_root.as_deref());
+            let cache_candidates =
+                tool_cache_candidates_with_root(rule, reported_root.as_deref(), &npm_installations);
             by_rule.insert(
                 rule.id.clone(),
                 PlatformRuleEvidence {
@@ -1282,7 +1319,10 @@ impl PlatformJunkEvidence {
                 },
             );
         }
-        Self { by_rule }
+        Self {
+            by_rule,
+            npm_installations,
+        }
     }
 
     /// Precomputed evidence for one rule, or `None` if the rule set this snapshot was built from
@@ -1965,16 +2005,9 @@ fn run_junk_scan(
     // When npm is in scope, report every installation discovered: the manager controlling each,
     // its version, which copy PATH defaults to, and the measured last activity of its cache. This
     // is what lets a reader see multiple npm copies instead of only the resolver's answer.
-    let npm_installations: Vec<tool_installations::ToolInstallation> = if load_platform_junk_rules()
-        .is_ok_and(|rules| {
-            rules
-                .iter()
-                .any(|rule| rule.root_kind == "npm_reported_cache")
-        }) {
-        tool_installations::discover_npm_installations()
-    } else {
-        Vec::new()
-    };
+    // Inventory is the same invocation snapshot used by classification, never a second
+    // round of subprocesses after scanning. Explicit project-only scans have no tool probes.
+    let npm_installations = &evidence.npm_installations;
     if format != OutputFormat::Human {
         // All-cache runs (no fresh scan) are treated as ok; otherwise use the fresh scan's status.
         let scan_status_ok = scan
@@ -4381,7 +4414,7 @@ impl ToolReportedRoot {
     /// A missing tool, a nonzero exit, empty output, or a relative path all yield `None`: this
     /// is discovery, so an unusable answer must drop the rule rather than fall back to a guess.
     /// Only the first line is used, because a tool may add warnings after it.
-    fn resolve(&self) -> Option<PathBuf> {
+    fn resolve(&self, runner: &mut ProbeRunner) -> Option<PathBuf> {
         // On Windows many of these tools ship only as a `.cmd`/`.bat` shim, and `Command::new` does
         // not apply `PATHEXT`, so the bare name fails even though the shell finds it. Measured: npm
         // on this host is `npm.ps1` plus `npm.cmd`, and without this the live npm cache was reported
@@ -4398,11 +4431,8 @@ impl ToolReportedRoot {
         let spellings: Vec<String> = vec![self.program.to_string()];
 
         for spelling in spellings {
-            let Ok(output) = std::process::Command::new(&spelling)
-                .args(self.arguments)
-                .stdin(std::process::Stdio::null())
-                .output()
-            else {
+            let mut command = std::process::Command::new(&spelling);
+            let Ok(output) = runner.run(command.args(self.arguments)) else {
                 continue;
             };
             if !output.status.success() {
@@ -4616,6 +4646,7 @@ fn matches_structural_fingerprint(root: &Path, fingerprint: &StructuralFingerpri
 fn tool_cache_candidates_with_root(
     rule: &PlatformJunkRule,
     reported_root: Option<&Path>,
+    installations: &[tool_installations::ToolInstallation],
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     // Deduplication asks the filesystem, not the string. `%LOCALAPPDATA%\pip\Cache` and
@@ -4651,8 +4682,10 @@ fn tool_cache_candidates_with_root(
     // non-default npm was explicitly configured to use would be missed. Ask every discovered
     // installation for its own cache; the marker/fingerprint checks below still verify each.
     if rule.root_kind == "npm_reported_cache" {
-        for cache in tool_installations::discover_npm_cache_roots() {
-            push(cache, &mut candidates);
+        for installation in installations {
+            if let Some(cache) = &installation.cache {
+                push(cache.clone(), &mut candidates);
+            }
         }
     }
     // Defaults are relative to the platform's per-user cache base. On Windows that is
@@ -5106,10 +5139,14 @@ mod tests {
             .unwrap();
         let rules = vec![rule];
         let mut probes = 0;
-        let evidence = PlatformJunkEvidence::precompute_with(&rules, |_| {
-            probes += 1;
-            Some(cache.clone())
-        });
+        let evidence = PlatformJunkEvidence::precompute_with(
+            &rules,
+            |_| {
+                probes += 1;
+                Some(cache.clone())
+            },
+            Vec::new(),
+        );
         let platform = PlatformJunkSetup { rules, evidence };
         let roots = default_platform_junk_roots(&platform);
         assert_eq!(probes, 1);

@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::ProbeRunner;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -133,19 +134,7 @@ fn manager_layouts() -> Vec<ManagerLayout> {
 /// The first executable `PATH` resolves is marked as the default. Installations that no manager
 /// layout recognizes but sit on `PATH` are still admitted under the `path` manager, so a custom
 /// build is never silently dropped.
-pub fn discover_npm_installations() -> Vec<ToolInstallation> {
-    discover_npm(true)
-}
-
-/// Discovers cache roots without launching npm/node version probes needed only by inventory UI.
-pub fn discover_npm_cache_roots() -> Vec<PathBuf> {
-    discover_npm(false)
-        .into_iter()
-        .filter_map(|installation| installation.cache)
-        .collect()
-}
-
-fn discover_npm(include_versions: bool) -> Vec<ToolInstallation> {
+pub fn discover_npm_installations(runner: &mut ProbeRunner) -> Vec<ToolInstallation> {
     let path_executables = path_resolved_executables("npm");
     let default_executable = path_executables.first().cloned();
 
@@ -194,19 +183,12 @@ fn discover_npm(include_versions: bool) -> Vec<ToolInstallation> {
         if !seen.insert(identity) {
             continue;
         }
-        let tool_version = include_versions
-            .then(|| run_trimmed(&executable, &["--version"]))
-            .flatten();
-        let runtime_version = include_versions
-            .then_some(&executable)
-            .and_then(|executable| executable.parent())
-            .map(|bin| bin.join(if cfg!(windows) { "node.exe" } else { "node" }))
-            .filter(|node| is_executable_file(node))
-            .and_then(|node| run_trimmed(&node, &["--version"]));
-        let cache = run_trimmed(&executable, &["config", "get", "cache"]).map(PathBuf::from);
+        // Resolve cache answers before spending the shared budget on inventory-only versions.
+        let cache = run_trimmed(runner, &executable, &["config", "get", "cache"])
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
         let cache_last_active_at = cache
             .as_ref()
-            .filter(|_| include_versions)
             .and_then(|cache| directory_newest_mtime(cache))
             .and_then(rfc3339);
         let is_path_default = default_executable
@@ -217,12 +199,24 @@ fn discover_npm(include_versions: bool) -> Vec<ToolInstallation> {
             manager,
             manager_label: label,
             executable,
-            tool_version,
-            runtime_version,
+            tool_version: None,
+            runtime_version: None,
             cache,
             cache_last_active_at,
             is_path_default,
         });
+    }
+    for installation in &mut installations {
+        if runner.is_exhausted() {
+            break;
+        }
+        installation.tool_version = run_trimmed(runner, &installation.executable, &["--version"]);
+        installation.runtime_version = installation
+            .executable
+            .parent()
+            .map(|bin| bin.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .filter(|node| is_executable_file(node))
+            .and_then(|node| run_trimmed(runner, &node, &["--version"]));
     }
     installations
 }
@@ -232,13 +226,33 @@ fn path_resolved_executables(program: &str) -> Vec<PathBuf> {
     let Some(path_var) = std::env::var_os("PATH") else {
         return Vec::new();
     };
+    executables_in_paths(program, std::env::split_paths(&path_var))
+}
+
+fn executables_in_paths(program: &str, paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    for directory in std::env::split_paths(&path_var) {
-        let candidate = directory.join(program);
-        if is_executable_file(&candidate)
-            && !found
-                .iter()
-                .any(|existing: &PathBuf| same_path(existing, &candidate))
+    #[cfg(windows)]
+    let names = [
+        format!("{program}.cmd"),
+        format!("{program}.bat"),
+        format!("{program}.exe"),
+        program.to_string(),
+    ];
+    #[cfg(not(windows))]
+    let names = [program.to_string()];
+    for directory in paths {
+        // Match the resolver's supported Windows shim spellings. One installation per PATH
+        // directory prevents reporting its .cmd/.exe launchers as different default copies.
+        let Some(candidate) = names
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| is_executable_file(candidate))
+        else {
+            continue;
+        };
+        if !found
+            .iter()
+            .any(|existing: &PathBuf| same_path(existing, &candidate))
         {
             found.push(candidate);
         }
@@ -247,12 +261,9 @@ fn path_resolved_executables(program: &str) -> Vec<PathBuf> {
 }
 
 /// Runs a program with arguments and returns the trimmed first stdout line.
-fn run_trimmed(executable: &Path, arguments: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(executable)
-        .args(arguments)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+fn run_trimmed(runner: &mut ProbeRunner, executable: &Path, arguments: &[&str]) -> Option<String> {
+    let mut command = std::process::Command::new(executable);
+    let output = runner.run(command.args(arguments)).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -354,9 +365,20 @@ mod tests {
 
     #[test]
     fn run_trimmed_rejects_a_missing_executable_and_bad_exit() {
-        assert!(run_trimmed(Path::new("/nonexistent/npm-xyz"), &["--version"]).is_none());
+        let mut runner = ProbeRunner::new(
+            super::super::ProbeLimits::default(),
+            crate::CancellationToken::new(),
+        );
+        assert!(
+            run_trimmed(
+                &mut runner,
+                Path::new("/nonexistent/npm-xyz"),
+                &["--version"]
+            )
+            .is_none()
+        );
         // `true` exits zero but prints nothing; an empty line must still be `None`.
-        assert!(run_trimmed(Path::new("/usr/bin/true"), &[]).is_none());
+        assert!(run_trimmed(&mut runner, Path::new("/usr/bin/true"), &[]).is_none());
     }
 
     #[test]
@@ -374,9 +396,23 @@ mod tests {
         assert!(!is_executable_file(temp.path()));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_discovers_cmd_shims_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let shim = temp.path().join("npm.cmd");
+        std::fs::write(&shim, b"@echo off").unwrap();
+        std::fs::write(temp.path().join("npm.exe"), b"another launcher").unwrap();
+        let paths = vec![temp.path().to_path_buf(), temp.path().to_path_buf()];
+        assert_eq!(executables_in_paths("npm", paths), vec![shim]);
+    }
+
     #[test]
     fn discovery_is_self_consistent_on_this_host() {
-        let installations = discover_npm_installations();
+        let installations = discover_npm_installations(&mut ProbeRunner::new(
+            super::super::ProbeLimits::default(),
+            crate::CancellationToken::new(),
+        ));
         // No executable reported twice after identity resolution.
         let mut identities: Vec<PathBuf> = installations
             .iter()
