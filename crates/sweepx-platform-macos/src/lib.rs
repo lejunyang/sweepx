@@ -5,6 +5,8 @@ use sweepx_platform::{
 #[cfg(target_os = "macos")]
 mod bulk_directory;
 #[cfg(target_os = "macos")]
+pub mod fsevents;
+#[cfg(target_os = "macos")]
 use sweepx_platform::{DirectoryHandleAdmission, OpenedDirectory};
 
 #[derive(Debug)]
