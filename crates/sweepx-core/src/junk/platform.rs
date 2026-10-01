@@ -299,6 +299,12 @@ impl CombinedJunkClassifier<'_> {
 }
 
 impl JunkClassifier for CombinedJunkClassifier<'_> {
+    fn uses_only_local_markers(&self) -> bool {
+        // Project precedence uses only parent markers. Platform matches use captured native
+        // locators and this invocation's immutable discovery snapshot, never other markers.
+        true
+    }
+
     fn needs_file_marker(&self, name: &sweepx_model::NativeName) -> bool {
         self.project.needs_project_marker(name)
     }

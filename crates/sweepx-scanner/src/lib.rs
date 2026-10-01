@@ -229,6 +229,13 @@ pub trait ScanSink {
         false
     }
 
+    /// Whether final aggregates may arrive when a subtree closes, before the root finishes.
+    /// The subtree and its parent must have finished enumeration. Consumers opting in must
+    /// not require marker observations from other directories; aggregate ordering may change.
+    fn accepts_closed_subtrees(&self) -> bool {
+        false
+    }
+
     /// Reports statistics from a committed directory batch, before recursive coverage is known.
     /// This is a provisional observation, never a replacement for the final aggregate.
     fn note_directory_progress(&mut self, _path: &Path, _aggregate: &DirectoryAggregate) {}
@@ -329,10 +336,20 @@ pub trait SubtreeReuse: Sync {
 }
 /// Classifies observed directories using one loaded rule service.
 ///
-/// The collecting sink currently evaluates each directory when final root aggregates arrive,
-/// after marker observation for that root. Only matching rows and aggregates are retained.
+/// The collecting sink evaluates directories after the marker observations they depend on.
+/// Only matching rows and aggregates are retained.
 /// Provisional live statistics cannot establish marker absence or a final rule decision.
 pub trait JunkClassifier {
+    /// Whether decisions depend only on this entry and its own/parent file-marker sets.
+    ///
+    /// Opting in permits classification after complete subtree and parent enumeration, using
+    /// the same `classify` implementation. All decisions, including rule precedence and
+    /// negative predicates, must be final with these facts. The default waits for the entire
+    /// root's markers so existing custom evaluators can inspect the full index safely.
+    fn uses_only_local_markers(&self) -> bool {
+        false
+    }
+
     /// Whether a file basename is needed as a classification marker.
     /// Defaults to retaining every name for custom evaluators. Built-in rule services can
     /// restrict this to their admitted marker set without changing rule semantics.
@@ -357,8 +374,9 @@ pub trait JunkClassifier {
 /// Borrowed live observations from the existing classified traversal.
 ///
 /// Callbacks run synchronously on the scan sequencer, not the directory workers. Consumers must
-/// keep them short and bound any owned copies or event queues. Classification still waits for
-/// the root's marker observations; a candidate callback is emitted only after its final aggregate
+/// keep them short and bound any owned copies or event queues. Local-marker classifiers may
+/// emit completed subtrees before the root finishes; other classifiers wait for root markers.
+/// A candidate callback is emitted only after its final aggregate
 /// and rule decision have been admitted. This interface does not provide Git enrichment, a UI
 /// queue or execution authority. Cancellation uses the scan's existing token.
 pub trait ClassifiedScanObserver {
@@ -983,6 +1001,11 @@ impl ScanSink for CollectingScanSink<'_> {
 
     fn wants_directory_progress(&self) -> bool {
         self.observer.is_some()
+    }
+
+    fn accepts_closed_subtrees(&self) -> bool {
+        self.classifier
+            .is_some_and(JunkClassifier::uses_only_local_markers)
     }
 
     fn note_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {
@@ -1726,7 +1749,6 @@ where
             directory,
         } = admission;
         let root_path = root.path().to_path_buf();
-        let initial_aggregate_count = sink.retained_aggregate_count();
 
         // Qualify the accelerated path before traversing.
         //
@@ -2182,7 +2204,8 @@ where
                                     }
                                 }
 
-                                if initial_aggregate_count
+                                if sink
+                                    .retained_aggregate_count()
                                     .checked_add(directory_states.len())
                                     .is_none_or(|count| {
                                         count
@@ -2241,6 +2264,12 @@ where
                                 directory_states
                                     .entry(metadata.path.clone())
                                     .or_insert_with(|| DirectoryState::new(entry_id.clone()));
+                                if sink.accepts_closed_subtrees() {
+                                    directory_states
+                                        .get_mut(&path)
+                                        .expect("parent state retained")
+                                        .open_subtrees += 1;
+                                }
                                 sink.push_entry(&root_path, scanned)?;
                                 frontier.push_back(FrontierDirectory {
                                     path: metadata.path.clone(),
@@ -2479,6 +2508,20 @@ where
                             &state.aggregate(&self.options.scan_id, false),
                         );
                     }
+                    if sink.accepts_closed_subtrees()
+                        && !continuation_reserved
+                        && end_of_directory
+                        && !directory_limit_blocks_continuation
+                        && !cancel.is_cancelled()
+                    {
+                        finish_subtree_batch(
+                            &root_path,
+                            &path,
+                            &self.options.scan_id,
+                            &mut directory_states,
+                            sink,
+                        )?;
+                    }
                 }
                 Ok(())
             })();
@@ -2519,6 +2562,79 @@ where
     }
 }
 
+/// Closes admitted subtrees on the sequencer after their final committed batch. File bytes
+/// have already been folded into every open ancestor, so removing a closed state loses no
+/// accounting. A finished child waits if its parent still has unconsumed markers. Errors and
+/// cancelled streams never set enumeration_finished; their ancestors fall back to root-end
+/// lower bounds. The short-lived waiting-path list is bounded by the admitted state count.
+fn finish_subtree_batch(
+    root: &Path,
+    path: &Path,
+    scan_id: &ScanId,
+    states: &mut BTreeMap<PathBuf, DirectoryState>,
+    sink: &mut dyn ScanSink,
+) -> Result<(), ScanError> {
+    states
+        .get_mut(path)
+        .expect("enumerated state retained")
+        .enumeration_finished = true;
+    let waiting: Vec<_> = states
+        .range(path.to_path_buf()..)
+        .take_while(|(child, _)| child.starts_with(path))
+        .filter(|(child, state)| {
+            child.parent() == Some(path)
+                && state.subtree_closed
+                && state.incomplete_reasons.is_empty()
+        })
+        .map(|(child, _)| child.clone())
+        .collect();
+    for child in waiting {
+        emit_closed_subtree(root, &child, scan_id, states, sink)?;
+    }
+    let mut current = path.to_path_buf();
+    while let Some(state) = states.get_mut(&current) {
+        if state.subtree_closed || !state.enumeration_finished || state.open_subtrees != 0 {
+            break;
+        }
+        state.subtree_closed = true;
+        let complete = state.incomplete_reasons.is_empty();
+        let parent = current
+            .parent()
+            .filter(|parent| states.contains_key(*parent))
+            .map(Path::to_path_buf);
+        let parent_enumerated = if let Some(parent) = &parent {
+            let state = states.get_mut(parent).expect("parent retained");
+            state.open_subtrees = state.open_subtrees.checked_sub(1).ok_or_else(|| {
+                PlatformError::Unsupported("closed subtree accounting underflow".into())
+            })?;
+            state.enumeration_finished
+        } else {
+            true
+        };
+        if complete && parent_enumerated {
+            emit_closed_subtree(root, &current, scan_id, states, sink)?;
+        }
+        let Some(parent) = parent else {
+            break;
+        };
+        current = parent;
+    }
+    Ok(())
+}
+
+fn emit_closed_subtree(
+    root: &Path,
+    path: &Path,
+    scan_id: &ScanId,
+    states: &mut BTreeMap<PathBuf, DirectoryState>,
+    sink: &mut dyn ScanSink,
+) -> Result<(), ScanError> {
+    let state = states.remove(path).expect("closed subtree retained");
+    let aggregate = state.into_aggregate(scan_id);
+    sink.note_directory_coverage(path, &aggregate.coverage);
+    sink.push_aggregate(root, aggregate)
+}
+
 #[derive(Debug, Clone)]
 struct DirectoryState {
     entry_id: ScanEntryId,
@@ -2530,6 +2646,11 @@ struct DirectoryState {
     reclaimable_bytes: EvidenceAccumulator,
     incomplete_reasons: BTreeSet<ReasonCode>,
     counted_hard_links: BTreeSet<HardLinkKey>,
+    // Only used by sinks accepting completed subtrees. No child paths or hard-link sets are
+    // copied into the closure tracker. A parent closes after all admitted children close.
+    enumeration_finished: bool,
+    open_subtrees: usize,
+    subtree_closed: bool,
 }
 
 impl DirectoryState {
@@ -2544,6 +2665,9 @@ impl DirectoryState {
             reclaimable_bytes: EvidenceAccumulator::known_zero(),
             incomplete_reasons: BTreeSet::new(),
             counted_hard_links: BTreeSet::new(),
+            enumeration_finished: false,
+            open_subtrees: 0,
+            subtree_closed: false,
         }
     }
 
@@ -3097,6 +3221,7 @@ fn native_basename_marker(name: &NativeName) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    mod early_candidates;
     use std::collections::BTreeMap;
     #[cfg(all(target_os = "linux", feature = "platform-linux"))]
     use std::fs;

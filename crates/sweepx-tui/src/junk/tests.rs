@@ -76,6 +76,52 @@ fn initial() -> VecDeque<JunkEvent> {
 }
 
 #[test]
+fn early_complete_base_is_visible_during_scan_and_selection_survives_current_replacement() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    model.apply(JunkEvent::Started {
+        revision: 1,
+        keys: None,
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 1,
+        current: false,
+        historical: false,
+        row: row("early", "/project/target"),
+    });
+    model.reorder();
+    model.marked.insert("early".into());
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("/project/target"));
+    assert!(screen.contains("Interpreting"));
+    assert!(model.busy && model.rows["early"].row.complete());
+    assert!(!model.eligible("early"));
+    model.apply(JunkEvent::Candidate {
+        revision: 1,
+        current: true,
+        historical: false,
+        row: row("early", "/project/target"),
+    });
+    assert!(!model.eligible("early"), "enrichment does not end the scan");
+    model.apply(JunkEvent::Completed {
+        revision: 1,
+        outcome: JunkOutcome::Complete,
+        replaced: true,
+    });
+    model.reorder();
+    assert!(model.eligible("early"));
+    assert!(model.marked.contains("early"));
+    assert_eq!(model.order[model.cursor], "early");
+}
+
+#[test]
 fn cached_preview_stays_historical_and_preserves_selection_when_current_replaces_it() {
     let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
     model.apply(JunkEvent::Started {

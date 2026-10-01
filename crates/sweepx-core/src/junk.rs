@@ -221,6 +221,10 @@ impl JunkService {
 }
 
 impl crate::JunkClassifier for JunkService {
+    fn uses_only_local_markers(&self) -> bool {
+        true
+    }
+
     fn classify(
         &self,
         entry: &ScannedEntry,

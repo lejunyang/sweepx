@@ -8,6 +8,130 @@ use std::time::Instant;
 static SESSION_TESTS: Mutex<()> = Mutex::new(());
 
 #[test]
+fn native_closed_candidate_reaches_session_mailbox_before_unrelated_subtree() {
+    struct Probe<'a> {
+        inner: Observer<'a>,
+        target: PathBuf,
+        unrelated: PathBuf,
+        unrelated_seen: bool,
+        early: bool,
+    }
+    impl ClassifiedScanObserver for Probe<'_> {
+        fn on_progress(&mut self, root: &Path, event: &ProgressEvent) {
+            if let ProgressEvent::EntryObserved { path, .. } = event {
+                self.unrelated_seen |= path.starts_with(&self.unrelated) && path != &self.unrelated;
+            }
+            self.inner.on_progress(root, event);
+        }
+        fn on_boundary(&mut self, boundary: &sweepx_platform::BoundaryRecord) {
+            self.inner.on_boundary(boundary);
+        }
+        fn on_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {
+            self.inner.on_directory_progress(path, aggregate);
+        }
+        fn preferred_directory(&self) -> Option<PathBuf> {
+            Some(self.target.clone())
+        }
+        fn on_candidate(
+            &mut self,
+            entry: &ScannedEntry,
+            rule: &str,
+            aggregate: &DirectoryAggregate,
+        ) {
+            if native_path(entry).as_ref() == Some(&self.target) {
+                assert!(
+                    !self.unrelated_seen,
+                    "candidate must precede unrelated payload traversal"
+                );
+                assert!(aggregate.coverage.complete);
+                self.early = true;
+            }
+            self.inner.on_candidate(entry, rule, aggregate);
+        }
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let target = root.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("payload"), b"completed subtree").unwrap();
+    let unrelated = root.join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    for index in 0..64 {
+        fs::write(unrelated.join(format!("file-{index}")), b"later").unwrap();
+    }
+    // Ordinary native metadata is the independent oracle, including host-created files.
+    let logical: u128 = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+        .sum();
+    let limits = JunkSessionLimits::default();
+    let shared = Arc::new(Shared::new(limits));
+    let cancel = CancellationToken::new();
+    let mut writer = Writer::new(Arc::clone(&shared), JunkSessionRevision(1), cancel.clone());
+    let service = JunkService::built_in().unwrap();
+    let platform = PlatformJunkSetup::default();
+    let mut pending = Rows::new();
+    let mut probe = Probe {
+        inner: Observer {
+            service: &service,
+            platform: &platform,
+            writer: &mut writer,
+            pending: &mut pending,
+            paths: None,
+            limits,
+            retained_bytes: 0,
+            retained_rows: 0,
+            rules_digest: [0; 32],
+            observed: 0,
+        },
+        target: target.clone(),
+        unrelated,
+        unrelated_seen: false,
+        early: false,
+    };
+    Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            max_workers: 1,
+            ..Default::default()
+        },
+    )
+    .scan_classified_with_observer(
+        &[ScanRoot::new(root).unwrap()],
+        &cancel,
+        &service.with_platform(&platform.rules, &platform.evidence),
+        None,
+        &mut probe,
+    )
+    .unwrap();
+    assert!(probe.early && probe.unrelated_seen);
+    drop(probe);
+    assert!(writer.fault.is_none());
+    assert_eq!(pending.len(), 1);
+    let session = JunkSession { shared };
+    let event = std::iter::from_fn(|| session.try_next_event())
+        .find(|event| {
+            matches!(
+                event.kind,
+                JunkSessionEventKind::Candidate {
+                    state: JunkSessionCandidateState::Base,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let JunkSessionEventKind::Candidate { row, key, .. } = event.kind else {
+        unreachable!()
+    };
+    assert_eq!(row.observed_native_path(), Some(target));
+    assert_eq!(row.logical_bytes(), &sweepx_platform::known_u128(logical));
+    assert!(row.complete());
+    assert!(pending.contains_key(&key));
+    session.close();
+}
+
+#[test]
 fn system_admission_rejects_explicit_roots_and_disabled_platform_rules() {
     let fixture = tempfile::tempdir().unwrap();
     let mut request = JunkSessionRequest::system();
