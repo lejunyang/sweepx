@@ -27,7 +27,7 @@
 
 ## 尚存的设计不足
 
-1. **规则系统统一（部分落地）。** `sweepx-catalog` 的 `schema` / `vm` 模块与 CLI 的 `project-junk-rules.json` / `platform-junk-rules.json` 各自承担发现、匹配或解释。项目规则已迁入 `sweepx-catalog::junk`，由 `sweepx-core::junk::JunkService` 统一校验并调用已有 cleaner VM；CLI 不再维护另一套项目匹配逻辑。规则字节、机器 ID、风险和匹配行为保持一致，输入规模有界；规则加载时建立有序名称索引并预先规范化父标记，普通目录不再逐规则分配规范化字符串。平台规则发现与候选解释暂时仍在 CLI，需要继续扩展这个服务：输入扫描事实与本次探测证据，输出候选、依据、风险和 blockers。先统一内部类型与评估入口，不急于新增插件框架。
+1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释仍在 CLI，需继续迁移才能关闭完整平台共享服务验收；Git 增强证据也尚待单独下沉。先完成具体业务边界，不新增插件框架。
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
@@ -187,7 +187,7 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 - [x] 端到端阶段计时、受控及真实目录冷/热测量、结果等价核验。
 - [x] 合并根/文件索引历史查询，移除完整历史后的固定等待。
 - [x] listing、marker 与多根缓存的统一字节预算、逐根淘汰及有界持久化读取；预算耗尽不能把缺失证据当作否定结论。
-- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务。
+- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用发现/分类/解释已下沉，Linux `/tmp` 专用发现及解释仍待迁移。
 - [ ] 缓存命中后重建当前 Git 上下文及增强证据。
 - [ ] 核心垃圾扫描会话：开始、取消、可见目录优先级、选中范围刷新；有界阶段/进度/候选/统计/错误/终态事件，稳定候选键及 revision。
 - [ ] 垃圾交互 TUI：历史结果标记与逐项替换、自由选择和删除前原生身份重验。
@@ -265,3 +265,17 @@ macOS 属性提示现在只保留当前返回批次及至多一个 lookahead；�
 相同 arm64 macOS、Rust 1.98.0 release，8 根/8,192 文件，每状态 3 次、OS 缓存未清空的[原生批次复测](junk-benchmark-bulk-bounded-2026-10-01.json)通过候选及逻辑字节独立核验：完整进程中位数冷扫 245.6 ms、整根命中 31.2 ms（每次 8/8）、单文件变化 67.8 ms（每次 7/8）。冷扫遍历阶段中位数 85.9 ms，变化后遍历 10.4 ms；本轮没有新的整机提速结论，交付的是有界保留和复用前的当前类型证据。
 
 交付验证：受影响 platform/scanner 测试 134 项通过、1 项原有基准 ignored；格式和受影响 crate/工作区 all-targets/all-features clippy 通过。初次工作区运行在旧预览缓存夹具的 `NotFound` 处中断，后续步骤未运行；独立时钟采样证明时间戳不唯一，夹具改为原子独占创建，详见[宿主记录](../development/historical-host-notes.md#cache-test-directory-isolation-2026-10-01)。修复后的工作区完整运行 749 项通过、0 失败、2 项原有基准 ignored，1 项系统 Trash 挂起用例仍显式排除，未验证该系统操作。Linux GNU/Windows GNU 工作区交叉 clippy 通过，包括目标测试代码，未运行目标宿主测试或 MSVC。53 份 Markdown 检查、23 项文档检查器及 5 项基准验证器测试通过。
+
+## 共享平台 catalog 与候选解释（2026-10-01）
+
+平台规则资源逐字节迁入 catalog，声明式 browser/known-root 类型与原有严格语义校验一起迁移。新增调用者提供的 JSON 准入：解析前限制 128 KiB，最多 64 条规则及各嵌套列表 64 项；未知字段、路径逃逸、错误 root-kind/depth/match-kind 组合、重复 ID 或缺少依据均拒绝。CLI 的缓存摘要仍绑定实际内嵌加载字节，不增加手维护 hash，也不改变现有风险及机器字段。
+
+core 的 `junk::platform` 接管工具及平台根发现、活动/格式解释和组合分类器；`junk::candidate` 接管报告类型、大小证据选择、项目/平台候选拼装及缓存动态解释。CLI 的新扫描调用 `JunkService::with_platform` 和 `interpret`；缓存只转换存储事实，再调用 `refresh_candidate_interpretation`。缺少或不一致的原生目录事实返回 `None`，公开解释入口不会因缺失 locator 而 panic。工具探测继续共享有界 invocation 快照，现允许调用者传入取消 token。旧 Git 置信度仍显式清除，当前 Git 重建尚未实现。
+
+直接调用 core 的受控 fixture 回归同时产生 Cargo target 和 pip cache 候选，核对规则 ID、来源扫描 ID、基础置信度、活动状态和独立 metadata 尺寸；文件、链接、缺少 locator 与未知决定不能被解释成目录候选。平台 JSON 编辑回归覆盖规模、严格字段、路径及组合契约。原有 15 项发现/规则/尺寸测试跟随模块迁移，名称与迁移前源码独立对照；其中浏览器状态正例改为注入临时目录 anchor，并与完整目标集合比较，保留用户数据反例，不再要求本机装有 Chrome/Edge/Postman。
+
+此阶段没有增加 crate；CLI `main.rs` 从 6,318 行减少到约 3,900 行（包括测试），core 的普通依赖仍不含 TUI/ratatui/crossterm。包清单包含新模块和平台规则资源；资源与迁移前 Git 版本的 bytes 比较完全一致。没有进行 registry 构建或发布。
+
+共享服务验收仍保留未完成：Linux `/tmp` 的专用 native 测量、引用证据与报告拼装仍在 CLI，下一步迁移时必须保持它与清理预览共用同一实现，并处理跨 crate 测试夹具。浏览器/known-root 匹配也仍沿用原来的现场发现调用；后续在共享服务内将这些结果纳入本次有界快照，避免逐候选重枚举，核对根自身与嵌套根的路径绑定。不得把缓存预算验收误读为所有发现路径已完成资源审计。Git、会话、TUI、大文件、重复文件及规则扩展的清单状态不变。
+
+本阶段验证：受影响 catalog/core/CLI 253 项测试通过、1 项原有基准 ignored、1 项系统 Trash 挂起显式排除；工作区 752 项通过、0 失败、2 项原有基准 ignored，同一 Trash 用例仍排除。格式、受影响及工作区 all-targets/all-features clippy 通过。交叉检查最初发现 CLI 的 macOS-only 导入未正确 cfg，修正门控后 Linux GNU、Windows GNU 工作区交叉 clippy 均通过，包含目标测试代码；未运行目标宿主测试或 MSVC。本次没有端到端性能测量，不声称模块迁移带来整机提速。

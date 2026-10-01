@@ -160,7 +160,7 @@ Lemon 的 filter 列表记录了大量误删案例，后续规则实现应优先
 
 ## 已集成的第一批 macOS 策略
 
-2026-09-29 已将以下 report-only 策略接入 `crates/sweepx-cli/resources/platform-junk-rules.json`，并由统一 `junk --system` 扫描路径发现。具体位置通过每条规则的 `knownRoots`（`base: home` + 相对 `components`）声明，发现代码只读这份数据，不再按 rule id 硬编码根路径；新增策略只需在 JSON 增加 `knownRoots`：
+2026-09-29 已将以下 report-only 策略接入平台规则 JSON，2026-10-01 资源迁入 `crates/sweepx-catalog/resources/platform-junk-rules.json`，由统一 `junk --system` 扫描路径发现。具体位置通过每条规则的 `knownRoots`（`base: home` + 相对 `components`）声明，发现代码只读这份数据，不再按 rule id 硬编码根路径；新增策略只需在 JSON 增加 `knownRoots`：
 
 - `macos.xcode-derived-data`：`~/Library/Developer/Xcode/DerivedData`。
 - `macos.cargo-registry-cache`：`~/.cargo/registry/cache` 与 `~/.cargo/git/db`。

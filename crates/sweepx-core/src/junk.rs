@@ -3,6 +3,11 @@
 //! Rules live in the catalog and their predicates use the existing cleaner VM. The service does
 //! no filesystem I/O and starts no subprocesses. Platform root discovery remains a separate input.
 
+/// Candidate report types and interpretation over captured facts.
+pub mod candidate;
+/// Platform rule discovery and interpretation.
+pub mod platform;
+
 use std::collections::{BTreeMap, BTreeSet};
 use sweepx_catalog::schema::{Predicate, PredicateArg, PredicateOp};
 use sweepx_catalog::vm::{EvaluationContext, VmValue, evaluate_predicate};
@@ -25,6 +30,39 @@ pub struct JunkService {
 }
 
 impl JunkService {
+    /// Combines this admitted project catalog with platform rules and invocation-scoped evidence.
+    pub fn with_platform<'a>(
+        &'a self,
+        rules: &'a [platform::PlatformJunkRule],
+        evidence: &'a platform::PlatformJunkEvidence,
+    ) -> platform::CombinedJunkClassifier<'a> {
+        platform::CombinedJunkClassifier {
+            project: self,
+            platform_rules: rules,
+            evidence,
+        }
+    }
+
+    /// Interprets a walk-time decision through the same admitted catalogs used by classification.
+    /// Unknown decisions or invalid native facts decline; no rendering or execution is performed.
+    pub fn interpret(
+        &self,
+        decision: &str,
+        entry: &ScannedEntry,
+        aggregates: &BTreeMap<&str, &sweepx_model::DirectoryAggregate>,
+        rules: &[platform::PlatformJunkRule],
+        evidence: &platform::PlatformJunkEvidence,
+    ) -> Option<candidate::JunkCandidate> {
+        if let Some(id) = decision.strip_prefix("project:") {
+            let rule = self.rules.iter().find(|rule| rule.id == id)?;
+            candidate::assemble_project_candidate(rule, entry, aggregates)
+        } else {
+            let id = decision.strip_prefix("platform:")?;
+            let rule = rules.iter().find(|rule| rule.id == id)?;
+            candidate::assemble_platform_candidate(rule, entry, aggregates, evidence)
+        }
+    }
+
     /// Loads and compiles the shipped project rules once for the scan invocation.
     pub fn built_in() -> Result<Self, ProjectRuleError> {
         Self::from_rule_bytes(PROJECT_RULES_JSON.as_bytes())

@@ -1,5 +1,8 @@
 //! Project artifact rules admitted through the catalog, independent of CLI rendering.
 
+/// Platform rule types and bounded admission.
+pub mod platform;
+
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
