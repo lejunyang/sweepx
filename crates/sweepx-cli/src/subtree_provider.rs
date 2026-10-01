@@ -15,7 +15,8 @@ use std::time::Duration;
 use sweepx_core::{FsEventId, PlannedEntry, SubtreeReuse, events_since};
 use sweepx_platform::CachedFileEntry;
 
-use crate::junk_cache::{self, StoredDirListing, StoredSubtreeIndex};
+use crate::junk_cache::{self, StoredDirListing, StoredJunkRoot, StoredSubtreeIndex};
+use sweepx_scanner::ChangeLog;
 
 /// Bounded wall time for the per-device FSEvents drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,54 +38,91 @@ pub struct SubtreeCacheProvider {
 }
 
 impl SubtreeCacheProvider {
-    /// Builds the provider for `roots_to_scan` from indexes under `cache_dir`.
+    /// Loads both cache layers and validates them with one complete history drain.
     ///
-    /// Roots on a device with no usable index are simply absent from the device map, so every
-    /// directory under them is traversed. Drain failures mark only that device unusable.
-    pub fn prepare(cache_dir: &Path, roots_to_scan: &[PathBuf]) -> Self {
-        // Group roots to scan by device id.
-        let mut roots_by_device: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-        for root in roots_to_scan {
-            if let Some(device) = device_key(root) {
-                roots_by_device
-                    .entry(device)
-                    .or_default()
-                    .push(root.clone());
-            }
-        }
+    /// The query covers every requested root from the oldest root/index cursor. Each consumer
+    /// filters events by its own cursor, so older index events cannot invalidate newer root
+    /// records. Both caches are loaded before querying: a subsequently loaded older index
+    /// could otherwise require history that the shared observation did not cover.
+    pub fn prepare(cache_dir: &Path, roots: &[PathBuf]) -> (Self, Vec<Option<StoredJunkRoot>>) {
+        Self::prepare_with_query(cache_dir, roots, |paths, since| {
+            events_since(paths, since, DRAIN_TIMEOUT)
+        })
+    }
 
-        let mut devices = BTreeMap::new();
-        for (device, device_roots) in roots_by_device {
-            let Some(index) = junk_cache::load_subtree_index(cache_dir, &device) else {
-                // No index: first scan, or never cached for this device. Skip building state.
-                continue;
-            };
-
-            let paths: Vec<&Path> = device_roots.iter().map(PathBuf::as_path).collect();
-            let state = match events_since(&paths, index.since_event_id(), DRAIN_TIMEOUT) {
-                Ok(log) => DeviceState {
-                    index,
-                    changed: log
-                        .events
-                        .iter()
-                        .map(|event| PathBuf::from(&event.path))
-                        .collect(),
-                    unusable: log.must_rescan,
-                },
-                // A drain error/timeout must not reuse anything on this device.
-                Err(_) => DeviceState {
-                    index,
-                    changed: BTreeSet::new(),
-                    unusable: true,
-                },
-            };
-            devices.insert(device, state);
-        }
-
-        Self {
-            cache_dir: cache_dir.to_path_buf(),
-            devices,
-        }
+    fn prepare_with_query(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
+    ) -> (Self, Vec<Option<StoredJunkRoot>>) {
+        let records = junk_cache::load_bound_roots(cache_dir, roots);
+        let bindings: BTreeMap<_, _> = roots
+            .iter()
+            .filter_map(|root| {
+                let metadata = fs::symlink_metadata(root).ok()?;
+                Some((root, (metadata.dev(), metadata.ino())))
+            })
+            .collect();
+        let devices: BTreeSet<_> = roots.iter().filter_map(|root| device_key(root)).collect();
+        let indexes: BTreeMap<_, _> = devices
+            .into_iter()
+            .filter_map(|device| {
+                let index = junk_cache::load_subtree_index(cache_dir, &device)?;
+                Some((device, index))
+            })
+            .collect();
+        let since = records
+            .iter()
+            .flatten()
+            .map(StoredJunkRoot::since_event_id)
+            .chain(indexes.values().map(StoredSubtreeIndex::since_event_id))
+            .min();
+        let paths: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        let log = since.and_then(|since| query(&paths, since).ok());
+        let records = junk_cache::validate_records_with_log(roots, records, log.as_ref());
+        // A root replaced while history was draining cannot lend its old listing to the
+        // replacement tree, even if that change is delivered only in the next event batch.
+        let rebound: BTreeSet<_> = roots
+            .iter()
+            .filter(|root| {
+                let current = fs::symlink_metadata(root)
+                    .ok()
+                    .map(|meta| (meta.dev(), meta.ino()));
+                current.is_none() || current.as_ref() != bindings.get(root)
+            })
+            .cloned()
+            .collect();
+        let devices = indexes
+            .into_iter()
+            .map(|(device, index)| {
+                let usable = log.as_ref().filter(|log| !log.must_rescan);
+                let mut changed: BTreeSet<PathBuf> = usable
+                    .map(|log| {
+                        log.events
+                            .iter()
+                            .filter(|event| event.id > index.since_event_id())
+                            .map(|event| PathBuf::from(&event.path))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                changed.extend(rebound.iter().cloned());
+                (
+                    device,
+                    DeviceState {
+                        index,
+                        changed,
+                        unusable: usable.is_none(),
+                    },
+                )
+            })
+            .collect();
+        (
+            Self {
+                cache_dir: cache_dir.to_path_buf(),
+                devices,
+            },
+            records,
+        )
     }
 
     /// Persists directory coverage and file lengths for the device of `scan_root`.
@@ -183,6 +221,136 @@ fn device_key(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seeded_cache() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let cache = base.join("cache");
+        let roots: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let root = base.join(name);
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("file"), b"payload").unwrap();
+                let record = StoredJunkRoot::capture(&root, vec![], 80).unwrap();
+                junk_cache::write(&cache, &record).unwrap();
+                root
+            })
+            .collect();
+        let covered = roots
+            .iter()
+            .map(|root| (root.display().to_string(), true))
+            .collect();
+        let listings = roots
+            .iter()
+            .map(|root| {
+                (
+                    root.display().to_string(),
+                    StoredDirListing {
+                        files: [("file".to_string(), 7)].into_iter().collect(),
+                        dirs: BTreeSet::new(),
+                    },
+                )
+            })
+            .collect();
+        let index = StoredSubtreeIndex::new(device_key(&roots[0]).unwrap(), 40, covered, listings);
+        junk_cache::write_subtree_index(&cache, &index).unwrap();
+        (fixture, cache, roots)
+    }
+
+    #[test]
+    fn shared_drain_uses_oldest_cursor_and_preserves_each_consumers_cursor() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let calls = std::cell::Cell::new(0);
+        let (provider, records) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |paths, since| {
+                calls.set(calls.get() + 1);
+                assert_eq!(since, 40, "older file-index history must be included");
+                assert_eq!(
+                    paths.iter().copied().collect::<BTreeSet<_>>(),
+                    roots.iter().map(PathBuf::as_path).collect()
+                );
+                Ok(ChangeLog {
+                    must_rescan: false,
+                    events: vec![
+                        sweepx_scanner::ChangeEvent {
+                            path: roots[0].join("file").display().to_string(),
+                            id: 60,
+                            flags: 0,
+                        },
+                        sweepx_scanner::ChangeEvent {
+                            path: roots[1].join("file").display().to_string(),
+                            id: 90,
+                            flags: 0,
+                        },
+                    ],
+                })
+            });
+        assert_eq!(calls.get(), 1);
+        assert!(
+            records[0].is_some(),
+            "old event must not invalidate newer root record"
+        );
+        assert!(records[1].is_none(), "new event must invalidate its root");
+        let device = &provider.devices[&device_key(&roots[0]).unwrap()];
+        assert!(!device.unusable);
+        assert!(overlaps_changes(&device.changed, &roots[0].join("file")));
+        assert!(overlaps_changes(&device.changed, &roots[1].join("file")));
+        assert!(!overlaps_changes(&device.changed, &roots[0].join("other")));
+    }
+
+    #[test]
+    fn incomplete_or_failed_shared_history_disables_both_cache_layers() {
+        let (_fixture, cache, roots) = seeded_cache();
+        for failed in [false, true] {
+            let (provider, records) =
+                SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| {
+                    if failed {
+                        Err(std::io::Error::other("history unavailable"))
+                    } else {
+                        Ok(ChangeLog {
+                            events: vec![],
+                            must_rescan: true,
+                        })
+                    }
+                });
+            assert!(records.iter().all(Option::is_none));
+            assert!(provider.devices.values().all(|device| device.unusable));
+        }
+    }
+
+    #[test]
+    fn root_binding_is_rechecked_after_the_shared_observation() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let (provider, records) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| {
+                // Keep the original inode alive so the replacement cannot accidentally reuse it.
+                fs::rename(&roots[0], roots[0].with_extension("old")).unwrap();
+                fs::create_dir(&roots[0]).unwrap();
+                Ok(ChangeLog {
+                    events: vec![],
+                    must_rescan: false,
+                })
+            });
+        assert!(records[0].is_none());
+        assert!(records[1].is_some());
+        let state = &provider.devices[&device_key(&roots[1]).unwrap()];
+        assert!(overlaps_changes(&state.changed, &roots[0].join("file")));
+        assert!(!overlaps_changes(&state.changed, &roots[1].join("file")));
+    }
+
+    #[test]
+    fn cache_absence_does_not_query_native_history() {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let (provider, records) = SubtreeCacheProvider::prepare_with_query(
+            &root.join("absent-cache"),
+            std::slice::from_ref(&root),
+            |_, _| panic!("no cursor to validate"),
+        );
+        assert!(records[0].is_none());
+        assert!(provider.devices.is_empty());
+    }
 
     #[test]
     fn history_preserves_ancestors_and_component_boundaries() {

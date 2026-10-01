@@ -439,3 +439,5 @@ macOS 的 `junk` 缓存按批次校验根目录，避免逐根等待 FSEvents；
 `junk --timings` 在 stderr 输出一条 `sweepx.junk.timings/v1` JSON，包含发现、准备、根缓存验证、逐文件缓存验证、遍历、候选拼装、Git 证据、缓存写入和报告阶段的纳秒耗时，以及实际根命中/未命中数；stdout 的既有报告格式不变。计时仅用于只读报告，不能与 `--trash` 或 `--clean-temp` 同用。`complete` 表示报告流程走到结尾，覆盖是否完整仍以报告 `status` 为准。阶段计时从 junk 命令分发开始，不包含前面的 CLI 启动；完整进程耗时由基准脚本单独测量。
 
 先构建 `cargo build -p sweepx-cli --release`，再运行 `python3 scripts/benchmark-junk.py --build-label release --output /tmp/junk-benchmark.json`。脚本使用隔离状态目录，对比空 SweepX 缓存、热扫尝试和受控单文件变化，并核对候选及文件大小；`--root /absolute/project` 可测只读真实目录。它保留每次实际命中数，不把 OS 缓存等同 SweepX 缓存；小样本只汇报中位数。
+
+macOS 的根记录和逐文件索引现在共享一次覆盖全部请求根的 FSEvents 历史查询，各自按原游标判断变化；缺失历史或查询失败仍回到现场观察。使用 `--timings` 时，两层读取与验证合计在 `rootCacheValidation` 阶段，`subtreeCacheValidation` 保留为零附近的阶段边界。

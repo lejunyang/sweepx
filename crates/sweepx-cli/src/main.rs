@@ -1645,17 +1645,22 @@ fn run_junk_scan(
 
     timings.phase("setup");
 
+    // Load both cache generations before the single history observation. The pre-scan cursor
+    // above remains the next generation's cursor, preserving changes racing with validation.
+    #[cfg(target_os = "macos")]
+    let (subtree_provider, cache_records) = subtree_provider::SubtreeCacheProvider::prepare(
+        cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
+        &canonical_roots,
+    );
+
     // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
     #[cfg(target_os = "macos")]
     let (hit_records, miss_indexes): (Vec<junk_cache::StoredJunkRoot>, Vec<usize>) =
         match &cache_dir {
-            Some(cache) => {
+            Some(_) => {
                 let mut hits = Vec::new();
                 let mut misses = Vec::new();
-                for (index, record) in junk_cache::load_current_roots(cache, &canonical_roots)
-                    .into_iter()
-                    .enumerate()
-                {
+                for (index, record) in cache_records.into_iter().enumerate() {
                     match record {
                         Some(record) => hits.push(record),
                         _ => misses.push(index),
@@ -1689,14 +1694,7 @@ fn run_junk_scan(
     );
     timings.phase("rootCacheValidation");
 
-    // Build the subtree-reuse provider for the roots being scanned. On a cache-validated run the
-    // scanner reuses unchanged file lengths while traversing directories with current identities.
-    #[cfg(target_os = "macos")]
-    let subtree_provider = subtree_provider::SubtreeCacheProvider::prepare(
-        cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
-        &miss_roots,
-    );
-
+    // File-index validation was included in the shared root-cache phase above.
     timings.phase("subtreeCacheValidation");
     let classified = if miss_roots.is_empty() {
         None

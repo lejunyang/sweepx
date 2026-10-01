@@ -28,17 +28,22 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use sweepx_core::FsEventId;
 #[cfg(test)]
 use sweepx_core::current_event_id;
-use sweepx_core::{FsEventId, events_since};
+#[cfg(test)]
+use sweepx_core::events_since;
 use sweepx_model::{ByteValue, ScanEntryId};
+use sweepx_scanner::ChangeLog;
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
 const STORED_SCHEMA: &str = "sweepx.junk-cache/v4";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
+#[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One root's cached result.
@@ -96,6 +101,11 @@ impl StoredJunkRoot {
         })
     }
 
+    /// Earliest change cursor required to validate this record.
+    pub fn since_event_id(&self) -> FsEventId {
+        self.since_event_id
+    }
+
     /// Number of candidates in a stored record, used by tests.
     #[cfg(test)]
     pub fn candidates_len(&self) -> usize {
@@ -140,47 +150,29 @@ fn rules_digest() -> &'static str {
     })
 }
 
-/// Loads and validates all roots with one historical drain, rather than one wait per root.
-pub fn load_current_roots(cache_dir: &Path, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
-    let records = roots.iter().map(|root| load(cache_dir, root)).collect();
-    validate_records(roots, records)
+/// Loads only records whose root identity and loaded rules still match.
+/// History is validated separately against the same drain used by the file index.
+pub fn load_bound_roots(cache_dir: &Path, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+    roots
+        .iter()
+        .map(|root| load(cache_dir, root).filter(|record| record.matches_root(root)))
+        .collect()
 }
 
-fn validate_records(
+/// Checks each root against its own pre-scan cursor and rechecks its native binding.
+/// Missing/incomplete history makes every record a miss, never a partial cache hit.
+pub fn validate_records_with_log(
     roots: &[PathBuf],
     mut records: Vec<Option<StoredJunkRoot>>,
+    log: Option<&ChangeLog>,
 ) -> Vec<Option<StoredJunkRoot>> {
     for (root, record) in roots.iter().zip(&mut records) {
-        if !record
-            .as_ref()
-            .is_some_and(|record| record.matches_root(root))
-        {
-            *record = None;
-        }
-    }
-    let Some(since) = records
-        .iter()
-        .flatten()
-        .map(|record| record.since_event_id)
-        .min()
-    else {
-        return records;
-    };
-    let paths: Vec<&Path> = roots
-        .iter()
-        .zip(&records)
-        .filter(|(_, record)| record.is_some())
-        .map(|(root, _)| root.as_path())
-        .collect();
-    // Query from the oldest cursor, then filter each root by its own cursor. A failure affects
-    // the whole batch; partial history never establishes freshness.
-    let log = events_since(&paths, since, FSEVENTS_TIMEOUT);
-    for record in &mut records {
-        let valid = match (&log, record.as_ref()) {
-            (Ok(log), Some(stored)) if !log.must_rescan => !log.events.iter().any(|event| {
-                event.id > stored.since_event_id
-                    && paths_overlap(Path::new(&event.path), Path::new(&stored.root))
-            }),
+        let valid = match (log, record.as_ref()) {
+            (Some(log), Some(stored)) if !log.must_rescan && stored.matches_root(root) => {
+                !log.events.iter().any(|event| {
+                    event.id > stored.since_event_id && paths_overlap(Path::new(&event.path), root)
+                })
+            }
             _ => false,
         };
         if !valid {
@@ -188,6 +180,21 @@ fn validate_records(
         }
     }
     records
+}
+
+#[cfg(test)]
+fn validate_records(
+    roots: &[PathBuf],
+    records: Vec<Option<StoredJunkRoot>>,
+) -> Vec<Option<StoredJunkRoot>> {
+    let since = records
+        .iter()
+        .flatten()
+        .map(StoredJunkRoot::since_event_id)
+        .min();
+    let paths: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    let log = since.and_then(|since| events_since(&paths, since, FSEVENTS_TIMEOUT).ok());
+    validate_records_with_log(roots, records, log.as_ref())
 }
 
 /// Ancestor events cannot be discarded: a parent change may rename or replace a cached root.
