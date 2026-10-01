@@ -5,6 +5,7 @@
 
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;
+mod context;
 mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]
@@ -24,6 +25,8 @@ pub use sweepx_catalog::junk::{
 
 /// Read-only project classification using one validated catalog and compiled predicates.
 pub struct JunkService {
+    // Digest the admitted source bytes, including edits that preserve the parsed predicates.
+    rule_bytes_digest: [u8; 32],
     rules: Vec<ProjectJunkRule>,
     predicates: Vec<Predicate>,
     // Immutable indexes preserve catalog order for overlapping names while avoiding repeated
@@ -137,6 +140,10 @@ impl JunkService {
             .map(|name| normalize_rule_name(name))
             .collect();
         Ok(Self {
+            rule_bytes_digest: {
+                use sha2::Digest;
+                sha2::Sha256::digest(bytes).into()
+            },
             rules,
             predicates,
             by_name,

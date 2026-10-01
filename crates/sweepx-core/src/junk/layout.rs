@@ -78,6 +78,17 @@ pub(super) struct LayoutRoot {
 }
 
 impl LayoutRoot {
+    pub fn context_fact(&self) -> impl serde::Serialize + '_ {
+        (
+            &self.native_path,
+            self.identity.device(),
+            self.identity.inode(),
+            self.filesystem.device,
+            self.mount.value,
+            &self.fingerprint,
+        )
+    }
+
     pub fn matches(&self, path: &NativeAbsolutePath, entry: &ScannedEntry) -> bool {
         let Some(locator) = entry.validated_native_locator().ok().flatten() else {
             return false;

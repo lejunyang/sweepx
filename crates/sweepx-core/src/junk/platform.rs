@@ -241,6 +241,63 @@ pub struct CombinedJunkClassifier<'a> {
     pub evidence: &'a PlatformJunkEvidence,
 }
 
+impl CombinedJunkClassifier<'_> {
+    /// Binds whole-root candidate reuse to admitted project bytes, effective platform rules and
+    /// this invocation's discovery scope. Unknown layout coverage or missing rule evidence declines
+    /// reuse. Dynamic tool activity and Git interpretation must still be rebuilt separately.
+    ///
+    /// Rule order is significant for classification ties. Discovered roots are sets: hashing sorts
+    /// borrowed references by lossless path, so native enumeration order cannot change validity.
+    /// Serialization streams at most 1 MiB into fixed hash state. Sorting retains at most 1,024
+    /// references per rule; tool paths larger than 64 KiB decline reuse before native conversion.
+    pub fn classification_context_digest(&self) -> Option<[u8; 32]> {
+        if self.evidence.layout_failure.is_some() {
+            return None;
+        }
+        let mut hash = super::context::ContextHash::new(&self.project.rule_bytes_digest);
+        for rule in self
+            .platform_rules
+            .iter()
+            .filter(|rule| rule_applies_to_host(rule))
+        {
+            hash.fact(rule)?;
+            match rule.match_kind.as_str() {
+                "verified_tool_root" => {
+                    let facts = self.evidence.for_rule(rule)?;
+                    if facts.cache_candidates.len() > 1024 {
+                        return None;
+                    }
+                    let mut paths = facts.cache_candidates.iter().collect::<Vec<_>>();
+                    paths.sort_unstable();
+                    hash.fact(paths.len())?;
+                    for path in paths {
+                        if path.as_os_str().len() > 64 * 1024 {
+                            return None;
+                        }
+                        // Path serialization must be lossless. Unsupported encodings decline cache
+                        // reuse instead of letting two different native paths share a digest.
+                        hash.fact(sweepx_model::NativeAbsolutePath::from_path(path).ok()?)?;
+                    }
+                }
+                "verified_browser_cache" | "verified_cache_root" | "verified_known_root" => {
+                    let facts = self.evidence.layout_roots.get(&rule.id)?;
+                    if facts.len() > 1024 {
+                        return None;
+                    }
+                    let mut roots = facts.iter().collect::<Vec<_>>();
+                    roots.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                    hash.fact(roots.len())?;
+                    for root in roots {
+                        hash.fact(root.context_fact())?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(hash.finish())
+    }
+}
+
 impl JunkClassifier for CombinedJunkClassifier<'_> {
     fn needs_file_marker(&self, name: &sweepx_model::NativeName) -> bool {
         self.project.needs_project_marker(name)
@@ -1284,6 +1341,75 @@ mod tests {
     use sweepx_model::{ByteValue, ReasonCode};
 
     #[test]
+    fn classification_context_tracks_rules_and_discovery_but_not_activity() {
+        let project = JunkService::built_in().unwrap();
+        let rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.root_kind == "pip_reported_cache")
+            .unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let a = fixture.path().join("a");
+        let b = fixture.path().join("b");
+        let mut evidence = PlatformJunkEvidence::default();
+        evidence.by_rule.insert(
+            rule.id.clone(),
+            PlatformRuleEvidence {
+                cache_candidates: vec![a.clone(), b.clone()],
+                reported_root: Some(a.clone()),
+            },
+        );
+        let digest = |rules: &[PlatformJunkRule], evidence: &PlatformJunkEvidence| {
+            project
+                .with_platform(rules, evidence)
+                .classification_context_digest()
+        };
+        let rules = vec![rule];
+        let first = digest(&rules, &evidence).unwrap();
+        assert_ne!(
+            digest(&[], &evidence).unwrap(),
+            first,
+            "enabled rules matter"
+        );
+        let facts = evidence.by_rule.get_mut(&rules[0].id).unwrap();
+        facts.cache_candidates.reverse();
+        facts.reported_root = Some(b);
+        assert_eq!(
+            digest(&rules, &evidence),
+            Some(first),
+            "order and activity are not scope"
+        );
+        evidence
+            .by_rule
+            .get_mut(&rules[0].id)
+            .unwrap()
+            .cache_candidates
+            .pop();
+        assert_ne!(
+            digest(&rules, &evidence),
+            Some(first),
+            "scope changed outside the scan root"
+        );
+        let mut changed = rules.clone();
+        changed[0].risk = "R3".into();
+        assert_ne!(digest(&changed, &evidence), digest(&rules, &evidence));
+        assert_eq!(digest(&rules, &PlatformJunkEvidence::default()), None);
+        evidence.layout_failure = Some(LayoutDiscoveryFailure::ObservationUnavailable);
+        assert_eq!(digest(&rules, &evidence), None);
+        let edited = format!("{}\n", super::super::PROJECT_RULES_JSON);
+        let edited = JunkService::from_rule_bytes(edited.as_bytes()).unwrap();
+        assert_ne!(
+            project
+                .with_platform(&[], &PlatformJunkEvidence::default())
+                .classification_context_digest(),
+            edited
+                .with_platform(&[], &PlatformJunkEvidence::default())
+                .classification_context_digest(),
+            "actual loaded bytes are bound even when the parsed predicates are identical"
+        );
+    }
+
+    #[test]
     fn missing_layout_anchor_does_not_claim_complete_empty_discovery() {
         let rule = load_platform_junk_rules()
             .unwrap()
@@ -1388,6 +1514,15 @@ mod tests {
             LayoutDiscoveryLimits::default(),
             CancellationToken::new(),
             |_| Some(base.clone()),
+        );
+        assert_ne!(
+            project
+                .with_platform(&rules, &evidence)
+                .classification_context_digest(),
+            project
+                .with_platform(&rules, &current)
+                .classification_context_digest(),
+            "a same-path replacement changes the native discovery context"
         );
         assert_eq!(scan(cache, &current).decisions.len(), 1);
         assert!(

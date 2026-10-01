@@ -1307,6 +1307,8 @@ fn run_junk_scan(
     // Resolve every rule's tool caches and live root once, up front, so the walk-time classifier
     // and the later assembly both read from this snapshot instead of each spawning the tools.
     let classifier = project_service.with_platform(&platform_rules, &evidence);
+    #[cfg(target_os = "macos")]
+    let classification_context = classifier.classification_context_digest();
 
     // Resolve every root to its canonical (symlink-free) path; FSEvents reports canonical paths
     // and the per-root cache is keyed on them. A root that cannot be canonicalized is passed
@@ -1328,6 +1330,7 @@ fn run_junk_scan(
     let (subtree_provider, cache_records) = subtree_provider::SubtreeCacheProvider::prepare(
         cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
         &canonical_roots,
+        classification_context.as_ref(),
     );
 
     // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
@@ -1468,11 +1471,11 @@ fn run_junk_scan(
     if let Some(cache) = &cache_dir {
         for index in &miss_indexes {
             let root = &canonical_roots[*index];
-            // Partial layout discovery may omit classifications despite complete filesystem
-            // traversal. Never freeze that omission into a whole-root candidate cache hit.
-            if layout_failure.is_some() {
+            // Unknown discovery scope or a context digest that exceeds its bound cannot justify
+            // candidate reuse, even with complete filesystem traversal. File facts are independent.
+            let Some(classification_context) = classification_context else {
                 continue;
-            }
+            };
             // Incomplete scans (including denied roots) must be retried, never frozen as hits.
             if !scan.as_ref().is_some_and(|scan| {
                 root.to_str()
@@ -1486,12 +1489,16 @@ fn run_junk_scan(
                     stored.push(junk_candidate_to_stored(candidate));
                 }
             }
-            match junk_cache::StoredJunkRoot::capture(root, stored, scan_event_id).and_then(
-                |mut record| {
-                    record.bind_scope(&canonical_roots);
-                    junk_cache::write(cache, &record)
-                },
-            ) {
+            match junk_cache::StoredJunkRoot::capture(
+                root,
+                stored,
+                scan_event_id,
+                classification_context,
+            )
+            .and_then(|mut record| {
+                record.bind_scope(&canonical_roots);
+                junk_cache::write(cache, &record)
+            }) {
                 Ok(()) => {}
                 // A cache write failure never fails the report; the root simply rescans next run.
                 Err(error) => eprintln!(

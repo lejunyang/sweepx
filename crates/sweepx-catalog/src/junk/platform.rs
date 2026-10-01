@@ -1,7 +1,7 @@
 //! Platform junk rule admission, independent of host discovery and rendering.
 
 use super::is_safe_rule_component;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Exact built-in bytes used by classification and cache digests.
@@ -13,7 +13,7 @@ pub const PLATFORM_JUNK_RULES_JSON: &str = include_str!("../../resources/platfor
 /// string, so a rule stays portable across users and volumes. Only documented, vendor-published
 /// roots belong here; a directory name guessed from an upstream catalog is not evidence by
 /// itself.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnownRoot {
     /// Anchor the components are joined onto. `home` resolves to the current user's home
@@ -31,7 +31,7 @@ pub struct KnownRoot {
 /// for any browser without a code branch per browser or a hardcoded profile-name list (profiles
 /// are expanded from disk). Only derived cache directory names belong in the lists; cookies,
 /// history, passwords, bookmarks, Local Storage and IndexedDB are never named.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowserCacheSpec {
     /// Anchor `userData` is resolved against: `application_support` (`~/Library/Application
@@ -74,7 +74,7 @@ const fn default_true() -> bool {
 }
 
 /// Admitted report-only platform rule. Matching never grants deletion authority.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformJunkRule {
     /// Stable machine rule identifier.

@@ -47,8 +47,14 @@ impl SubtreeCacheProvider {
     /// filters events by its own cursor, so older index events cannot invalidate newer root
     /// records. Both caches are loaded before querying: a subsequently loaded older index
     /// could otherwise require history that the shared observation did not cover.
-    pub fn prepare(cache_dir: &Path, roots: &[PathBuf]) -> (Self, Vec<Option<StoredJunkRoot>>) {
-        Self::prepare_with_query(cache_dir, roots, |paths, since| {
+    /// Candidate records additionally require the current classification context. A changed or
+    /// unknown context does not invalidate file facts or require a second history query.
+    pub fn prepare(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        context: Option<&[u8; 32]>,
+    ) -> (Self, Vec<Option<StoredJunkRoot>>) {
+        Self::prepare_with_query(cache_dir, roots, context, |paths, since| {
             events_since(paths, since, DRAIN_TIMEOUT)
         })
     }
@@ -56,11 +62,13 @@ impl SubtreeCacheProvider {
     fn prepare_with_query(
         cache_dir: &Path,
         roots: &[PathBuf],
+        context: Option<&[u8; 32]>,
         query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
     ) -> (Self, Vec<Option<StoredJunkRoot>>) {
         Self::prepare_with_query_and_limits(
             cache_dir,
             roots,
+            context,
             query,
             MAX_CHANGE_PATHS,
             MAX_CHANGE_BYTES,
@@ -70,12 +78,13 @@ impl SubtreeCacheProvider {
     fn prepare_with_query_and_limits(
         cache_dir: &Path,
         roots: &[PathBuf],
+        context: Option<&[u8; 32]>,
         query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
         change_count: usize,
         change_bytes: usize,
     ) -> (Self, Vec<Option<StoredJunkRoot>>) {
         let mut reader = junk_cache::CacheReader::new(cache_dir);
-        let records = reader.roots(roots);
+        let records = reader.roots(roots, context);
         let max_roots = junk_cache::Limits::default().roots;
         let bindings: BTreeMap<_, _> = roots
             .iter()
@@ -391,7 +400,7 @@ mod tests {
                 let root = base.join(name);
                 fs::create_dir(&root).unwrap();
                 fs::write(root.join("file"), b"payload").unwrap();
-                let record = StoredJunkRoot::capture(&root, vec![], 80).unwrap();
+                let record = StoredJunkRoot::capture(&root, vec![], 80, [0; 32]).unwrap();
                 junk_cache::write(&cache, &record).unwrap();
                 root
             })
@@ -415,11 +424,135 @@ mod tests {
     }
 
     #[test]
+    fn new_platform_context_rescans_empty_candidates_and_keeps_file_facts() {
+        use sweepx_core::junk::{
+            JunkService,
+            platform::{PlatformJunkEvidence, load_platform_junk_rules},
+        };
+        let (_fixture, cache, roots) = seeded_cache();
+        let root = &roots[0];
+        fs::create_dir(root.join("user-data-child")).unwrap();
+        let project = JunkService::built_in().unwrap();
+        let empty_evidence = PlatformJunkEvidence::default();
+        let project_classifier = project.with_platform(&[], &empty_evidence);
+        let old_context = project_classifier.classification_context_digest().unwrap();
+        let context = sweepx_core::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let request = sweepx_core::ScanRequest {
+            roots: vec![root.clone()],
+            state_dir: None,
+        };
+        let old = sweepx_core::scan_junk_with_store::<sweepx_core::MemorySnapshotStore>(
+            &context,
+            &request,
+            None,
+            &project_classifier,
+            None,
+        )
+        .unwrap();
+        assert!(old.decisions.is_empty());
+        junk_cache::write(
+            &cache,
+            &StoredJunkRoot::capture(root, vec![], 80, old_context).unwrap(),
+        )
+        .unwrap();
+        let rules = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .filter(|rule| rule.id == "macos.user-caches")
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 1);
+        let classifier = project.with_platform(&rules, &empty_evidence);
+        let new_context = classifier.classification_context_digest().unwrap();
+        let empty_log = |_: &[&Path], _: FsEventId| {
+            Ok(ChangeLog {
+                events: vec![],
+                must_rescan: false,
+            })
+        };
+        let (_, old_records) = SubtreeCacheProvider::prepare_with_query(
+            &cache,
+            std::slice::from_ref(root),
+            Some(&old_context),
+            empty_log,
+        );
+        assert!(
+            old_records[0].is_some(),
+            "unchanged context admits the warm empty report"
+        );
+        for current in [Some(&new_context), None] {
+            let (provider, records) = SubtreeCacheProvider::prepare_with_query(
+                &cache,
+                std::slice::from_ref(root),
+                current,
+                empty_log,
+            );
+            assert!(
+                records[0].is_none(),
+                "new or unknown scope cannot replay an empty report"
+            );
+            let child = sweepx_platform::DirectoryEntryRecord::from_parent_and_name(
+                root,
+                sweepx_model::NativeName::unix(b"file".to_vec()),
+            )
+            .unwrap();
+            let plan = provider.plan_entries(root, &[child]).unwrap();
+            assert!(matches!(&plan[0], PlannedEntry::ReuseFile(file)
+                if file.logical_bytes == u128::from(fs::symlink_metadata(root.join("file")).unwrap().len())));
+            let fresh = sweepx_core::scan_junk_with_store::<sweepx_core::MemorySnapshotStore>(
+                &context,
+                &request,
+                None,
+                &classifier,
+                Some(&provider),
+            )
+            .unwrap();
+            assert_eq!(
+                fresh.decisions.len(),
+                1,
+                "live traversal introduces the new candidate"
+            );
+            let candidate = fresh
+                .scan
+                .summary
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry
+                        .identity
+                        .as_ref()
+                        .is_some_and(|id| fresh.decisions.contains_key(&id.entry_id))
+                })
+                .unwrap();
+            assert_eq!(
+                candidate.display_path,
+                root.join("user-data-child").display().to_string()
+            );
+        }
+        let after = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            after,
+            ["file", "user-data-child"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
+        );
+    }
+
+    #[test]
     fn shared_drain_uses_oldest_cursor_and_preserves_each_consumers_cursor() {
         let (_fixture, cache, roots) = seeded_cache();
         let calls = std::cell::Cell::new(0);
-        let (provider, records) =
-            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |paths, since| {
+        let (provider, records) = SubtreeCacheProvider::prepare_with_query(
+            &cache,
+            &roots,
+            Some(&[0; 32]),
+            |paths, since| {
                 calls.set(calls.get() + 1);
                 assert_eq!(since, 40, "older file-index history must be included");
                 assert_eq!(
@@ -441,7 +574,8 @@ mod tests {
                         },
                     ],
                 })
-            });
+            },
+        );
         assert_eq!(calls.get(), 1);
         assert!(
             records[0].is_some(),
@@ -478,7 +612,7 @@ mod tests {
         let (_fixture, cache, roots) = seeded_cache();
         for failed in [false, true] {
             let (provider, records) =
-                SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| {
+                SubtreeCacheProvider::prepare_with_query(&cache, &roots, Some(&[0; 32]), |_, _| {
                     if failed {
                         Err(std::io::Error::other("history unavailable"))
                     } else {
@@ -498,7 +632,7 @@ mod tests {
     fn root_binding_is_rechecked_after_the_shared_observation() {
         let (_fixture, cache, roots) = seeded_cache();
         let (provider, records) =
-            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| {
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, Some(&[0; 32]), |_, _| {
                 // Keep the original inode alive so the replacement cannot accidentally reuse it.
                 fs::rename(&roots[0], roots[0].with_extension("old")).unwrap();
                 fs::create_dir(&roots[0]).unwrap();
@@ -534,6 +668,7 @@ mod tests {
         let (provider, records) = SubtreeCacheProvider::prepare_with_query(
             &root.join("absent-cache"),
             std::slice::from_ref(&root),
+            Some(&[0; 32]),
             |_, _| panic!("no cursor to validate"),
         );
         assert!(records[0].is_none());
@@ -573,22 +708,24 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let (provider, _) = SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| {
-            Ok(ChangeLog {
-                events: vec![],
-                must_rescan: false,
-            })
-        });
+        let (provider, _) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, Some(&[0; 32]), |_, _| {
+                Ok(ChangeLog {
+                    events: vec![],
+                    must_rescan: false,
+                })
+            });
         provider
             .store_index(changed, &roots, 100, &covered, &listings)
             .unwrap();
-        let (provider, _) = SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, since| {
-            assert_eq!(since, 40, "B still needs its older cursor");
-            Ok(ChangeLog {
-                events: vec![],
-                must_rescan: false,
-            })
-        });
+        let (provider, _) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, Some(&[0; 32]), |_, since| {
+                assert_eq!(since, 40, "B still needs its older cursor");
+                Ok(ChangeLog {
+                    events: vec![],
+                    must_rescan: false,
+                })
+            });
         for (root, expected) in [(&roots[0], 14), (&roots[1], 7)] {
             let children: Vec<_> = ["file", "uncached"]
                 .into_iter()
@@ -698,6 +835,7 @@ mod tests {
             let (provider, records) = SubtreeCacheProvider::prepare_with_query_and_limits(
                 &cache,
                 &roots,
+                Some(&[0; 32]),
                 |_, _| {
                     // The event predates both complete root records but is relevant to the older
                     // file index. Root records cannot mask a truncated invalidation map.
@@ -723,15 +861,19 @@ mod tests {
         let cached = roots.clone();
         let base = roots[0].parent().unwrap().to_path_buf();
         roots.extend((0..300).map(|ordinal| base.join(format!("uncached-{ordinal}"))));
-        let (provider, records) =
-            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |paths, since| {
+        let (provider, records) = SubtreeCacheProvider::prepare_with_query(
+            &cache,
+            &roots,
+            Some(&[0; 32]),
+            |paths, since| {
                 assert_eq!(since, 40);
                 assert_eq!(
                     paths.iter().copied().collect::<BTreeSet<_>>(),
                     cached.iter().map(PathBuf::as_path).collect()
                 );
                 Ok(log_of(&[]))
-            });
+            },
+        );
         assert!(records[0].is_some() && records[1].is_some());
         assert!(records[2..].iter().all(Option::is_none));
         assert_eq!(provider.roots.len(), 2);
@@ -747,7 +889,9 @@ mod tests {
         fs::create_dir(&nested).unwrap();
         roots.push(nested);
         let (provider, _) =
-            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| Ok(log_of(&[])));
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, Some(&[0; 32]), |_, _| {
+                Ok(log_of(&[]))
+            });
         let child = sweepx_platform::DirectoryEntryRecord {
             path: parent.join("file"),
             file_name: sweepx_model::NativeName::UnixBytes(b"file".to_vec()),

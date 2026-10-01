@@ -54,6 +54,8 @@ Release automation builds five target archives, checksums, installers, and this 
 
 Browser and known-cache discovery in `junk --system` shares a bounded invocation snapshot with classification, avoiding profile enumeration for each candidate. Permission, observation or resource failures set `layoutDiscovery.complete` to false with an `incompleteReason`, report partial and return exit code 4. Confirmed results remain visible; an empty list does not prove there is no junk. The native deadline is cooperative between calls and cannot interrupt blocking OS access. Non-interactive cleanup/Trash requests are rejected before discovery.
 
+Whole-root candidate records bind the currently enabled rules and discovery scope, triggering fresh classification when they change. File-length caches are validated independently, so an old empty candidate report cannot hide results introduced by newly enabled rules.
+
 ## Read by question
 
 | What you want to know | Page |

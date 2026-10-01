@@ -45,7 +45,7 @@ use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v5";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v6";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 #[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,6 +56,8 @@ pub struct StoredJunkRoot {
     schema: String,
     /// Classification data changes invalidate a report even when the filesystem is unchanged.
     rules_digest: String,
+    /// Current enabled rules and discovery scope, independent of filesystem history.
+    classification_context: [u8; 32],
     /// Canonical absolute path of the root at capture; verified before reuse.
     root: String,
     /// Native identity of the root directory at capture.
@@ -93,6 +95,7 @@ impl StoredJunkRoot {
         canonical_root: &Path,
         candidates: Vec<StoredJunkCandidate>,
         since_event_id: FsEventId,
+        classification_context: [u8; 32],
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(canonical_root)?;
         if !metadata.is_dir() {
@@ -101,6 +104,7 @@ impl StoredJunkRoot {
         Ok(Self {
             schema: STORED_SCHEMA.to_string(),
             rules_digest: rules_digest().to_string(),
+            classification_context,
             root: canonical_root
                 .to_str()
                 .ok_or_else(|| io::Error::other("cache root is not UTF-8"))?
@@ -192,8 +196,13 @@ impl CacheReader {
         self.budget.remaining_retained_bytes()
     }
 
-    /// Root identity and loaded rule bytes must match even before history is consulted.
-    pub fn roots(&mut self, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+    /// Root identity, loaded rule bytes and current classification context must match before
+    /// history is consulted. Unknown context skips candidate reads; file indexes remain independent.
+    pub fn roots(
+        &mut self,
+        roots: &[PathBuf],
+        context: Option<&[u8; 32]>,
+    ) -> Vec<Option<StoredJunkRoot>> {
         roots
             .iter()
             .enumerate()
@@ -201,13 +210,15 @@ impl CacheReader {
                 if ordinal >= self.limits.roots {
                     return None;
                 }
+                let context = context?;
                 let record: StoredJunkRoot = self.budget.read(
                     self.directory.as_ref()?,
                     &record_file_name(root),
                     self.limits,
                     root_retained_bytes,
                 )?;
-                (record.matches_root(root)
+                (record.classification_context == *context
+                    && record.matches_root(root)
                     && record.excluded_root_keys == excluded_root_keys(root, roots))
                 .then_some(record)
             })
@@ -273,7 +284,7 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 pub fn load(cache_dir: &Path, canonical_root: &Path) -> Option<StoredJunkRoot> {
     CacheReader::new(cache_dir)
-        .roots(&[canonical_root.to_path_buf()])
+        .roots(&[canonical_root.to_path_buf()], Some(&[0; 32]))
         .pop()
         .flatten()
 }
@@ -666,14 +677,16 @@ mod tests {
     #[test]
     fn pre_scan_cursor_survives_capture_and_old_schema_is_refused() {
         let (_fixture, cache) = temp_cache();
-        let mut stored = StoredJunkRoot::capture(&cache, vec![], 42).unwrap();
+        let mut stored = StoredJunkRoot::capture(&cache, vec![], 42, [0; 32]).unwrap();
         assert_eq!(stored.since_event_id, 42);
         assert!(stored.matches_root(&cache));
         stored.rules_digest = "old-rules".into();
         assert!(!stored.matches_root(&cache));
         stored.rules_digest = rules_digest().into();
-        stored.schema = "sweepx.junk-cache/v1".into();
-        assert!(!stored.matches_root(&cache));
+        for old_schema in ["sweepx.junk-cache/v1", "sweepx.junk-cache/v5"] {
+            stored.schema = old_schema.into();
+            assert!(!stored.matches_root(&cache));
+        }
         fs::remove_dir_all(cache).unwrap();
     }
 
@@ -708,7 +721,7 @@ mod tests {
             let cursor = current_event_id();
             let records: Vec<_> = roots
                 .iter()
-                .map(|root| Some(StoredJunkRoot::capture(root, vec![], cursor).unwrap()))
+                .map(|root| Some(StoredJunkRoot::capture(root, vec![], cursor, [0; 32]).unwrap()))
                 .collect();
             if validate_records(&roots, records.clone())
                 .iter()
@@ -757,6 +770,7 @@ mod tests {
                 &canonical,
                 vec![sample_candidate("a")],
                 current_event_id(),
+                [0; 32],
             )
             .unwrap();
             write(&cache, &stored).unwrap();
@@ -780,7 +794,8 @@ mod tests {
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
-        let stored = StoredJunkRoot::capture(&canonical, vec![], current_event_id()).unwrap();
+        let stored =
+            StoredJunkRoot::capture(&canonical, vec![], current_event_id(), [0; 32]).unwrap();
         write(&cache, &stored).unwrap();
         fs::write(canonical.join("new.txt"), b"x").unwrap();
         let loaded = load(&cache, &canonical).expect("stored");
@@ -799,7 +814,8 @@ mod tests {
         let gone = fs::canonicalize(&gone).unwrap();
 
         for root in [&keep, &gone] {
-            let stored = StoredJunkRoot::capture(root, vec![], current_event_id()).unwrap();
+            let stored =
+                StoredJunkRoot::capture(root, vec![], current_event_id(), [0; 32]).unwrap();
             write(&cache, &stored).unwrap();
         }
         prune(&cache).unwrap();
@@ -817,7 +833,7 @@ mod tests {
             .map(|name| {
                 let root = cache.join(name);
                 fs::create_dir(&root).unwrap();
-                let record = StoredJunkRoot::capture(&root, vec![], 12).unwrap();
+                let record = StoredJunkRoot::capture(&root, vec![], 12, [0; 32]).unwrap();
                 write(&cache, &record).unwrap();
                 let index =
                     StoredSubtreeIndex::new(&root, 12, BTreeMap::new(), BTreeMap::new()).unwrap();
@@ -917,12 +933,12 @@ mod tests {
         let child = parent.join("child");
         fs::create_dir_all(&child).unwrap();
         let roots = vec![parent.clone(), child];
-        let mut record = StoredJunkRoot::capture(&parent, vec![], 40).unwrap();
+        let mut record = StoredJunkRoot::capture(&parent, vec![], 40, [0; 32]).unwrap();
         record.bind_scope(&roots);
         write(&cache, &record).unwrap();
-        assert!(CacheReader::new(&cache).roots(&roots)[0].is_some());
+        assert!(CacheReader::new(&cache).roots(&roots, Some(&[0; 32]))[0].is_some());
         assert!(
-            CacheReader::new(&cache).roots(&[parent])[0].is_none(),
+            CacheReader::new(&cache).roots(&[parent], Some(&[0; 32]))[0].is_none(),
             "child-owned candidates are missing from the parent-only report"
         );
     }
@@ -979,7 +995,11 @@ mod tests {
         let (_fixture, cache) = temp_cache();
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
-        write(&cache, &StoredJunkRoot::capture(&root, vec![], 10).unwrap()).unwrap();
+        write(
+            &cache,
+            &StoredJunkRoot::capture(&root, vec![], 10, [0; 32]).unwrap(),
+        )
+        .unwrap();
         let external = cache.join("external");
         fs::create_dir(&external).unwrap();
         let outside_file = external.join(format!("{}.json", "a".repeat(64)));
@@ -1002,7 +1022,7 @@ mod tests {
     #[test]
     fn root_scope_vector_reservations_count_as_retained_metadata() {
         let (_fixture, cache) = temp_cache();
-        let mut record = StoredJunkRoot::capture(&cache, vec![], 1).unwrap();
+        let mut record = StoredJunkRoot::capture(&cache, vec![], 1, [0; 32]).unwrap();
         let baseline = root_retained_bytes(&record);
         record.excluded_root_keys = Vec::with_capacity(4096);
         let owned_slots = record.excluded_root_keys.capacity() * std::mem::size_of::<String>();
