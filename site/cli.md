@@ -441,3 +441,5 @@ macOS 的 `junk` 缓存按批次校验根目录，避免逐根等待 FSEvents；
 先构建 `cargo build -p sweepx-cli --release`，再运行 `python3 scripts/benchmark-junk.py --build-label release --output /tmp/junk-benchmark.json`。脚本使用隔离状态目录，对比空 SweepX 缓存、热扫尝试和受控单文件变化，并核对候选及文件大小；`--root /absolute/project` 可测只读真实目录。它保留每次实际命中数，不把 OS 缓存等同 SweepX 缓存；小样本只汇报中位数。
 
 macOS 的根记录和逐文件索引现在共享一次覆盖全部请求根的 FSEvents 历史查询，各自按原游标判断变化；缺失历史或查询失败仍回到现场观察。使用 `--timings` 时，两层读取与验证合计在 `rootCacheValidation` 阶段，`subtreeCacheValidation` 保留为零附近的阶段边界。
+
+历史查询收到完整历史标记后立即结束 run loop 等待，避免每次命中再等待固定时间片；处理一个事件源并不代表完整历史，超时或历史缺口仍拒绝复用。

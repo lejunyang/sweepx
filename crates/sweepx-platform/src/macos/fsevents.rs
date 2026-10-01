@@ -180,8 +180,10 @@ pub fn events_since(
     }
 
     let deadline = Instant::now() + timeout;
-    // Drain until the callback observes HistoryDone. Each RunInMode returns when a source is
-    // handled (the callback stops the loop on HistoryDone) or when its slice times out.
+    // Return after each handled source so HistoryDone can end the drain immediately. The
+    // callback does not stop the run loop: waiting for the whole slice after it completed
+    // imposed a 250 ms floor on every valid cache hit. A handled source alone does not prove
+    // completeness; only the callback's HistoryDone flag ends the outer loop successfully.
     let mut timed_out = false;
     while !collector.history_done && !timed_out {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -191,7 +193,7 @@ pub fn events_since(
         }
         let slice = remaining.min(Duration::from_millis(250)).as_secs_f64();
         // SAFETY: run loop live; returns a scalar result code.
-        let _result = unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, slice, 0) };
+        let _result = unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, slice, 1) };
     }
 
     // Full teardown in declared order; stopping after a timeout simply ends the live stream.
@@ -365,6 +367,55 @@ mod tests {
     #[test]
     fn current_event_id_is_nonzero_on_a_live_system() {
         assert!(current_event_id() > 0, "a booted system has FSEvents");
+    }
+
+    #[test]
+    fn zero_deadline_refuses_history_even_when_the_stream_started() {
+        let root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let error = events_since(&[root.as_path()], current_event_id(), Duration::ZERO)
+            .expect_err("no time to establish HistoryDone; never accept partial history");
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn handled_sources_preserve_the_whole_callback_batch_and_gap_flags() {
+        let mut collector = Collector {
+            events: vec![],
+            must_rescan: false,
+            history_done: false,
+        };
+        let names =
+            ["/root/a", "/root/b", "", "/root/c"].map(|name| std::ffi::CString::new(name).unwrap());
+        let paths: Vec<_> = names.iter().map(|name| name.as_ptr()).collect();
+        // Even a sentinel inside a delivered batch cannot discard following records or gaps.
+        let flags = [0, 0, FLAG_HISTORY_DONE, FLAG_KERNEL_DROPPED];
+        let ids = [101, 102, 103, 104];
+        stream_callback(
+            std::ptr::null(),
+            (&mut collector as *mut Collector).cast(),
+            paths.len(),
+            paths.as_ptr().cast_mut().cast(),
+            flags.as_ptr(),
+            ids.as_ptr(),
+        );
+        assert!(collector.history_done);
+        assert!(collector.must_rescan);
+        assert_eq!(
+            collector
+                .events
+                .iter()
+                .map(|event| event.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/root/a", "/root/b", "/root/c"]
+        );
+        assert_eq!(
+            collector
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            [101, 102, 104]
+        );
     }
 
     #[test]

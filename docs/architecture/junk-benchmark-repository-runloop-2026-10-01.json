@@ -1,0 +1,232 @@
+{
+  "schema": "sweepx.junk.benchmark/v1",
+  "dateUtc": "2026-10-01T03:08:08.791709+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.9.6"
+  },
+  "binary": {
+    "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/release/sweepx",
+    "version": "sweepx 0.0.1",
+    "sha256": "7b62040e389d431deef61b9ae88440d5b07a17cb6f658930277062358d7064e2",
+    "buildLabel": "Rust 1.98.0 release immediate HistoryDone"
+  },
+  "workload": {
+    "generated": false,
+    "roots": [
+      "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates",
+      "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/site"
+    ],
+    "filesPerRoot": null,
+    "repetitions": 3,
+    "settleSeconds": 1.0
+  },
+  "verification": {
+    "coldWarmFilesystemFactsEqual": true,
+    "independentFixtureWalk": false,
+    "dynamicGitToolInterpretationsCompared": false
+  },
+  "osCache": "uncontrolled; cold means empty SweepX cache only",
+  "summary": {
+    "cold": {
+      "samples": 3,
+      "medianWallNs": 166020417,
+      "medianPhasesNs": {
+        "cacheWrite": 4818917,
+        "classification": 146042,
+        "discovery": 9625,
+        "gitEvidence": 227792,
+        "report": 148875,
+        "rootCacheValidation": 60084,
+        "setup": 175333,
+        "subtreeCacheValidation": 83,
+        "tail": 2226334,
+        "traversal": 146413666
+      }
+    },
+    "root-cache-hit": {
+      "samples": 3,
+      "medianWallNs": 21509542,
+      "medianPhasesNs": {
+        "cacheWrite": 133583,
+        "discovery": 9625,
+        "gitEvidence": 250,
+        "report": 167792,
+        "rootCacheValidation": 10629375,
+        "setup": 210583,
+        "subtreeCacheValidation": 41,
+        "tail": 155875,
+        "traversal": 1834
+      }
+    }
+  },
+  "samples": [
+    {
+      "wallNs": 166020417,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 154167375,
+        "phasesNs": {
+          "discovery": 9625,
+          "setup": 175333,
+          "rootCacheValidation": 60084,
+          "subtreeCacheValidation": 125,
+          "traversal": 146413666,
+          "classification": 146042,
+          "gitEvidence": 222125,
+          "cacheWrite": 4818917,
+          "report": 148875,
+          "tail": 2166750
+        },
+        "rootCount": 2,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 2,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 1,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    },
+    {
+      "wallNs": 146090666,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 132990333,
+        "phasesNs": {
+          "discovery": 9916,
+          "setup": 208959,
+          "rootCacheValidation": 68416,
+          "subtreeCacheValidation": 42,
+          "traversal": 125526833,
+          "classification": 139542,
+          "gitEvidence": 227792,
+          "cacheWrite": 4446916,
+          "report": 129750,
+          "tail": 2226334
+        },
+        "rootCount": 2,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 2,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 2,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    },
+    {
+      "wallNs": 195809583,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 183528625,
+        "phasesNs": {
+          "discovery": 8292,
+          "setup": 148875,
+          "rootCacheValidation": 43042,
+          "subtreeCacheValidation": 83,
+          "traversal": 160837792,
+          "classification": 180375,
+          "gitEvidence": 335833,
+          "cacheWrite": 19147792,
+          "report": 196375,
+          "tail": 2624083
+        },
+        "rootCount": 2,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 2,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 3,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    },
+    {
+      "wallNs": 27474667,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 12361375,
+        "phasesNs": {
+          "discovery": 9625,
+          "setup": 248750,
+          "rootCacheValidation": 11566000,
+          "subtreeCacheValidation": 83,
+          "traversal": 2375,
+          "gitEvidence": 250,
+          "cacheWrite": 223250,
+          "report": 133500,
+          "tail": 173584
+        },
+        "rootCount": 2,
+        "rootCacheHits": 2,
+        "rootCacheMisses": 0,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 1,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    },
+    {
+      "wallNs": 21213917,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 11058083,
+        "phasesNs": {
+          "discovery": 10958,
+          "setup": 210583,
+          "rootCacheValidation": 10372709,
+          "subtreeCacheValidation": 41,
+          "traversal": 1709,
+          "gitEvidence": 125,
+          "cacheWrite": 126750,
+          "report": 192750,
+          "tail": 140375
+        },
+        "rootCount": 2,
+        "rootCacheHits": 2,
+        "rootCacheMisses": 0,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 2,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    },
+    {
+      "wallNs": 21509542,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 11277208,
+        "phasesNs": {
+          "discovery": 7417,
+          "setup": 178125,
+          "rootCacheValidation": 10629375,
+          "subtreeCacheValidation": 41,
+          "traversal": 1834,
+          "gitEvidence": 1208,
+          "cacheWrite": 133583,
+          "report": 167792,
+          "tail": 155875
+        },
+        "rootCount": 2,
+        "rootCacheHits": 2,
+        "rootCacheMisses": 0,
+        "candidateCount": 1
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 3,
+      "factsSha256": "1344df8bd2eafb97ca657dc5b1cc1387d81ad5ec9a0ba5aa03298ac8bb53b0e3"
+    }
+  ]
+}

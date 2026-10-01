@@ -480,3 +480,5 @@ On a root-cache miss, directories are enumerated again to reconstruct current id
 After `cargo build -p sweepx-cli --release`, run `python3 scripts/benchmark-junk.py --build-label release --output /tmp/junk-benchmark.json`. It isolates SweepX state and compares empty-cache scans, warm attempts and controlled file mutations, checking candidate facts and file sizes. Repeat `--root /absolute/project` to measure existing directories without modifying them. Every attempt retains actual cache hit counts; OS caches are uncontrolled, and small samples report medians only.
 
 On macOS, root records and file indexes share one FSEvents query covering every requested root, then interpret events against their own cursors. Missing history or query failure still falls back to fresh observations. With `--timings`, both layers are included in `rootCacheValidation`; `subtreeCacheValidation` remains a near-zero phase boundary.
+
+The history query ends its run-loop wait as soon as the complete-history marker arrives. Handling one source alone does not establish completeness; timeouts and history gaps still refuse reuse.

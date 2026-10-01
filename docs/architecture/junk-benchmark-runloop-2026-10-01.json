@@ -1,0 +1,338 @@
+{
+  "schema": "sweepx.junk.benchmark/v1",
+  "dateUtc": "2026-10-01T03:08:05.306593+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.9.6"
+  },
+  "binary": {
+    "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/release/sweepx",
+    "version": "sweepx 0.0.1",
+    "sha256": "7b62040e389d431deef61b9ae88440d5b07a17cb6f658930277062358d7064e2",
+    "buildLabel": "Rust 1.98.0 release immediate HistoryDone"
+  },
+  "workload": {
+    "generated": true,
+    "roots": [
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-000",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-001",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-002",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-003",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-004",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-005",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-006",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-x6to5l4q/project-007"
+    ],
+    "filesPerRoot": 1024,
+    "repetitions": 3,
+    "settleSeconds": 1.0
+  },
+  "verification": {
+    "coldWarmFilesystemFactsEqual": true,
+    "independentFixtureWalk": true,
+    "dynamicGitToolInterpretationsCompared": false
+  },
+  "osCache": "uncontrolled; cold means empty SweepX cache only",
+  "summary": {
+    "cold": {
+      "samples": 3,
+      "medianWallNs": 173692083,
+      "medianPhasesNs": {
+        "cacheWrite": 8798167,
+        "classification": 17875,
+        "discovery": 13000,
+        "gitEvidence": 64834,
+        "report": 86083,
+        "rootCacheValidation": 97917,
+        "setup": 267250,
+        "subtreeCacheValidation": 42,
+        "tail": 3110834,
+        "traversal": 92473417
+      }
+    },
+    "root-cache-hit": {
+      "samples": 3,
+      "medianWallNs": 23260959,
+      "medianPhasesNs": {
+        "cacheWrite": 151250,
+        "discovery": 10333,
+        "gitEvidence": 333,
+        "report": 84959,
+        "rootCacheValidation": 12245125,
+        "setup": 220500,
+        "subtreeCacheValidation": 83,
+        "tail": 181125,
+        "traversal": 2042
+      }
+    },
+    "changed": {
+      "samples": 3,
+      "medianWallNs": 42603750,
+      "medianPhasesNs": {
+        "cacheWrite": 4092750,
+        "classification": 3916,
+        "discovery": 12208,
+        "gitEvidence": 8750,
+        "report": 80667,
+        "rootCacheValidation": 11991375,
+        "setup": 207000,
+        "subtreeCacheValidation": 41,
+        "tail": 330959,
+        "traversal": 9694084
+      }
+    }
+  },
+  "samples": [
+    {
+      "wallNs": 9540684125,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 163860500,
+        "phasesNs": {
+          "discovery": 66875,
+          "setup": 433541,
+          "rootCacheValidation": 137709,
+          "subtreeCacheValidation": 83,
+          "traversal": 144202333,
+          "classification": 17875,
+          "gitEvidence": 64834,
+          "cacheWrite": 15687166,
+          "report": 93875,
+          "tail": 3134709
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 1,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 173692083,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 104938000,
+        "phasesNs": {
+          "discovery": 13000,
+          "setup": 267250,
+          "rootCacheValidation": 96916,
+          "subtreeCacheValidation": 42,
+          "traversal": 92473417,
+          "classification": 17166,
+          "gitEvidence": 68750,
+          "cacheWrite": 8798167,
+          "report": 86083,
+          "tail": 3110834
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 2,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 105758292,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 92804417,
+        "phasesNs": {
+          "discovery": 11875,
+          "setup": 262833,
+          "rootCacheValidation": 97917,
+          "subtreeCacheValidation": 42,
+          "traversal": 82593625,
+          "classification": 18000,
+          "gitEvidence": 56958,
+          "cacheWrite": 7242667,
+          "report": 74666,
+          "tail": 2440417
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 3,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 144358667,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 134097208,
+        "phasesNs": {
+          "discovery": 11666,
+          "setup": 231625,
+          "rootCacheValidation": 133435875,
+          "subtreeCacheValidation": 167,
+          "traversal": 2083,
+          "gitEvidence": 334,
+          "cacheWrite": 147166,
+          "report": 84959,
+          "tail": 181125
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 1,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 22852916,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 12418042,
+        "phasesNs": {
+          "discovery": 10333,
+          "setup": 220500,
+          "rootCacheValidation": 11776417,
+          "subtreeCacheValidation": 83,
+          "traversal": 1917,
+          "gitEvidence": 333,
+          "cacheWrite": 154709,
+          "report": 78875,
+          "tail": 172500
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 2,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 23260959,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 12896167,
+        "phasesNs": {
+          "discovery": 10000,
+          "setup": 210917,
+          "rootCacheValidation": 12245125,
+          "subtreeCacheValidation": 83,
+          "traversal": 2042,
+          "gitEvidence": 333,
+          "cacheWrite": 151250,
+          "report": 86417,
+          "tail": 187333
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 3,
+      "factsSha256": "37a6a1e34f0b205df4ec092798b95299e85659e2dbcd1bdd97a57851511c40cf"
+    },
+    {
+      "wallNs": 42603750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 24461042,
+        "phasesNs": {
+          "discovery": 12667,
+          "setup": 202792,
+          "rootCacheValidation": 11877500,
+          "subtreeCacheValidation": 41,
+          "traversal": 9694084,
+          "classification": 3708,
+          "gitEvidence": 9417,
+          "cacheWrite": 2097583,
+          "report": 80667,
+          "tail": 479125
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 1,
+      "factsSha256": "c3f7395aebae8d6506bf32c14a2d22b4e820abe7a41510d42fcd88e0c310f3c6"
+    },
+    {
+      "wallNs": 46922542,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 27576000,
+        "phasesNs": {
+          "discovery": 11583,
+          "setup": 207000,
+          "rootCacheValidation": 13370834,
+          "subtreeCacheValidation": 41,
+          "traversal": 9510334,
+          "classification": 3916,
+          "gitEvidence": 8334,
+          "cacheWrite": 4092750,
+          "report": 75208,
+          "tail": 293792
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 2,
+      "factsSha256": "c0b25c18cc8f361455381801b6a2602ee2a37134c7634d2dd699330d006c3754"
+    },
+    {
+      "wallNs": 42140625,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 28298625,
+        "phasesNs": {
+          "discovery": 12208,
+          "setup": 226500,
+          "rootCacheValidation": 11991375,
+          "subtreeCacheValidation": 42,
+          "traversal": 11380291,
+          "classification": 4709,
+          "gitEvidence": 8750,
+          "cacheWrite": 4237791,
+          "report": 103875,
+          "tail": 330959
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 3,
+      "factsSha256": "fdb71e2b9221ed704e2dff1b98c6e1b55ea202b374049d42c8dc1aad05875164"
+    }
+  ]
+}

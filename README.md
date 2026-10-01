@@ -123,6 +123,8 @@ cargo run -p sweepx-cli -- junk --system --clean-temp
 
 规则加载、类型校验与纯评估已合并到 `sweepx-catalog`，分别保留 `schema` / `vm` 模块，减少内部包依赖。 平台契约和三个实现统一到 `sweepx-platform::{linux,macos,windows}`；仅需契约的调用方可不启用后端。
 
+macOS 垃圾缓存的根记录和文件索引共用一次事件历史验证，收到完整历史后立即结束等待。可用 `junk --timings` 查看实际阶段耗时和命中数；可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
+
 项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
 
 当显式根中能完整识别 Git 工作区时，`junk` 会通过有界、非交互的 Git 查询给现有
