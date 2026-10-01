@@ -112,17 +112,52 @@ impl GitEvidenceSession {
     /// Captures only nested-repository/coverage facts from a fresh traversal. Facts absent due to
     /// resource or coverage loss cannot prove that a candidate contains no repository. Caller may
     /// persist these scalars only with the same validated root coverage and pre-scan change cursor.
-    pub fn capture_scan_facts(
+    pub fn capture_scan_facts<'a>(
         &mut self,
         summary: &crate::ScanSummary,
         coverages: &BTreeMap<ScanEntryId, Coverage>,
         directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
-        candidates: &mut [JunkCandidate],
+        candidates: impl IntoIterator<Item = &'a mut JunkCandidate>,
     ) {
-        for candidate in candidates.iter_mut() {
+        // Borrow candidates rather than copying their native locators. The temporary reference
+        // index is itself bounded; once it cannot fit, all incoming facts remain unknown.
+        let mut retained_candidates = Vec::new();
+        let mut incomplete = false;
+        for candidate in candidates {
             candidate.git_scan_facts = None;
+            if !incomplete && retained_candidates.len() < self.limits.max_lineage_records {
+                if retained_candidates.len() == retained_candidates.capacity() {
+                    // Reserve in small explicit batches, charging capacity rather than length.
+                    // An allocator may grant more slots than requested; charge those too before
+                    // using the index. Overflow abandons all facts, including later inputs.
+                    let additional =
+                        32.min(self.limits.max_lineage_records - retained_candidates.len());
+                    let before = retained_candidates.capacity();
+                    let slot_bytes = std::mem::size_of::<&mut JunkCandidate>();
+                    if !self.charge(additional.saturating_mul(slot_bytes))
+                        || retained_candidates.try_reserve_exact(additional).is_err()
+                        || !self.charge(
+                            retained_candidates
+                                .capacity()
+                                .saturating_sub(before + additional)
+                                .saturating_mul(slot_bytes),
+                        )
+                    {
+                        incomplete = true;
+                        retained_candidates.clear();
+                        continue;
+                    }
+                }
+                retained_candidates.push(candidate);
+            } else {
+                incomplete = true;
+            }
         }
-        if !candidates.iter().any(is_project_candidate) {
+        if incomplete
+            || !retained_candidates
+                .iter()
+                .any(|candidate| is_project_candidate(candidate))
+        {
             return;
         }
         if summary
@@ -160,7 +195,7 @@ impl GitEvidenceSession {
                 repositories.push(parent);
             }
         }
-        for candidate in candidates {
+        for candidate in retained_candidates {
             if !is_project_candidate(candidate) {
                 continue;
             }
@@ -607,30 +642,10 @@ fn captured_path<'a>(
     wanted: Option<&Path>,
 ) -> Option<(PathBuf, Option<&'a NativePathComponent>)> {
     let locator = row.validated_native_locator().ok().flatten()?;
-    let absolute = locator.scan_root_absolute_path.as_ref()?;
     if locator.parent_reopen_recipe.len() > 256 {
         return None;
     }
-    #[cfg(unix)]
-    let mut path = {
-        use std::os::unix::ffi::OsStringExt;
-        match absolute {
-            sweepx_model::NativeAbsolutePath::UnixBytes(bytes) if bytes.len() <= 64 * 1024 => {
-                PathBuf::from(OsString::from_vec(bytes.clone()))
-            }
-            _ => return None,
-        }
-    };
-    #[cfg(windows)]
-    let mut path = {
-        use std::os::windows::ffi::OsStringExt;
-        match absolute {
-            sweepx_model::NativeAbsolutePath::WindowsUtf16(units) if units.len() <= 32 * 1024 => {
-                PathBuf::from(OsString::from_wide(units))
-            }
-            _ => return None,
-        }
-    };
+    let mut path = native_root_path(row)?;
     let mut found = (wanted == Some(path.as_path())).then_some(&locator.scan_root);
     if locator.entry.entry_id != locator.scan_root.entry_id {
         for component in locator
@@ -651,7 +666,35 @@ fn captured_path<'a>(
     Some((path, found))
 }
 
-fn native_path(row: &sweepx_model::ScannedEntry) -> Option<PathBuf> {
+// Shared with scan sessions for presentation keys and read-only refresh roots. Neither decoded
+// path carries authority: callers must independently check the captured native binding.
+pub(super) fn native_root_path(row: &sweepx_model::ScannedEntry) -> Option<PathBuf> {
+    let locator = row.validated_native_locator().ok().flatten()?;
+    let absolute = locator.scan_root_absolute_path.as_ref()?;
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStringExt;
+        match absolute {
+            sweepx_model::NativeAbsolutePath::UnixBytes(bytes) if bytes.len() <= 64 * 1024 => {
+                PathBuf::from(OsString::from_vec(bytes.clone()))
+            }
+            _ => return None,
+        }
+    };
+    #[cfg(windows)]
+    let path = {
+        use std::os::windows::ffi::OsStringExt;
+        match absolute {
+            sweepx_model::NativeAbsolutePath::WindowsUtf16(units) if units.len() <= 32 * 1024 => {
+                PathBuf::from(OsString::from_wide(units))
+            }
+            _ => return None,
+        }
+    };
+    Some(path)
+}
+
+pub(super) fn native_path(row: &sweepx_model::ScannedEntry) -> Option<PathBuf> {
     Some(captured_path(row, None)?.0)
 }
 

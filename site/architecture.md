@@ -56,6 +56,8 @@ Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、
 
 ## 状态与取消
 
+`sweepx-core::junk::session` 提供显式目录根的后台垃圾扫描会话。阶段、候选、边界、错误和终态使用有界背压队列，进度与目录统计合并；稳定候选键与 revision 分离。选中刷新复验原生绑定，只有完整观察才能移除旧行；取消或不完整扫描保留未确认的旧证据。它尚未接入垃圾 TUI、历史缓存或系统自动根发现，刷新仍遍历原始根以保留分类上下文。会话取消独立于下述持久化 `cancel` 命令。
+
 CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 与 Windows 仍写 legacy operation snapshot；Windows state directory 由 current-user-private DACL、owner 校验和逐级 reparse-point 拒绝保护。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。
 
 与 scan/status 分离，`cache status` 只读取 preview cache 的现存状态。Linux、macOS 与 Windows 支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录。`available` 只表示缓存结构和受限校验可读，不代表任何 live/current 文件事实；warning、error 或 quarantine presence 会把结果降为 `degraded`。

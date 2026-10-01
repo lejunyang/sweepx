@@ -79,6 +79,57 @@ pub struct GitIgnoreEvidence {
     pub check: String,
 }
 
+impl JunkCandidate {
+    /// Conservative owned-data estimate for session retention, not allocator RSS or file size.
+    pub fn estimated_retained_bytes(&self) -> usize {
+        let strings = [
+            &self.path,
+            &self.rule_id,
+            &self.risk,
+            &self.evidence,
+            &self.source_reviewed_at,
+        ];
+        let mut bytes = strings.iter().fold(
+            std::mem::size_of::<Self>().saturating_add(512),
+            |sum, value| sum.saturating_add(value.capacity()),
+        );
+        for values in [&self.references, &self.stale_formats, &self.blockers] {
+            bytes = bytes.saturating_add(
+                values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            );
+            for value in values {
+                bytes = bytes.saturating_add(value.capacity());
+            }
+        }
+        for value in [&self.activity, &self.classification, &self.confidence]
+            .into_iter()
+            .flatten()
+        {
+            bytes = bytes.saturating_add(value.capacity());
+        }
+        bytes = bytes.saturating_add(self.entry_id.as_str().len());
+        for id in &self.ancestor_ids {
+            bytes = bytes.saturating_add(128).saturating_add(id.as_str().len());
+        }
+        if let Some(git) = &self.git {
+            bytes = bytes
+                .saturating_add(git.status.capacity())
+                .saturating_add(git.repository_entry_id.capacity())
+                .saturating_add(git.check.capacity());
+        }
+        if let Some(entry) = &self.source_entry {
+            bytes = bytes.saturating_add(entry.estimated_retained_bytes());
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(path) = &self.native_path {
+            bytes = bytes.saturating_add(path.as_os_str().len());
+        }
+        bytes
+    }
+}
+
 /// Assembles one project junk candidate for an entry the classifier already matched.
 /// Missing or inconsistent native directory facts return `None`, never a guessed identity.
 pub fn assemble_project_candidate(

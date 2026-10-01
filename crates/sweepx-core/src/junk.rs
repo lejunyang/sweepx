@@ -14,6 +14,8 @@ mod layout;
 pub mod linux_temp;
 /// Platform rule discovery and interpretation.
 pub mod platform;
+/// Worker-owned junk scans with bounded events and identity-bound refresh.
+pub mod session;
 
 use std::collections::{BTreeMap, BTreeSet};
 use sweepx_catalog::schema::{Predicate, PredicateArg, PredicateOp};

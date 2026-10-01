@@ -182,6 +182,25 @@ where
         })
     }
 
+    /// Reopens and checks the captured root and directory without enumerating their children.
+    ///
+    /// Uses the same no-follow, object/filesystem/mount and relative-component checks as detail
+    /// rescans. Directory fingerprints may change when children change; identity must still
+    /// match. The returned observation is read-only evidence, not a retained mutation permit.
+    pub fn revalidate_directory(
+        &self,
+        request: DetailRescanRequest<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(ScannedEntry, ScannedEntry), DetailRescanError> {
+        let ids = DetailEntryIdAllocator::new(request.source_scan_id.clone())?;
+        self.validate_request(&request, &ids)?;
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+        let reopened = self.reopen_target(&request, cancel)?;
+        Ok((reopened.observed_root, reopened.observed_directory))
+    }
+
     /// Recursively rescans one directory and emits bounded lower-bound snapshots while walking.
     ///
     /// Progress snapshots reuse the final result's scan-scoped row identities and are advisory:
