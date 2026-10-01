@@ -6,6 +6,8 @@
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;
 mod context;
+/// Current Git interpretation shared by fresh scans and validated candidate-cache hits.
+pub mod git;
 mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]

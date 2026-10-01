@@ -1039,6 +1039,157 @@ fn junk_system_reports_incomplete_discovery_without_following_layout_ancestor_li
 }
 
 #[test]
+fn junk_git_observes_current_global_configuration_selected_by_environment() {
+    let fixture = TempDir::new().unwrap();
+    let base = git_fixture_root(&fixture);
+    let root = base.join("project");
+    let home = base.join("home");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let config = base.join("selected-global-config");
+    let excludes = base.join("excludes");
+    fs::write(&excludes, b"target/\n").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("config")
+            .arg("--file")
+            .arg(&config)
+            .arg("core.excludesFile")
+            .arg(&excludes)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for ignored in [true, false] {
+        if !ignored {
+            fs::write(&excludes, b"").unwrap();
+        }
+        let configure = |command: &mut std::process::Command| {
+            command
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", &config);
+        };
+        let mut oracle = std::process::Command::new("git");
+        configure(&mut oracle);
+        assert_eq!(
+            oracle
+                .arg("-C")
+                .arg(&root)
+                .args(["check-ignore", "--quiet", "--", "target"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(if ignored { 0 } else { 1 })
+        );
+        let mut command = cli_command();
+        command
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &config);
+        let output = command
+            .args(["--format", "json", "--state-dir"])
+            .arg(base.join("state"))
+            .args(["junk"])
+            .arg(&root)
+            .timeout(std::time::Duration::from_secs(15))
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["candidateCount"], 1);
+        assert_eq!(
+            report["candidates"][0]["confidence"],
+            if ignored { "high" } else { "medium" }
+        );
+        assert_eq!(report["candidates"][0]["blockers"], json!([]));
+    }
+}
+
+#[test]
+fn junk_git_queries_do_not_inherit_a_foreign_repository_authority() {
+    let fixture = TempDir::new().unwrap();
+    let base = git_fixture_root(&fixture);
+    let root = base.join("own");
+    let foreign = base.join("foreign");
+    for directory in [&root, &foreign] {
+        fs::create_dir_all(directory.join("target")).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(directory)
+            .status()
+            .unwrap();
+        assert!(init.success());
+    }
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+    fs::write(foreign.join("target/tracked"), b"foreign-data").unwrap();
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&foreign)
+        .args(["add", "--force", "target/tracked"])
+        .status()
+        .unwrap();
+    assert!(add.success());
+    let mut command = cli_command();
+    let output = command
+        .env("GIT_DIR", foreign.join(".git"))
+        .env("GIT_WORK_TREE", &foreign)
+        .args(["--format", "json", "junk"])
+        .arg(&root)
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["candidateCount"], 1);
+    assert_eq!(report["candidates"][0]["confidence"], "high");
+    assert_eq!(report["candidates"][0]["git"]["status"], "ignored");
+    assert_eq!(report["candidates"][0]["blockers"], json!([]));
+}
+
+#[test]
+fn junk_gitfile_boundaries_are_retained_in_classified_scans() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join(".git"), b"gitdir: unavailable-worktree\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    let mut command = cli_command();
+    let output = command
+        .args(["--format", "json", "junk"])
+        .arg(&root)
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["candidateCount"], 1);
+    assert_eq!(report["candidates"][0]["confidence"], "medium");
+    assert_eq!(report["candidates"][0]["git"], Value::Null);
+    assert_eq!(
+        report["candidates"][0]["blockers"],
+        json!(["gitfile_repository_boundary"])
+    );
+}
+
+#[test]
 fn junk_scan_strengthens_known_candidates_with_git_ignore_evidence() {
     let fixture = TempDir::new().unwrap();
     let root = git_fixture_root(&fixture);

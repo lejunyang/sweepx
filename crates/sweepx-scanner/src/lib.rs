@@ -284,7 +284,8 @@ pub trait JunkClassifier {
 
 /// Result of a classified scan: the pruned summary plus the rule id chosen per entry.
 pub struct ClassifiedScan {
-    /// Summary whose directory rows contain only classified candidates.
+    /// Summary whose directory rows contain only classified candidates, with sparse `.git` file
+    /// rows retained as worktree/submodule boundary facts.
     pub summary: ScanSummary,
     /// Entry id to the rule id returned by the classifier, keyed for candidate assembly.
     pub decisions: BTreeMap<ScanEntryId, String>,
@@ -695,6 +696,14 @@ impl ScanSink for CollectingScanSink<'_> {
                         Path::new(&entry.display_path),
                         extract_known_u128(&entry.logical_bytes),
                     );
+                    // A gitfile is a repository boundary (worktree/submodule), not an ordinary
+                    // project marker. Preserve its native parent lineage without retaining every
+                    // file row; loss consumes the same required-evidence budget as directories.
+                    if native_basename_marker(&entry.native_basename).as_deref() == Some(".git")
+                        && self.admit_metadata(Self::row_cost(&entry), true)
+                    {
+                        self.summary.entries.push(entry);
+                    }
                 }
                 // Symlinks and reparse/other rows feed no junk rule; symlinks are already
                 // recorded as boundaries.
@@ -1142,6 +1151,8 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             plan.as_ref().and_then(|entries| entries.get(index))
             && cached.path == directory_entry.path
             && cached.file_name == directory_entry.file_name
+            // Keep gitfile native lineage available to post-scan boundary interpretation.
+            && native_basename_marker(&directory_entry.file_name).as_deref() != Some(".git")
             && platform.confirms_cached_file(
                 &current.handle,
                 &directory_entry,

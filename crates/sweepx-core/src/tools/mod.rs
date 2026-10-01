@@ -78,7 +78,9 @@ impl ProbeRunner {
     /// Starts a batch using the provided limits and cancellation token.
     pub fn new(limits: ProbeLimits, cancel: CancellationToken) -> Self {
         Self {
-            deadline: Instant::now() + limits.total_timeout,
+            deadline: Instant::now()
+                .checked_add(limits.total_timeout)
+                .unwrap_or_else(Instant::now),
             remaining: limits.max_processes,
             limits,
             cancel,
@@ -103,9 +105,11 @@ impl ProbeRunner {
             return Err(ProbeError::BudgetExhausted);
         }
         self.remaining -= 1;
-        let deadline = self
-            .deadline
-            .min(Instant::now() + self.limits.probe_timeout);
+        let deadline = self.deadline.min(
+            Instant::now()
+                .checked_add(self.limits.probe_timeout)
+                .ok_or(ProbeError::BudgetExhausted)?,
+        );
         command
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -341,6 +345,29 @@ mod tests {
             },
             CancellationToken::new(),
         )
+    }
+
+    #[test]
+    fn overflowing_deadlines_decline_before_process_launch() {
+        for limits in [
+            ProbeLimits {
+                total_timeout: Duration::MAX,
+                ..ProbeLimits::default()
+            },
+            ProbeLimits {
+                probe_timeout: Duration::MAX,
+                ..ProbeLimits::default()
+            },
+        ] {
+            let mut runner = ProbeRunner::new(limits, CancellationToken::new());
+            let mut absent = Command::new("sweepx-deliberately-absent-deadline-fixture");
+            // A launch would produce Io(NotFound); an unrepresentable bound must instead decline
+            // admission without panicking or consulting the executable search path.
+            assert!(matches!(
+                runner.run(&mut absent),
+                Err(ProbeError::BudgetExhausted)
+            ));
+        }
     }
 
     #[test]

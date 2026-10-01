@@ -881,7 +881,7 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
 /// Result of a junk scan: the scan output and the per-entry rule decisions.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub struct JunkScanSuccess {
-    /// Scan envelope, snapshot and pruned summary (junk directory rows only).
+    /// Scan envelope, snapshot and pruned summary (junk directory rows and sparse gitfile facts).
     pub scan: ScanSuccess,
     /// Rule id returned per entry, for candidate assembly.
     pub decisions: JunkDecisions,

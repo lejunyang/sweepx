@@ -171,6 +171,7 @@ pub fn report_candidates(
                 confidence: Some("medium".to_string()),
                 blockers,
                 source_entry: None,
+                git_scan_facts: None,
             })
         })
         .collect()

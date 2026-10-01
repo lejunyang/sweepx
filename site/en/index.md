@@ -56,6 +56,8 @@ Browser and known-cache discovery in `junk --system` shares a bounded invocation
 
 Whole-root candidate records bind the currently enabled rules and discovery scope, triggering fresh classification when they change. File-length caches are validated independently, so an old empty candidate report cannot hide results introduced by newly enabled rules.
 
+Candidate-cache hits also rebuild current Git interpretation. Changes to ignore configuration, the index or repository boundaries outside the selected root cannot replay historical confidence. Git queries only enrich existing project-rule candidates; they neither discover junk by themselves nor authorize deletion.
+
 ## Read by question
 
 | What you want to know | Page |

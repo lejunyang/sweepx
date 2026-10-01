@@ -45,7 +45,7 @@ use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v6";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v7";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 #[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,6 +87,8 @@ pub struct StoredJunkCandidate {
     /// identity revalidation as a fresh one. `None` for records that never carried a row.
     #[serde(default)]
     pub source_entry: Option<sweepx_model::ScannedEntry>,
+    /// Nested-repository and traversal coverage facts, excluding Git answers.
+    pub git_scan_facts: Option<sweepx_core::junk::git::GitScanFacts>,
 }
 
 impl StoredJunkRoot {
@@ -671,6 +673,7 @@ mod tests {
             ancestor_ids: BTreeSet::new(),
             size_is_logical: true,
             source_entry: None,
+            git_scan_facts: None,
         }
     }
 
@@ -683,7 +686,11 @@ mod tests {
         stored.rules_digest = "old-rules".into();
         assert!(!stored.matches_root(&cache));
         stored.rules_digest = rules_digest().into();
-        for old_schema in ["sweepx.junk-cache/v1", "sweepx.junk-cache/v5"] {
+        for old_schema in [
+            "sweepx.junk-cache/v1",
+            "sweepx.junk-cache/v5",
+            "sweepx.junk-cache/v6",
+        ] {
             stored.schema = old_schema.into();
             assert!(!stored.matches_root(&cache));
         }

@@ -27,10 +27,10 @@
 
 ## 尚存的设计不足
 
-1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照和路径绑定已落地，整根候选缓存现也绑定本次启用规则与发现范围；Git 增强证据尚待单独下沉。先完成具体业务边界，不新增插件框架。
+1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照和路径绑定已落地，整根候选缓存现也绑定本次启用规则与发现范围；Git 增强证据随后也已迁入 core，并在缓存命中后重新查询当前上下文。先完成具体业务边界，不新增插件框架。
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
-4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
+4. **缓存的活动状态解释（已分层）。** 整根缓存不持久保存 activity、staleFormats、Git 查询结果、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则先恢复基础 known_generated/medium，再用共享 Git 会话重新观察当前仓库、tracked 与 ignore 证据，不回放历史 ignored/high。遍历覆盖及候选内仓库边界作为文件系统事实独立保存，不能代替当前 Git 查询。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
 5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；junk 当前仍是收集完再拼报告。`ScanSink` 已有事件入口，但这不是可直接订阅的、带背压的 junk 会话接口。
 
 ## 支撑后续 TUI 的目标接口
@@ -188,7 +188,7 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 - [x] 合并根/文件索引历史查询，移除完整历史后的固定等待。
 - [x] listing、marker 与多根缓存的统一字节预算、逐根淘汰及有界持久化读取；预算耗尽不能把缺失证据当作否定结论。
 - [x] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用及 Linux `/tmp` 发现/分类/解释、有界浏览器/known-root 快照及路径绑定已下沉，整根候选缓存绑定当前分类上下文，避免遗漏新引入的候选。
-- [ ] 缓存命中后重建当前 Git 上下文及增强证据。
+- [x] 缓存命中后重建当前 Git 上下文及增强证据。
 - [ ] 核心垃圾扫描会话：开始、取消、可见目录优先级、选中范围刷新；有界阶段/进度/候选/统计/错误/终态事件，稳定候选键及 revision。
 - [ ] 垃圾交互 TUI：历史结果标记与逐项替换、自由选择和删除前原生身份重验。
 - [ ] 同一次遍历中的独立大文件分析：阈值、有界 top-K、逻辑/分配大小和覆盖状态。
@@ -326,3 +326,18 @@ Linux `/tmp` 的原生测量、当前用户引用证据及报告解释已迁入 
 共享服务这项验收完成。后续依次为缓存命中后的当前 Git 证据、核心扫描会话、垃圾 TUI、大文件、重复文件与规则扩展。其他工具发现路径、Linux 临时对象资源保留审计及目标宿主/Trash 验证缺口仍保留，不因这项摘要预算完成而视为已关闭。
 
 交付验证（arm64 macOS、固定 Rust 1.98.0）：受影响 catalog/core/CLI 262 项测试通过、1 项原有基准 ignored；工作区 761 项通过、0 失败、2 项原有基准 ignored。两套命令仍显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 系统 Trash 挂起，该行为未验证。格式、受影响及工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy 通过；53 份 Markdown 检查通过，core 打包清单包含新 context 模块。交叉检查包含目标测试代码，不代表目标宿主运行时或 MSVC 验收。初次编译发现新增测试将 u128 长度与 u64 metadata 长度直接比较，修复显式转换后通过；未排除该回归。本次没有端到端性能计时，不宣称新增摘要提高整机扫描速度。
+
+
+## 当前 Git 证据与缓存命中（2026-10-01）
+
+Git 解释迁入 `sweepx-core::junk::git`。冷扫与整根缓存候选共用一批 `GitEvidenceSession` 预算：先丢弃旧解释，再由当前 native locator 重建路径，no-follow 准入并检查对象/filesystem/mount 身份，逐级寻找最近父仓库，范围允许位于选定根之外；marker 相对 retained parent 检查，gitfile、链接、挂载或观察不确定性均不能增强置信度。Git 的实际 worktree/git-dir 查询必须与本次原生观察相符，环境中的 GIT_DIR/WORK_TREE/INDEX_FILE 等重定向参数被清除；tracked/ignore 查询保留现有原生路径、`./` 前缀及 literal index pathspec，避免 shell、通配或 pathspec magic。查询前后复验仓库及 `.git` 原生绑定；这不是 Git 配置/index/ignore 的原子快照，也不提供任何删除授权。
+
+根 schema v7 每候选仅增加遍历覆盖及是否包含仓库的两个标量事实；只有原有完整根覆盖、分类上下文和事件历史成立时才可复用。当前仓库位置、ignore、tracked、置信度和 blockers 不持久保存。分类扫描保留稀疏 `.git` 文件行，并让这些文件退回当前原生检查，避免 worktree/submodule 边界被普通文件裁剪或长度复用隐藏；普通文件仍保持原有缓存快路径。独立文件索引 schema v4 不变。旧上下文先降回基础解释，当前查询成功才增强；失败仍报告已知项目候选，不把未知 Git 证据当作没有 tracked 或仓库。平台及 Linux 临时对象的分类不会被 Git 刷新重写。
+
+默认最多 65,536 个借用 lineage 节点、8 MiB 保留估算和 1,024 次原生目录准入。Git 进程共用现有 ProbeRunner：整批 5 秒、单次 2 秒、最多 256 次启动、每次 stdout 64 KiB；取消、超量输出与超时均拒绝使用答案并回收本次进程。没有另建管道线程或子进程轮询实现。native path 重建最多 256 个 component 和 64 KiB 路径，逐个追加，不复制所有祖先路径；原生 deadline 仍是调用间合作检查，不能中断阻塞 OS 调用。超大不可表示的工具期限现拒绝启动，不能溢出 Instant。仓库发现共享本次快照；每候选的 scope/tracked/ignore 查询保留当前检查，计入同一有界预算。
+
+受控回归包含实际磁盘根记录命中后当前 Git 重建，以及只修改根外 excludes/index 时同一遍历事实由 high 降回 medium/产生 tracked blocker。普通目录枚举、metadata 和原始文件内容独立核对选定根没有改变。另覆盖 `.git` 文件与链接、嵌套 gitfile、同名对象替换、伪造 display path、未知扫描事实、lineage/内存/原生次数/期限/取消降级，以及外来 GIT_DIR/GIT_WORK_TREE 不得改变已绑定仓库。原有 ignore/已跟踪/不可用/嵌套仓库四项 CLI 契约保留，新增 gitfile、外来仓库环境及当前 GIT_CONFIG_GLOBAL 三项；配置选择变量保留，使用 Git 自身查询作独立 oracle 验证修改根外 excludes 文件后的解释。初次复用解释回归暴露 tracked blocker 残留，已清除旧 Git blocker 后按当前结果重建，不放宽断言。
+
+Git 项完成后，继续核心扫描会话、垃圾 TUI、大文件、重复文件和规则扩展。工具/Linux 临时对象资源审计及目标宿主/系统 Trash 验证缺口仍保留。没有新 crate，没有端到端性能计时，不将增加当前 Git 查询说成扫描提速。
+
+交付验证（arm64 macOS，固定 Rust 1.98.0）：工作区测试 767 项通过、0 失败、2 项原有基准 ignored；随后修正 Git 环境变量隔离范围并增加当前配置选择回归，最终受影响 scanner/core/CLI 294 项测试通过、0 失败、1 项基准 ignored，其余未变测试复用上述工作区结果，不称为再次完整矩阵。两套命令仍显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 系统 Trash 挂起，该行为未验证。最终格式、受影响及工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy 通过；交叉检查包含目标测试代码，未执行对应宿主运行时或 MSVC 验收。53 份 Markdown 检查通过，core 包清单包含新 Git 模块；未发布包，也未验证 registry 依赖构建。

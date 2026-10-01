@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode as ProcessExitCode, Stdio};
+use std::process::ExitCode as ProcessExitCode;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,9 +47,7 @@ use sweepx_core::{
 #[cfg(target_os = "linux")]
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
 use sweepx_i18n::detect_locale;
-use sweepx_model::{
-    ByteValue, Coverage, EvidenceValue, HumanSizeUnit, IdentityEvidence, ScanEntryId, ScanSort,
-};
+use sweepx_model::{ByteValue, EvidenceValue, HumanSizeUnit, ScanSort};
 use sweepx_platform::{
     ElevatedRelaunch, ElevationPolicy, PrivilegeProvider, StartupPrivilegeDecision,
     decide_startup_privilege,
@@ -1000,23 +998,6 @@ fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct GitRepository {
-    entry_id: ScanEntryId,
-    path: PathBuf,
-    depth: usize,
-    ancestor_ids: BTreeSet<ScanEntryId>,
-    uses_gitfile: bool,
-}
-
-const GIT_EVIDENCE_MAX_QUERIES: usize = 256;
-const GIT_EVIDENCE_DEADLINE: Duration = Duration::from_secs(5);
-
-struct GitProbeBudget {
-    remaining_queries: usize,
-    deadline: Instant,
-}
-
 struct JunkCleanOptions<'a> {
     enabled: bool,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1024,85 +1005,19 @@ struct JunkCleanOptions<'a> {
     stdin_is_terminal: bool,
 }
 
-impl GitProbeBudget {
-    fn new() -> Self {
-        Self {
-            remaining_queries: GIT_EVIDENCE_MAX_QUERIES,
-            deadline: Instant::now() + GIT_EVIDENCE_DEADLINE,
-        }
-    }
-
-    fn run(
-        &mut self,
-        repository: &Path,
-        arguments: &[&str],
-        path: &Path,
-        literal_pathspec: bool,
-    ) -> Result<i32, ()> {
-        if self.remaining_queries == 0 || Instant::now() >= self.deadline {
-            return Err(());
-        }
-        self.remaining_queries -= 1;
-        let relative = path.strip_prefix(repository).map_err(|_| ())?;
-        if relative.as_os_str().is_empty() {
-            return Err(());
-        }
-        // Prefix with `./` so a native name beginning with `:` cannot be parsed as Git pathspec
-        // magic. The index query additionally disables all wildcard interpretation; check-ignore
-        // does not accept literal pathspec mode on the Git versions in the supported runner set.
-        let literal_relative = Path::new(".").join(relative);
-        // Git's ignore/index queries are local and non-mutating, but still receive explicit
-        // process/time limits: an unexpected executable or repository configuration must not hang
-        // a disk scan. Fixed arguments keep native path bytes out of a shell.
-        let mut command = ProcessCommand::new("git");
-        command
-            .arg("--no-optional-locks")
-            .arg("-c")
-            .arg("core.fsmonitor=false")
-            .arg("-C")
-            .arg(repository)
-            .args(arguments)
-            .arg("--")
-            .arg(literal_relative)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_PAGER", "cat")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if literal_pathspec {
-            command.env("GIT_LITERAL_PATHSPECS", "1");
-        }
-        let mut child = command.spawn().map_err(|_| ())?;
-        loop {
-            match child.try_wait().map_err(|_| ())? {
-                Some(status) => return status.code().ok_or(()),
-                None if Instant::now() < self.deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(());
-                }
-            }
-        }
-    }
-
-    fn exhausted(&self) -> bool {
-        self.remaining_queries == 0 || Instant::now() >= self.deadline
-    }
-}
-
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
 // rebuild contract. MangoDisk's broader inventory is research input, not license-compatible code
 // or automatic authority. Each future rule must carry its own source and safety review.
 #[cfg(target_os = "macos")]
 use sweepx_core::junk::PROJECT_RULES_JSON as PROJECT_JUNK_RULES_JSON;
+#[cfg(all(test, target_os = "macos"))]
+use sweepx_core::junk::candidate::GitIgnoreEvidence;
+use sweepx_core::junk::candidate::JunkCandidate;
 #[cfg(target_os = "macos")]
 use sweepx_core::junk::candidate::refresh_candidate_interpretation;
-use sweepx_core::junk::candidate::{GitIgnoreEvidence, JunkCandidate};
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::candidate::{assemble_platform_candidate, assemble_project_candidate};
+use sweepx_core::junk::git::{GitEvidenceLimits, GitEvidenceSession};
 
 #[cfg(target_os = "macos")]
 use sweepx_core::junk::platform::PLATFORM_JUNK_RULES_JSON;
@@ -1150,13 +1065,15 @@ fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunk
         ancestor_ids: candidate.ancestor_ids.clone(),
         size_is_logical: candidate.size_is_logical,
         source_entry: candidate.source_entry.clone(),
+        git_scan_facts: candidate.git_scan_facts,
     }
 }
 
 /// Converts a cache record back into an in-memory candidate.
 ///
 /// Tool interpretation is rebuilt from this invocation. Git metadata is not retained in the
-/// root facts, so project candidates revert to base confidence with an explicit blocker.
+/// root facts, so project candidates first revert to base confidence with an explicit blocker;
+/// the current Git session then independently refreshes them using validated traversal facts.
 #[cfg(target_os = "macos")]
 fn stored_candidate_to_junk(
     stored: junk_cache::StoredJunkCandidate,
@@ -1184,6 +1101,7 @@ fn stored_candidate_to_junk(
             confidence: None,
             blockers: Vec::new(),
             source_entry,
+            git_scan_facts: stored.git_scan_facts,
         },
         project_rules,
         platform_rules,
@@ -1355,14 +1273,14 @@ fn run_junk_scan(
     let miss_indexes: Vec<usize> = (0..canonical_roots.len()).collect();
 
     #[cfg(target_os = "macos")]
-    let cached_candidates: Vec<JunkCandidate> = hit_records
+    let mut cached_candidates: Vec<JunkCandidate> = hit_records
         .into_iter()
         .flat_map(junk_cache::StoredJunkRoot::into_candidates)
         .filter_map(|stored| stored_candidate_to_junk(stored, rules, &platform_rules, &evidence))
         .collect();
     // Caching is macOS-only; other platforms have no restored candidates.
     #[cfg(not(target_os = "macos"))]
-    let cached_candidates: Vec<JunkCandidate> = Vec::new();
+    let mut cached_candidates: Vec<JunkCandidate> = Vec::new();
     let miss_roots: Vec<PathBuf> = miss_indexes
         .iter()
         .map(|index| canonical_roots[*index].clone())
@@ -1422,6 +1340,8 @@ fn run_junk_scan(
     // Assemble freshly scanned candidates. Applicability was joined during the walk through scan
     // identities and lossless native names; aggregates carry each directory's size.
     let mut fresh_candidates = Vec::new();
+    let mut git_session =
+        GitEvidenceSession::new(GitEvidenceLimits::default(), CancellationToken::new());
     if let Some(scan) = &scan {
         let aggregates = scan
             .scan
@@ -1450,7 +1370,7 @@ fn run_junk_scan(
             }
         }
         timings.phase("classification");
-        annotate_project_candidates_with_git(
+        git_session.capture_scan_facts(
             &scan.scan.summary,
             &scan.coverages,
             &scan.directory_markers,
@@ -1462,6 +1382,8 @@ fn run_junk_scan(
         fresh_candidates.extend(linux_temp::report_candidates(rule, discovery));
     }
 
+    git_session.refresh(&mut fresh_candidates);
+    git_session.refresh(&mut cached_candidates);
     timings.phase("gitEvidence");
 
     // Persist every scanned (miss) root with the candidates attributed to its deepest root, then
@@ -1809,418 +1731,6 @@ fn run_junk_scan(
             scan_exit
         },
     )
-}
-
-/// Adds bounded Git evidence to already-classified project candidates.
-///
-/// This seam is intentionally report-only. Git decides its own ignore semantics, while the
-/// scanner remains the source of filesystem identity and size. A subprocess or repository lookup
-/// failure leaves the existing candidate at its original confidence; it never makes it safer.
-fn annotate_project_candidates_with_git(
-    summary: &sweepx_core::ScanSummary,
-    coverages: &BTreeMap<ScanEntryId, Coverage>,
-    directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
-    candidates: &mut [JunkCandidate],
-) {
-    if summary
-        .boundaries
-        .iter()
-        .any(|boundary| boundary.kind == sweepx_platform::BoundaryKind::ResourceLimit)
-    {
-        for candidate in candidates {
-            candidate
-                .blockers
-                .push("git_scan_evidence_incomplete".to_string());
-        }
-        return;
-    }
-    let repositories = git_repositories(summary, coverages, directory_markers);
-    let mut budget = GitProbeBudget::new();
-    for candidate in candidates.iter_mut() {
-        let Some(repository) = repositories
-            .iter()
-            .filter(|repository| repository_contains(repository, candidate))
-            .max_by_key(|repository| repository.depth)
-        else {
-            continue;
-        };
-        if repository.uses_gitfile {
-            candidate
-                .blockers
-                .push("gitfile_repository_boundary".to_string());
-            continue;
-        }
-        if candidate_contains_nested_repository(&repositories, repository, &candidate.entry_id) {
-            candidate.blockers.push("nested_repository".to_string());
-            continue;
-        }
-        if coverages
-            .get(&candidate.entry_id)
-            .is_none_or(|coverage| !coverage.complete || coverage.details_lost)
-        {
-            candidate
-                .blockers
-                .push("git_scan_evidence_incomplete".to_string());
-            continue;
-        }
-        let Some(candidate_row) = summary
-            .roots
-            .iter()
-            .chain(summary.entries.iter())
-            .find(|row| {
-                row.identity
-                    .as_ref()
-                    .is_some_and(|identity| identity.entry_id == candidate.entry_id)
-            })
-        else {
-            candidate
-                .blockers
-                .push("git_path_binding_unavailable".to_string());
-            continue;
-        };
-        let Some(candidate_locator) = candidate_row.native_locator.as_ref() else {
-            candidate
-                .blockers
-                .push("git_path_binding_unavailable".to_string());
-            continue;
-        };
-        let Some(path) = path_from_scanned_entry(candidate_row) else {
-            candidate
-                .blockers
-                .push("git_path_binding_unavailable".to_string());
-            continue;
-        };
-        // A repository row is usually absent in a classified scan (it is not itself junk),
-        // so identities are read from the candidate row's captured locator chain: the scan
-        // root or the matching reopen component names the repository, and the entry component
-        // names the candidate. This compares the same native evidence the old summary-based
-        // check used, without requiring the non-junk rows to have been retained.
-        let Some(repo_evidence) =
-            locator_component_identity(candidate_locator, &repository.entry_id)
-        else {
-            candidate.blockers.push("git_identity_changed".to_string());
-            continue;
-        };
-        if !identity_evidence_matches_path(repo_evidence, &repository.path)
-            || !identity_evidence_matches_path(
-                &candidate_locator.entry.platform_file_identity,
-                &path,
-            )
-        {
-            candidate.blockers.push("git_identity_changed".to_string());
-            continue;
-        }
-        if budget.exhausted() {
-            candidate
-                .blockers
-                .push("git_query_budget_exhausted".to_string());
-            continue;
-        }
-        match git_path_has_tracked_descendant(&mut budget, &repository.path, &path) {
-            Ok(true) => {
-                candidate.blockers.push("tracked_descendant".to_string());
-                continue;
-            }
-            Ok(false) => {}
-            Err(()) => {
-                candidate.blockers.push("git_query_failed".to_string());
-                continue;
-            }
-        }
-        if budget.exhausted() {
-            candidate
-                .blockers
-                .push("git_query_budget_exhausted".to_string());
-            continue;
-        }
-        match git_path_is_ignored(&mut budget, &repository.path, &path) {
-            Ok(true) => {
-                candidate.git = Some(GitIgnoreEvidence {
-                    status: "ignored".to_string(),
-                    repository_entry_id: repository.entry_id.to_string(),
-                    check: "git.check-ignore.v1".to_string(),
-                });
-                candidate.classification = Some("known_generated_ignored".to_string());
-                candidate.confidence = Some("high".to_string());
-            }
-            Ok(false) => {}
-            Err(()) => candidate.blockers.push("git_query_failed".to_string()),
-        }
-    }
-}
-
-/// Finds a directory component's platform identity inside a captured locator chain.
-///
-/// The component may be the scan root, an intermediate reopen component, or the entry itself.
-fn locator_component_identity<'a>(
-    locator: &'a sweepx_model::NativeLocatorEvidence,
-    entry_id: &ScanEntryId,
-) -> Option<&'a IdentityEvidence<sweepx_model::PlatformFileIdentity>> {
-    std::iter::once(&locator.scan_root)
-        .chain(locator.parent_reopen_recipe.iter())
-        .chain(std::iter::once(&locator.entry))
-        .find(|component| &component.entry_id == entry_id)
-        .map(|component| &component.platform_file_identity)
-}
-
-/// Whether captured identity evidence still names the directory currently at `path`.
-#[cfg(unix)]
-fn identity_evidence_matches_path(
-    evidence: &IdentityEvidence<sweepx_model::PlatformFileIdentity>,
-    path: &Path,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let IdentityEvidence::Known { value } = evidence else {
-        return false;
-    };
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_dir()
-        && value.device.0 == u128::from(metadata.dev())
-        && value.inode.0 == u128::from(metadata.ino())
-}
-
-/// Whether captured identity evidence still names the directory currently at `path`.
-#[cfg(windows)]
-fn identity_evidence_matches_path(
-    evidence: &IdentityEvidence<sweepx_model::PlatformFileIdentity>,
-    path: &Path,
-) -> bool {
-    let IdentityEvidence::Known { value } = evidence else {
-        return false;
-    };
-    matches!(
-        sweepx_platform::windows::read_live_identity(path),
-        Ok(Some(actual))
-            if value.device.0 == u128::from(actual.device()) && value.inode.0 == actual.inode()
-    )
-}
-
-fn git_repositories(
-    summary: &sweepx_core::ScanSummary,
-    coverages: &BTreeMap<ScanEntryId, Coverage>,
-    directory_markers: &BTreeMap<ScanEntryId, BTreeMap<String, ScanEntryId>>,
-) -> Vec<GitRepository> {
-    // In a classified scan only junk directory rows survive, so a `.git` row is absent even
-    // when its name was recorded as a directory marker. Repositories are therefore the parent
-    // ids whose recorded children include `.git`. Flatten the markers into a child→parent map
-    // so the full ancestor chain is reconstructible without the dropped rows.
-    let mut child_parent: BTreeMap<ScanEntryId, ScanEntryId> = BTreeMap::new();
-    // child id → its own native basename, used to reconstruct paths for dropped rows.
-    let mut child_names: BTreeMap<ScanEntryId, String> = BTreeMap::new();
-    for (parent_id, children) in directory_markers {
-        for (name, child_id) in children {
-            child_parent.insert(child_id.clone(), parent_id.clone());
-            child_names.insert(child_id.clone(), name.clone());
-        }
-    }
-    let mut root_paths: BTreeMap<ScanEntryId, PathBuf> = BTreeMap::new();
-    for row in summary.roots.iter().chain(summary.entries.iter()) {
-        let Some(locator) = row.native_locator.as_ref() else {
-            continue;
-        };
-        let Some(absolute) = locator.scan_root_absolute_path.as_ref() else {
-            continue;
-        };
-        let key = locator.scan_root.entry_id.clone();
-        if root_paths.contains_key(&key) {
-            continue;
-        }
-        if let Some(path) = native_absolute_path_for_git(absolute) {
-            root_paths.insert(key, path);
-        }
-    }
-    let mut repositories = Vec::new();
-    for (parent_id, children) in directory_markers {
-        if !children.contains_key(".git") {
-            continue;
-        }
-        if coverages
-            .get(parent_id)
-            .is_none_or(|coverage| !coverage.complete)
-        {
-            continue;
-        }
-        // Prefer the parent's own retained row (carries the real locator). Rows for nested
-        // non-junk directories were dropped, so reconstruct the path from recorded names:
-        // walk child→parent collecting basenames, then append them to the root path.
-        let row = summary
-            .roots
-            .iter()
-            .chain(summary.entries.iter())
-            .find(|row| {
-                row.identity
-                    .as_ref()
-                    .is_some_and(|identity| &identity.entry_id == parent_id)
-            });
-        let Some(path) = row
-            .as_ref()
-            .and_then(|row| path_from_scanned_entry(row))
-            .or_else(|| {
-                reconstruct_marker_path(parent_id, &child_parent, &child_names, &root_paths)
-            })
-        else {
-            continue;
-        };
-        // A `.git` *file* (gitfile/submodule pointer) is a boundary even though the marker
-        // index only records directory names; verify against the live path.
-        let uses_gitfile = std::fs::symlink_metadata(path.join(".git"))
-            .is_ok_and(|metadata| metadata.file_type().is_file());
-        // Build the ancestor chain from child→parent; stop at the scan root (no parent
-        // recorded). When the row survives, its locator gives the same chain directly.
-        let (depth, ancestor_ids) = row
-            .as_ref()
-            .and_then(|row| row.native_locator.as_ref())
-            .map(|locator| {
-                (
-                    locator.parent_reopen_recipe.len(),
-                    locator
-                        .parent_reopen_recipe
-                        .iter()
-                        .map(|component| component.entry_id.clone())
-                        .collect::<BTreeSet<_>>(),
-                )
-            })
-            .unwrap_or_else(|| {
-                let mut chain: BTreeSet<ScanEntryId> = BTreeSet::new();
-                let mut current = child_parent.get(parent_id).cloned();
-                while let Some(parent) = current {
-                    let next = child_parent.get(&parent).cloned();
-                    chain.insert(parent);
-                    current = next;
-                }
-                let depth = chain.len();
-                (depth, chain)
-            });
-        repositories.push(GitRepository {
-            entry_id: parent_id.clone(),
-            path,
-            depth,
-            ancestor_ids,
-            uses_gitfile,
-        });
-    }
-    repositories
-}
-
-/// Reconstructs a dropped directory row's path from the recorded marker chain.
-///
-/// Follows child→parent to the scan root, collecting each child's recorded native basename,
-/// then appends the names in root order to the root path. Returns `None` if the chain does
-/// not terminate at a known scan root (markers incomplete).
-fn reconstruct_marker_path(
-    target_id: &ScanEntryId,
-    child_parent: &BTreeMap<ScanEntryId, ScanEntryId>,
-    child_names: &BTreeMap<ScanEntryId, String>,
-    root_paths: &BTreeMap<ScanEntryId, PathBuf>,
-) -> Option<PathBuf> {
-    let mut names: Vec<String> = Vec::new();
-    let mut current = target_id.clone();
-    while !root_paths.contains_key(&current) {
-        let parent = child_parent.get(&current)?.clone();
-        names.push(child_names.get(&current)?.clone());
-        current = parent;
-    }
-    let mut path = root_paths.get(&current)?.clone();
-    for name in names.into_iter().rev() {
-        path.push(name);
-    }
-    Some(path)
-}
-
-fn repository_contains(repository: &GitRepository, candidate: &JunkCandidate) -> bool {
-    repository.entry_id == candidate.entry_id
-        || candidate.ancestor_ids.contains(&repository.entry_id)
-}
-
-fn candidate_contains_nested_repository(
-    repositories: &[GitRepository],
-    owning_repository: &GitRepository,
-    candidate_id: &ScanEntryId,
-) -> bool {
-    repositories.iter().any(|nested| {
-        nested.entry_id != owning_repository.entry_id && nested.ancestor_ids.contains(candidate_id)
-    })
-}
-
-fn path_from_scanned_entry(entry: &sweepx_model::ScannedEntry) -> Option<PathBuf> {
-    let locator = entry.validated_native_locator().ok()??;
-    let root = native_absolute_path_for_git(locator.scan_root_absolute_path.as_ref()?)?;
-    if locator.entry.entry_id == locator.scan_root.entry_id {
-        return Some(root);
-    }
-    let mut path = root;
-    for component in locator.parent_reopen_recipe.iter().skip(1) {
-        path.push(native_name_for_git(&component.native_basename)?);
-    }
-    path.push(native_name_for_git(&locator.entry.native_basename)?);
-    Some(path)
-}
-
-#[cfg(unix)]
-fn native_absolute_path_for_git(path: &sweepx_model::NativeAbsolutePath) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-    match path {
-        sweepx_model::NativeAbsolutePath::UnixBytes(bytes) => {
-            Some(PathBuf::from(OsString::from_vec(bytes.clone())))
-        }
-        sweepx_model::NativeAbsolutePath::WindowsUtf16(_) => None,
-    }
-}
-
-#[cfg(windows)]
-fn native_absolute_path_for_git(path: &sweepx_model::NativeAbsolutePath) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    match path {
-        sweepx_model::NativeAbsolutePath::WindowsUtf16(units) => {
-            Some(PathBuf::from(OsString::from_wide(units)))
-        }
-        sweepx_model::NativeAbsolutePath::UnixBytes(_) => None,
-    }
-}
-
-#[cfg(unix)]
-fn native_name_for_git(name: &sweepx_model::NativeName) -> Option<OsString> {
-    use std::os::unix::ffi::OsStringExt;
-    match name {
-        sweepx_model::NativeName::UnixBytes(bytes) => Some(OsString::from_vec(bytes.clone())),
-        sweepx_model::NativeName::WindowsUtf16(_) => None,
-    }
-}
-
-#[cfg(windows)]
-fn native_name_for_git(name: &sweepx_model::NativeName) -> Option<OsString> {
-    use std::os::windows::ffi::OsStringExt;
-    match name {
-        sweepx_model::NativeName::WindowsUtf16(units) => Some(OsString::from_wide(units)),
-        sweepx_model::NativeName::UnixBytes(_) => None,
-    }
-}
-
-fn git_path_is_ignored(
-    budget: &mut GitProbeBudget,
-    repository: &Path,
-    path: &Path,
-) -> Result<bool, ()> {
-    match budget.run(repository, &["check-ignore", "--quiet"], path, false)? {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(()),
-    }
-}
-
-fn git_path_has_tracked_descendant(
-    budget: &mut GitProbeBudget,
-    repository: &Path,
-    path: &Path,
-) -> Result<bool, ()> {
-    match budget.run(repository, &["ls-files", "--error-unmatch"], path, true)? {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(()),
-    }
 }
 
 /// One origin's share of a browser storage subsystem, with the bytes it holds.
@@ -3442,6 +2952,138 @@ mod tests {
         assert_eq!(restored.blockers, ["git_evidence_not_revalidated"]);
         assert_eq!(restored.reclaimable, prior.reclaimable);
         assert_eq!(restored.source_entry, prior.source_entry);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn validated_disk_candidate_hit_rebuilds_git_from_current_external_configuration() {
+        let owner = tempfile::tempdir().unwrap();
+        let base = owner.path().canonicalize().unwrap();
+        let root = base.join("project");
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::write(root.join("target/file"), b"payload").unwrap();
+        let run_git = |args: &[&std::ffi::OsStr]| {
+            let mut command = std::process::Command::new("git");
+            command.arg("-C").arg(&base).args(args);
+            let output =
+                sweepx_core::tools::ProbeRunner::new(Default::default(), CancellationToken::new())
+                    .run(&mut command)
+                    .unwrap();
+            assert!(output.status.success());
+        };
+        run_git(&[
+            std::ffi::OsStr::new("init"),
+            std::ffi::OsStr::new("--quiet"),
+        ]);
+        let excludes = base.join("external-excludes");
+        std::fs::write(&excludes, b"project/target/\n").unwrap();
+        run_git(&[
+            std::ffi::OsStr::new("config"),
+            std::ffi::OsStr::new("core.excludesFile"),
+            excludes.as_os_str(),
+        ]);
+        let service = JunkService::built_in().unwrap();
+        let evidence = PlatformJunkEvidence::default();
+        let classifier = service.with_platform(&[], &evidence);
+        let digest = classifier.classification_context_digest().unwrap();
+        let context = CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = scan_junk_with_store::<sweepx_core::MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: None,
+            },
+            None,
+            &classifier,
+            None,
+        )
+        .unwrap();
+        let aggregates = scan
+            .scan
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect();
+        let mut fresh = scan
+            .scan
+            .summary
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let decision = scan.decisions.get(&entry.identity.as_ref()?.entry_id)?;
+                service.interpret(decision, entry, &aggregates, &[], &evidence)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fresh.len(), 1);
+        let mut git = GitEvidenceSession::new(Default::default(), CancellationToken::new());
+        git.capture_scan_facts(
+            &scan.scan.summary,
+            &scan.coverages,
+            &scan.directory_markers,
+            &mut fresh,
+        );
+        git.refresh(&mut fresh);
+        assert_eq!(fresh[0].confidence.as_deref(), Some("high"));
+        let record = junk_cache::StoredJunkRoot::capture(
+            &root,
+            fresh.iter().map(junk_candidate_to_stored).collect(),
+            42,
+            digest,
+        )
+        .unwrap();
+        let cache = base.join("private-cache");
+        junk_cache::write(&cache, &record).unwrap();
+        let restore = || {
+            let roots = vec![root.clone()];
+            let read = junk_cache::CacheReader::new(&cache).roots(&roots, Some(&digest));
+            // Controlled complete history: only Git inputs outside this root are mutated below.
+            let mut valid = junk_cache::validate_records_with_log(
+                &roots,
+                read,
+                Some(&sweepx_scanner::ChangeLog {
+                    events: vec![],
+                    must_rescan: false,
+                }),
+            );
+            valid
+                .remove(0)
+                .expect("the filesystem and classification cache must actually hit")
+                .into_candidates()
+                .into_iter()
+                .map(|stored| {
+                    stored_candidate_to_junk(stored, service.project_rules(), &[], &evidence)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut warm = restore();
+        assert!(warm[0].git.is_none(), "Git answers were not persisted");
+        GitEvidenceSession::new(Default::default(), CancellationToken::new()).refresh(&mut warm);
+        assert_eq!(warm[0].confidence.as_deref(), Some("high"));
+        assert!(warm[0].blockers.is_empty());
+        std::fs::write(&excludes, b"").unwrap();
+        let mut changed = restore();
+        GitEvidenceSession::new(Default::default(), CancellationToken::new()).refresh(&mut changed);
+        assert_eq!(changed[0].confidence.as_deref(), Some("medium"));
+        assert!(changed[0].git.is_none());
+        assert!(changed[0].blockers.is_empty());
+        assert_eq!(std::fs::read(root.join("target/file")).unwrap(), b"payload");
+        let names = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            names,
+            ["Cargo.toml", "target"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
+        );
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub struct JunkCandidate {
     pub confidence: Option<String>,
     /// Conditions that prevent this report-only candidate from being promoted.
     pub blockers: Vec<String>,
+    /// Traversal facts only; reused solely with validated filesystem coverage/history.
+    pub git_scan_facts: Option<super::git::GitScanFacts>,
     /// The scanned source row, retained for the bulk Trash path's identity revalidation. Present
     /// for freshly scanned candidates and for candidates restored from cache; `None` for the Linux
     /// temporary-object candidates, which use a different cleanup flow.
@@ -70,7 +72,8 @@ pub struct JunkCandidate {
 pub struct GitIgnoreEvidence {
     /// Stable Git evidence status.
     pub status: String,
-    /// Repository scan identity, serialized without native execution authority.
+    /// Repository scan identity, or `git-native:` observation key for an ancestor outside the
+    /// scan root. Neither representation carries native execution authority.
     pub repository_entry_id: String,
     /// Machine identifier of the Git observation contract.
     pub check: String,
@@ -114,6 +117,7 @@ pub fn assemble_project_candidate(
         classification: Some("known_generated".to_string()),
         confidence: Some("medium".to_string()),
         blockers: Vec::new(),
+        git_scan_facts: None,
         source_entry: Some(entry.clone()),
     })
 }
@@ -173,6 +177,7 @@ pub fn assemble_platform_candidate(
         classification: None,
         confidence: None,
         blockers: Vec::new(),
+        git_scan_facts: None,
         source_entry: Some(entry.clone()),
     })
 }
