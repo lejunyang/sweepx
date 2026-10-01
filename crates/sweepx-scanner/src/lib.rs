@@ -232,7 +232,8 @@ pub struct DirListing {
 /// One enumerated child about to be inspected, resolved against the cache before any syscall.
 #[derive(Debug)]
 pub enum PlannedEntry {
-    /// An unchanged regular file present in the cache; the scanner uses its size without stating.
+    /// A proposed unchanged regular file. Current backend facts must confirm its type and length;
+    /// otherwise the scanner inspects it normally, regardless of the persisted cache claim.
     ReuseFile(sweepx_platform::CachedFileEntry),
     /// The child must be inspected normally (a directory, a changed/new file, or unknown type).
     Inspect(sweepx_platform::DirectoryEntryRecord),
@@ -249,7 +250,8 @@ pub trait SubtreeReuse: Sync {
     /// unchanged regular files) or inspected. `None` means no plan is available for this
     /// directory, so the scanner states every child — the safe fallback. Implementors must not
     /// reuse a file unless the directory was recorded as fully covered and file-level evidence
-    /// proves that exact file unchanged.
+    /// proves that exact file unchanged. The scanner also requires current backend confirmation
+    /// of the ordinary-file type and logical length before accepting a proposed reuse.
     fn plan_entries(
         &self,
         _dir_path: &Path,
@@ -1134,10 +1136,17 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             deferred.push(directory_entry);
             continue;
         }
-        // Cached unchanged file: push without a syscall; it is folded into the aggregate by the
-        // sequencer like a freshly stated file.
+        // History validates old facts, but cannot replace current type evidence. A stale or
+        // misaligned plan must not suppress directory traversal or turn a link into a file.
         if let Some(PlannedEntry::ReuseFile(cached)) =
             plan.as_ref().and_then(|entries| entries.get(index))
+            && cached.path == directory_entry.path
+            && cached.file_name == directory_entry.file_name
+            && platform.confirms_cached_file(
+                &current.handle,
+                &directory_entry,
+                cached.logical_bytes,
+            )
         {
             inspected.push(WalkEntry::CachedFile(cached.clone()));
             continue;
@@ -4445,6 +4454,151 @@ mod tests {
             aggregate.potentially_reclaimable_bytes,
             lower_bound_u128(11, ReasonCode::UnknownLayout)
         );
+    }
+
+    #[test]
+    fn cached_plan_without_current_backend_evidence_is_inspected() {
+        struct StalePlan;
+        impl SubtreeReuse for StalePlan {
+            fn plan_entries(
+                &self,
+                _: &Path,
+                children: &[DirectoryEntryRecord],
+            ) -> Option<Vec<PlannedEntry>> {
+                Some(
+                    children
+                        .iter()
+                        .map(|child| {
+                            PlannedEntry::ReuseFile(sweepx_platform::CachedFileEntry {
+                                path: child.path.clone(),
+                                file_name: child.file_name.clone(),
+                                logical_bytes: 999,
+                            })
+                        })
+                        .collect(),
+                )
+            }
+        }
+        let root = test_path("root");
+        let file = root.join("file");
+        let mut metadata = test_metadata(file.clone(), "file", EntryKind::File, Some(1));
+        metadata.logical_bytes = known_u128(7);
+        let scanner = Scanner::new(
+            FakePlatform::new(
+                root.clone(),
+                vec![test_entry(&root, "file")],
+                BTreeMap::from([(file, WalkEntry::File(metadata))]),
+            ),
+            ScannerOptions::default(),
+        );
+        let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
+        scanner
+            .scan_with_sink(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+                Some(&StalePlan),
+                &mut sink,
+            )
+            .unwrap();
+        let result = sink.finish();
+        assert_eq!(
+            aggregate_for_path(&result, &root).apparent_logical_bytes,
+            known_u128(7)
+        );
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "platform-macos"))]
+    #[test]
+    fn cached_plans_cannot_hide_current_directories_links_lengths_or_child_bindings() {
+        use std::fs;
+        struct StalePlan;
+        impl SubtreeReuse for StalePlan {
+            fn plan_entries(
+                &self,
+                dir: &Path,
+                children: &[DirectoryEntryRecord],
+            ) -> Option<Vec<PlannedEntry>> {
+                Some(
+                    children
+                        .iter()
+                        .map(|child| {
+                            let path = if child.path.file_name().unwrap() == "misaligned" {
+                                dir.join("same")
+                            } else {
+                                child.path.clone()
+                            };
+                            PlannedEntry::ReuseFile(sweepx_platform::CachedFileEntry {
+                                path,
+                                file_name: child.file_name.clone(),
+                                logical_bytes: 7,
+                            })
+                        })
+                        .collect(),
+                )
+            }
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("same"), b"1234567").unwrap();
+        fs::write(root.join("misaligned"), b"1234567").unwrap();
+        fs::write(root.join("resized"), b"123456789").unwrap();
+        fs::create_dir(root.join("directory")).unwrap();
+        fs::write(root.join("directory/payload"), b"12345").unwrap();
+        std::os::unix::fs::symlink("same", root.join("link")).unwrap();
+        fn ordinary_file_total(path: &Path) -> u128 {
+            std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let metadata = std::fs::symlink_metadata(entry.path()).unwrap();
+                    if metadata.is_dir() {
+                        ordinary_file_total(&entry.path())
+                    } else if metadata.is_file() {
+                        metadata.len() as u128
+                    } else {
+                        0
+                    }
+                })
+                .sum()
+        }
+        let expected = ordinary_file_total(&root);
+        let scanner = Scanner::new(
+            HostPlatformScanner::new(),
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_directory_batch_entries: 2,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        );
+        let mut sink = CollectingScanSink::new(ScanResourceLimits::default());
+        scanner
+            .scan_with_sink(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+                Some(&StalePlan),
+                &mut sink,
+            )
+            .unwrap();
+        let result = sink.finish();
+        let aggregate = aggregate_for_path(&result, &root);
+        assert_eq!(aggregate.apparent_logical_bytes, known_u128(expected));
+        assert!(aggregate.coverage.complete);
+        let row = |name: &str| {
+            result
+                .entries
+                .iter()
+                .find(|entry| entry.display_path == root.join(name).display().to_string())
+        };
+        // A genuinely confirmed unchanged file uses the shortcut; rejected proposals retain live rows.
+        assert!(row("same").is_none());
+        assert!(row("misaligned").is_some());
+        assert!(row("resized").is_some());
+        assert!(row("directory/payload").is_some());
+        assert_eq!(row("directory").unwrap().object_type, ObjectType::Directory);
+        assert_eq!(row("link").unwrap().object_type, ObjectType::Symlink);
     }
 
     #[test]

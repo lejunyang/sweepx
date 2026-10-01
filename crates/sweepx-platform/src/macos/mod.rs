@@ -50,6 +50,10 @@ mod backend {
         MacosPlatformScanner::dirfd(directory)
     }
     #[cfg(test)]
+    pub(super) fn bulk_hints_helper(directory: &OpenDirectory) -> Vec<Vec<u8>> {
+        directory.bulk_attributes.keys().cloned().collect()
+    }
+    #[cfg(test)]
     pub(super) fn fstatat_helper(
         parent_fd: libc::c_int,
         name: &CString,
@@ -120,9 +124,10 @@ mod backend {
         mount_identity: MountIdentity,
         pending: Option<DirectoryEntryRecord>,
         enumeration: DirectoryEnumeration,
-        /// Attributes decoded from the most recent bulk pages, keyed by the child's raw native
-        /// name bytes. Populated as bulk children are dequeued and read by child inspection,
-        /// avoiding a per-child `fstatat`.
+        /// Attributes for the current returned batch and at most one pending lookahead child.
+        /// The next enumeration discards older hints; delayed inspection then uses `fstatat`.
+        /// The cursor separately retains at most one bounded native page. Neither retains the
+        /// whole directory. Exclusive enumerate-and-inspect ownership preserves deferred batches.
         bulk_attributes: std::collections::BTreeMap<Vec<u8>, libc::stat>,
     }
 
@@ -904,6 +909,22 @@ mod backend {
                 )));
             }
 
+            // Keep only the lookahead that belongs to the next batch. Old records remain usable
+            // through handle-relative inspection, but must not borrow a previous batch's stat.
+            let pending_stat = directory.pending.as_ref().and_then(|child| {
+                let NativeName::UnixBytes(bytes) = &child.file_name else {
+                    return None;
+                };
+                directory
+                    .bulk_attributes
+                    .remove(bytes)
+                    .map(|stat| (bytes.clone(), stat))
+            });
+            directory.bulk_attributes.clear();
+            if let Some((name, stat)) = pending_stat {
+                directory.bulk_attributes.insert(name, stat);
+            }
+
             let mut entries = Vec::new();
             let mut bytes_used = 0usize;
 
@@ -975,6 +996,26 @@ mod backend {
                 )),
                 entry => Ok(entry),
             }
+        }
+
+        fn confirms_cached_file(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            logical_bytes: u128,
+        ) -> bool {
+            if child.validate_for_parent(&parent.path).is_err() {
+                return false;
+            }
+            let NativeName::UnixBytes(bytes) = &child.file_name else {
+                return false;
+            };
+            parent.bulk_attributes.get(bytes).is_some_and(|stat| {
+                kind_from_mode(stat.st_mode) == EntryKind::File
+                    && stat.st_dev as u64 == parent.identity.device
+                    && stat.st_size >= 0
+                    && stat.st_size as u128 == logical_bytes
+            })
         }
 
         fn inspect_child_with_directory_admission(
@@ -1726,6 +1767,139 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(zero, PlatformError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn bulk_hints_are_bounded_by_the_current_batch_and_old_records_fall_back() {
+        let temp = TempDir::new("bounded-bulk-hints");
+        for index in 0..37 {
+            fs::write(temp.path().join(format!("file-{index:03}")), b"hello").unwrap();
+        }
+        let expected = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().as_bytes().to_vec())
+            .collect::<std::collections::BTreeSet<_>>();
+        let scanner = MacosPlatformScanner::new();
+        let cancel = CancellationToken::new();
+        let root = ScanRoot::new(temp.path()).unwrap();
+        let max_record = expected
+            .iter()
+            .map(|bytes| {
+                child_record(temp.path(), bytes)
+                    .estimated_retained_bytes()
+                    .unwrap()
+            })
+            .max()
+            .unwrap();
+        // Exercise both count-driven and byte-driven batching against an ordinary enumeration.
+        for limits in [
+            DirectoryReadLimits {
+                max_batch_entries: 3,
+                max_batch_bytes: 1024 * 1024,
+            },
+            DirectoryReadLimits {
+                max_batch_entries: 512,
+                max_batch_bytes: max_record * 2,
+            },
+        ] {
+            let mut admission = scanner.admit_root(&root, &cancel).unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut first = None;
+            loop {
+                let batch = scanner
+                    .enumerate_children(&mut admission.directory, &cancel, limits)
+                    .unwrap();
+                let hints = backend::bulk_hints_helper(&admission.directory);
+                assert!(hints.len() <= batch.entries.len() + usize::from(!batch.end_of_directory));
+                for child in &batch.entries {
+                    let NativeName::UnixBytes(bytes) = &child.file_name else {
+                        panic!("Unix child")
+                    };
+                    assert!(seen.insert(bytes.clone()), "duplicate enumeration");
+                    let metadata = fs::symlink_metadata(&child.path).unwrap();
+                    assert!(scanner.confirms_cached_file(
+                        &admission.directory,
+                        child,
+                        metadata.len() as u128
+                    ));
+                    assert!(!scanner.confirms_cached_file(
+                        &admission.directory,
+                        child,
+                        metadata.len() as u128 + 1
+                    ));
+                    first.get_or_insert_with(|| child.clone());
+                }
+                if batch.end_of_directory {
+                    break;
+                }
+            }
+            assert_eq!(seen, expected);
+            let old = first.unwrap();
+            let NativeName::UnixBytes(bytes) = &old.file_name else {
+                panic!("Unix child")
+            };
+            assert!(!backend::bulk_hints_helper(&admission.directory).contains(bytes));
+            fs::write(&old.path, b"a changed length after enumeration").unwrap();
+            let metadata = fs::symlink_metadata(&old.path).unwrap();
+            assert!(!scanner.confirms_cached_file(
+                &admission.directory,
+                &old,
+                metadata.len() as u128
+            ));
+            let WalkEntry::File(observed) = scanner
+                .inspect_child(&admission.directory, &old, &cancel)
+                .unwrap()
+            else {
+                panic!("ordinary file")
+            };
+            assert_eq!(
+                observed.logical_bytes,
+                crate::known_u128(metadata.len() as u128)
+            );
+            fs::write(&old.path, b"hello").unwrap();
+        }
+    }
+
+    #[test]
+    fn cached_file_confirmation_requires_current_regular_file_and_valid_binding() {
+        let temp = TempDir::new("cached-type-proof");
+        fs::write(temp.path().join("file"), b"hello").unwrap();
+        fs::create_dir(temp.path().join("directory")).unwrap();
+        symlink("file", temp.path().join("link")).unwrap();
+        let scanner = MacosPlatformScanner::new();
+        let cancel = CancellationToken::new();
+        let mut admission = scanner
+            .admit_root(&ScanRoot::new(temp.path()).unwrap(), &cancel)
+            .unwrap();
+        let batch = scanner
+            .enumerate_children(
+                &mut admission.directory,
+                &cancel,
+                DirectoryReadLimits {
+                    max_batch_entries: 32,
+                    max_batch_bytes: 1024 * 1024,
+                },
+            )
+            .unwrap();
+        for child in &batch.entries {
+            let metadata = fs::symlink_metadata(&child.path).unwrap();
+            assert_eq!(
+                scanner.confirms_cached_file(&admission.directory, child, metadata.len() as u128),
+                metadata.is_file()
+            );
+            let mut forged = child.clone();
+            forged.path = temp.path().join("other");
+            assert!(!scanner.confirms_cached_file(
+                &admission.directory,
+                &forged,
+                metadata.len() as u128
+            ));
+        }
+        assert!(!scanner.confirms_cached_file(
+            &admission.directory,
+            &child_record(temp.path(), b"absent"),
+            0
+        ));
     }
 
     #[test]

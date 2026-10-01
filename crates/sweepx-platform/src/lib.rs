@@ -1114,6 +1114,22 @@ pub trait PlatformScanner: Send + Sync {
         limits: DirectoryReadLimits,
     ) -> Result<DirectoryEntryBatch, PlatformError>;
 
+    /// Confirms a proposed cached logical length using current, handle-relative enumeration facts.
+    ///
+    /// Return true only for a no-follow ordinary file on the retained parent's device, with the
+    /// same logical length and a valid child binding. This does not establish execution authority,
+    /// allocation, hard-link uniqueness or an atomic snapshot. Missing current evidence must return
+    /// false so the scanner performs ordinary inspection. Callers still validate cache history.
+    /// The default disables this shortcut for backends without current enumeration metadata.
+    fn confirms_cached_file(
+        &self,
+        _parent: &Self::DirectoryHandle,
+        _child: &DirectoryEntryRecord,
+        _logical_bytes: u128,
+    ) -> bool {
+        false
+    }
+
     /// Performs backend-specific, handle-relative child inspection.
     ///
     /// Implementations must independently enforce the [`DirectoryEntryRecord`] invariant and must
