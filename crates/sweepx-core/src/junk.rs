@@ -15,6 +15,11 @@ mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]
 pub mod linux_temp;
+// Exercise portable byte/count/cancellation contracts on Unix hosts without compiling Linux
+// production traversal or claiming that a macOS run verifies procfs/O_NOATIME runtime behavior.
+#[cfg(all(test, unix, not(target_os = "linux")))]
+#[path = "junk/linux_temp/observation.rs"]
+mod linux_temp_observation_tests;
 /// Platform rule discovery and interpretation.
 pub mod platform;
 /// Worker-owned junk scans with bounded events and identity-bound refresh.

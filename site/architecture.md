@@ -58,6 +58,8 @@ Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、
 
 `sweepx-core::junk::session` 提供显式目录根的后台垃圾扫描会话，由 CLI adapter 接入 `junk --tui`。阶段、候选、边界、错误和终态使用有界背压队列，进度与目录统计合并；稳定候选键与 revision 分离。选中刷新复验原生绑定，只有完整观察才能移除旧行；取消或不完整扫描保留未确认的旧证据。TUI 只绘制可见行，选择独立于扫描，后台回收复用原生绑定检查和现有 Trash adapter。macOS 缓存存储和文件复用已迁到 core 共用；会话先发送明确标记的历史候选，再重建当前目录身份、分类及 Git 证据，完整观察后才能移除旧键。缓存失败退回现场扫描。系统自动根发现仍待接入，刷新仍遍历原始根以保留分类上下文。会话取消独立于下述持久化 `cancel` 命令。
 
+Linux 临时对象服务提供共享预算与合作式取消；目录名、递归身份指纹、进程枚举和 mount/socket 表输入都有界。资源失败不可恢复为本次完整阴性结论；报告与清理重验复用同一实现，各次调用独立建立预算和当前引用证据。
+
 进度日志也有保留上限；仅截断进度不会把完整扫描变成 partial。错误计数、取消和真实资源不足独立保留，现场会话继续收到可靠错误与终态。
 
 CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 与 Windows 仍写 legacy operation snapshot；Windows state directory 由 current-user-private DACL、owner 校验和逐级 reparse-point 拒绝保护。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。

@@ -5,6 +5,10 @@
 //! same measurement and reference logic is used by the report and by the mutation preview, so a
 //! candidate cannot be presented under one rule and executed under another.
 
+mod observation;
+
+pub use observation::LinuxTempObservationLimits;
+use observation::Observation;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, Metadata};
@@ -13,6 +17,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+use sweepx_platform::CancellationToken;
 
 /// Minimum idle interval required by the temporary-object rule.
 pub const MIN_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -193,15 +198,47 @@ pub fn discover(
     explicit_roots: Option<&[PathBuf]>,
     deadline: Instant,
 ) -> LinuxTempDiscovery {
+    discover_with_cancel_and_limits(
+        temp_root,
+        explicit_roots,
+        deadline,
+        &CancellationToken::new(),
+        LinuxTempObservationLimits::default(),
+    )
+}
+
+/// Observes temporary objects with one shared budget and cooperative cancellation.
+/// Cancellation or a resource/deadline failure preserves positive observations as incomplete;
+/// the caller must not interpret missing candidates as absence or authorize cleanup from them.
+pub fn discover_with_cancel_and_limits(
+    temp_root: &Path,
+    explicit_roots: Option<&[PathBuf]>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+    limits: LinuxTempObservationLimits,
+) -> LinuxTempDiscovery {
+    let mut observation = Observation::new(deadline, cancel.clone(), limits);
     let mut discovery = LinuxTempDiscovery {
         candidates: Vec::new(),
         complete: true,
         incomplete_reason: None,
     };
 
+    if let Err(reason) = observation.check() {
+        discovery.complete = false;
+        discovery.incomplete_reason = Some(reason);
+        return discovery;
+    }
     let entries = match explicit_roots {
-        Some(roots) => roots.to_vec(),
-        None => match enumerate_direct_children(temp_root) {
+        Some(roots) => match admit_requested_paths(roots, &mut observation) {
+            Ok(roots) => roots,
+            Err(reason) => {
+                discovery.complete = false;
+                discovery.incomplete_reason = Some(reason);
+                return discovery;
+            }
+        },
+        None => match enumerate_direct_children(temp_root, &mut observation) {
             Ok(entries) => entries,
             Err(error) => {
                 return LinuxTempDiscovery {
@@ -214,12 +251,12 @@ pub fn discover(
     };
 
     for path in entries {
-        if Instant::now() >= deadline {
+        if let Err(reason) = observation.check() {
             discovery.complete = false;
-            discovery.incomplete_reason = Some("linux tmp discovery deadline reached".to_string());
+            discovery.incomplete_reason = Some(reason);
             break;
         }
-        match inspect_candidate(&path, temp_root, deadline, true, true) {
+        match inspect_candidate(&path, temp_root, &mut observation, true, true) {
             Ok(measurement) => {
                 discovery
                     .candidates
@@ -240,6 +277,10 @@ pub fn discover(
         }
     }
 
+    if let Err(reason) = observation.check() {
+        discovery.complete = false;
+        discovery.incomplete_reason = Some(reason);
+    }
     discovery
         .candidates
         .sort_by(|left, right| left.path.as_os_str().cmp(right.path.as_os_str()));
@@ -259,12 +300,16 @@ pub fn validate_candidate_with_seams(
     temp_root: &Path,
     allow_test_seams: bool,
 ) -> Result<LinuxTempMeasurement, String> {
-    let deadline = Instant::now() + MEASURE_DEADLINE;
-    inspect_candidate(path, temp_root, deadline, allow_test_seams, true).map_err(
-        |error| match error {
+    let mut observation = Observation::new(
+        Instant::now() + MEASURE_DEADLINE,
+        CancellationToken::new(),
+        LinuxTempObservationLimits::default(),
+    );
+    inspect_candidate(path, temp_root, &mut observation, allow_test_seams, true).map_err(|error| {
+        match error {
             InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
-        },
-    )
+        }
+    })
 }
 
 /// Revalidates a candidate after its symlink targets have intentionally been read.
@@ -273,8 +318,12 @@ pub fn revalidate_prepared_candidate_with_seams(
     temp_root: &Path,
     allow_test_seams: bool,
 ) -> Result<LinuxTempMeasurement, String> {
-    let deadline = Instant::now() + MEASURE_DEADLINE;
-    inspect_candidate(path, temp_root, deadline, allow_test_seams, false).map_err(|error| {
+    let mut observation = Observation::new(
+        Instant::now() + MEASURE_DEADLINE,
+        CancellationToken::new(),
+        LinuxTempObservationLimits::default(),
+    );
+    inspect_candidate(path, temp_root, &mut observation, allow_test_seams, false).map_err(|error| {
         match error {
             InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
         }
@@ -300,8 +349,12 @@ pub fn prepare_symlink_copy(
     }
     assert_only_symlink_access_times_changed(path, expected, &before)?;
 
-    let deadline = Instant::now() + MEASURE_DEADLINE;
-    let measurement = inspect_candidate(path, temp_root, deadline, allow_test_seams, false)
+    let mut observation = Observation::new(
+        Instant::now() + MEASURE_DEADLINE,
+        CancellationToken::new(),
+        LinuxTempObservationLimits::default(),
+    );
+    let measurement = inspect_candidate(path, temp_root, &mut observation, allow_test_seams, false)
         .map_err(|error| match error {
             InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
         })?;
@@ -396,13 +449,47 @@ enum InspectError {
     Incomplete(String),
 }
 
-fn enumerate_direct_children(temp_root: &Path) -> Result<Vec<PathBuf>, String> {
+fn admit_requested_paths(
+    roots: &[PathBuf],
+    observation: &mut Observation,
+) -> Result<Vec<PathBuf>, String> {
+    if roots.len() > observation.limits.max_directory_entries {
+        return Err("linux tmp directory entry limit reached".into());
+    }
+    let mut entries = Vec::new();
+    let mut name_bytes = 0;
+    for path in roots {
+        name_bytes = observation.directory_record(
+            entries.len(),
+            name_bytes,
+            path.file_name().map_or(0, |name| name.len()),
+            256usize.saturating_add(path.capacity()),
+        )?;
+        entries.push(path.clone());
+    }
+    Ok(entries)
+}
+
+fn enumerate_direct_children(
+    temp_root: &Path,
+    observation: &mut Observation,
+) -> Result<Vec<PathBuf>, String> {
+    observation.check()?;
     let read_dir =
         fs::read_dir(temp_root).map_err(|error| format!("enumerate {temp_root:?}: {error}"))?;
     let mut entries = Vec::new();
+    let mut name_bytes = 0;
     for entry in read_dir {
+        observation.check()?;
         let entry = entry.map_err(|error| format!("enumerate entry in {temp_root:?}: {error}"))?;
-        entries.push(entry.path());
+        let path = entry.path();
+        name_bytes = observation.directory_record(
+            entries.len(),
+            name_bytes,
+            path.file_name().map_or(0, |name| name.len()),
+            256usize.saturating_add(path.capacity()),
+        )?;
+        entries.push(path);
     }
     entries.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
     Ok(entries)
@@ -411,10 +498,11 @@ fn enumerate_direct_children(temp_root: &Path) -> Result<Vec<PathBuf>, String> {
 fn inspect_candidate(
     path: &Path,
     temp_root: &Path,
-    deadline: Instant,
+    observation: &mut Observation,
     allow_test_seams: bool,
     enforce_idle: bool,
 ) -> Result<LinuxTempMeasurement, InspectError> {
+    observation.observe().map_err(InspectError::Incomplete)?;
     if path.parent() != Some(temp_root) {
         return Err(InspectError::Ineligible(format!(
             "{} is not a direct child of the temporary root",
@@ -451,8 +539,8 @@ fn inspect_candidate(
         )));
     }
 
-    let first = measure_tree(path, metadata.dev(), deadline, allow_test_seams)?;
-    let second = measure_tree(path, metadata.dev(), deadline, allow_test_seams)?;
+    let first = measure_tree(path, metadata.dev(), observation, allow_test_seams)?;
+    let second = measure_tree(path, metadata.dev(), observation, allow_test_seams)?;
     if !first.fingerprint_equals(&second) {
         return Err(InspectError::Incomplete(format!(
             "{} changed while its recursive activity evidence was collected",
@@ -476,7 +564,7 @@ fn inspect_candidate(
             path.display()
         )));
     }
-    if has_mount_boundary(path, metadata.dev(), deadline, allow_test_seams)
+    if has_mount_boundary(path, metadata.dev(), observation, allow_test_seams)
         .map_err(InspectError::Incomplete)?
     {
         return Err(InspectError::Ineligible(format!(
@@ -484,7 +572,7 @@ fn inspect_candidate(
             path.display()
         )));
     }
-    if temp_path_is_referenced(path, &second.fifo_inodes, deadline, allow_test_seams)
+    if temp_path_is_referenced(path, &second.fifo_inodes, observation, allow_test_seams)
         .map_err(InspectError::Incomplete)?
     {
         return Err(InspectError::Ineligible(format!(
@@ -545,6 +633,21 @@ impl CPath {
 /// Enumerates a real directory without updating its access time, refusing a final symlink.
 /// Enumeration failure is returned to the caller, never interpreted as an empty directory.
 pub fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
+    read_dir_names_no_atime_observed(
+        path,
+        &mut Observation::new(
+            Instant::now() + MEASURE_DEADLINE,
+            CancellationToken::new(),
+            LinuxTempObservationLimits::default(),
+        ),
+    )
+}
+
+fn read_dir_names_no_atime_observed(
+    path: &Path,
+    observation: &mut Observation,
+) -> io::Result<Vec<OsString>> {
+    observation.check().map_err(io::Error::other)?;
     let path_bytes = CPath::new(path.as_os_str())?;
     // O_NOATIME keeps SweepX's own eligibility read from turning a stale directory into an active
     // one. O_NOFOLLOW and O_DIRECTORY reject a final-component symlink or non-directory race.
@@ -561,7 +664,7 @@ pub fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    let result = read_dir_names_at(fd);
+    let result = read_dir_names_at_observed(fd, observation);
     unsafe {
         libc::close(fd);
     }
@@ -572,6 +675,18 @@ pub fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
 /// Enumerates using a duplicate of the retained directory descriptor without taking caller ownership.
 /// The caller must keep the original descriptor valid and exclusively owned throughout the call.
 pub fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
+    read_dir_names_at_observed(
+        fd,
+        &mut Observation::new(
+            Instant::now() + MEASURE_DEADLINE,
+            CancellationToken::new(),
+            LinuxTempObservationLimits::default(),
+        ),
+    )
+}
+
+fn read_dir_names_at_observed(fd: i32, observation: &mut Observation) -> io::Result<Vec<OsString>> {
+    observation.check().map_err(io::Error::other)?;
     struct DirectoryStream(*mut libc::DIR);
 
     impl Drop for DirectoryStream {
@@ -600,7 +715,9 @@ pub fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
     }
     let directory = DirectoryStream(directory);
     let mut names = Vec::new();
+    let mut name_bytes = 0usize;
     loop {
+        observation.check().map_err(io::Error::other)?;
         unsafe {
             *libc::__errno_location() = 0;
         }
@@ -615,31 +732,30 @@ pub fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
         // SAFETY: `readdir` returned a valid entry whose `d_name` is NUL-terminated.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
+            name_bytes = observation
+                .directory_record(
+                    names.len(),
+                    name_bytes,
+                    name.len(),
+                    128usize.saturating_add(name.len()),
+                )
+                .map_err(io::Error::other)?;
             names.push(OsString::from_vec(name.to_vec()));
         }
     }
     Ok(names)
 }
 
-fn read_child_names(path: &Path) -> io::Result<Vec<OsString>> {
-    #[cfg(target_os = "linux")]
-    {
-        read_dir_names_no_atime(path)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        fs::read_dir(path)?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect()
-    }
-}
-
 fn measure_tree(
     path: &Path,
     root_device: u64,
-    deadline: Instant,
+    observation: &mut Observation,
     allow_test_seams: bool,
 ) -> Result<LinuxTempMeasurement, InspectError> {
+    observation.observe().map_err(InspectError::Incomplete)?;
+    observation
+        .retain(512usize.saturating_add(path.as_os_str().len()))
+        .map_err(InspectError::Incomplete)?;
     let mut top = fs::symlink_metadata(path).map_err(|error| {
         InspectError::Incomplete(format!("inspect {}: {error}", path.display()))
     })?;
@@ -664,26 +780,19 @@ fn measure_tree(
         let mut stack = vec![path.to_path_buf()];
         let mut hardlinks: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
         while let Some(directory) = stack.pop() {
-            if Instant::now() >= deadline {
-                return Err(InspectError::Incomplete(
-                    "linux tmp recursive measurement deadline reached".to_string(),
-                ));
-            }
+            observation.check().map_err(InspectError::Incomplete)?;
             if !directory_is_removable(&directory) {
                 return Err(InspectError::Ineligible(format!(
                     "{} is not writable enough to remove after a cross-filesystem copy",
                     directory.display()
                 )));
             }
-            let child_names = read_child_names(&directory).map_err(|error| {
-                InspectError::Incomplete(format!("enumerate {}: {error}", directory.display()))
-            })?;
+            let child_names =
+                read_dir_names_no_atime_observed(&directory, observation).map_err(|error| {
+                    InspectError::Incomplete(format!("enumerate {}: {error}", directory.display()))
+                })?;
             for name in child_names {
-                if Instant::now() >= deadline {
-                    return Err(InspectError::Incomplete(
-                        "linux tmp recursive measurement deadline reached".to_string(),
-                    ));
-                }
+                observation.check().map_err(InspectError::Incomplete)?;
                 let child = directory.join(name);
                 let metadata = fs::symlink_metadata(&child).map_err(|error| {
                     InspectError::Incomplete(format!("inspect {}: {error}", child.display()))
@@ -704,6 +813,15 @@ fn measure_tree(
                     .strip_prefix(path)
                     .expect("recursive traversal stays beneath the candidate")
                     .to_path_buf();
+                // Covers the fingerprint key, spare frontier path, hard-link/FIFO indexes and
+                // map overhead conservatively. Both safety passes share this admission budget.
+                observation
+                    .retain(
+                        256usize
+                            .saturating_add(relative.capacity())
+                            .saturating_add(child.capacity()),
+                    )
+                    .map_err(InspectError::Incomplete)?;
                 entries.insert(relative, entry_identity(&metadata));
                 let file_type = metadata.file_type();
                 if file_type.is_dir() {
@@ -743,7 +861,7 @@ fn measure_tree(
                             child.display()
                         )));
                     }
-                    if unix_socket_path_is_bound(&child, deadline, allow_test_seams)
+                    if unix_socket_path_is_bound(&child, observation, allow_test_seams)
                         .map_err(InspectError::Incomplete)?
                     {
                         return Err(InspectError::Ineligible(format!(
@@ -788,7 +906,7 @@ fn measure_tree(
             }
         }
     } else if top.file_type().is_socket()
-        && unix_socket_path_is_bound(path, deadline, allow_test_seams)
+        && unix_socket_path_is_bound(path, observation, allow_test_seams)
             .map_err(InspectError::Incomplete)?
     {
         return Err(InspectError::Ineligible(format!(
@@ -880,12 +998,12 @@ fn system_time(seconds: i64, nanoseconds: i64) -> Result<SystemTime, InspectErro
 fn has_mount_boundary(
     path: &Path,
     _device: u64,
-    deadline: Instant,
+    observation: &mut Observation,
     allow_test_seams: bool,
 ) -> Result<bool, String> {
     let proc_root = proc_root(allow_test_seams);
     let self_mountinfo = proc_root.join("self/mountinfo");
-    match fs::read_to_string(&self_mountinfo) {
+    match observation.read_table(&self_mountinfo) {
         Ok(content) => {
             if mountinfo_references_path(&content, path) {
                 return Ok(true);
@@ -895,15 +1013,11 @@ fn has_mount_boundary(
         Err(error) => return Err(format!("read {}: {error}", self_mountinfo.display())),
     }
 
-    if Instant::now() >= deadline {
-        return Err("linux tmp process observation deadline reached".to_string());
-    }
+    observation.check()?;
     let processes = fs::read_dir(&proc_root)
         .map_err(|error| format!("read {}: {error}", proc_root.display()))?;
     for process in processes {
-        if Instant::now() >= deadline {
-            return Err("linux tmp process observation deadline reached".to_string());
-        }
+        observation.observe()?;
         let process =
             process.map_err(|error| format!("read {} entry: {error}", proc_root.display()))?;
         if !is_pid(&process.file_name()) {
@@ -919,7 +1033,7 @@ fn has_mount_boundary(
             continue;
         }
         let mountinfo_path = process_path.join("mountinfo");
-        let content = match fs::read_to_string(&mountinfo_path) {
+        let content = match observation.read_table(&mountinfo_path) {
             Ok(content) => content,
             Err(error) if is_gone(&error) => continue,
             Err(error) => return Err(format!("read {}: {error}", mountinfo_path.display())),
@@ -947,20 +1061,16 @@ fn mountinfo_references_path(content: &str, candidate: &Path) -> bool {
 fn temp_path_is_referenced(
     _path: &Path,
     candidate_fifo_inodes: &BTreeSet<u64>,
-    deadline: Instant,
+    observation: &mut Observation,
     allow_test_seams: bool,
 ) -> Result<bool, String> {
     let current_uid = current_uid();
     let proc_root = proc_root(allow_test_seams);
-    if Instant::now() >= deadline {
-        return Err("linux tmp process observation deadline reached".to_string());
-    }
+    observation.check()?;
     let processes = fs::read_dir(&proc_root)
         .map_err(|error| format!("read {}: {error}", proc_root.display()))?;
     for process in processes {
-        if Instant::now() >= deadline {
-            return Err("linux tmp process observation deadline reached".to_string());
-        }
+        observation.observe()?;
         let process =
             process.map_err(|error| format!("read {} entry: {error}", proc_root.display()))?;
         let name = process.file_name();
@@ -977,6 +1087,7 @@ fn temp_path_is_referenced(
             continue;
         }
         for relative in ["cwd", "root", "exe"] {
+            observation.observe()?;
             match proc_link_references(&process_path.join(relative), _path) {
                 Ok(true) => return Ok(true),
                 Ok(false) | Err(IsReferenceError::Gone) => {}
@@ -989,6 +1100,7 @@ fn temp_path_is_referenced(
             Err(error) => return Err(format!("read fd: {error}")),
         };
         for entry in fd_entries {
+            observation.observe()?;
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) if is_gone(&error) => continue,
@@ -1012,6 +1124,7 @@ fn temp_path_is_referenced(
                 Err(error) => return Err(format!("read {directory}: {error}")),
             };
             for entry in entries {
+                observation.observe()?;
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) if is_gone(&error) => continue,
@@ -1025,7 +1138,7 @@ fn temp_path_is_referenced(
             }
         }
     }
-    unix_socket_path_is_bound(_path, deadline, allow_test_seams)
+    unix_socket_path_is_bound(_path, observation, allow_test_seams)
 }
 
 enum IsReferenceError {
@@ -1096,37 +1209,38 @@ fn test_path(variable: &str, allow_test_seams: bool) -> Option<PathBuf> {
 
 fn unix_socket_path_is_bound(
     path: &Path,
-    deadline: Instant,
+    observation: &mut Observation,
     allow_test_seams: bool,
 ) -> Result<bool, String> {
     if allow_test_seams && let Some(table) = test_path("SWEEPX_TEST_LINUX_PROC_NET_UNIX", true) {
-        return unix_socket_path_is_bound_at(path, &table);
+        return unix_socket_path_is_bound_at(path, &table, observation);
     }
 
     let proc_root = proc_root(false);
     let mut observed_namespaces = BTreeSet::new();
     let self_table = proc_root.join("self/net/unix");
-    let self_namespace = fs::symlink_metadata(proc_root.join("self/ns/net"))
+    let self_namespace = network_namespace_identity(&proc_root.join("self/ns/net"))
         .map_err(|error| format!("inspect current network namespace: {error}"))?;
-    let self_namespace = (self_namespace.dev(), self_namespace.ino());
-    observed_namespaces.insert(self_namespace);
-    if unix_socket_path_is_bound_at(path, &self_table)? {
+    if socket_table_references_path(
+        path,
+        &self_table,
+        self_namespace,
+        &mut observed_namespaces,
+        observation,
+        &proc_root.join("self/ns/net"),
+    )?
+    .ok_or_else(|| "current network namespace disappeared during observation".to_string())?
+    {
         return Ok(true);
     }
-    if Instant::now() >= deadline {
-        return Err("linux tmp process observation deadline reached".to_string());
-    }
+    observation.check()?;
 
     let current_uid = current_uid();
-    if Instant::now() >= deadline {
-        return Err("linux tmp process observation deadline reached".to_string());
-    }
+    observation.check()?;
     for process in fs::read_dir(&proc_root)
         .map_err(|error| format!("read {}: {error}", proc_root.display()))?
     {
-        if Instant::now() >= deadline {
-            return Err("linux tmp process observation deadline reached".to_string());
-        }
+        observation.observe()?;
         let process =
             process.map_err(|error| format!("read {} entry: {error}", proc_root.display()))?;
         if !is_pid(&process.file_name()) {
@@ -1142,13 +1256,20 @@ fn unix_socket_path_is_bound(
             continue;
         }
         let table = process_path.join("net/unix");
-        let namespace = match fs::symlink_metadata(process_path.join("ns/net")) {
-            Ok(identity) => (identity.dev(), identity.ino()),
+        let namespace = match network_namespace_identity(&process_path.join("ns/net")) {
+            Ok(identity) => identity,
             Err(error) if is_gone(&error) => continue,
             Err(error) => return Err(format!("inspect process network namespace: {error}")),
         };
-        if socket_table_references_path(path, &table, namespace, &mut observed_namespaces)?
-            .unwrap_or(false)
+        if socket_table_references_path(
+            path,
+            &table,
+            namespace,
+            &mut observed_namespaces,
+            observation,
+            &process_path.join("ns/net"),
+        )?
+        .unwrap_or(false)
         {
             return Ok(true);
         }
@@ -1156,23 +1277,58 @@ fn unix_socket_path_is_bound(
     Ok(false)
 }
 
+fn network_namespace_identity(path: &Path) -> io::Result<(u64, u64)> {
+    // These are fixed procfs namespace magic links, not candidate paths or execution authority.
+    // stat observes the namespace object; lstat observes a per-process link and cannot deduplicate
+    // processes sharing one namespace. Permissions/races remain failures, never an empty view.
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 fn socket_table_references_path(
     candidate: &Path,
     table: &Path,
     namespace: (u64, u64),
     observed_namespaces: &mut BTreeSet<(u64, u64)>,
+    observation: &mut Observation,
+    namespace_path: &Path,
 ) -> Result<Option<bool>, String> {
-    if !observed_namespaces.insert(namespace) {
+    observation.check()?;
+    if !namespace_matches(namespace_path, namespace)? {
+        return Ok(None);
+    }
+    if observed_namespaces.contains(&namespace) {
         return Ok(Some(false));
     }
-    match fs::read_to_string(table) {
-        Ok(content) => Ok(Some(content.lines().skip(1).any(|line| {
-            unix_socket_line_path(line).is_some_and(|socket_path| {
-                path_is_same_or_inside(Path::new(&socket_path), candidate)
-            })
-        }))),
+    match observation.read_table(table) {
+        Ok(content) => {
+            // Observe the binding again after EOF. Namespace changes or disappearing processes
+            // cannot attribute a different namespace's negative table to the captured key.
+            // These are live point observations, not an atomic system-wide reference snapshot.
+            if !namespace_matches(namespace_path, namespace)? {
+                return Ok(None);
+            }
+            // A vanished process cannot establish an empty namespace table: another process
+            // in that namespace must still be observed. Admit only successfully read tables.
+            observation.retain(64)?;
+            observed_namespaces.insert(namespace);
+            Ok(Some(content.lines().skip(1).any(|line| {
+                unix_socket_line_path(line).is_some_and(|socket_path| {
+                    path_is_same_or_inside(Path::new(&socket_path), candidate)
+                })
+            })))
+        }
         Err(error) if is_gone(&error) => Ok(None),
         Err(error) => Err(format!("read {}: {error}", table.display())),
+    }
+}
+
+fn namespace_matches(path: &Path, expected: (u64, u64)) -> Result<bool, String> {
+    match network_namespace_identity(path) {
+        Ok(actual) if actual == expected => Ok(true),
+        Ok(_) => Err("network namespace changed during socket observation".into()),
+        Err(error) if is_gone(&error) => Ok(false),
+        Err(error) => Err(format!("inspect network namespace: {error}")),
     }
 }
 
@@ -1198,9 +1354,14 @@ fn unix_socket_line_path(line: &str) -> Option<OsString> {
     Some(OsString::from(OsStr::from_bytes(bytes.trim_ascii())))
 }
 
-fn unix_socket_path_is_bound_at(path: &Path, table: &Path) -> Result<bool, String> {
-    let content =
-        fs::read_to_string(table).map_err(|error| format!("read {}: {error}", table.display()))?;
+fn unix_socket_path_is_bound_at(
+    path: &Path,
+    table: &Path,
+    observation: &mut Observation,
+) -> Result<bool, String> {
+    let content = observation
+        .read_table(table)
+        .map_err(|error| format!("read {}: {error}", table.display()))?;
     Ok(content.lines().skip(1).any(|line| {
         unix_socket_line_path(line)
             .is_some_and(|socket_path| path_is_same_or_inside(Path::new(&socket_path), path))
@@ -1216,7 +1377,7 @@ pub(crate) fn decode_mountinfo_path(encoded: &str) -> PathBuf {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' && index + 3 <= bytes.len() {
+        if bytes[index] == b'\\' && index + 4 <= bytes.len() {
             let octal = &bytes[index + 1..index + 4];
             let decoded_octal = std::str::from_utf8(octal)
                 .map_err(|_| ())
@@ -1236,6 +1397,13 @@ pub(crate) fn decode_mountinfo_path(encoded: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_observation() -> Observation {
+        Observation::new(
+            Instant::now() + Duration::from_secs(10),
+            CancellationToken::new(),
+            LinuxTempObservationLimits::default(),
+        )
+    }
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
@@ -1261,13 +1429,280 @@ mod tests {
         assert!(touched.success());
         let before = fs::symlink_metadata(&candidate).unwrap().atime();
 
-        let names = read_child_names(&candidate).unwrap();
+        let names = read_dir_names_no_atime(&candidate).unwrap();
         assert_eq!(names, vec![OsString::from("payload")]);
         let after = fs::symlink_metadata(&candidate).unwrap().atime();
         assert_eq!(before, after);
     }
 
     use sweepx_fixtures::linux_temp::TestSeams as TestProcSeams;
+
+    #[test]
+    fn cancelled_discovery_refuses_before_any_root_access() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let discovery = discover_with_cancel_and_limits(
+            Path::new("/missing-temp-root"),
+            None,
+            Instant::now() + Duration::from_secs(10),
+            &cancel,
+            LinuxTempObservationLimits::default(),
+        );
+        assert!(!discovery.complete && discovery.candidates.is_empty());
+        assert_eq!(
+            discovery.incomplete_reason.as_deref(),
+            Some("linux tmp observation cancelled")
+        );
+    }
+
+    #[test]
+    fn bounded_native_enumeration_refuses_prefixes_and_preserves_caller_fd() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = TempDir::new().unwrap();
+        for name in ["first", "second", "third"] {
+            fs::write(root.path().join(name), b"payload").unwrap();
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NOATIME)
+            .open(root.path())
+            .unwrap();
+        let mut observation = Observation::new(
+            Instant::now() + Duration::from_secs(10),
+            CancellationToken::new(),
+            LinuxTempObservationLimits {
+                max_directory_entries: 1,
+                ..Default::default()
+            },
+        );
+        assert!(
+            read_dir_names_at_observed(file.as_raw_fd(), &mut observation)
+                .unwrap_err()
+                .to_string()
+                .contains("entry limit")
+        );
+        assert!(
+            file.metadata().unwrap().is_dir(),
+            "only the duplicated stream descriptor is closed"
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 3);
+        let mut observation = Observation::new(
+            Instant::now() + Duration::from_secs(10),
+            CancellationToken::new(),
+            LinuxTempObservationLimits {
+                max_directory_name_bytes: 1,
+                ..Default::default()
+            },
+        );
+        assert!(
+            read_dir_names_no_atime_observed(root.path(), &mut observation)
+                .unwrap_err()
+                .to_string()
+                .contains("name byte limit")
+        );
+    }
+
+    #[test]
+    fn measurement_fact_budget_refuses_an_incomplete_fingerprint() {
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("payload"), b"unchanged").unwrap();
+        let mut observation = Observation::new(
+            Instant::now() + Duration::from_secs(10),
+            CancellationToken::new(),
+            LinuxTempObservationLimits {
+                max_retained_bytes: 1,
+                ..Default::default()
+            },
+        );
+        let result = measure_tree(
+            root.path(),
+            fs::symlink_metadata(root.path()).unwrap().dev(),
+            &mut observation,
+            false,
+        );
+        assert!(
+            matches!(result, Err(InspectError::Incomplete(reason)) if reason.contains("fact budget"))
+        );
+        assert_eq!(fs::read(root.path().join("payload")).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn vanished_namespace_table_does_not_hide_a_later_reference() {
+        let root = TempDir::new().unwrap();
+        let table = root.path().join("unix");
+        let namespace_path = root.path().join("namespace");
+        fs::write(&namespace_path, b"namespace fixture").unwrap();
+        let namespace = network_namespace_identity(&namespace_path).unwrap();
+        let candidate = Path::new("/tmp/controlled-candidate");
+        let mut seen = BTreeSet::new();
+        let mut observation = test_observation();
+        assert_eq!(
+            socket_table_references_path(
+                candidate,
+                &table,
+                namespace,
+                &mut seen,
+                &mut observation,
+                &namespace_path,
+            )
+            .unwrap(),
+            None
+        );
+        assert!(seen.is_empty());
+        fs::write(&table, b"header\n0000: 00000002 00000000 00010000 0001 01 123456 /tmp/controlled-candidate/socket\n").unwrap();
+        assert_eq!(
+            socket_table_references_path(
+                candidate,
+                &table,
+                namespace,
+                &mut seen,
+                &mut observation,
+                &namespace_path,
+            )
+            .unwrap(),
+            Some(true)
+        );
+        assert!(seen.contains(&namespace));
+    }
+
+    #[test]
+    fn replaced_namespace_binding_cannot_reuse_another_namespaces_table() {
+        let root = TempDir::new().unwrap();
+        let namespace_path = root.path().join("namespace");
+        fs::write(&namespace_path, b"original namespace object").unwrap();
+        let expected = network_namespace_identity(&namespace_path).unwrap();
+        // Keep the original inode alive so the fixture cannot accidentally exercise inode reuse.
+        fs::rename(&namespace_path, root.path().join("original-namespace")).unwrap();
+        fs::write(&namespace_path, b"replacement namespace object").unwrap();
+        let table = root.path().join("unix");
+        fs::write(&table, b"header\n").unwrap();
+        let mut seen = BTreeSet::new();
+        assert!(
+            socket_table_references_path(
+                Path::new("/tmp/controlled-candidate"),
+                &table,
+                expected,
+                &mut seen,
+                &mut test_observation(),
+                &namespace_path
+            )
+            .unwrap_err()
+            .contains("namespace changed")
+        );
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn namespace_child() {
+        if std::env::var_os("SWEEPX_TEST_NAMESPACE_CHILD").is_some() {
+            use std::io::Read;
+            std::io::stdin().read_exact(&mut [0u8; 1]).unwrap();
+        }
+    }
+
+    #[test]
+    fn namespace_identity_matches_kernel_link_and_an_inheriting_process() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    for _ in 0..100 {
+                        if self.0.try_wait().ok().flatten().is_some() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "junk::linux_temp::tests::namespace_child",
+                    "--nocapture",
+                ])
+                .env("SWEEPX_TEST_NAMESPACE_CHILD", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let own_path = Path::new("/proc/self/ns/net");
+        let child_path = PathBuf::from(format!("/proc/{}/ns/net", child.0.id()));
+        let kernel_link = fs::read_link(own_path)
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap();
+        let expected_inode: u64 = kernel_link
+            .strip_prefix("net:[")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap()
+            .parse()
+            .unwrap();
+        let own = network_namespace_identity(own_path).unwrap();
+        let inherited = network_namespace_identity(&child_path).unwrap();
+        assert_eq!(
+            own.1, expected_inode,
+            "identity comes from the namespace object, not its link inode"
+        );
+        assert_eq!(inherited, own);
+        assert_eq!(
+            fs::read_link(&child_path).unwrap(),
+            fs::read_link(own_path).unwrap()
+        );
+        child.0.stdin.take().unwrap().write_all(&[1]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "namespace child did not exit after explicit release"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn oversized_namespace_table_never_establishes_an_empty_reference_view() {
+        let root = TempDir::new().unwrap();
+        let table = root.path().join("unix");
+        let namespace_path = root.path().join("namespace");
+        fs::write(&namespace_path, b"namespace fixture").unwrap();
+        let namespace = network_namespace_identity(&namespace_path).unwrap();
+        fs::write(&table, b"header\n0000: 00000002 00000000 00010000 0001 01 123456 /tmp/controlled-candidate/socket\n").unwrap();
+        let mut observation = Observation::new(
+            Instant::now() + Duration::from_secs(10),
+            CancellationToken::new(),
+            LinuxTempObservationLimits {
+                max_proc_table_bytes: 8,
+                ..Default::default()
+            },
+        );
+        let mut seen = BTreeSet::new();
+        assert!(
+            socket_table_references_path(
+                Path::new("/tmp/controlled-candidate"),
+                &table,
+                namespace,
+                &mut seen,
+                &mut observation,
+                &namespace_path
+            )
+            .is_err()
+        );
+        assert!(seen.is_empty());
+    }
 
     #[test]
     fn native_discovery_and_report_are_callable_without_cli() {
@@ -1353,7 +1788,7 @@ mod tests {
         let measurement = measure_tree(
             &candidate,
             fs::symlink_metadata(root.path()).unwrap().dev(),
-            Instant::now() + Duration::from_secs(10),
+            &mut test_observation(),
             true,
         )
         .unwrap();
@@ -1421,14 +1856,8 @@ mod tests {
             .unwrap();
         assert!(accessed.success());
 
-        let error = inspect_candidate(
-            &candidate,
-            root.path(),
-            Instant::now() + Duration::from_secs(10),
-            true,
-            true,
-        )
-        .unwrap_err();
+        let error = inspect_candidate(&candidate, root.path(), &mut test_observation(), true, true)
+            .unwrap_err();
         unsafe {
             std::env::remove_var("SWEEPX_TEST_LINUX_NOW_UNIX");
         }
@@ -1454,7 +1883,7 @@ mod tests {
         let error = inspect_candidate(
             &candidate,
             root.path(),
-            Instant::now() + Duration::from_secs(10),
+            &mut test_observation(),
             false,
             true,
         )
@@ -1486,8 +1915,8 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).unwrap();
         let net = std::env::temp_dir().join(format!("sweepx-proc-net-unix-{}", std::process::id()));
         fs::write(&net, std::fs::read_to_string("/proc/net/unix").unwrap()).unwrap();
-        assert!(unix_socket_path_is_bound_at(&socket_path, &net).unwrap());
-        assert!(!unix_socket_path_is_bound_at(&stale_path, &net).unwrap());
+        assert!(unix_socket_path_is_bound_at(&socket_path, &net, &mut test_observation()).unwrap());
+        assert!(!unix_socket_path_is_bound_at(&stale_path, &net, &mut test_observation()).unwrap());
     }
 
     #[test]
@@ -1500,13 +1929,9 @@ mod tests {
         std::os::unix::fs::symlink(candidate.join("open-file (deleted)"), fd_root.join("7"))
             .unwrap();
 
-        let referenced = temp_path_is_referenced(
-            &candidate,
-            &BTreeSet::new(),
-            Instant::now() + Duration::from_secs(10),
-            true,
-        )
-        .unwrap();
+        let referenced =
+            temp_path_is_referenced(&candidate, &BTreeSet::new(), &mut test_observation(), true)
+                .unwrap();
         assert!(referenced);
     }
 
@@ -1521,13 +1946,8 @@ mod tests {
         let mut fifos = BTreeSet::new();
         fifos.insert(424242);
 
-        let referenced = temp_path_is_referenced(
-            &candidate,
-            &fifos,
-            Instant::now() + Duration::from_secs(10),
-            true,
-        )
-        .unwrap();
+        let referenced =
+            temp_path_is_referenced(&candidate, &fifos, &mut test_observation(), true).unwrap();
         assert!(referenced);
     }
 
@@ -1546,7 +1966,7 @@ mod tests {
         let measurement = measure_tree(
             &candidate,
             fs::symlink_metadata(root.path()).unwrap().dev(),
-            Instant::now() + Duration::from_secs(10),
+            &mut test_observation(),
             false,
         )
         .unwrap();
@@ -1603,12 +2023,8 @@ mod tests {
         let process = seams.proc_root.path().join("4243");
         fs::create_dir(&process).unwrap();
         fs::set_permissions(&process, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = temp_path_is_referenced(
-            &candidate,
-            &BTreeSet::new(),
-            Instant::now() + Duration::from_secs(10),
-            true,
-        );
+        let result =
+            temp_path_is_referenced(&candidate, &BTreeSet::new(), &mut test_observation(), true);
         fs::set_permissions(&process, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
     }
@@ -1622,9 +2038,13 @@ mod tests {
             b"42 1 0:42 / /tmp/old-root rw,noatime - ext4 /dev/sda rw\n",
         )
         .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        assert!(has_mount_boundary(Path::new("/tmp/old-root"), 0, deadline, true).unwrap());
-        assert!(!has_mount_boundary(Path::new("/tmp/old"), 0, deadline, true).unwrap());
+        assert!(
+            has_mount_boundary(Path::new("/tmp/old-root"), 0, &mut test_observation(), true)
+                .unwrap()
+        );
+        assert!(
+            !has_mount_boundary(Path::new("/tmp/old"), 0, &mut test_observation(), true).unwrap()
+        );
     }
 
     #[test]
@@ -1637,5 +2057,11 @@ mod tests {
             decode_mountinfo_path("/tmp/a\\134b").as_os_str().as_bytes(),
             br"/tmp/a\b"
         );
+        for path in ["/tmp/a\\", "/tmp/a\\1", "/tmp/a\\12"] {
+            assert_eq!(
+                decode_mountinfo_path(path).as_os_str().as_bytes(),
+                path.as_bytes()
+            );
+        }
     }
 }

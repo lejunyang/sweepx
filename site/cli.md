@@ -167,6 +167,8 @@ macOS 整根缓存命中后按本次工具快照重算 activity/staleFormats，�
 
 不传显式根并加 `--system` 时，Linux 除报告 `XDG_CACHE_HOME` 外，还会枚举 `/tmp` 的任意直接子对象，名称不参与判断。候选必须是当前用户拥有、与 `/tmp` 同设备、可从 sticky 父目录删除且递归 atime/mtime/ctime 至少 7 天未更新的目录、普通文件、符号链接、FIFO 或无绑定 Unix socket；目录会 no-follow 递归统计分配大小和最新活动时间。SweepX 拒绝其他用户对象、跨设备/挂载边界、外部硬链接、设备 inode、已绑定 socket，以及在当前用户可读的 `cwd`/`root`/`exe`/`fd`（含 FIFO 的 `pipe:[inode]` 引用）/`map_files`/`mountinfo` 或可观测网络命名空间 Unix socket 表中出现的对象。其他用户私有进程或挂载/网络命名空间仍可能不可见；只要当前用户视图读取不完整，报告标记 partial 且清理拒绝执行。macOS 在 `~/Library/Caches` 下逐个报告应用缓存，Windows 只在 `%LOCALAPPDATA%/Packages` 下识别深度为 2 的 `LocalCache` / `TempState`。Linux `/var/tmp`、Windows 系统清理以及包管理器/容器共享存储尚未纳入。
 
+Linux 临时对象分析与清理重验都有独立的资源预算：默认最多 1,000,000 条观察、64 MiB 累计保留估算；每目录最多 65,536 个名称及 8 MiB 名称字节，单个 mount/socket 表最多 4 MiB，整次表读取最多 64 MiB。它们不是 RSS 上限。取消、期限或预算不足均保留不完整状态，表的截断前缀不能证明没有进程引用；缺失候选也不能当作没有垃圾。
+
 Linux 可显式隔离这一组陈旧临时对象：
 
 ```bash
