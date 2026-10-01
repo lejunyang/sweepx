@@ -2646,7 +2646,7 @@ mod tests {
             .args([
                 "--ignored",
                 "--exact",
-                "trash_qualification::tests::real_gio_trash_only_generated_disposable_fixture",
+                "linux::trash_qualification::tests::real_gio_trash_only_generated_disposable_fixture",
                 "--nocapture",
             ])
             .env("SWEEPX_REAL_GIO_CHILD", "1")

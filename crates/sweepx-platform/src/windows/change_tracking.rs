@@ -6,7 +6,7 @@
 //!
 //! # Why this is separate from the accelerated reader
 //!
-//! [`crate::read_volume_layout_records`] answers "what is on the volume right now" and needs
+//! [`crate::windows::read_volume_layout_records`] answers "what is on the volume right now" and needs
 //! elevation. Change detection answers "is what I already have still true", and the bounds query
 //! it depends on is far cheaper. Keeping them apart means a caller can validate a cached result
 //! without paying for a whole-volume metadata read, which is the entire point of the layer.
@@ -19,7 +19,7 @@
 //! narrowing it to a subtree requires resolving every changed record's parent chain, and a wrong
 //! answer would serve stale sizes for a directory the user just modified.
 
-use crate::ntfs_acceleration::{UsnCacheMissReason, UsnCursorDecision, UsnJournalBounds};
+use crate::windows::ntfs_acceleration::{UsnCacheMissReason, UsnCursorDecision, UsnJournalBounds};
 
 /// A captured point in a volume's USN change journal.
 ///
@@ -91,7 +91,7 @@ impl ChangeVerdict {
 
 /// Compares a captured token against the volume's current journal bounds.
 ///
-/// Delegates the trust decision to [`crate::validate_usn_cursor`] rather than repeating its
+/// Delegates the trust decision to [`crate::windows::validate_usn_cursor`] rather than repeating its
 /// comparisons: that function already refuses a changed journal id, a wrapped range and an
 /// impossible cursor, and a second implementation of the same rules could disagree with it. The
 /// only judgement added here is turning an accepted cursor into either `Unchanged` or an explicit
@@ -102,7 +102,7 @@ impl ChangeVerdict {
 /// both cases the safe interpretation is that the cached result describes something else.
 #[must_use]
 pub fn compare_to_current(token: VolumeChangeToken, current: UsnJournalBounds) -> ChangeVerdict {
-    match crate::validate_usn_cursor(token.journal_id, token.next_usn, current) {
+    match crate::windows::validate_usn_cursor(token.journal_id, token.next_usn, current) {
         UsnCursorDecision::CacheMiss(reason) => ChangeVerdict::MustRescan(reason),
         UsnCursorDecision::ReadFrom(cursor) if cursor == current.next_usn => {
             ChangeVerdict::Unchanged

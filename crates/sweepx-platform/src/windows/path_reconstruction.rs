@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use crate::ntfs_acceleration::FileLayoutRecord;
+use crate::windows::ntfs_acceleration::FileLayoutRecord;
 
 /// Upper bound on ancestor links followed for one record.
 ///
@@ -97,8 +97,8 @@ const NAME_ENTRY_DOS: u32 = 0x0000_0002;
 /// Unflagged names are the common case on volumes without 8.3 generation — `E:` reported
 /// `flags=0x0` for 23483 of 23494 names — so they must not be treated as second class.
 fn preferred_name(
-    names: &[crate::ntfs_acceleration::FileLayoutName],
-) -> Option<&crate::ntfs_acceleration::FileLayoutName> {
+    names: &[crate::windows::ntfs_acceleration::FileLayoutName],
+) -> Option<&crate::windows::ntfs_acceleration::FileLayoutName> {
     names
         .iter()
         .find(|name| name.flags & NAME_ENTRY_NTFS != 0)
@@ -258,7 +258,7 @@ impl RecordIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ntfs_acceleration::{FileLayoutName, FileLayoutRecord};
+    use crate::windows::ntfs_acceleration::{FileLayoutName, FileLayoutRecord};
 
     fn utf16(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()

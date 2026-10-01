@@ -129,7 +129,7 @@ pub fn read_accelerated_preview(
     root: &Path,
     cancel: &CancellationToken,
 ) -> Result<AcceleratedPreview, AccelerationRefusal> {
-    use sweepx_platform_windows::{
+    use sweepx_platform::windows::{
         read_volume_layout_records, root_file_reference, select_subtree,
     };
     // Imported here rather than at module scope: the fallback below does not time anything, so a
@@ -182,7 +182,7 @@ pub fn read_accelerated_preview(
 /// USN journal. Cancellation is checked first so a cancelled scan does not open a volume handle.
 #[cfg(all(windows, feature = "platform-windows"))]
 pub fn qualify_acceleration(root: &Path, cancel: &CancellationToken) -> AccelerationDecision {
-    use sweepx_platform_windows::{
+    use sweepx_platform::windows::{
         NtfsAccelerationFallback, NtfsAccelerationProbe, probe_ntfs_acceleration,
     };
 
@@ -322,7 +322,7 @@ mod tests {
     fn an_unelevated_windows_host_refuses_and_names_elevation() {
         use sweepx_platform::PrivilegeProvider as _;
 
-        let elevated = sweepx_platform_windows::WindowsPrivilegeProvider::new()
+        let elevated = sweepx_platform::windows::WindowsPrivilegeProvider::new()
             .observe()
             .level
             .grants_elevated_capability();

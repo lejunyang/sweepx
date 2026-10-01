@@ -1233,7 +1233,6 @@ dependencies = [
  "sweepx-i18n",
  "sweepx-model",
  "sweepx-platform",
- "sweepx-platform-windows",
  "sweepx-protocol",
  "sweepx-tui",
  "tempfile",
@@ -1335,39 +1334,14 @@ dependencies = [
 name = "sweepx-platform"
 version = "0.0.1"
 dependencies = [
- "serde",
- "sweepx-model",
- "thiserror",
-]
-
-[[package]]
-name = "sweepx-platform-linux"
-version = "0.0.1"
-dependencies = [
  "libc",
  "libloading",
+ "serde",
  "sha2",
  "sweepx-fixtures",
  "sweepx-model",
- "sweepx-platform",
  "tempfile",
-]
-
-[[package]]
-name = "sweepx-platform-macos"
-version = "0.0.1"
-dependencies = [
- "libc",
- "sweepx-model",
- "sweepx-platform",
-]
-
-[[package]]
-name = "sweepx-platform-windows"
-version = "0.0.1"
-dependencies = [
- "sweepx-model",
- "sweepx-platform",
+ "thiserror",
  "windows-sys 0.61.2",
 ]
 
@@ -1404,9 +1378,6 @@ dependencies = [
  "sweepx-fixtures",
  "sweepx-model",
  "sweepx-platform",
- "sweepx-platform-linux",
- "sweepx-platform-macos",
- "sweepx-platform-windows",
  "tempfile",
  "thiserror",
 ]

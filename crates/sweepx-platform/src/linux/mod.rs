@@ -19,20 +19,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
-use sweepx_model::{DecimalU128, NativeName, ReasonCode};
-#[cfg(target_os = "linux")]
-use sweepx_platform::{
+use crate::{
     BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
     EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
     OpenedDirectory, PresentRegularFileRead, RegularFileChangeStamp, RegularFileIdentityMismatch,
     RegularFileMountMismatch, RegularFileObservation, RegularFileReadExpectation,
     error_kind_for_io, fingerprint_for, known_count, known_u128, reason_for_io,
 };
-use sweepx_platform::{
+use crate::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryHandleAdmission,
     DirectoryReadLimits, EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot,
     WalkEntry,
 };
+#[cfg(target_os = "linux")]
+use sweepx_model::{DecimalU128, NativeName, ReasonCode};
 
 // Native mutation remains a test-only qualification concern. In particular,
 // this module is absent from normal and all-features library builds.
@@ -504,7 +504,7 @@ impl LinuxPlatformScanner {
             || observed_before.change_stamp != observed_after.change_stamp
         {
             return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
-                sweepx_platform::RegularFileObservationMismatch {
+                crate::RegularFileObservationMismatch {
                     observed_before: observed_before.clone(),
                     observed_after: observed_after.clone(),
                 },
@@ -1121,7 +1121,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
-    use sweepx_platform::{BoundedRegularFileReadError, read_bound_regular_file};
+    use crate::{BoundedRegularFileReadError, read_bound_regular_file};
     use tempfile::TempDir;
 
     fn limits(max_entries: usize) -> DirectoryReadLimits {

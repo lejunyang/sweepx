@@ -1,7 +1,7 @@
 use std::mem::size_of;
 use std::path::Path;
 
-use sweepx_platform::CancellationToken;
+use crate::CancellationToken;
 
 /// Upper bound for one NTFS layout page. Runtime I/O uses the same cap after native qualification.
 pub const FILE_LAYOUT_PAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -143,8 +143,8 @@ pub fn probe_ntfs_acceleration(root: &Path, cancel: &CancellationToken) -> NtfsA
     }
     // Only a definite `Elevated` proceeds: an unreadable token must not send the probe
     // down a path whose prerequisite could not be confirmed.
-    use sweepx_platform::PrivilegeProvider as _;
-    if !crate::WindowsPrivilegeProvider::new()
+    use crate::PrivilegeProvider as _;
+    if !crate::windows::WindowsPrivilegeProvider::new()
         .observe()
         .level
         .grants_elevated_capability()
@@ -482,7 +482,7 @@ fn read_i64(bytes: &[u8], offset: usize) -> Result<i64, &'static str> {
 }
 
 #[cfg(windows)]
-pub(crate) mod native {
+pub(in crate::windows) mod native {
     use std::ffi::{OsString, c_void};
     use std::mem::size_of;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -1228,7 +1228,7 @@ mod tests {
         if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
             return;
         }
-        use crate::select_subtree;
+        use crate::windows::select_subtree;
         use std::collections::BTreeMap;
         use std::ffi::c_void;
         use std::os::windows::ffi::OsStrExt;
@@ -1408,7 +1408,7 @@ mod tests {
         if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
             return;
         }
-        use crate::{ChangeVerdict, VolumeChangeToken, compare_to_current};
+        use crate::windows::{ChangeVerdict, VolumeChangeToken, compare_to_current};
 
         let directory = std::env::temp_dir().join(format!(
             "sweepx-usn-{}",
@@ -1522,10 +1522,9 @@ mod tests {
             .components()
             .take(2)
             .collect::<std::path::PathBuf>();
-        let observation = sweepx_platform::PrivilegeProvider::observe(
-            &crate::privilege::WindowsPrivilegeProvider,
-        );
-        let elevated = matches!(observation.level, sweepx_platform::PrivilegeLevel::Elevated);
+        let observation =
+            crate::PrivilegeProvider::observe(&crate::windows::privilege::WindowsPrivilegeProvider);
+        let elevated = matches!(observation.level, crate::PrivilegeLevel::Elevated);
         println!(
             "privilege: level={:?} elevated={elevated} volume={volume_root:?}",
             observation.level
@@ -1661,7 +1660,7 @@ mod tests {
         if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
             return;
         }
-        use crate::{AcceleratedClaim, RecordIndex, verify_accelerated_record};
+        use crate::windows::{AcceleratedClaim, RecordIndex, verify_accelerated_record};
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use std::ptr;
@@ -1848,8 +1847,8 @@ mod tests {
         if std::env::var_os("SWEEPX_RUN_NATIVE_NTFS_PROBE").as_deref() != Some("1".as_ref()) {
             return;
         }
-        use sweepx_platform::PrivilegeProvider as _;
-        let elevated = crate::WindowsPrivilegeProvider::new()
+        use crate::PrivilegeProvider as _;
+        let elevated = crate::windows::WindowsPrivilegeProvider::new()
             .observe()
             .level
             .grants_elevated_capability();
@@ -2018,8 +2017,8 @@ mod tests {
         // The outcome must agree with the privilege that was actually detected, so a
         // silently broken gate cannot hide behind the permissive allowlist above.
         // Without this, returning `NotElevated` unconditionally would still pass.
-        use sweepx_platform::PrivilegeProvider as _;
-        let privileged = crate::WindowsPrivilegeProvider::new()
+        use crate::PrivilegeProvider as _;
+        let privileged = crate::windows::WindowsPrivilegeProvider::new()
             .observe()
             .level
             .grants_elevated_capability();

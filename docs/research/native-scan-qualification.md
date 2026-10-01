@@ -12,7 +12,7 @@ on any development host from claims that require the target operating system and
 
 ## Current implementation state
 
-- macOS `sweepx-platform-macos` now uses a 64 KiB aligned `getattrlistbulk` page for directory
+- macOS `sweepx-platform::macos` now uses a 64 KiB aligned `getattrlistbulk` page for directory
   enumeration and child metadata in one pass (2026-09-29): each page decodes the name plus device,
   type, file id, modification/status-change times, mode, flags and data length, so child inspection
   no longer issues a per-child `fstatat`. It accepts only checked attributes and NUL-terminated
@@ -21,7 +21,7 @@ on any development host from claims that require the target operating system and
   fallback to `readdir` + `fstatat` happens only when the first bulk call reports a documented
   unsupported condition. Failure after an accepted page fails closed rather than restarting and
   risking duplicates or omissions. Native macOS CI exercises the path.
-- Windows `sweepx-platform-windows` now has independent bounded parsers for
+- Windows `sweepx-platform::windows` now has independent bounded parsers for
   `QUERY_FILE_LAYOUT_OUTPUT` and USN v2 pages, a fail-closed USN cursor validator, and a read-only
   native probe that opens an NTFS volume, queries the journal, and consumes bounded layout pages.
   Path reconstruction and identity verification now exist and are validated against the OS, and the
@@ -169,7 +169,7 @@ still needs one elevated run to validate against real parent links.
 
 ### Path reconstruction, validated against the OS (2026-09-02)
 
-`crates/sweepx-platform-windows/src/path_reconstruction.rs` walks a record's parent chain to the
+`crates/sweepx-platform/src/windows/path_reconstruction.rs` walks a record's parent chain to the
 volume root. It is pure logic over parsed records, so cycles, missing ancestors, overlong chains,
 a file appearing as an ancestor, and lossless handling of unpaired surrogates are all unit-tested
 without privilege; only the input has to come from an elevated read. Every failure is a refusal,
@@ -207,7 +207,7 @@ happily while they were defined backwards.
 
 ### Identity verification (unprivileged)
 
-`crates/sweepx-platform-windows/src/accelerated_verification.rs` implements the half the
+`crates/sweepx-platform/src/windows/accelerated_verification.rs` implements the half the
 measurements qualified. It resolves a record's reference number through `OpenFileById` using an
 ordinary handle the scanner already holds, then compares the **full 128-bit** file id plus volume
 serial against the claim, and also checks the record's directory/file claim — identity equality

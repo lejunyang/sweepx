@@ -263,7 +263,7 @@ impl TrashCandidate {
             verify_scanned_identity(entry, &metadata)?;
         }
         #[cfg(windows)]
-        let identity = sweepx_platform_windows::read_live_identity(&path)
+        let identity = sweepx_platform::windows::read_live_identity(&path)
             .map_err(TrashError::Inspect)?
             .map(Some)
             // A path that resolved a moment ago but has no readable identity is refused below
@@ -669,7 +669,7 @@ fn same_object(before_identity: Option<&sweepx_platform::EntryIdentity>, path: &
     let Some(before) = before_identity else {
         return false;
     };
-    match sweepx_platform_windows::read_live_identity(path) {
+    match sweepx_platform::windows::read_live_identity(path) {
         Ok(Some(current)) => &current == before,
         // Absent or unreadable both mean "cannot prove it is the same object".
         Ok(None) | Err(_) => false,
@@ -788,7 +788,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
 
-        let captured = sweepx_platform_windows::read_live_identity(&dir)
+        let captured = sweepx_platform::windows::read_live_identity(&dir)
             .expect("readable")
             .expect("present");
         assert!(
@@ -811,7 +811,7 @@ mod tests {
     fn an_unidentifiable_or_absent_target_is_refused() {
         let missing = std::env::temp_dir().join("sweepx-trash-absent-8c1f");
         let _ = std::fs::remove_dir_all(&missing);
-        let any = sweepx_platform_windows::read_live_identity(&std::env::temp_dir())
+        let any = sweepx_platform::windows::read_live_identity(&std::env::temp_dir())
             .expect("readable")
             .expect("present");
 

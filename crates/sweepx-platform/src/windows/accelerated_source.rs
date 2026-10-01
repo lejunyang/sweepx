@@ -20,8 +20,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ntfs_acceleration::FileLayoutRecord;
-use crate::path_reconstruction::{ReconstructionRefusal, RecordIndex};
+use crate::windows::ntfs_acceleration::FileLayoutRecord;
+use crate::windows::path_reconstruction::{ReconstructionRefusal, RecordIndex};
 
 /// `FILE_ATTRIBUTE_DIRECTORY`.
 const ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
@@ -33,7 +33,7 @@ const ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 /// Deliberately the layout reader's own bound rather than an independent number: if the source
 /// accepted more records than the reader can deliver, the extra capacity would be unreachable,
 /// and if it accepted fewer, a volume the reader handled fine would be refused for no reason.
-pub const MAX_SOURCE_RECORDS: u64 = crate::ntfs_acceleration::MAX_FILE_LAYOUT_RECORDS;
+pub const MAX_SOURCE_RECORDS: u64 = crate::windows::ntfs_acceleration::MAX_FILE_LAYOUT_RECORDS;
 
 /// Reads the file reference number of `path` from a live open.
 ///
@@ -314,7 +314,7 @@ fn is_under_root(
     let mut chain = Vec::new();
     let mut current = reference;
     let mut answer = false;
-    for _ in 0..crate::path_reconstruction::MAX_ANCESTOR_DEPTH {
+    for _ in 0..crate::windows::path_reconstruction::MAX_ANCESTOR_DEPTH {
         if current == root_reference {
             answer = true;
             break;
@@ -339,7 +339,7 @@ fn is_under_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ntfs_acceleration::{FileLayoutDataStream, FileLayoutName};
+    use crate::windows::ntfs_acceleration::{FileLayoutDataStream, FileLayoutName};
 
     fn utf16(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()
@@ -675,7 +675,7 @@ mod tests {
     fn the_record_bound_matches_the_layout_reader() {
         assert_eq!(
             MAX_SOURCE_RECORDS,
-            crate::ntfs_acceleration::MAX_FILE_LAYOUT_RECORDS,
+            crate::windows::ntfs_acceleration::MAX_FILE_LAYOUT_RECORDS,
             "the source must refuse at exactly the point the reader refuses"
         );
     }

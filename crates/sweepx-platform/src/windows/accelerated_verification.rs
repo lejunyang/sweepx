@@ -28,7 +28,7 @@ use std::mem::{self, MaybeUninit};
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::ptr;
 
-use sweepx_platform::EntryIdentity;
+use crate::EntryIdentity;
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,

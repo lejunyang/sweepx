@@ -104,9 +104,6 @@ publish_order=(
   sweepx-audit
   sweepx-catalog
   sweepx-event-journal
-  sweepx-platform-linux
-  sweepx-platform-macos
-  sweepx-platform-windows
   sweepx-tui
   sweepx-scanner
   sweepx-analysis

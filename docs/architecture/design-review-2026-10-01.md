@@ -4,9 +4,9 @@
 
 ## 判断
 
-22 个 crate 并不是扫描慢的直接原因。平台适配、文件身份与删除安全、协议及扫描器的边界有价值；真正的问题是业务边界没有落实：CLI 同时负责规则加载、工具探测、分类、Git 证据、缓存、结果拼装和删除入口。审视时 `main.rs` 约 6,100 行、core 的 `lib.rs` 约 8,000 行，二者都包括测试。增加 crate 没有阻止这些职责重新堆到入口。
+初次审视时的 22 个 crate 并不是扫描慢的直接原因（后续已收敛到 17 个）。平台适配、文件身份与删除安全、协议及扫描器的边界有价值；真正的问题是业务边界没有落实：CLI 同时负责规则加载、工具探测、分类、Git 证据、缓存、结果拼装和删除入口。审视时 `main.rs` 约 6,100 行、core 的 `lib.rs` 约 8,000 行，二者都包括测试。增加 crate 没有阻止这些职责重新堆到入口。
 
-暂不进行机械式合并或重命名。它不会减少一次文件系统调用，还会同时改变包依赖、发布顺序和公共 API。优先在既有 crate 内拆出可独立调用的业务模块，再决定哪些小库只有一个调用者、没有独立契约，值得合并。
+初次审视暂不进行机械式合并或重命名；后续基于实际依赖，将规则和平台各自收敛到既有 crate。它不会减少一次文件系统调用，还会同时改变包依赖、发布顺序和公共 API。优先在既有 crate 内拆出可独立调用的业务模块，再决定哪些小库只有一个调用者、没有独立契约，值得合并。
 
 ## 已落实的修改
 
@@ -96,4 +96,8 @@ cargo test -p sweepx-cli benchmark_batched_root_validation -- --ignored --nocapt
 
 ## Crate 收敛进展
 
-规则三包已合入现有 `sweepx-catalog`（`schema` / `vm` / `junk` 模块），workspace 从 22 减为 20。原有 package 准入 API 保留，schema/VM 的 Rust 导入路径迁移到 catalog 模块；机器 schema ID、规则资源字节与风险值不变。平台四包随后合入 `sweepx-platform` 的各平台模块，目标为 17 个 crate。已经发布的旧包不属于本地 workspace，也不在新的发布顺序中；此次修改不发布或撤回 registry 包。
+规则三包已合入现有 `sweepx-catalog`（`schema` / `vm` / `junk` 模块），workspace 从 22 减为 20。原有 package 准入 API 保留，schema/VM 的 Rust 导入路径迁移到 catalog 模块；机器 schema ID、规则资源字节与风险值不变。平台四包已合入 `sweepx-platform::{linux,macos,windows}`，workspace 进一步收敛到 17 个。平台默认仅编译共享契约；三个后端 feature 由 scanner 原有平台 feature 转发，原生依赖仍按目标选择，Windows 纯解析器仍可在其他宿主测试。原 crate-private native helper 的可见性收紧到其平台模块，Linux 测试子进程的 exact filter 同步迁移。已经发布的旧包不属于本地 workspace，也不在新的发布顺序中；此次修改不发布或撤回 registry 包。
+
+合并交付验证（2026-10-01，arm64 macOS）：工作区格式、`--all-targets --all-features` clippy 和测试通过，仍为 707 项通过、0 失败、2 项基准 ignored，显式排除上述系统 Trash 契约测试。独立对照合并前后的测试名称，共享契约、macOS 后端和 Windows 纯解析器的 75 项测试全部保留，仅增加平台模块前缀。仅契约、单后端以及无后端 scanner 的编译检查通过；仅契约的普通依赖树不含原生后端依赖。
+
+Linux GNU、Windows GNU 的全工作区交叉 clippy，以及各自单独启用后端 feature 的平台 crate clippy 均通过；这不覆盖目标宿主运行时或 Windows MSVC。53 份 Markdown 检查和 23 项文档检查器测试通过。17 个本地 package archive 已生成并独立核对：迁移源码、catalog 规则资源、后端 feature 均存在，规范化依赖清单没有已移除的五个 crate。打包使用 `--no-verify`，不代表从 registry 依赖构建已验收；发布脚本顺序覆盖全部 17 包并满足本地依赖顺序。

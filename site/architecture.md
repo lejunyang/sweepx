@@ -36,12 +36,14 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 ## Crate 职责
 
+当前 workspace 共 17 个 crate。平台实现位于 `sweepx-platform::{linux,macos,windows}`，通过 `backend-linux` / `backend-macos` / `backend-windows` 选择；默认只提供契约。scanner 继续保留原有 `platform-*` feature，并转发到对应后端；原生依赖仍按目标平台编译。Windows 纯解析器仍可在其他平台启用并测试。
+
 规则类型与校验位于 `sweepx-catalog::schema`，纯规则评估位于 `sweepx-catalog::vm`，内置资源与 package 准入由同一个 crate 管理。原独立 schema/VM 包已退出 workspace；机器 schema ID、规则内容和风险值保持不变。
 
 | 层 | 代表 crate | 当前职责 |
 |---|---|---|
 | 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |
-| 平台与扫描 | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache`, `sweepx-event-journal` | platform boundary、三平台只读遍历与聚合；Linux bounded SQLite journal；macOS legacy snapshot |
+| 平台与扫描 | `sweepx-platform`, `sweepx-scanner`, `sweepx-cache`, `sweepx-event-journal` | platform boundary、三平台只读遍历与聚合；Linux bounded SQLite journal；macOS legacy snapshot |
 | 分析与 Cleaner | `sweepx-analysis`, `sweepx-catalog` | candidate/explanation、声明式规则、内置 package |
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |

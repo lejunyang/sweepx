@@ -1,3 +1,20 @@
+//! Shared filesystem contracts and feature-selected native backends.
+//!
+//! Backends retain no-follow and authority checks in separate OS modules. Features select
+//! implementation code only; they never weaken protection or execution guards.
+
+/// Linux traversal and bounded native file observations, with a fail-closed non-Linux stub.
+#[cfg(feature = "backend-linux")]
+pub mod linux;
+/// macOS handle-bound traversal and FSEvents history, with a fail-closed non-macOS stub.
+#[cfg(feature = "backend-macos")]
+pub mod macos;
+/// Windows traversal, privilege observations and pure NTFS parsers.
+///
+/// Pure record parsers remain testable off Windows; native operations retain their OS gates.
+#[cfg(feature = "backend-windows")]
+pub mod windows;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};

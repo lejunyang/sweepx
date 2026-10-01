@@ -206,8 +206,7 @@ jobs:
         run: >-
           cargo check --locked --all-targets --target ${{ matrix.target }}
           --package sweepx-model
-          --package sweepx-platform
-          --package sweepx-platform-windows
+          --package sweepx-platform --features backend-windows
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
@@ -216,8 +215,7 @@ jobs:
         run: >-
           cargo clippy --locked --all-targets --target ${{ matrix.target }}
           --package sweepx-model
-          --package sweepx-platform
-          --package sweepx-platform-windows
+          --package sweepx-platform --features backend-windows
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
@@ -226,8 +224,7 @@ jobs:
         if: matrix.capability_os == 'windows'
         run: >-
           cargo test --locked --target ${{ matrix.target }}
-          --package sweepx-platform
-          --package sweepx-platform-windows
+          --package sweepx-platform --features backend-windows
           --package sweepx-core
           --package sweepx-tui
           --package sweepx-cli
@@ -240,12 +237,12 @@ jobs:
           # alone silently skipped the change-token probe, which carries an unrelated name. The
           # remaining ignored probes are deliberately excluded: they panic rather than skip when
           # the volume handle is denied, and one is pinned to a drive letter that no runner has.
-          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform-windows -- --ignored --nocapture --test-threads=1 native_ntfs_probe the_change_token_notices_a_real_write a_journal_range_read_only_accepts_record_boundaries volume_access_masks_behave_the_same_at_both_privilege_levels
+          cargo test --locked --target ${{ matrix.target }} --package sweepx-platform --features backend-windows -- --ignored --nocapture --test-threads=1 native_ntfs_probe the_change_token_notices_a_real_write a_journal_range_read_only_accepts_record_boundaries volume_access_masks_behave_the_same_at_both_privilege_levels
       - name: Exercise macOS bulk directory enumeration
         if: matrix.capability_os == 'macos'
         run: >-
           cargo test --locked --target ${{ matrix.target }}
-          --package sweepx-platform-macos
+          --package sweepx-platform --features backend-macos
           enumerate_children_uses_opened_dir_and_enforces_limits
       - name: Benchmark macOS bulk directory enumeration smoke
         if: matrix.capability_os == 'macos'
@@ -253,7 +250,7 @@ jobs:
           SWEEPX_RUN_NATIVE_MACOS_BULK_BENCH: "1"
         run: >-
           cargo test --locked --target ${{ matrix.target }}
-          --package sweepx-platform-macos
+          --package sweepx-platform --features backend-macos
           native_bulk_enumeration_benchmark_smoke -- --ignored --nocapture
       - name: Test macOS cache status natively
         if: matrix.capability_os == 'macos'

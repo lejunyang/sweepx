@@ -17,7 +17,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::path::Path;
 
-use sweepx_platform::EntryIdentity;
+use crate::EntryIdentity;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,

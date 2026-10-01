@@ -967,7 +967,7 @@ fn forwardable_arguments(
 fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
     #[cfg(windows)]
     {
-        Box::new(sweepx_platform_windows::WindowsPrivilegeProvider::new())
+        Box::new(sweepx_platform::windows::WindowsPrivilegeProvider::new())
     }
     #[cfg(not(windows))]
     {
@@ -2307,7 +2307,7 @@ fn identity_evidence_matches_path(
         return false;
     };
     matches!(
-        sweepx_platform_windows::read_live_identity(path),
+        sweepx_platform::windows::read_live_identity(path),
         Ok(Some(actual))
             if value.device.0 == u128::from(actual.device()) && value.inode.0 == actual.inode()
     )

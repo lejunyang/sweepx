@@ -37,7 +37,7 @@ sweepx-canonical = { version = "0.0.1", path = "../sweepx-canonical" }
 sweepx-audit = { version = "0.0.1", path = "../sweepx-audit" }
 
 [target.'cfg(windows)'.dependencies]
-sweepx-platform-windows = { version = "0.0.1", path = "../sweepx-platform-windows" }
+sweepx-platform = { version = "0.0.1", path = "../sweepx-platform", features = ["backend-windows"] }
 # `SetStdHandle` only, so an elevated child's output can reach the parent's pipe: a relaunched
 # process gets a new console that closes with it, taking every result line along.
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }

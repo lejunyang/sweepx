@@ -1,6 +1,6 @@
 #[cfg(windows)]
-use sweepx_platform::DirectoryHandleAdmission;
-use sweepx_platform::{
+use crate::DirectoryHandleAdmission;
+use crate::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryReadLimits,
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
@@ -114,8 +114,7 @@ mod backend {
     use std::path::{Path, PathBuf};
     use std::ptr;
 
-    use sweepx_model::{DecimalU128, NativeName, ReasonCode};
-    use sweepx_platform::{
+    use crate::{
         BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
         EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
         OpenedDirectory, PresentRegularFileRead, RegularFileChangeStamp,
@@ -123,6 +122,7 @@ mod backend {
         RegularFileReadExpectation, error_kind_for_io, fingerprint_for, known_count, known_u128,
         reason_for_io, unknown_u128,
     };
+    use sweepx_model::{DecimalU128, NativeName, ReasonCode};
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
         FILE_DIRECTORY_FILE, FILE_ID_EXTD_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
@@ -1097,7 +1097,7 @@ mod backend {
                 || before.change_stamp != after.change_stamp
             {
                 return Err(BoundedRegularFileReadError::ChangedDuringRead(Box::new(
-                    sweepx_platform::RegularFileObservationMismatch {
+                    crate::RegularFileObservationMismatch {
                         observed_before: before.clone(),
                         observed_after: after.clone(),
                     },
@@ -2479,7 +2479,7 @@ mod backend {
                 10,
             )
             .expect("exact request is valid");
-            let read = sweepx_platform::read_bound_regular_file(
+            let read = crate::read_bound_regular_file(
                 &scanner(),
                 &admission.directory,
                 &exact,
@@ -2577,7 +2577,7 @@ mod backend {
             let request =
                 BoundedRegularFileReadRequest::establish_live(NativeName::windows_utf16(name), 64)
                     .expect("unpaired UTF-16 basename remains a valid native token");
-            let read = sweepx_platform::read_bound_regular_file(
+            let read = crate::read_bound_regular_file(
                 &scanner(),
                 &admission.directory,
                 &request,
@@ -3282,7 +3282,7 @@ mod backend {
             parent: &Self::DirectoryHandle,
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
-            _directory_admission: sweepx_platform::DirectoryHandleAdmission,
+            _directory_admission: crate::DirectoryHandleAdmission,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
             self.inspect_child(parent, child, cancel)
         }

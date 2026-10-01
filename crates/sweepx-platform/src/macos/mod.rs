@@ -1,4 +1,4 @@
-use sweepx_platform::{
+use crate::{
     CancellationToken, DirectoryEntryBatch, DirectoryEntryRecord, DirectoryReadLimits,
     EntryMetadata, PlatformError, PlatformScanner, RootAdmission, ScanRoot, WalkEntry,
 };
@@ -7,7 +7,7 @@ mod bulk_directory;
 #[cfg(target_os = "macos")]
 pub mod fsevents;
 #[cfg(target_os = "macos")]
-use sweepx_platform::{DirectoryHandleAdmission, OpenedDirectory};
+use crate::{DirectoryHandleAdmission, OpenedDirectory};
 
 #[derive(Debug)]
 pub struct MacosUnavailableDirectory;
@@ -32,14 +32,14 @@ mod backend {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use sweepx_model::{CountValue, DecimalU128, NativeName, ReasonCode};
-    use sweepx_platform::{
+    use crate::{
         BoundaryKind, BoundaryRecord, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
         EntryIdentity, EntryKind, ErrorRecord, FilesystemIdentity, HardLinkKey, MountIdentity,
         PresentRegularFileRead, RegularFileChangeStamp, RegularFileIdentityMismatch,
         RegularFileMountMismatch, RegularFileObservation, RegularFileObservationMismatch,
         RegularFileReadExpectation, fingerprint_for, known_count, known_u128, unknown_u128,
     };
+    use sweepx_model::{CountValue, DecimalU128, NativeName, ReasonCode};
 
     use super::bulk_directory::{BulkDirectoryCursor, unsupported as bulk_unsupported};
     use super::*;
@@ -715,7 +715,7 @@ mod backend {
         }
 
         #[cfg(test)]
-        pub(crate) fn install_replace_with_symlink_after_preview_hook(
+        pub(in crate::macos) fn install_replace_with_symlink_after_preview_hook(
             parent: PathBuf,
             child_name: NativeName,
             link_target: PathBuf,
@@ -732,7 +732,7 @@ mod backend {
         }
 
         #[cfg(test)]
-        pub(crate) fn clear_read_test_hook() {
+        pub(in crate::macos) fn clear_read_test_hook() {
             *READ_REGULAR_FILE_TEST_HOOK.lock().unwrap() = None;
         }
     }
@@ -905,8 +905,8 @@ mod backend {
                         Err(error) => {
                             return Ok(WalkEntry::Error(ErrorRecord {
                                 path: child.path.clone(),
-                                kind: sweepx_platform::error_kind_for_io(&error),
-                                reason: sweepx_platform::reason_for_io(&error),
+                                kind: crate::error_kind_for_io(&error),
+                                reason: crate::reason_for_io(&error),
                                 detail: error.to_string(),
                             }));
                         }
@@ -941,8 +941,8 @@ mod backend {
                         Err(error) => {
                             return Ok(WalkEntry::Error(ErrorRecord {
                                 path: child.path.clone(),
-                                kind: sweepx_platform::error_kind_for_io(&error),
-                                reason: sweepx_platform::reason_for_io(&error),
+                                kind: crate::error_kind_for_io(&error),
+                                reason: crate::reason_for_io(&error),
                                 detail: error.to_string(),
                             }));
                         }
@@ -1151,7 +1151,7 @@ impl PlatformScanner for MacosPlatformScanner {
         parent: &Self::DirectoryHandle,
         child: &DirectoryEntryRecord,
         cancel: &CancellationToken,
-        _directory_admission: sweepx_platform::DirectoryHandleAdmission,
+        _directory_admission: crate::DirectoryHandleAdmission,
     ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
         self.inspect_child(parent, child, cancel)
     }
@@ -1214,11 +1214,11 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
-    use sweepx_model::{DecimalU128, EvidenceValue, NativeName, ReasonCode};
-    use sweepx_platform::{
+    use crate::{
         BoundaryKind, BoundedRegularFileReadError, BoundedRegularFileReadRequest,
         DirectoryReadLimits, known_count, read_bound_regular_file,
     };
+    use sweepx_model::{DecimalU128, EvidenceValue, NativeName, ReasonCode};
 
     use super::*;
 
@@ -1317,7 +1317,7 @@ mod tests {
 
         assert!(matches!(
             admission.metadata.kind,
-            sweepx_platform::EntryKind::Directory
+            crate::EntryKind::Directory
         ));
         assert!(admission.metadata.identity.is_some());
         assert!(admission.metadata.filesystem_identity.is_some());
@@ -1574,7 +1574,7 @@ mod tests {
                 reason: ReasonCode::UnknownIdentity
             }
         ));
-        assert_eq!(link.kind, sweepx_platform::EntryKind::Symlink);
+        assert_eq!(link.kind, crate::EntryKind::Symlink);
         assert_ne!(link.identity, first.identity);
         assert!(matches!(
             link.logical_bytes,
@@ -1636,10 +1636,7 @@ mod tests {
         match inspected {
             Ok(WalkEntry::Error(record)) => {
                 assert!(record.path == blocked);
-                assert!(matches!(
-                    record.kind,
-                    sweepx_platform::ErrorKind::AccessDenied
-                ));
+                assert!(matches!(record.kind, crate::ErrorKind::AccessDenied));
             }
             other => panic!("expected an access-denied walk error, got {other:?}"),
         }
@@ -1688,7 +1685,7 @@ mod tests {
                     &CancellationToken::new()
                 )
                 .unwrap(),
-            WalkEntry::Boundary(sweepx_platform::BoundaryRecord {
+            WalkEntry::Boundary(crate::BoundaryRecord {
                 kind: BoundaryKind::OtherFilesystem,
                 ..
             })
@@ -1767,7 +1764,7 @@ mod tests {
         assert_eq!(
             error,
             BoundedRegularFileReadError::SymlinkOrReparse {
-                observed_kind: sweepx_platform::EntryKind::Symlink,
+                observed_kind: crate::EntryKind::Symlink,
             }
         );
     }
@@ -1830,7 +1827,7 @@ mod tests {
         assert_eq!(
             error,
             BoundedRegularFileReadError::SymlinkOrReparse {
-                observed_kind: sweepx_platform::EntryKind::Symlink,
+                observed_kind: crate::EntryKind::Symlink,
             }
         );
     }

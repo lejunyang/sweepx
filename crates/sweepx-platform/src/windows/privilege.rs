@@ -11,13 +11,13 @@ use std::mem;
 #[cfg(windows)]
 use std::ptr;
 
-use sweepx_platform::{ElevationPolicy, ElevationRefusal, PrivilegeObservation, PrivilegeProvider};
+use crate::{ElevationPolicy, ElevationRefusal, PrivilegeObservation, PrivilegeProvider};
 
 // `relaunch_elevated` and the tests that exercise it are both Windows-only, so this type has no
 // non-Windows use. The crate is still compiled as a workspace member on other hosts, where an
 // ungated import fails `-D warnings`.
 #[cfg(windows)]
-use sweepx_platform::ElevatedRelaunch;
+use crate::ElevatedRelaunch;
 
 #[cfg(windows)]
 use std::ffi::{OsStr, OsString};
@@ -289,7 +289,7 @@ fn join_arguments(arguments: &[OsString]) -> OsString {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use sweepx_platform::{PrivilegeLevel, PrivilegeOrigin, resolve_privilege};
+    use crate::{PrivilegeLevel, PrivilegeOrigin, resolve_privilege};
 
     /// Detection must return a definite answer on a real Windows host.
     ///

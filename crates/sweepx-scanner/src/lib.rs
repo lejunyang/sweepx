@@ -39,15 +39,15 @@ use sweepx_platform::{
 use thiserror::Error;
 
 #[cfg(all(target_os = "linux", feature = "platform-linux"))]
-pub use sweepx_platform_linux::LinuxPlatformScanner as HostPlatformScanner;
+pub use sweepx_platform::linux::LinuxPlatformScanner as HostPlatformScanner;
 #[cfg(all(target_os = "macos", feature = "platform-macos"))]
-pub use sweepx_platform_macos::MacosPlatformScanner as HostPlatformScanner;
+pub use sweepx_platform::macos::MacosPlatformScanner as HostPlatformScanner;
 #[cfg(all(target_os = "windows", feature = "platform-windows"))]
-pub use sweepx_platform_windows::WindowsPlatformScanner as HostPlatformScanner;
+pub use sweepx_platform::windows::WindowsPlatformScanner as HostPlatformScanner;
 /// Volume change detection, re-exported so consumers reach it through the same edge as the
 /// scanner rather than taking a second dependency on the platform crate.
 #[cfg(all(target_os = "windows", feature = "platform-windows"))]
-pub use sweepx_platform_windows::{
+pub use sweepx_platform::windows::{
     ChangeVerdict, VolumeChangeToken, compare_to_current, read_volume_change_token,
     read_volume_journal_bounds,
 };
@@ -55,7 +55,7 @@ pub use sweepx_platform_windows::{
 /// FSEvents change-log query, re-exported through the scanner edge so consumers (the junk cache)
 /// do not take a second dependency on the macOS platform crate.
 #[cfg(all(target_os = "macos", feature = "platform-macos"))]
-pub use sweepx_platform_macos::fsevents::{
+pub use sweepx_platform::macos::fsevents::{
     ChangeEvent, ChangeLog, EventId as FsEventId, current_event_id, events_since,
 };
 

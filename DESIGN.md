@@ -846,10 +846,7 @@ Cargo.toml
 crates/
   sweepx-model/             # tagged values、IDs、wire DTO、状态/outcome enum
   sweepx-canonical/         # JCS、domain-separated digest、fingerprint
-  sweepx-platform/          # native names/identities、adapter traits、capabilities
-  sweepx-platform-windows/  # Windows scan/trash/permanent/holder
-  sweepx-platform-macos/    # macOS scan/trash/permanent/holder
-  sweepx-platform-linux/    # Linux scan/trash/permanent/holder
+  sweepx-platform/          # shared contracts + linux/macos/windows backend modules
   sweepx-scanner/           # scheduler、queues、budget、aggregate、cancel
   sweepx-cache/             # generations、field provenance、spill/index
   sweepx-probe-host/        # first-party helper protocol/sandbox

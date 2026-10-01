@@ -82,6 +82,8 @@ archives.
 Before creating the Git tag, `scripts/publish-crates.sh` publishes the crates in
 this dependency order:
 
+The current source workspace has 17 publishable packages. The former schema/VM and three platform backend packages are now modules of catalog/platform and are absent from this order; previously published versions remain in the registry.
+
 ```text
 sweepx-canonical
 sweepx-i18n
@@ -93,9 +95,6 @@ sweepx-protocol
 sweepx-audit
 sweepx-catalog
 sweepx-event-journal
-sweepx-platform-linux
-sweepx-platform-macos
-sweepx-platform-windows
 sweepx-tui
 sweepx-scanner
 sweepx-analysis
