@@ -1,0 +1,338 @@
+{
+  "schema": "sweepx.junk.benchmark/v1",
+  "dateUtc": "2026-10-01T04:09:49.217431+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.9.6"
+  },
+  "binary": {
+    "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/release/sweepx",
+    "version": "sweepx 0.0.1",
+    "sha256": "4b5ad1eb91b5d8bd6158e1462a5d6223d5bb14c3709cef67445ec6f4df5939a6",
+    "buildLabel": "release"
+  },
+  "workload": {
+    "generated": true,
+    "roots": [
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-000",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-001",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-002",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-003",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-004",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-005",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-006",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-7mqj6k_t/project-007"
+    ],
+    "filesPerRoot": 1024,
+    "repetitions": 3,
+    "settleSeconds": 1.0
+  },
+  "verification": {
+    "coldWarmFilesystemFactsEqual": true,
+    "independentFixtureWalk": true,
+    "dynamicGitToolInterpretationsCompared": false
+  },
+  "osCache": "uncontrolled; cold means empty SweepX cache only",
+  "summary": {
+    "cold": {
+      "samples": 3,
+      "medianWallNs": 4064859416,
+      "medianPhasesNs": {
+        "cacheWrite": 268403084,
+        "classification": 18791,
+        "discovery": 14333,
+        "gitEvidence": 61542,
+        "report": 84875,
+        "rootCacheValidation": 2180875,
+        "setup": 286375,
+        "subtreeCacheValidation": 83,
+        "tail": 2520208,
+        "traversal": 88816625
+      }
+    },
+    "root-cache-hit": {
+      "samples": 3,
+      "medianWallNs": 36452333,
+      "medianPhasesNs": {
+        "cacheWrite": 376750,
+        "discovery": 12083,
+        "gitEvidence": 1917,
+        "report": 113459,
+        "rootCacheValidation": 22932416,
+        "setup": 220834,
+        "subtreeCacheValidation": 125,
+        "tail": 184250,
+        "traversal": 584
+      }
+    },
+    "changed": {
+      "samples": 3,
+      "medianWallNs": 84392750,
+      "medianPhasesNs": {
+        "cacheWrite": 41957209,
+        "classification": 4166,
+        "discovery": 12542,
+        "gitEvidence": 10708,
+        "report": 82166,
+        "rootCacheValidation": 18753000,
+        "setup": 224042,
+        "subtreeCacheValidation": 83,
+        "tail": 484208,
+        "traversal": 8842583
+      }
+    }
+  },
+  "samples": [
+    {
+      "wallNs": 13873976584,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 403722500,
+        "phasesNs": {
+          "discovery": 134334,
+          "setup": 754375,
+          "rootCacheValidation": 2306166,
+          "subtreeCacheValidation": 84,
+          "traversal": 129421500,
+          "classification": 18791,
+          "gitEvidence": 75500,
+          "cacheWrite": 268403084,
+          "report": 86000,
+          "tail": 2520208
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 1,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 4064859416,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 500620208,
+        "phasesNs": {
+          "discovery": 14333,
+          "setup": 286375,
+          "rootCacheValidation": 2180875,
+          "subtreeCacheValidation": 83,
+          "traversal": 88816625,
+          "classification": 21000,
+          "gitEvidence": 61542,
+          "cacheWrite": 406052000,
+          "report": 84875,
+          "tail": 3098708
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 2,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 353935875,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 343145125,
+        "phasesNs": {
+          "discovery": 10250,
+          "setup": 238125,
+          "rootCacheValidation": 288375,
+          "subtreeCacheValidation": 42,
+          "traversal": 77587833,
+          "classification": 16667,
+          "gitEvidence": 56875,
+          "cacheWrite": 262457292,
+          "report": 80625,
+          "tail": 2404458
+        },
+        "rootCount": 8,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 8,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 3,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 32502750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 22257833,
+        "phasesNs": {
+          "discovery": 12083,
+          "setup": 199833,
+          "rootCacheValidation": 21368292,
+          "subtreeCacheValidation": 83,
+          "traversal": 584,
+          "gitEvidence": 1791,
+          "cacheWrite": 401917,
+          "report": 88167,
+          "tail": 180583
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 1,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 164173792,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 154002250,
+        "phasesNs": {
+          "discovery": 9584,
+          "setup": 232708,
+          "rootCacheValidation": 153012833,
+          "subtreeCacheValidation": 209,
+          "traversal": 583,
+          "gitEvidence": 1958,
+          "cacheWrite": 376750,
+          "report": 151834,
+          "tail": 213208
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 2,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 36452333,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 23843875,
+        "phasesNs": {
+          "discovery": 13416,
+          "setup": 220834,
+          "rootCacheValidation": 22932416,
+          "subtreeCacheValidation": 125,
+          "traversal": 667,
+          "gitEvidence": 1917,
+          "cacheWrite": 372166,
+          "report": 113459,
+          "tail": 184250
+        },
+        "rootCount": 8,
+        "rootCacheHits": 8,
+        "rootCacheMisses": 0,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 3,
+      "factsSha256": "5a9dd194be6e58e07909127a2249dc1aa51c32c0dc3ae5ce1a41203eb0e60145"
+    },
+    {
+      "wallNs": 84392750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 72387625,
+        "phasesNs": {
+          "discovery": 14750,
+          "setup": 214083,
+          "rootCacheValidation": 25521417,
+          "subtreeCacheValidation": 83,
+          "traversal": 8884042,
+          "classification": 4166,
+          "gitEvidence": 9917,
+          "cacheWrite": 37152167,
+          "report": 82166,
+          "tail": 502459
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 1,
+      "factsSha256": "97a96fe8578d52a4705421fd5c4060e4944fc378150a95750475011227a90f3d"
+    },
+    {
+      "wallNs": 81003667,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 69942000,
+        "phasesNs": {
+          "discovery": 9792,
+          "setup": 224042,
+          "rootCacheValidation": 18753000,
+          "subtreeCacheValidation": 83,
+          "traversal": 8408208,
+          "classification": 3417,
+          "gitEvidence": 10708,
+          "cacheWrite": 41957209,
+          "report": 89125,
+          "tail": 484208
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 2,
+      "factsSha256": "8a5bcacd1ee297e8da3193df3bf2e4cb6949d2bf49dc796bcc26a6a8b0726660"
+    },
+    {
+      "wallNs": 86698542,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 75162375,
+        "phasesNs": {
+          "discovery": 12542,
+          "setup": 275500,
+          "rootCacheValidation": 18442666,
+          "subtreeCacheValidation": 42,
+          "traversal": 8842583,
+          "classification": 4959,
+          "gitEvidence": 11625,
+          "cacheWrite": 47048083,
+          "report": 76208,
+          "tail": 445917
+        },
+        "rootCount": 8,
+        "rootCacheHits": 7,
+        "rootCacheMisses": 1,
+        "candidateCount": 8
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 3,
+      "factsSha256": "92357bd4a16f9884658656b2c7521c878dfdd6676ef39afd3a9d8d4741a4d3af"
+    }
+  ]
+}

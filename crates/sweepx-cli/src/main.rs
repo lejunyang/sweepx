@@ -1801,7 +1801,7 @@ fn run_junk_scan(
     timings.phase("gitEvidence");
 
     // Persist every scanned (miss) root with the candidates attributed to its deepest root, then
-    // drop cache entries for roots no longer present. A root with zero candidates is still
+    // keep other roots while the bounded cache has space. A root with zero candidates is still
     // written so an empty-but-scanned root stays a hit next time.
     #[cfg(target_os = "macos")]
     if let Some(cache) = &cache_dir {
@@ -1809,7 +1809,8 @@ fn run_junk_scan(
             let root = &canonical_roots[*index];
             // Incomplete scans (including denied roots) must be retried, never frozen as hits.
             if !scan.as_ref().is_some_and(|scan| {
-                scan.covered_paths.get(&root.display().to_string()) == Some(&true)
+                root.to_str()
+                    .is_some_and(|path| scan.covered_paths.get(path) == Some(&true))
             }) {
                 continue;
             }
@@ -1819,9 +1820,12 @@ fn run_junk_scan(
                     stored.push(junk_candidate_to_stored(candidate));
                 }
             }
-            match junk_cache::StoredJunkRoot::capture(root, stored, scan_event_id)
-                .and_then(|record| junk_cache::write(cache, &record))
-            {
+            match junk_cache::StoredJunkRoot::capture(root, stored, scan_event_id).and_then(
+                |mut record| {
+                    record.bind_scope(&canonical_roots);
+                    junk_cache::write(cache, &record)
+                },
+            ) {
                 Ok(()) => {}
                 // A cache write failure never fails the report; the root simply rescans next run.
                 Err(error) => eprintln!(
@@ -1830,38 +1834,32 @@ fn run_junk_scan(
                 ),
             }
         }
-        let _ = junk_cache::prune(cache, &canonical_roots);
 
         // Persist file lengths only. Candidate rows cannot reconstruct subtree accounting or
         // current scan identities; directories are always traversed on a root-cache miss.
         if let Some(scan) = &scan {
-            // Convert the scanner's captured child listings into the persisted form.
-            let listings: BTreeMap<String, junk_cache::StoredDirListing> = scan
-                .dir_listings
-                .iter()
-                .map(|(path, listing)| {
-                    (
-                        path.clone(),
-                        junk_cache::StoredDirListing {
-                            files: listing.files.clone(),
-                            dirs: listing.dirs.clone(),
-                        },
-                    )
-                })
-                .collect();
-            // One index per device; use the first scanned root only to identify the device.
-            let store_result = miss_roots.first().map(|scan_root| {
-                subtree_provider.store_index(
+            for scan_root in &miss_roots {
+                if let Err(error) = subtree_provider.store_index(
                     scan_root,
+                    &canonical_roots,
                     scan_event_id,
-                    scan.covered_paths.clone(),
-                    listings,
-                )
-            });
-            if let Some(Err(error)) = store_result {
-                eprintln!("could not update subtree index: {error}");
+                    &scan.covered_paths,
+                    &scan.dir_listings,
+                ) {
+                    eprintln!(
+                        "could not update subtree index for {}: {error}",
+                        scan_root.display()
+                    );
+                }
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(cache) = &cache_dir
+        && let Err(error) = junk_cache::prune(cache)
+    {
+        eprintln!("could not prune junk cache: {error}");
     }
 
     timings.phase("cacheWrite");

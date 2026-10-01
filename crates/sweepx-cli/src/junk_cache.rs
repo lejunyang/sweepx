@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::time::Duration;
@@ -40,8 +40,12 @@ use sweepx_core::events_since;
 use sweepx_model::{ByteValue, ScanEntryId};
 use sweepx_scanner::ChangeLog;
 
+mod storage;
+use storage::Directory;
+pub(crate) use storage::{Limits, ReadBudget};
+
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v4";
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v5";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 #[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +64,8 @@ pub struct StoredJunkRoot {
     /// FSEvents id captured before the root was scanned.
     since_event_id: FsEventId,
     candidates: Vec<StoredJunkCandidate>,
+    /// Nested requested roots own their candidates; a different request scope must rescan.
+    excluded_root_keys: Vec<String>,
 }
 
 /// Validated filesystem and rule-match facts, excluding transient tool and Git interpretations.
@@ -89,16 +95,28 @@ impl StoredJunkRoot {
         since_event_id: FsEventId,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(canonical_root)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::other("cache root is not a real directory"));
+        }
         Ok(Self {
             schema: STORED_SCHEMA.to_string(),
             rules_digest: rules_digest().to_string(),
-            root: canonical_root.display().to_string(),
+            root: canonical_root
+                .to_str()
+                .ok_or_else(|| io::Error::other("cache root is not UTF-8"))?
+                .to_string(),
             root_device: metadata.dev().to_string(),
             root_inode: metadata.ino().to_string(),
             // A pre-scan cursor preserves writes racing with the walk for the next validation.
             since_event_id,
             candidates,
+            excluded_root_keys: Vec::new(),
         })
+    }
+
+    /// Binds candidate attribution to the current set of nested requested roots.
+    pub fn bind_scope(&mut self, roots: &[PathBuf]) {
+        self.excluded_root_keys = excluded_root_keys(Path::new(&self.root), roots);
     }
 
     /// Earliest change cursor required to validate this record.
@@ -121,7 +139,7 @@ impl StoredJunkRoot {
     fn matches_root(&self, canonical_root: &Path) -> bool {
         if self.schema != STORED_SCHEMA
             || self.rules_digest != rules_digest()
-            || self.root != canonical_root.display().to_string()
+            || Some(self.root.as_str()) != canonical_root.to_str()
         {
             return false;
         }
@@ -152,11 +170,55 @@ fn rules_digest() -> &'static str {
 
 /// Loads only records whose root identity and loaded rules still match.
 /// History is validated separately against the same drain used by the file index.
-pub fn load_bound_roots(cache_dir: &Path, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
-    roots
-        .iter()
-        .map(|root| load(cache_dir, root).filter(|record| record.matches_root(root)))
-        .collect()
+pub struct CacheReader {
+    directory: Option<Directory>,
+    budget: ReadBudget,
+    limits: Limits,
+}
+
+impl CacheReader {
+    /// Both cache layers share encoded-input and retained-data limits within an invocation.
+    pub fn new(cache_dir: &Path) -> Self {
+        let limits = Limits::default();
+        Self {
+            directory: Directory::open(cache_dir, false).ok(),
+            budget: ReadBudget::new(limits),
+            limits,
+        }
+    }
+
+    /// Root identity and loaded rule bytes must match even before history is consulted.
+    pub fn roots(&mut self, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+        roots
+            .iter()
+            .enumerate()
+            .map(|(ordinal, root)| {
+                if ordinal >= self.limits.roots {
+                    return None;
+                }
+                let record: StoredJunkRoot = self.budget.read(
+                    self.directory.as_ref()?,
+                    &record_file_name(root),
+                    self.limits,
+                    root_retained_bytes,
+                )?;
+                (record.matches_root(root)
+                    && record.excluded_root_keys == excluded_root_keys(root, roots))
+                .then_some(record)
+            })
+            .collect()
+    }
+
+    /// File indexes have their own root binding and cursor, but share the read allowance.
+    pub fn index(&mut self, root: &Path) -> Option<StoredSubtreeIndex> {
+        let index: StoredSubtreeIndex = self.budget.read(
+            self.directory.as_ref()?,
+            &index_file_name(root),
+            self.limits,
+            index_retained_bytes,
+        )?;
+        index.matches_root(root).then_some(index)
+    }
 }
 
 /// Checks each root against its own pre-scan cursor and rechecks its native binding.
@@ -203,108 +265,226 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 }
 
 /// Loads a stored record for `canonical_root`, returning `None` on any failure or absence.
+#[cfg(test)]
 pub fn load(cache_dir: &Path, canonical_root: &Path) -> Option<StoredJunkRoot> {
-    let path = record_path(cache_dir, canonical_root);
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice::<StoredJunkRoot>(&bytes).ok()
+    CacheReader::new(cache_dir)
+        .roots(&[canonical_root.to_path_buf()])
+        .pop()
+        .flatten()
 }
 
-/// Atomically writes `record` for its canonical root.
+/// Atomically publishes one bounded record; cache errors never fail the report.
 pub fn write(cache_dir: &Path, record: &StoredJunkRoot) -> io::Result<()> {
-    prepare_cache_dir(cache_dir)?;
-    let canonical_root = PathBuf::from(&record.root);
-    let destination = record_path(cache_dir, &canonical_root);
-
-    let bytes =
-        serde_json::to_vec_pretty(record).map_err(|error| io::Error::other(error.to_string()))?;
-    let temp = temp_path(&destination);
-    // Write a private temp file, fsync, then rename; replacing an existing file by rename is atomic.
-    fs::write(&temp, bytes)?;
-    set_file_private(&temp)?;
-    fs::rename(&temp, &destination)
+    publish(
+        cache_dir,
+        &record_file_name(Path::new(&record.root)),
+        record,
+        Limits::default(),
+    )
 }
 
-/// Removes cached records whose root is no longer in `current_roots`, so the directory does not
-/// accumulate entries for stale paths. Missing/unreadable files are simply skipped.
-pub fn prune(cache_dir: &Path, current_roots: &[PathBuf]) -> io::Result<()> {
-    if !cache_dir.exists() {
-        return Ok(());
+fn publish(
+    cache_dir: &Path,
+    name: &str,
+    value: &impl serde::Serialize,
+    limits: Limits,
+) -> io::Result<()> {
+    let directory = Directory::open(cache_dir, true)?;
+    let _lock = directory.lock()?;
+    directory.write_json(name, value, limits.entry_bytes)?;
+    prune_directory(&directory, limits)
+}
+
+/// Evicts the least recently read root groups under count, per-root and total disk limits.
+/// Alternating requested roots stay cached while they fit; paired facts/indexes are evicted together.
+pub fn prune(cache_dir: &Path) -> io::Result<()> {
+    let directory = match Directory::open(cache_dir, false) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let _lock = directory.lock()?;
+    prune_directory(&directory, Limits::default())
+}
+
+#[derive(Default)]
+struct RootGroup {
+    bytes: u64,
+    largest_entry: u64,
+    accessed: (i64, i64),
+}
+
+fn prune_directory(directory: &Directory, limits: Limits) -> io::Result<()> {
+    prune_with_observations(directory, limits, |name| directory.metadata(name))
+}
+
+// The quota/ordering contract is independent of external readers changing native atime.
+// Production observations always come from the same retained native directory.
+fn prune_with_observations(
+    directory: &Directory,
+    limits: Limits,
+    mut observe: impl FnMut(&str) -> io::Result<storage::EntryMetadata>,
+) -> io::Result<()> {
+    let mut groups = BTreeMap::<String, RootGroup>::new();
+    // Enumeration retains at most roots + 1 groups, never an unbounded directory inventory.
+    directory.entries(|name, _| {
+        if legacy_name(name) || (name.starts_with(".sweepx-") && name.ends_with(".tmp")) {
+            return directory.remove(name);
+        }
+        let Some(key) = group_key(name) else {
+            return Ok(());
+        };
+        if groups.contains_key(key) {
+            return Ok(());
+        }
+        let mut group = RootGroup::default();
+        // Observe both members now so eviction does not depend on enumeration order.
+        for name in [format!("r-{key}.json"), format!("f-{key}.json")] {
+            match observe(&name) {
+                Ok(metadata) => {
+                    group.bytes = group.bytes.saturating_add(metadata.bytes);
+                    group.largest_entry = group.largest_entry.max(metadata.bytes);
+                    group.accessed = group.accessed.max(metadata.accessed);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if group.bytes > limits.root_bytes || group.largest_entry > limits.entry_bytes as u64 {
+            remove_group(directory, key)?;
+            return Ok(());
+        }
+        groups.insert(key.to_string(), group);
+        while groups.len() > limits.roots
+            || groups.values().map(|group| group.bytes).sum::<u64>() > limits.disk_bytes
+        {
+            let oldest = groups
+                .iter()
+                .min_by_key(|(key, group)| (group.accessed, *key))
+                .map(|(key, _)| key.clone())
+                .expect("over-budget groups");
+            remove_group(directory, &oldest)?;
+            groups.remove(&oldest);
+        }
+        Ok(())
+    })?;
+    // Retired per-device indexes are never read; remove only their known file namespace.
+    match directory.child("subtrees") {
+        Ok(legacy) => legacy.entries(|name, _| {
+            if legacy_name(name) || (name.starts_with('.') && name.ends_with(".json.tmp")) {
+                legacy.remove(name)
+            } else {
+                Ok(())
+            }
+        })?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    let wanted: BTreeSet<String> = current_roots
+    Ok(())
+}
+
+fn remove_group(directory: &Directory, key: &str) -> io::Result<()> {
+    for name in [format!("r-{key}.json"), format!("f-{key}.json")] {
+        match directory.remove(&name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn legacy_name(name: &str) -> bool {
+    name.strip_suffix(".json").is_some_and(hash_name)
+}
+
+fn hash_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn group_key(name: &str) -> Option<&str> {
+    let key = name
+        .strip_prefix("r-")
+        .or_else(|| name.strip_prefix("f-"))?
+        .strip_suffix(".json")?;
+    hash_name(key).then_some(key)
+}
+
+fn excluded_root_keys(root: &Path, roots: &[PathBuf]) -> Vec<String> {
+    roots
         .iter()
-        .filter_map(|root| record_file_name(root))
-        .collect();
-    for entry in fs::read_dir(cache_dir)? {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.ends_with(".json") && !wanted.contains(name) {
-            let _ = fs::remove_file(entry.path());
+        .filter(|other| other.as_path() != root && other.starts_with(root))
+        .map(|other| root_key(other))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn root_key(root: &Path) -> String {
+    format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()))
+}
+fn record_file_name(root: &Path) -> String {
+    format!("r-{}.json", root_key(root))
+}
+fn index_file_name(root: &Path) -> String {
+    format!("f-{}.json", root_key(root))
+}
+
+fn root_retained_bytes(root: &StoredJunkRoot) -> usize {
+    let mut bytes = std::mem::size_of::<StoredJunkRoot>()
+        + root.schema.capacity()
+        + root.rules_digest.capacity()
+        + root.root.capacity()
+        + root.root_device.capacity()
+        + root.root_inode.capacity()
+        + root.candidates.capacity() * std::mem::size_of::<StoredJunkCandidate>();
+    for key in &root.excluded_root_keys {
+        bytes = bytes.saturating_add(32 + key.capacity());
+    }
+    for candidate in &root.candidates {
+        for text in [
+            &candidate.path,
+            &candidate.rule_id,
+            &candidate.risk,
+            &candidate.evidence,
+            &candidate.source_reviewed_at,
+        ] {
+            bytes = bytes.saturating_add(text.capacity());
+        }
+        bytes =
+            bytes.saturating_add(candidate.references.capacity() * std::mem::size_of::<String>());
+        for reference in &candidate.references {
+            bytes = bytes.saturating_add(reference.capacity());
+        }
+        bytes = bytes.saturating_add(candidate.entry_id.as_str().len() * 2);
+        for identity in &candidate.ancestor_ids {
+            bytes = bytes.saturating_add(128 + identity.as_str().len() * 2);
+        }
+        if let Some(entry) = &candidate.source_entry {
+            bytes = bytes.saturating_add(entry.estimated_retained_bytes());
         }
     }
-    Ok(())
+    bytes
 }
 
-fn prepare_cache_dir(cache_dir: &Path) -> io::Result<()> {
-    if cache_dir.exists() {
-        let metadata = fs::symlink_metadata(cache_dir)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(io::Error::other("junk cache path is not a real directory"));
-        }
-        return Ok(());
-    }
-    fs::create_dir_all(cache_dir)?;
-    fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
+/// Schema marker for independently root-bound file indexes.
+const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v4";
 
-fn set_file_private(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-fn record_path(cache_dir: &Path, canonical_root: &Path) -> PathBuf {
-    cache_dir.join(record_file_name(canonical_root).expect("root path hashable"))
-}
-
-fn record_file_name(canonical_root: &Path) -> Option<String> {
-    let bytes = canonical_root.as_os_str().as_encoded_bytes();
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Some(format!("{:x}.json", hasher.finalize()))
-}
-
-fn temp_path(destination: &Path) -> PathBuf {
-    // Record names are ASCII hex from record_file_name; the non-UTF8 fallback never occurs.
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| format!(".{name}.tmp"))
-        .unwrap_or_else(|| ".tmp".to_string());
-    destination.with_file_name(file_name)
-}
-
-/// Schema marker for the per-device subtree index.
-const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v3";
-
-/// Per-device index captured after a classified scan.
-///
-/// It stores the captured child listing of every covered directory for file-level reuse.
-/// The `since_event_id`
-/// plus one FSEvents drain lets the provider decide precisely which files changed: unchanged
-/// files keep their recorded size with no syscall.
+/// File lengths for one root. Partial optional listings do not authorize subtree skipping:
+/// every directory is still enumerated and children absent from this index are inspected.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSubtreeIndex {
     schema: String,
-    device: String,
-    /// FSEvents id captured before the scan that produced this index.
+    /// Lossless canonical root path; non-UTF-8 roots are not persisted.
+    root: String,
+    /// Native root binding, checked before and after history observation.
+    device: u64,
+    inode: u64,
+    /// Pre-observation cursor; racing changes remain visible on the next validation.
     since_event_id: FsEventId,
-    /// Canonical path → fully covered, for every directory the scan completed.
-    ///
-    /// Only a complete directory listing can supply cached file lengths; directories themselves
-    /// are still traversed to rebuild classification markers and current scan identities.
+    /// Complete directory enumeration does not imply all optional lengths were retained.
     covered: BTreeMap<String, bool>,
-    /// Canonical directory path → its captured file/directory children, for file-level reuse.
-    #[serde(default)]
+    /// Partial optional facts; missing children are always inspected.
     listings: BTreeMap<String, StoredDirListing>,
 }
 
@@ -320,82 +500,126 @@ pub struct StoredDirListing {
 }
 
 impl StoredSubtreeIndex {
-    /// Captures complete listings with the event cursor taken before their validation and scan.
+    /// Captures file facts under this root with the cursor taken before observation.
     pub fn new(
-        device: String,
+        root: &Path,
         since_event_id: FsEventId,
         covered: BTreeMap<String, bool>,
         listings: BTreeMap<String, StoredDirListing>,
-    ) -> Self {
-        Self {
-            schema: SUBTREE_SCHEMA.to_string(),
-            device,
+    ) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(root)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::other("index root is not a real directory"));
+        }
+        Ok(Self {
+            schema: SUBTREE_SCHEMA.into(),
+            root: root
+                .to_str()
+                .ok_or_else(|| io::Error::other("index root is not UTF-8"))?
+                .into(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
             since_event_id,
             covered,
             listings,
-        }
+        })
     }
 
-    /// Returns the earliest event cursor the next validation must cover.
+    fn matches_root(&self, root: &Path) -> bool {
+        self.schema == SUBTREE_SCHEMA
+            && root.to_str() == Some(self.root.as_str())
+            && fs::symlink_metadata(root).is_ok_and(|metadata| {
+                metadata.is_dir() && metadata.dev() == self.device && metadata.ino() == self.inode
+            })
+            && self
+                .covered
+                .keys()
+                .chain(self.listings.keys())
+                .all(|path| Path::new(path).starts_with(root))
+    }
+
+    /// Captures only this root's listings, stopping before the optional wire budget is spent.
+    /// Conservative JSON escaping allowances bound copies before serialization. Missing facts
+    /// always require live inspection; omission does not create negative classification evidence.
+    pub fn capture(
+        root: &Path,
+        all_roots: &[PathBuf],
+        since: FsEventId,
+        covered: &BTreeMap<String, bool>,
+        listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+    ) -> io::Result<Self> {
+        let mut remaining = Limits::default()
+            .entry_bytes
+            .saturating_sub(1024 + root.as_os_str().len().saturating_mul(6));
+        let mut result = Self::new(root, since, BTreeMap::new(), BTreeMap::new())?;
+        for (path, listing) in listings {
+            if covered.get(path) != Some(&true)
+                || all_roots
+                    .iter()
+                    .filter(|candidate| Path::new(path).starts_with(candidate))
+                    .max_by_key(|candidate| candidate.components().count())
+                    .map(PathBuf::as_path)
+                    != Some(root)
+            {
+                continue;
+            }
+            let cost = path.len().saturating_mul(12).saturating_add(128);
+            if cost > remaining {
+                break;
+            }
+            remaining -= cost;
+            let mut saved = StoredDirListing::default();
+            for (name, bytes) in &listing.files {
+                let cost = name.len().saturating_mul(6).saturating_add(64);
+                if cost > remaining {
+                    break;
+                }
+                remaining -= cost;
+                saved.files.insert(name.clone(), *bytes);
+            }
+            result.covered.insert(path.clone(), true);
+            result.listings.insert(path.clone(), saved);
+        }
+        Ok(result)
+    }
+
+    /// Earliest event cursor the next validation must cover.
     pub fn since_event_id(&self) -> FsEventId {
         self.since_event_id
     }
-
-    /// Whether the canonical path was recorded as fully covered during the index's scan.
+    /// Whether this directory was fully enumerated; optional cached lengths may be incomplete.
     pub fn is_covered(&self, path: &str) -> bool {
         self.covered.get(path).copied().unwrap_or(false)
     }
-
-    /// Captured child listing for a directory, if one was stored.
+    /// A partial set of cached ordinary-file lengths; unknown children must be inspected.
     pub fn listing(&self, path: &str) -> Option<&StoredDirListing> {
         self.listings.get(path)
     }
 }
 
-/// Loads the subtree index for `device`, returning `None` when absent, corrupt, or wrong schema.
-pub fn load_subtree_index(cache_dir: &Path, device: &str) -> Option<StoredSubtreeIndex> {
-    let path = subtree_index_path(cache_dir, device);
-    let bytes = fs::read(path).ok()?;
-    let index: StoredSubtreeIndex = serde_json::from_slice(&bytes).ok()?;
-    if index.schema != SUBTREE_SCHEMA || index.device != device {
-        return None;
+fn index_retained_bytes(index: &StoredSubtreeIndex) -> usize {
+    let mut bytes =
+        std::mem::size_of::<StoredSubtreeIndex>() + index.schema.capacity() + index.root.capacity();
+    for path in index.covered.keys() {
+        bytes = bytes.saturating_add(128 + path.capacity());
     }
-    Some(index)
-}
-
-/// Atomically writes the subtree index for its device.
-pub fn write_subtree_index(cache_dir: &Path, index: &StoredSubtreeIndex) -> io::Result<()> {
-    prepare_subtrees_dir(cache_dir)?;
-    let destination = subtree_index_path(cache_dir, &index.device);
-    let bytes =
-        serde_json::to_vec_pretty(index).map_err(|error| io::Error::other(error.to_string()))?;
-    let temp = temp_path(&destination);
-    fs::write(&temp, bytes)?;
-    set_file_private(&temp)?;
-    fs::rename(&temp, &destination)
-}
-
-fn prepare_subtrees_dir(cache_dir: &Path) -> io::Result<()> {
-    prepare_cache_dir(cache_dir)?;
-    let path = cache_dir.join("subtrees");
-    if path.exists() {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(io::Error::other("subtrees path is not a real directory"));
+    for (path, listing) in &index.listings {
+        bytes = bytes.saturating_add(256 + path.capacity());
+        for name in listing.files.keys().chain(listing.dirs.iter()) {
+            bytes = bytes.saturating_add(128 + name.capacity());
         }
-        return Ok(());
     }
-    fs::create_dir_all(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+    bytes
 }
 
-fn subtree_index_path(cache_dir: &Path, device: &str) -> PathBuf {
-    // Device names contain only digits/separators; keep a safe file stem via hash anyway.
-    let mut hasher = Sha256::new();
-    hasher.update(device.as_bytes());
-    cache_dir
-        .join("subtrees")
-        .join(format!("{:x}.json", hasher.finalize()))
+/// Atomically publishes one root's optional file lengths without overwriting other roots.
+pub fn write_subtree_index(cache_dir: &Path, index: &StoredSubtreeIndex) -> io::Result<()> {
+    publish(
+        cache_dir,
+        &index_file_name(Path::new(&index.root)),
+        index,
+        Limits::default(),
+    )
 }
 
 #[cfg(test)]
@@ -406,6 +630,8 @@ mod tests {
         // can silently alias another fixture. Keep the guard alive through all native queries.
         let fixture = tempfile::TempDir::new().unwrap();
         let path = fs::canonicalize(fixture.path()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         (fixture, path)
     }
 
@@ -553,9 +779,8 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_records_for_roots_no_longer_present() {
+    fn prune_preserves_other_requested_generations_while_under_budget() {
         let (_fixture, cache) = temp_cache();
-        prepare_cache_dir(&cache).unwrap();
         let keep = cache.join("keep");
         let gone = cache.join("gone");
         fs::create_dir(&keep).unwrap();
@@ -567,11 +792,201 @@ mod tests {
             let stored = StoredJunkRoot::capture(root, vec![], current_event_id()).unwrap();
             write(&cache, &stored).unwrap();
         }
-        prune(&cache, std::slice::from_ref(&keep)).unwrap();
+        prune(&cache).unwrap();
 
         assert!(load(&cache, &keep).is_some());
-        assert!(load(&cache, &gone).is_none());
+        assert!(load(&cache, &gone).is_some());
 
         let _ = fs::remove_dir_all(&cache);
+    }
+    #[test]
+    fn disk_eviction_removes_whole_oldest_groups_and_keeps_unknown_files() {
+        let (_fixture, cache) = temp_cache();
+        let roots: Vec<_> = ["old", "middle", "new"]
+            .into_iter()
+            .map(|name| {
+                let root = cache.join(name);
+                fs::create_dir(&root).unwrap();
+                let record = StoredJunkRoot::capture(&root, vec![], 12).unwrap();
+                write(&cache, &record).unwrap();
+                let index =
+                    StoredSubtreeIndex::new(&root, 12, BTreeMap::new(), BTreeMap::new()).unwrap();
+                write_subtree_index(&cache, &index).unwrap();
+                root
+            })
+            .collect();
+        fs::write(cache.join("user.json"), b"keep").unwrap();
+        let directory = Directory::open(&cache, false).unwrap();
+        // Host readers can change native atime asynchronously. Inject controlled ordering
+        // observations while retaining real no-follow metadata for file existence and bytes.
+        let observe = |name: &str| {
+            let mut observation = directory.metadata(name)?;
+            let ordinal = roots
+                .iter()
+                .position(|root| name == record_file_name(root) || name == index_file_name(root))
+                .unwrap();
+            observation.accessed = (100 + ordinal as i64, 0);
+            Ok(observation)
+        };
+        let limits = Limits {
+            roots: 2,
+            ..Limits::default()
+        };
+        prune_with_observations(&directory, limits, observe).unwrap();
+        for name in [record_file_name(&roots[0]), index_file_name(&roots[0])] {
+            assert!(!cache.join(name).exists());
+        }
+        for root in &roots[1..] {
+            for name in [record_file_name(root), index_file_name(root)] {
+                assert!(cache.join(name).exists());
+            }
+        }
+        assert_eq!(fs::read(cache.join("user.json")).unwrap(), b"keep");
+        // Independent directory metadata checks the encoded disk contract, rather than using
+        // the eviction inventory as its own oracle.
+        let actual_bytes: u64 = fs::read_dir(&cache)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| group_key(entry.file_name().to_str().unwrap()).is_some())
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum();
+        prune_with_observations(
+            &directory,
+            Limits {
+                disk_bytes: actual_bytes - 1,
+                ..limits
+            },
+            observe,
+        )
+        .unwrap();
+        let remaining: u64 = fs::read_dir(&cache)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| group_key(entry.file_name().to_str().unwrap()).is_some())
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum();
+        assert!(remaining < actual_bytes);
+        assert!(!cache.join(record_file_name(&roots[1])).exists());
+        assert!(!cache.join(index_file_name(&roots[1])).exists());
+        prune_with_observations(
+            &directory,
+            Limits {
+                root_bytes: 1,
+                ..limits
+            },
+            observe,
+        )
+        .unwrap();
+        assert!(!cache.join(record_file_name(&roots[2])).exists());
+        assert!(!cache.join(index_file_name(&roots[2])).exists());
+    }
+
+    #[test]
+    fn migration_removes_only_known_legacy_cache_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_fixture, cache) = temp_cache();
+        let old_name = format!("{}.json", "a".repeat(64));
+        fs::write(cache.join(&old_name), b"retired").unwrap();
+        let subtrees = cache.join("subtrees");
+        fs::create_dir(&subtrees).unwrap();
+        fs::set_permissions(&subtrees, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(subtrees.join(&old_name), b"retired").unwrap();
+        fs::write(subtrees.join("notes.json"), b"keep").unwrap();
+        fs::write(cache.join("notes.json"), b"keep").unwrap();
+        prune(&cache).unwrap();
+        assert!(!cache.join(&old_name).exists());
+        assert!(!subtrees.join(&old_name).exists());
+        assert_eq!(fs::read(subtrees.join("notes.json")).unwrap(), b"keep");
+        assert_eq!(fs::read(cache.join("notes.json")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn nested_root_attribution_cannot_be_reused_for_a_different_request_scope() {
+        let (_fixture, cache) = temp_cache();
+        let parent = cache.join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let roots = vec![parent.clone(), child];
+        let mut record = StoredJunkRoot::capture(&parent, vec![], 40).unwrap();
+        record.bind_scope(&roots);
+        write(&cache, &record).unwrap();
+        assert!(CacheReader::new(&cache).roots(&roots)[0].is_some());
+        assert!(
+            CacheReader::new(&cache).roots(&[parent])[0].is_none(),
+            "child-owned candidates are missing from the parent-only report"
+        );
+    }
+
+    #[test]
+    fn capture_omits_nested_root_facts_and_limits_optional_copies() {
+        let (_fixture, cache) = temp_cache();
+        let parent = cache.join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let roots = vec![parent.clone(), child.clone()];
+        let mut files = BTreeMap::new();
+        for ordinal in 0..6000 {
+            files.insert(format!("{ordinal:04}-{}", "x".repeat(240)), ordinal);
+        }
+        let parent_path = parent.to_str().unwrap().to_string();
+        let child_path = child.to_str().unwrap().to_string();
+        let covered = [(parent_path.clone(), true), (child_path.clone(), true)]
+            .into_iter()
+            .collect();
+        let listings = [
+            (
+                parent_path.clone(),
+                sweepx_scanner::DirListing {
+                    files,
+                    dirs: BTreeSet::new(),
+                },
+            ),
+            (child_path.clone(), sweepx_scanner::DirListing::default()),
+        ]
+        .into_iter()
+        .collect();
+        let index = StoredSubtreeIndex::capture(&parent, &roots, 5, &covered, &listings).unwrap();
+        assert!(!index.is_covered(&child_path));
+        let saved = &index.listing(&parent_path).unwrap().files;
+        assert!(!saved.is_empty());
+        assert!(
+            saved.len() < 6000,
+            "optional index must truncate before copying everything"
+        );
+        for (name, bytes) in saved {
+            assert_eq!(Some(bytes), listings[&parent_path].files.get(name));
+        }
+        write_subtree_index(&cache, &index).unwrap();
+        let wire_bytes = fs::metadata(cache.join(index_file_name(&parent)))
+            .unwrap()
+            .len();
+        assert!(wire_bytes <= 4 * 1024 * 1024);
+        assert_eq!(CacheReader::new(&cache).index(&parent).unwrap(), index);
+    }
+    #[test]
+    fn unsafe_retired_namespace_cannot_bypass_active_cache_eviction() {
+        use std::os::unix::fs::symlink;
+        let (_fixture, cache) = temp_cache();
+        let root = cache.join("root");
+        fs::create_dir(&root).unwrap();
+        write(&cache, &StoredJunkRoot::capture(&root, vec![], 10).unwrap()).unwrap();
+        let external = cache.join("external");
+        fs::create_dir(&external).unwrap();
+        let outside_file = external.join(format!("{}.json", "a".repeat(64)));
+        fs::write(&outside_file, b"must stay").unwrap();
+        symlink(&external, cache.join("subtrees")).unwrap();
+        let directory = Directory::open(&cache, false).unwrap();
+        assert!(
+            prune_directory(
+                &directory,
+                Limits {
+                    roots: 0,
+                    ..Limits::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(!cache.join(record_file_name(&root)).exists());
+        assert_eq!(fs::read(outside_file).unwrap(), b"must stay");
     }
 }
