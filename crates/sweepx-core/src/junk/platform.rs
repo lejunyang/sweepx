@@ -493,6 +493,8 @@ fn known_macos_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::Scann
 /// the entry basename are appended byte-for-byte without normalization. This is what lets a
 /// known root nested inside a wider scan root (Homebrew/Yarn under `~/Library/Caches`) be
 /// classified at its real depth instead of only when it is a depth-0 root.
+/// The root row itself has no parent recipe and already has its own absolute path; appending
+/// its basename would instead compare `…/Homebrew/Homebrew` and silently miss the root.
 #[cfg(target_os = "macos")]
 fn entry_native_absolute_path(
     locator: &sweepx_model::NativeLocatorEvidence,
@@ -502,12 +504,17 @@ fn entry_native_absolute_path(
     else {
         return None;
     };
+    if locator.entry.entry_id == locator.scan_root.entry_id {
+        return Some(sweepx_model::NativeAbsolutePath::unix(root.clone()));
+    }
     let mut bytes = root.clone();
     let append = |bytes: &mut Vec<u8>, name: &sweepx_model::NativeName| {
         let sweepx_model::NativeName::UnixBytes(component) = name else {
             return false;
         };
-        bytes.push(b'/');
+        if bytes.last() != Some(&b'/') {
+            bytes.push(b'/');
+        }
         bytes.extend_from_slice(component);
         true
     };
@@ -1283,6 +1290,60 @@ mod tests {
     use super::super::candidate::junk_size_for;
     use super::*;
     use sweepx_model::{ByteValue, ReasonCode};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn captured_native_paths_match_root_and_nested_directory_walk() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let nested = root.join("Homebrew/downloads");
+        std::fs::create_dir_all(&nested).unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        // Both a wider root and a known root scanned on its own must use the same path binding.
+        for scan_root in [&root, &root.join("Homebrew")] {
+            let scan = crate::scan_with_store::<crate::MemorySnapshotStore>(
+                &context,
+                &crate::ScanRequest {
+                    roots: vec![scan_root.clone()],
+                    state_dir: None,
+                },
+                None,
+            )
+            .unwrap();
+            let mut expected = BTreeSet::from([scan_root.clone()]);
+            let mut pending = vec![scan_root.clone()];
+            while let Some(path) = pending.pop() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    if std::fs::symlink_metadata(entry.path()).unwrap().is_dir() {
+                        expected.insert(entry.path());
+                        pending.push(entry.path());
+                    }
+                }
+            }
+            let observed = scan
+                .summary
+                .roots
+                .iter()
+                .chain(&scan.summary.entries)
+                .filter(|entry| entry.object_type == sweepx_model::ObjectType::Directory)
+                .map(|entry| {
+                    let locator = entry.validated_native_locator().unwrap().unwrap();
+                    let path = entry_native_absolute_path(locator).unwrap();
+                    let matches = expected
+                        .iter()
+                        .filter(|expected| path.equals_path(expected).unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(matches.len(), 1, "unexpected native path {path:?}");
+                    matches[0].clone()
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(observed, expected);
+        }
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]

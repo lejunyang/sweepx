@@ -289,3 +289,11 @@ Linux `/tmp` 的原生测量、当前用户引用证据及报告解释已迁入 
 本次只完成业务迁移；Linux 原生目录名集合、递归 measurement map 和进程表读取的资源保留仍需进一步审计，不将此前缓存预算验收扩大到它们。浏览器/known-root 有界快照及路径绑定继续作为共享服务收尾，验收项暂不勾选。
 
 交付验证：受影响 core/CLI/fixtures 的本机测试 242 项通过、1 项基准 ignored、1 项系统 Trash 挂起显式排除；工作区 752 项通过、0 失败、2 项原有基准 ignored，仍以 `--skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 排除该原生行为。格式、受影响及工作区 all-targets/all-features clippy 通过；Linux GNU、Windows GNU 工作区交叉 clippy 通过，包括新增 Linux 测试代码。core/fixtures 包清单包含迁移模块；53 份 Markdown 检查与 23 项检查器测试通过。宿主为 arm64 macOS，未安装 Docker、Lima 或 QEMU Linux 运行器，Linux 原生测试尚未运行，Windows 宿主/MSVC 和系统 Trash 行为也未验证；不将交叉 lint 表述为运行时验收。本次未测端到端性能，模块迁移没有新的加速结论。
+
+## 已知缓存根自身的路径绑定（2026-10-01）
+
+修复原生路径重建的根行分支：根行没有 parent recipe，captured absolute path 已经是对象自身的路径，不能再次附加根 basename。旧实现把单独扫描的 `…/Homebrew` 比较为 `…/Homebrew/Homebrew`，使其漏掉 known-root 分类；嵌套目录仍按 retained native recipe 的原有顺序拼接。根为 `/` 时不重复加分隔符。路径来自已验证 locator，不使用 display string，也不授予删除权限。
+
+回归以独立 read_dir/symlink_metadata 收集受控目录全集，分别扫描宽根和已知缓存目录本身，核对所有目录 native path。移除根行修复后，该回归在根路径匹配处失败；恢复修复后通过。最初测试误用只保留候选行的 junk scan 入口而得到空集，已改为完整 scan 入口，不放宽全集相等断言。
+
+提交前格式、core all-targets/all-features clippy 及 core 113 项本机测试通过。改动均在 macOS cfg 分支，Linux GNU/Windows GNU 未改变编译分支，复用前一阶段的工作区交叉 lint 结果；目标宿主/MSVC、系统 Trash 仍未验证。交付边界工作区 clippy 通过，工作区测试 753 项通过、0 失败、2 项基准 ignored，仍显式排除已诊断的系统 Trash 挂起用例，该行为未验证；53 份 Markdown 检查通过。
