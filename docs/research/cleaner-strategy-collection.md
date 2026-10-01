@@ -5,7 +5,7 @@
 - [harry0703/MangoDisk](https://github.com/harry0703/MangoDisk)
 - [Tencent/lemon-cleaner](https://github.com/Tencent/lemon-cleaner)
 
-收集日期：2026-09-29。
+来源日期（收集快照）：2026-09-29。
 
 ## 许可证兼容性
 
