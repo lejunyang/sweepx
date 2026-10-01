@@ -2506,7 +2506,7 @@ impl TerminationFlag for NeverTerminate {
 }
 
 #[cfg(unix)]
-struct UnixTerminationFlag {
+pub(super) struct UnixTerminationFlag {
     previous: libc::sigaction,
     _exclusive_registration: MutexGuard<'static, ()>,
 }
@@ -2531,7 +2531,7 @@ extern "C" fn record_sigterm(signal: libc::c_int) {
 
 #[cfg(unix)]
 impl UnixTerminationFlag {
-    fn install() -> io::Result<Self> {
+    pub(super) fn install() -> io::Result<Self> {
         static INSTALL_LOCK: Mutex<()> = Mutex::new(());
         let registration = INSTALL_LOCK
             .lock()
@@ -3082,7 +3082,7 @@ fn display_basename(path: &str) -> String {
         .to_string()
 }
 
-fn sanitize_terminal_text(value: &str) -> String {
+pub(super) fn sanitize_terminal_text(value: &str) -> String {
     value
         .chars()
         .map(|character| {

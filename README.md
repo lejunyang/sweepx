@@ -112,6 +112,8 @@ cargo run -p sweepx-cli -- cleaner cargo-detect /absolute/path/to/workspace
 
 # 统一垃圾识别入口：首批覆盖常见项目构建产物，结果只报告不删除
 cargo run -p sweepx-cli -- junk ~/Projects
+# 实时垃圾视图：Space 选择，r 刷新，c 取消扫描，d/Delete 移到回收站
+cargo run -p sweepx-cli -- junk --tui ~/Projects
 # 扫描当前平台经过核验的用户缓存根（只报告）
 cargo run -p sweepx-cli -- junk --system
 # 分阶段诊断：stderr 输出计时 JSON，stdout 报告格式保持不变
@@ -127,7 +129,7 @@ cargo run -p sweepx-cli -- junk --system --clean-temp
 
 macOS 垃圾缓存的根记录和文件索引共用一次事件历史验证，收到完整历史后立即结束等待。可用 `junk --timings` 查看实际阶段耗时和命中数；可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
 
-core 已提供显式目录根的后台垃圾扫描会话，支持有界实时事件、取消和选中范围刷新。它尚未接入垃圾 TUI 或历史缓存；选中刷新仍遍历原始根以保留分类上下文，不代表已经实现高效局部扫描。
+`junk --tui ROOT...` 使用 core 的后台垃圾扫描会话，实时显示阶段、进度和各根完成后的候选，支持选择、取消和选中刷新。`d/Delete` 将所选当前且覆盖完整的候选交给后台回收站操作，逐项原生身份重验；重要/保护目录拒绝，失败保留历史行，不永久删除。该模式要求终端及显式目录根，不能结合 `--system`、`--timings`、机器输出或其他清理选项；尚未接入历史缓存。选中刷新仍遍历原始根以保留分类上下文，不能称为高效局部扫描。
 
 项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
 

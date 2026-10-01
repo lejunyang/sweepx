@@ -57,6 +57,62 @@ pub(crate) fn run_tui_trash(entry: &ScannedEntry, locale: Locale) -> ProcessExit
     print_result(OutputFormat::Human, locale, Some(&path), candidate.submit())
 }
 
+/// Worker-only selected junk mutation. No printing or terminal confirmation occurs here.
+/// Important/common paths are refused rather than blocking a background worker on stdin.
+/// Binding checks retain the scanner's no-follow and mount boundaries; the existing OS Trash
+/// preview still has a pathname race between its final checks and the system call.
+pub(crate) fn trash_session_candidate(
+    row: &sweepx_core::junk::session::JunkSessionCandidate,
+    cancel: &sweepx_core::CancellationToken,
+) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let entry = row
+        .candidate
+        .source_entry
+        .as_ref()
+        .ok_or_else(|| "native source unavailable".to_string())?;
+    if !entry.coverage.complete
+        || entry.coverage.details_lost
+        || !row.aggregate.coverage.complete
+        || row.aggregate.coverage.details_lost
+    {
+        return Err("candidate coverage incomplete".into());
+    }
+    row.revalidate_native_binding(cancel, sweepx_platform::ScanResourceLimits::default())
+        .map_err(|failure| format!("{}: {}", failure.code, failure.detail))?;
+    let candidate = TrashCandidate::from_scanned_entry(entry).map_err(|error| error.to_string())?;
+    if candidate.requires_confirmation() {
+        return Err(TrashError::ConfirmationRequired.to_string());
+    }
+    #[cfg(windows)]
+    {
+        // capture()'s identity must agree with the selected scanner row, not merely with a new
+        // object that happens to occupy the path between revalidation and capture.
+        let identity = entry
+            .validated_identity()
+            .ok()
+            .flatten()
+            .and_then(|identity| match &identity.platform_file_identity {
+                sweepx_model::IdentityEvidence::Known { value } => Some(value),
+                _ => None,
+            })
+            .ok_or_else(|| TrashError::MissingLiveIdentity.to_string())?;
+        if !candidate.identity.as_ref().is_some_and(|current| {
+            identity.device.0 == u128::from(current.device()) && identity.inode.0 == current.inode()
+        }) {
+            return Err(TrashError::Changed.to_string());
+        }
+    }
+    row.revalidate_native_binding(cancel, sweepx_platform::ScanResourceLimits::default())
+        .map_err(|failure| format!("{}: {}", failure.code, failure.detail))?;
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    candidate.submit().map_err(|error| error.to_string())
+}
+
 /// One candidate in a bulk junk-to-Trash plan.
 pub(crate) struct BulkTrashItem<'a> {
     /// Display path, shown in the plan only.

@@ -98,6 +98,17 @@ impl JunkSessionCandidate {
         native_path(self.candidate.source_entry.as_ref()?)
     }
 
+    /// Revalidates the captured directory chain with no-follow object/filesystem/mount checks.
+    /// Run on a worker immediately before a separate native action. This read-only observation
+    /// is not an execution permit and does not make a later pathname mutation atomic.
+    pub fn revalidate_native_binding(
+        &self,
+        cancel: &CancellationToken,
+        limits: ScanResourceLimits,
+    ) -> Result<(), JunkSessionFailure> {
+        validate_directory_binding(self, cancel, limits)
+    }
+
     fn cost(&self) -> usize {
         self.candidate
             .estimated_retained_bytes()
@@ -856,62 +867,71 @@ fn validate_selected(
     cancel: &CancellationToken,
     limits: ScanResourceLimits,
 ) -> Result<(), JunkSessionFailure> {
-    let scanner = DetailRescanner::new(HostPlatformScanner::new(), limits);
     for row in rows {
-        let source = row.candidate.source_entry.as_ref().ok_or_else(|| {
+        row.revalidate_native_binding(cancel, limits)?;
+    }
+    Ok(())
+}
+
+fn validate_directory_binding(
+    row: &JunkSessionCandidate,
+    cancel: &CancellationToken,
+    limits: ScanResourceLimits,
+) -> Result<(), JunkSessionFailure> {
+    let scanner = DetailRescanner::new(HostPlatformScanner::new(), limits);
+    let source = row.candidate.source_entry.as_ref().ok_or_else(|| {
+        JunkSessionFailure::new(
+            "refresh_binding_unavailable",
+            "source directory unavailable",
+        )
+    })?;
+    let locator = source
+        .executable_native_locator()
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
             JunkSessionFailure::new(
                 "refresh_binding_unavailable",
-                "source directory unavailable",
+                "executable directory locator unavailable",
             )
         })?;
-        let locator = source
-            .executable_native_locator()
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                JunkSessionFailure::new(
-                    "refresh_binding_unavailable",
-                    "executable directory locator unavailable",
-                )
-            })?;
-        let identity = source
-            .identity
-            .as_ref()
-            .expect("executable locator validated identity");
-        let root = ScanObjectIdentity {
-            entry_id: locator.scan_root.entry_id.clone(),
-            scan_root_id: locator.scan_root.entry_id.clone(),
-            parent_id: None,
-            platform_file_identity: locator.scan_root.platform_file_identity.clone(),
-            filesystem_object_domain_identity: locator
-                .scan_root
-                .filesystem_object_domain_identity
-                .clone(),
-            volume_or_mount_identity: locator.scan_root.volume_or_mount_identity.clone(),
-        };
-        scanner
-            .revalidate_directory(
-                DetailRescanRequest {
-                    source_scan_id: &source.scan_id,
-                    source_root_identity: &root,
-                    source_directory_identity: identity,
-                    directory_locator: locator,
-                    revision: sweepx_model::DecimalU128::new(1),
-                    max_rows: 0,
+    let identity = source
+        .identity
+        .as_ref()
+        .expect("executable locator validated identity");
+    let root = ScanObjectIdentity {
+        entry_id: locator.scan_root.entry_id.clone(),
+        scan_root_id: locator.scan_root.entry_id.clone(),
+        parent_id: None,
+        platform_file_identity: locator.scan_root.platform_file_identity.clone(),
+        filesystem_object_domain_identity: locator
+            .scan_root
+            .filesystem_object_domain_identity
+            .clone(),
+        volume_or_mount_identity: locator.scan_root.volume_or_mount_identity.clone(),
+    };
+    scanner
+        .revalidate_directory(
+            DetailRescanRequest {
+                source_scan_id: &source.scan_id,
+                source_root_identity: &root,
+                source_directory_identity: identity,
+                directory_locator: locator,
+                revision: sweepx_model::DecimalU128::new(1),
+                max_rows: 0,
+            },
+            cancel,
+        )
+        .map_err(|error| {
+            JunkSessionFailure::new(
+                if error == sweepx_scanner::DetailRescanError::Cancelled {
+                    "cancelled"
+                } else {
+                    "refresh_binding_changed"
                 },
-                cancel,
+                error.to_string(),
             )
-            .map_err(|error| {
-                JunkSessionFailure::new(
-                    if error == sweepx_scanner::DetailRescanError::Cancelled {
-                        "cancelled"
-                    } else {
-                        "refresh_binding_changed"
-                    },
-                    error.to_string(),
-                )
-            })?;
-    }
+        })?;
     Ok(())
 }
 

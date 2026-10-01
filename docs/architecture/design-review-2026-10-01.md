@@ -31,7 +31,7 @@
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根缓存不持久保存 activity、staleFormats、Git 查询结果、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则先恢复基础 known_generated/medium，再用共享 Git 会话重新观察当前仓库、tracked 与 ignore 证据，不回放历史 ignored/high。遍历覆盖及候选内仓库边界作为文件系统事实独立保存，不能代替当前 Git 查询。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
-5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；junk CLI 当前仍是收集完再拼报告。后续已加入共享 classified observer 和显式目录根的工作线程会话，见文末；会话具有有界事件队列、取消、稳定键及刷新，但尚未接入垃圾 TUI、历史缓存或系统自动发现模式。
+5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；普通 junk CLI 仍是收集完再拼报告。后续已加入共享 classified observer、显式目录根的工作线程会话与 `junk --tui`，见文末；垃圾 TUI 实时消费有界事件，提供取消、稳定键选择、刷新及后台回收，历史缓存与系统自动发现模式仍未接入。
 
 ## 支撑后续 TUI 的目标接口
 
@@ -190,7 +190,7 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 - [x] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用及 Linux `/tmp` 发现/分类/解释、有界浏览器/known-root 快照及路径绑定已下沉，整根候选缓存绑定当前分类上下文，避免遗漏新引入的候选。
 - [x] 缓存命中后重建当前 Git 上下文及增强证据。
 - [ ] 核心垃圾扫描会话：显式目录根已支持开始、取消、可见目录优先级、选中范围刷新，有界事件、稳定候选键及 revision；缓存/系统模式接入和单个大根的提前候选展示仍待完成。
-- [ ] 垃圾交互 TUI：历史结果标记与逐项替换、自由选择和删除前原生身份重验。
+- [ ] 垃圾交互 TUI：显式根已支持实时阶段/进度/候选、稳定选择、刷新历史标记及原生身份重验后的后台 Trash；历史缓存首屏、系统模式和单大根提前完整候选仍待接入。
 - [ ] 同一次遍历中的独立大文件分析：阈值、有界 top-K、逻辑/分配大小和覆盖状态。
 - [ ] 显式内容阶段的重复文件检测：硬链接别名排除、分阶段读取和完整 hash、身份/变化复验、资源预算及云占位保护。
 - [ ] 扩展有格式、所有权、上下文依据的垃圾规则，覆盖正例、用户数据误报反例及不同工具版本。
@@ -372,3 +372,21 @@ Git 项完成后，继续核心扫描会话、垃圾 TUI、大文件、重复文
 本阶段仍不勾选整个会话验收项：当前输入是显式目录根，可选择本次平台解释，不包含系统自动发现根、Linux 专用临时对象分析、历史候选缓存回放或单个大根中的提前完整候选。垃圾 TUI、大文件、重复内容与规则扩展继续推进；未进行端到端性能计时，不能据此宣称扫描加速倍数。
 
 交付验证（arm64 macOS，Rust 1.98.0）：工作区 784 项通过、0 失败、2 项原有基准 ignored；同一系统 Trash 挂起用例通过 `--skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 显式排除，未验证其宿主行为。格式、scanner/core/CLI 和工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy（含目标测试代码）通过；53 份 Markdown 和 23 项文档检查器测试通过。未运行 Linux/Windows 宿主测试或 MSVC。测试曾因零进度预算夹具错误及 macOS 文件名限制失败，分别按实际语义修正夹具和改用独立模型层编码反例，没有移除安全断言。没有新增 crate 或发布。
+
+
+## 显式目录根的垃圾交互 TUI（2026-10-01）
+
+`junk --tui ROOT...` 进入空的实时垃圾视图，后台 core 会话提供扫描阶段、进度和各根结束后的候选。CLI adapter 将共享 Arc 候选转换成 TUI 的 presentation trait，不复制分类器或 native locator；core 仍不依赖终端库。界面按稳定键维护焦点和选择，Base 显示解释中，Current 显示当前；刷新开始将选中子树的旧行标为历史，失败/partial/cancelled 不把未见旧行删除，也不开放这些历史行的回收。保留逻辑大小的 known/lower-bound/unknown 状态，缺失合并进度显示未报告而非零；默认按逻辑大小降序，--sort path 按路径，未知大小排在已知零之后。展示焦点完整路径、规则依据及 risk/classification/confidence/activity/blockers 的稳定字段值，不把逻辑大小标成可释放量。
+
+每个 UI tick 最多消费 128 个展示事件，再处理键盘；绘制最多 500 个可见行，不逐帧格式化所有候选。展示行上限 16,384、64 MiB 保留估算，最多选 256 项。展示预算耗尽会取消并保留 partial/historical，不能以丢失行制造完整结果。路径、规则及解释使用已有终端控制字符转义。方向键/Space/a/u 分别移动/选择/全选/清空；r 刷新已选或焦点范围，c 协作取消，d/Delete 请求所选当前且完整候选的 Trash，q/Esc 退出，Ctrl-C/SIGTERM 保留对应进程退出码并恢复终端。退出、设置失败或 I/O 错误均关闭 worker，不在 UI 线程等待阻塞 OS 调用。
+
+回收是独立的单线程有界批次，进程最多一个 Trash worker，结果通道只有一个槽。保留原生行及完整覆盖作为预检，前后复用 core 的 no-follow root/relative parent/object/filesystem/mount 检查，再使用现有 TrashCandidate 逐项检查与提交；Windows 的捕获身份额外与所选行的完整 file ID 对照，不能把捕获时的新对象当作原扫描对象。重要/保护目录拒绝，不在工作线程等待 stdin；重叠祖先/后代选择在启动前拒绝。成功逐项移除行和展示的子候选，失败保留为历史且显示错误；单项失败不取消其他明确选中的操作，关闭可取消尚未开始的操作。现有系统 Trash adapter 的最终 pathname 检查到系统调用之间仍有竞态，此模式不引入 handle-relative 原子移动，也没有永久删除兜底。
+
+本阶段提供可用的显式目录根交互切片，仍不勾选完整 TUI 验收项。历史缓存首屏、系统自动发现及 Linux 专用临时对象、单个大根中提前完整候选仍待做；选中刷新仍遍历原始根保留上下文。TUI 与 --system/--timings/机器输出/其他清理参数互斥，且不读写 candidate cache 或 durable operation journal。普通报告 CLI 的缓存行为保持原有实现。本阶段未做端到端性能测量，不把实时绘制等同扫描加速。
+
+独立回归用注入键盘及 TestBackend 验证稳定选择/焦点、revision 过期拒绝、partial/预算耗尽禁止回收、刷新及后台回收结果后持续浏览、逻辑 lower-bound 与双语标签。中文宽字符的终端 padding cell 曾导致朴素串接 oracle 误报，按字符显示列宽解码后保留原标签断言。原生 adapter 测试以普通 stat/read 核对刷新后的字节，同名目录替换及 Unix 链接替换均在系统 Trash 调用前拒绝，原对象及替代对象 payload 保留；该测试不宣称系统 Trash 成功移动已验证。CLI 集成验证无终端、机器格式及模式冲突在扫描/状态写入前拒绝。
+
+
+交付验证（arm64 macOS，Rust 1.98.0）：最终工作区 792 项通过、0 失败、2 项原有基准 ignored；同一系统 Trash 挂起用例以 `--skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 显式排除，其成功移动仍未验证。随后只加强排序测试中的已知零/未知对照并通过聚焦回归，未改变生产行为。格式、core/CLI/TUI 及工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy（含目标测试代码）通过。初次 Windows 编译发现 EntryIdentity 字段私有，改用公开 accessor；测试 lint 及宽字符 oracle 的失败均已修正，没有屏蔽 cfg 或移除断言。53 份 Markdown 与 23 项检查器测试通过，CLI help 包含 --tui 并落实已有 --sort。
+
+本机真实 PTY 用隔离目录核验最终二进制的完成候选视图；q、Ctrl-C、定向 SIGTERM 分别返回 0/130/143，终端属性和 alternate screen 恢复，payload 不变。初始诊断使用原始 ANSI substring 无法识别增量绘制，改用独立终端单元解码；父进程等待退出时必须持续消费输出，否则 macOS TCSADRAIN 可能阻塞；controlling-session leader 退出还会撤销 PTY，属性检查须在测试 wrapper 仍存活时进行。这些是 harness 修正，没有改动生产终端恢复逻辑。真实 PTY 未发送删除键；回收成功后的动态更新通过注入结果验证，实际 OS Trash 成功路径保留独立缺口。Linux/Windows 宿主运行时与 MSVC 未验收；没有新增 crate 或发布。

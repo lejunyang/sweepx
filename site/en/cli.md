@@ -152,11 +152,14 @@ A unified junk-discovery entry point is available:
 
 ```bash
 sweepx junk ~/Projects
+sweepx junk --tui ~/Projects
 sweepx --format json junk .
 sweepx --format json junk --system
 ```
 
 Project artifact rules are loaded by the catalog and evaluated through the existing cleaner VM by core’s `JunkService`, shared with future interactive clients. A rule match produces a report candidate only.
+
+`junk --tui ROOT...` shows live scan phases, progress and junk candidates as each root completes. Rows default to descending logical size; `--sort path` selects path order. Unknown sizes sort after known zero bytes and are never treated as zero. Arrow keys move, Space selects, `a` selects all (at most 256), `u` clears, `r` refreshes marked rows or the focused row, `c` cancels, `d/Delete` moves selected candidates to the operating-system Trash, and `q/Esc` quits. Selection survives revisions by stable key. Old, incomplete or failed-Trash rows are historical and require complete refresh before another move. Trash runs on a separate worker with per-item no-follow, object/filesystem/mount revalidation; important/protected paths are refused, and failures never trigger permanent deletion. This mode requires terminal input/output and explicit directory roots. It conflicts with `--system`, `--timings`, `--trash`, `--clean-temp`, `--quarantine-dir` and machine output. It does not read/write historical candidate caches or an operation journal. Selected refresh still traverses original roots for parent classification context; complete candidates within a single large root still wait for that root to finish.
 
 On a macOS root-cache hit, activity/staleFormats are recomputed from the current tool snapshot, and core’s `GitEvidenceSession` rebuilds current repository, tracked and ignore evidence. The cache stores only traversal coverage and repository-boundary facts inside the candidate, never Git answers; historical `ignored` / `high` claims are not replayed. Promotion requires current untracked/ignored evidence, complete coverage and no contained repository. Failures retain base `known_generated` / `medium` and an explicit blocker. Parent repositories and exclude configuration outside the selected root are observed in this invocation too.
 

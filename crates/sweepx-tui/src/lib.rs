@@ -20,6 +20,7 @@ use sweepx_model::{
 use sweepx_protocol::{OutputKind, OutputStatus};
 use thiserror::Error;
 
+pub mod junk;
 mod live;
 
 pub use live::{

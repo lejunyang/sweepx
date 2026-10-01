@@ -834,6 +834,28 @@ fn noninteractive_permanent_delete_leaves_directory_and_link_inputs_unchanged() 
 }
 
 #[test]
+fn junk_tui_rejects_nonterminals_machine_formats_and_conflicting_modes_before_scan() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path();
+    fs::write(root.join("payload"), b"unchanged").unwrap();
+    let state = root.join("state");
+    for args in [
+        vec!["junk", "--tui"],
+        vec!["--format", "json", "junk", "--tui"],
+        vec!["junk", "--tui", "--system"],
+        vec!["junk", "--tui", "--trash"],
+        vec!["junk", "--tui", "--timings"],
+    ] {
+        let mut cmd = cli_command();
+        cmd.timeout(std::time::Duration::from_secs(5));
+        cmd.arg("--state-dir").arg(&state).args(args).arg(root);
+        cmd.assert().code(2);
+        assert_eq!(fs::read(root.join("payload")).unwrap(), b"unchanged");
+        assert!(!state.exists());
+    }
+}
+
+#[test]
 fn junk_temp_cleanup_requires_a_foreground_human_confirmation() {
     let mut cmd = cli_command();
     cmd.timeout(std::time::Duration::from_secs(10));

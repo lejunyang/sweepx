@@ -27,6 +27,7 @@ use sweepx_core::junk::ProjectJunkRule as JunkRule;
 #[cfg(test)]
 use sweepx_core::junk::load_project_rules as load_project_junk_rules;
 mod junk_timings;
+mod junk_tui;
 mod trash_command;
 mod tui_adapter;
 use tui_adapter::tui_detail_rescan_provider;
@@ -207,6 +208,10 @@ enum Commands {
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
     Junk {
+        /// Open the live junk view for explicit directory roots. Space selects; d moves selected
+        /// current, complete candidates to Trash after native identity revalidation.
+        #[arg(long, conflicts_with_all = ["timings", "system", "trash", "clean_temp", "quarantine_dir"])]
+        tui: bool,
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
         /// Measures report-only work; stdout keeps its existing format.
         #[arg(long, conflicts_with_all = ["trash", "clean_temp"])]
@@ -602,6 +607,7 @@ fn main() -> ProcessExitCode {
             }
         },
         Commands::Junk {
+            tui,
             timings,
             system,
             clean_temp,
@@ -610,6 +616,28 @@ fn main() -> ProcessExitCode {
             roots,
         } => {
             let stdin_is_terminal = std::io::stdin().is_terminal();
+            if tui {
+                if let Err(message) = validate_tui_environment(
+                    format,
+                    stdin_is_terminal,
+                    std::io::stdout().is_terminal(),
+                ) {
+                    eprintln!("{message}");
+                    return ProcessExitCode::from(2);
+                }
+                let roots = match normalize_roots(&roots) {
+                    Ok(roots) if !roots.is_empty() => roots,
+                    Ok(_) => {
+                        eprintln!("junk --tui requires explicit directory roots");
+                        return ProcessExitCode::from(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return ProcessExitCode::from(2);
+                    }
+                };
+                return junk_tui::run(roots, context.locale(), size_unit, sort);
+            }
             if let Err(message) =
                 validate_junk_mutation_environment(clean_temp, trash, format, stdin_is_terminal)
             {
