@@ -394,19 +394,12 @@ fn subtree_index_path(cache_dir: &Path, device: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
-
-    fn temp_cache() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sweepx-junk-cache-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
+    fn temp_cache() -> (tempfile::TempDir, PathBuf) {
+        // Atomic exclusive creation isolates parallel tests; a timestamp plus create_dir_all
+        // can silently alias another fixture. Keep the guard alive through all native queries.
+        let fixture = tempfile::TempDir::new().unwrap();
+        let path = fs::canonicalize(fixture.path()).unwrap();
+        (fixture, path)
     }
 
     fn sample_candidate(name: &str) -> StoredJunkCandidate {
@@ -429,7 +422,7 @@ mod tests {
 
     #[test]
     fn pre_scan_cursor_survives_capture_and_old_schema_is_refused() {
-        let cache = temp_cache();
+        let (_fixture, cache) = temp_cache();
         let mut stored = StoredJunkRoot::capture(&cache, vec![], 42).unwrap();
         assert_eq!(stored.since_event_id, 42);
         assert!(stored.matches_root(&cache));
@@ -459,7 +452,7 @@ mod tests {
     #[test]
     #[ignore = "native FSEvents timing experiment; run explicitly with --nocapture"]
     fn benchmark_batched_root_validation() {
-        let fixture = temp_cache();
+        let (_guard, fixture) = temp_cache();
         let roots: Vec<_> = (0..24)
             .map(|index| {
                 let root = fixture.join(format!("root-{index}"));
@@ -509,7 +502,7 @@ mod tests {
 
     #[test]
     fn an_untouched_root_round_trips_as_current() {
-        let cache = temp_cache();
+        let (_fixture, cache) = temp_cache();
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
@@ -540,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_change_under_the_root_invalidates_the_record() {
-        let cache = temp_cache();
+        let (_fixture, cache) = temp_cache();
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
@@ -554,7 +547,7 @@ mod tests {
 
     #[test]
     fn prune_removes_records_for_roots_no_longer_present() {
-        let cache = temp_cache();
+        let (_fixture, cache) = temp_cache();
         prepare_cache_dir(&cache).unwrap();
         let keep = cache.join("keep");
         let gone = cache.join("gone");
