@@ -4281,6 +4281,7 @@ mod tests {
         }));
         (
             ScanSummary {
+                progress_retention: Default::default(),
                 roots: vec![root],
                 entries,
                 aggregates: vec![target_aggregate(&target_id, children.len() as u128)],

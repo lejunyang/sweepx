@@ -300,6 +300,7 @@ mod tui_detail_rescan_provider_tests {
             entry: component,
         };
         let provider = tui_detail_rescan_provider(&ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -371,6 +372,7 @@ mod tui_detail_rescan_provider_tests {
     #[test]
     fn tui_provider_cancel_hook_notifies_the_active_token() {
         let provider = tui_detail_rescan_provider(&ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),

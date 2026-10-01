@@ -1115,6 +1115,7 @@ fn scan_with_store_options<S: SnapshotStore>(
                 events,
                 snapshot,
                 summary: ScanSummary {
+                    progress_retention: Default::default(),
                     roots: Vec::new(),
                     entries: Vec::new(),
                     aggregates: Vec::new(),
@@ -3685,6 +3686,7 @@ fn parse_scan_input_from_value(envelope: Value) -> Result<ScanInputEnvelope, Cor
 
 fn scan_summary_from_input(input: &ScanInputEnvelope) -> ScanSummary {
     ScanSummary {
+        progress_retention: Default::default(),
         roots: input.roots.clone(),
         entries: input.entries.clone(),
         aggregates: input.aggregates.clone(),
@@ -4490,7 +4492,12 @@ fn unsupported_scan_output(
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn scan_status(summary: &ScanSummary) -> OutputStatus {
-    if scan_error_count(summary) > 0 || scan_partial_boundary_count(summary) > 0 {
+    if summary.progress_retention.cancelled {
+        OutputStatus::Cancelled
+    } else if scan_error_count(summary) > 0
+        || scan_partial_boundary_count(summary) > 0
+        || summary.progress_retention.resource_limited
+    {
         OutputStatus::Partial
     } else {
         OutputStatus::Ok
@@ -4499,11 +4506,7 @@ fn scan_status(summary: &ScanSummary) -> OutputStatus {
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn scan_error_count(summary: &ScanSummary) -> u128 {
-    summary
-        .progress
-        .iter()
-        .filter(|event| matches!(event, ProgressEvent::Error { .. }))
-        .count() as u128
+    summary.error_count()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -5906,6 +5909,32 @@ fn sync_directory(_path: &Path) -> Result<(), StateError> {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn scan_status_preserves_failures_and_cancellation_without_progress_detail() {
+        let mut summary = ScanSummary {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            aggregates: Vec::new(),
+            boundaries: Vec::new(),
+            progress: Vec::new(),
+            progress_retention: sweepx_scanner::ProgressRetention {
+                omitted_events: 100,
+                finished: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(scan_status(&summary), OutputStatus::Ok);
+        summary.progress_retention.resource_limited = true;
+        assert_eq!(scan_status(&summary), OutputStatus::Partial);
+        summary.progress_retention.resource_limited = false;
+        summary.progress_retention.omitted_errors = 2;
+        assert_eq!(scan_error_count(&summary), 2);
+        assert_eq!(scan_status(&summary), OutputStatus::Partial);
+        summary.progress_retention.cancelled = true;
+        assert_eq!(scan_status(&summary), OutputStatus::Cancelled);
+    }
+
     /// A preview must never be presented as authoritative or, when partial, as exact.
     ///
     /// This is the field a UI reads to decide whether it may show a number as final, so the
@@ -5913,6 +5942,7 @@ mod tests {
     #[test]
     fn an_accelerated_preview_is_reported_as_non_authoritative() {
         let mut summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -5954,6 +5984,7 @@ mod tests {
     #[test]
     fn a_declined_acceleration_reports_its_reason() {
         let summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -6174,6 +6205,7 @@ mod tests {
             events: Vec::new(),
             snapshot: OperationSnapshot::not_found("unused", Locale::EnUs),
             summary: ScanSummary {
+                progress_retention: Default::default(),
                 roots: Vec::new(),
                 entries: Vec::new(),
                 aggregates: Vec::new(),

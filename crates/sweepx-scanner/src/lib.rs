@@ -140,6 +140,68 @@ pub struct ScanSummary {
     pub aggregates: Vec<DirectoryAggregate>,
     pub boundaries: Vec<BoundaryRecord>,
     pub progress: Vec<ProgressEvent>,
+    /// Constant-size facts retained even when the optional progress log is truncated.
+    pub progress_retention: ProgressRetention,
+}
+
+/// Progress-log omissions and terminal observations, independent of filesystem coverage.
+///
+/// Dropping an observation does not drop a file, candidate or boundary. Errors and cancellation
+/// remain visible through these facts; live observers receive every event before retention.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgressRetention {
+    /// Number of observed progress records absent from the retained log.
+    pub omitted_events: u128,
+    /// Error observations absent from the log, included in [`ScanSummary::error_count`].
+    pub omitted_errors: u128,
+    /// Whether traversal observed cancellation, regardless of log capacity.
+    pub cancelled: bool,
+    /// Whether a traversal or result-retention resource limit was observed.
+    /// A limit on the optional progress log itself never sets this flag.
+    pub resource_limited: bool,
+    /// Whether the traversal sequencer ended; this does not imply complete coverage or success.
+    pub finished: bool,
+}
+
+impl ScanSummary {
+    /// Counts all observed errors, including errors displaced or omitted by log retention.
+    pub fn error_count(&self) -> u128 {
+        self.progress_retention.omitted_errors.saturating_add(
+            self.progress
+                .iter()
+                .filter(|event| matches!(event, ProgressEvent::Error { .. }))
+                .count() as u128,
+        )
+    }
+
+    fn retain_progress(&mut self, event: ProgressEvent, cap: usize) {
+        self.progress_retention.cancelled |= matches!(event, ProgressEvent::Cancelled { .. });
+        self.progress_retention.resource_limited |=
+            matches!(event, ProgressEvent::ResourceLimit { .. });
+        self.progress_retention.finished |= matches!(event, ProgressEvent::Finished);
+        if self.progress.len() < cap {
+            self.progress.push(event);
+            return;
+        }
+        // Preserve the latest failure/terminal detail when a slot exists. Earlier displaced
+        // errors still contribute to the authoritative count. Routine observations never
+        // overwrite diagnostic detail, and no log omission manufactures a coverage boundary.
+        let omitted = if matches!(
+            event,
+            ProgressEvent::Error { .. } | ProgressEvent::Cancelled { .. } | ProgressEvent::Finished
+        ) && let Some(last) = self.progress.last_mut()
+        {
+            std::mem::replace(last, event)
+        } else {
+            event
+        };
+        self.progress_retention.omitted_events =
+            self.progress_retention.omitted_events.saturating_add(1);
+        if matches!(omitted, ProgressEvent::Error { .. }) {
+            self.progress_retention.omitted_errors =
+                self.progress_retention.omitted_errors.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -205,7 +267,7 @@ pub trait ScanSink {
 
     /// Number of times *detail* was truncated because a retention cap was reached.
     ///
-    /// Detail means per-entry rows and progress events. These are dropped after their bytes
+    /// Detail means per-entry rows. These are dropped after their bytes
     /// have already been folded into the directory aggregate, so truncating them does not make
     /// a total wrong -- it only makes the listing partial. Kept separate from
     /// [`Self::overflow_count`] so a large scan is not reported as having inexact totals
@@ -417,6 +479,7 @@ impl<'a> CollectingScanSink<'a> {
     fn new(limits: ScanResourceLimits) -> Self {
         Self {
             summary: ScanSummary {
+                progress_retention: Default::default(),
                 roots: Vec::new(),
                 entries: Vec::new(),
                 aggregates: Vec::new(),
@@ -634,7 +697,7 @@ impl<'a> CollectingScanSink<'a> {
         }
     }
 
-    /// Records truncation of per-entry or progress detail.
+    /// Records truncation of per-entry detail.
     ///
     /// Still surfaced as a boundary so the truncation is visible and the caller can report the
     /// listing as partial -- silence would let a truncated listing look complete. It
@@ -670,11 +733,8 @@ impl<'a> CollectingScanSink<'a> {
         if let Some(observer) = self.observer.as_deref_mut() {
             observer.on_progress(&self.active_root, &event);
         }
-        Self::push_capped_replace_last(
-            &mut self.summary.progress,
-            event,
-            self.limits.max_progress_events,
-        );
+        self.summary
+            .retain_progress(event, self.limits.max_progress_events);
     }
 
     fn push_capped_replace_last<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -828,23 +888,8 @@ impl ScanSink for CollectingScanSink<'_> {
         if let Some(observer) = self.observer.as_deref_mut() {
             observer.on_progress(root, &event);
         }
-        if self.summary.progress.len() >= self.limits.max_progress_events {
-            let overflow_path = match &event {
-                ProgressEvent::RootAccepted { path }
-                | ProgressEvent::Boundary { path, .. }
-                | ProgressEvent::Error { path, .. }
-                | ProgressEvent::Cancelled { path }
-                | ProgressEvent::ResourceLimit { path }
-                | ProgressEvent::AccelerationUnavailable { path, .. }
-                | ProgressEvent::AcceleratedPreview { path, .. }
-                | ProgressEvent::EntryObserved { path, .. } => path.as_path(),
-                ProgressEvent::Finished => root,
-            };
-            // Progress events are an observation log, not an input to any total.
-            self.mark_detail_overflow(root, overflow_path, "retained progress cap exceeded");
-            return Ok(());
-        }
-        self.summary.progress.push(event);
+        self.summary
+            .retain_progress(event, self.limits.max_progress_events);
         Ok(())
     }
 
@@ -1423,6 +1468,7 @@ where
         cancel: &CancellationToken,
     ) -> Result<ScanSummary, ScanError> {
         let mut summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::with_capacity(roots.len()),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -1439,10 +1485,13 @@ where
                     // re-reports the same boundary.
                     let root_entry_id =
                         allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
-                    summary.progress.push(ProgressEvent::Error {
-                        path: root.path().to_path_buf(),
-                        reason: ReasonCode::StrictReadOnly,
-                    });
+                    summary.retain_progress(
+                        ProgressEvent::Error {
+                            path: root.path().to_path_buf(),
+                            reason: ReasonCode::StrictReadOnly,
+                        },
+                        self.options.resource_limits.max_progress_events,
+                    );
                     summary.boundaries.push(BoundaryRecord {
                         path: root.path().to_path_buf(),
                         kind: BoundaryKind::AccessDenied,
@@ -1483,11 +1532,17 @@ where
                 ),
                 complete_coverage(),
             ));
-            summary.progress.push(ProgressEvent::RootAccepted {
-                path: root.path().to_path_buf(),
-            });
+            summary.retain_progress(
+                ProgressEvent::RootAccepted {
+                    path: root.path().to_path_buf(),
+                },
+                self.options.resource_limits.max_progress_events,
+            );
         }
-        summary.progress.push(ProgressEvent::Finished);
+        summary.retain_progress(
+            ProgressEvent::Finished,
+            self.options.resource_limits.max_progress_events,
+        );
         Ok(summary)
     }
 
@@ -3804,6 +3859,126 @@ mod tests {
     }
 
     #[test]
+    fn progress_log_omissions_preserve_classified_results_and_live_observations() {
+        let platform = NestedFanOutPlatform::new(8);
+        let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
+        let ordinary = Scanner::new(platform, ScannerOptions::default())
+            .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
+            .unwrap();
+        for cap in [0, 1, 4] {
+            let mut observed = ObservationLog::default();
+            let result = Scanner::new(
+                NestedFanOutPlatform::new(8),
+                ScannerOptions {
+                    resource_limits: ScanResourceLimits {
+                        max_progress_events: cap,
+                        ..ScanResourceLimits::default()
+                    },
+                    ..ScannerOptions::default()
+                },
+            )
+            .scan_classified_with_observer(
+                &roots,
+                &CancellationToken::new(),
+                &ObservedBranches,
+                None,
+                &mut observed,
+            )
+            .unwrap();
+            assert!(result.summary.progress.len() <= cap);
+            assert!(result.summary.progress_retention.omitted_events > 0);
+            assert!(result.summary.progress_retention.finished && observed.finished);
+            assert!(!result.summary.progress_retention.cancelled);
+            assert!(!result.summary.progress_retention.resource_limited);
+            assert_eq!(result.summary.error_count(), 0);
+            assert_eq!(result.summary.roots, ordinary.summary.roots);
+            assert_eq!(result.summary.entries, ordinary.summary.entries);
+            assert_eq!(result.summary.aggregates, ordinary.summary.aggregates);
+            assert_eq!(result.summary.boundaries, ordinary.summary.boundaries);
+            assert_eq!(result.decisions, ordinary.decisions);
+            assert_eq!(result.coverages, ordinary.coverages);
+            assert_eq!(observed.candidates.len(), ordinary.decisions.len());
+            assert_eq!(observed.progress, ordinary.summary.progress);
+        }
+    }
+
+    #[test]
+    fn progress_log_cap_cannot_hide_errors_cancellation_or_traversal_end() {
+        let root = test_path("progress-root");
+        for cap in [0, 1, 4] {
+            let mut sink = CollectingScanSink::new(ScanResourceLimits {
+                max_progress_events: cap,
+                ..ScanResourceLimits::default()
+            });
+            for index in 0..10 {
+                sink.push_progress(
+                    &root,
+                    ProgressEvent::Error {
+                        path: root.join(format!("failed-{index}")),
+                        reason: ReasonCode::IncompleteStreamCoverage,
+                    },
+                )
+                .unwrap();
+                sink.push_progress(
+                    &root,
+                    ProgressEvent::EntryObserved {
+                        path: root.join(format!("ordinary-{index}")),
+                        kind: ObjectType::File,
+                    },
+                )
+                .unwrap();
+            }
+            sink.push_progress(&root, ProgressEvent::Cancelled { path: root.clone() })
+                .unwrap();
+            sink.push_progress(&root, ProgressEvent::Finished).unwrap();
+            assert_eq!(sink.detail_overflow_count(), 0);
+            assert_eq!(sink.overflow_count(), 0);
+            let result = sink.finish();
+            assert_eq!(result.error_count(), 10);
+            assert_eq!(
+                result.progress_retention.omitted_events + result.progress.len() as u128,
+                22
+            );
+            assert!(result.progress_retention.cancelled && result.progress_retention.finished);
+            assert!(result.boundaries.is_empty());
+            assert!(result.progress.len() <= cap);
+            if cap > 0 {
+                assert_eq!(result.progress.last(), Some(&ProgressEvent::Finished));
+            }
+        }
+    }
+
+    #[test]
+    fn enumeration_error_remains_counted_without_a_progress_log() {
+        let root = test_path("error-root");
+        let platform = FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new())
+            .with_enumeration_failure(PlatformError::Io {
+                path: root.clone(),
+                detail: "controlled I/O failure".into(),
+                io_kind: Some(std::io::ErrorKind::PermissionDenied),
+            });
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_progress_events: 0,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(result.progress.is_empty());
+        assert_eq!(result.error_count(), 1);
+        assert!(result.progress_retention.finished);
+        assert!(!aggregate_for_path(&result, &root).coverage.complete);
+    }
+
+    #[test]
     fn observer_delivers_boundaries_and_finish_outside_retained_log_caps() {
         let root = test_path("observer-root");
         let platform = FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new())
@@ -3832,6 +4007,8 @@ mod tests {
         .unwrap();
         assert!(result.summary.progress.is_empty());
         assert!(result.summary.boundaries.is_empty());
+        assert!(result.summary.progress_retention.resource_limited);
+        assert!(result.summary.progress_retention.finished);
         assert!(observed.finished);
         assert!(
             observed

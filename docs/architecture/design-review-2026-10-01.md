@@ -367,7 +367,7 @@ Git 项完成后，继续核心扫描会话、垃圾 TUI、大文件、重复文
 
 选中刷新只接受本会话键，先后复验 captured root/relative parent recipe/目标目录的 no-follow、对象、filesystem 和 mount 绑定。目录内容变化可重新观察；对象替换、链接或身份不确定失败，不移除旧候选。当前实现为了保持父 marker、规则和祖先上下文，重新遍历所选候选原始根，再过滤到选中子树；它提供范围替换语义，尚不是高效的局部遍历。范围之外的旧行保留，Git 查询重新读取当前祖先仓库和 ignore/index。完整观察后才进入 Replacement，发送消失的旧键及 replaced=true；partial/cancelled/failed 均不以未见到的行证明不存在。Replacement 开始后的取消竞态由已完成观察的提交流获胜，close 仍可放弃整个消费。
 
-边界完整性独立于 scanner 的保留日志：observer 在截断前记录不完整观察。元数据预算耗尽、边界保留预算为零或日志截断不能导致错误移除。回归通过受控原生目录、普通 read_dir/symlink_metadata 及独立 Git 命令核验精确逻辑字节、当前 ignore 变化、稳定键及新 scan ID；覆盖单槽背压、合并槽共用字节预算、可靠错误/终态顺序、worker 上限/退出、取消和资源失败、未知键/同名对象替换拒绝、partial 保留旧行及完整重扫移除。macOS 夹具卷拒绝非法 UTF-8 名称（独立宿主诊断为 EILSEQ），无损键反例使用模型 locator；它只证明编码不会混淆 lossy display，不宣称该卷支持那些文件名。零进度预算会主动报告详情截断，因此边界零保留回归保留正常进度预算，避免将本已 partial 的初扫当作 complete。
+边界完整性独立于 scanner 的保留日志：observer 在截断前记录不完整观察。元数据预算耗尽、边界保留预算为零或日志截断不能导致错误移除。回归通过受控原生目录、普通 read_dir/symlink_metadata 及独立 Git 命令核验精确逻辑字节、当前 ignore 变化、稳定键及新 scan ID；覆盖单槽背压、合并槽共用字节预算、可靠错误/终态顺序、worker 上限/退出、取消和资源失败、未知键/同名对象替换拒绝、partial 保留旧行及完整重扫移除。macOS 夹具卷拒绝非法 UTF-8 名称（独立宿主诊断为 EILSEQ），无损键反例使用模型 locator；它只证明编码不会混淆 lossy display，不宣称该卷支持那些文件名。零进度预算曾主动报告详情截断，因此本阶段的边界零保留回归保留正常进度预算；后续“进度保留与扫描完整性”修复了这项旧行为，并将该回归的两层日志预算都设为零，继续保留真正元数据不足时的安全断言。
 
 本阶段仍不勾选整个会话验收项：当前输入是显式目录根，可选择本次平台解释，不包含系统自动发现根、Linux 专用临时对象分析、历史候选缓存回放或单个大根中的提前完整候选。垃圾 TUI、大文件、重复内容与规则扩展继续推进；未进行端到端性能计时，不能据此宣称扫描加速倍数。
 
@@ -408,3 +408,22 @@ macOS 根记录、私有有界存储与逐文件复用从 CLI 迁入 `sweepx-cor
 交付验证（arm64 macOS，Rust 1.98.0）：最终工作区 804 项通过、0 失败、2 项原有基准 ignored，系统 Trash 挂起用例仍以 `--skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 排除，其成功移动未验证。格式、受影响 scanner/core/CLI/TUI 及工作区 all-targets/all-features clippy 通过。Linux GNU/Windows GNU 工作区交叉 clippy（含目标测试代码）通过；最后锁 guard 改动仅在 macOS 分支，复用未改变的这两个目标结果，宿主运行时和 MSVC 仍未验收。53 份 Markdown 和 23 项检查器测试通过。独立对照迁移前后的 29 项缓存测试名称全部保留，core/CLI 包清单包含预期迁移源码，仍为 17 包且 core 无终端依赖。
 
 最终二进制在隔离状态目录的真实 PTY 冷缓存检查中，q/Ctrl-C/SIGTERM 分别返回 0/130/143，终端属性与 alternate screen 恢复，payload 不变；8,192 文件热缓存检查观察到 Historical/partial 首屏，再由 Current 完成视图替换并以 q 安全退出，普通 glob/stat 核对文件数和逻辑字节未变。未发送删除键。首次大负载 partial、一次热缓存 PTY 超时与上述原生验证缺口继续分别记录，不将后续通过运行称为已修复间歇延迟。
+
+
+## 进度保留与扫描完整性（2026-10-01）
+
+可选进度日志达到 max_progress_events（默认 16,384）不再生成 ResourceLimit 边界，也不截断分类或覆盖证据。新增常量大小的 ProgressRetention，独立记录省略的观察/错误数、取消、真实资源不足及遍历结束；error_count 同时统计保留和省略的错误，core 输出状态使用这些事实。非零日志容量优先保留最新错误/终态，普通观察不会覆盖诊断；现场 observer 仍在日志保留之前收到每个事件。遍历结束不等于完整覆盖或后续 Git/缓存阶段成功。没有扩大生产预算；候选、边界、统计或规则 marker 的真实丢失仍保持 partial。
+
+受控回归覆盖零/单槽/多槽日志、连续错误后终态替换、枚举 I/O 错误，以及截断前后候选、规则、覆盖和现场观察一致。原生会话回归在默认预算下扫描 32,768 普通文件，冷、热缓存都必须 Complete；普通 read_dir/symlink_metadata 独立核对逻辑字节及条目数，检查历史首屏、新 scan ID 和稳定键。原有零边界保留的刷新回归现在也使用零进度日志，元数据不足仍必须保留旧候选且禁止以未见为已删除。
+
+[完整阶段测量](junk-benchmark-progress-retention-2026-10-01.json)：2026-10-01，arm64 macOS Darwin 25.5.0，Rust 1.98.0 release 构建，一个受控项目根的 32,768 文件，冷缓存、热缓存尝试和单文件变化各三次，条件等待 1 秒。SweepX 冷缓存不代表操作系统冷缓存；OS 缓存未控制。候选文件系统事实先作冷/热等价比较，再通过普通 walk/stat 核对；未比较动态 Git/工具解释，样本不足以计算尾延迟。
+
+| 状态 | 命中次数 | 进程 wall 中位数 | 遍历阶段中位数 | 根缓存校验中位数 |
+| --- | ---: | ---: | ---: | ---: |
+| SweepX 空缓存 | 0/3 | 245.3 ms | 212.6 ms | 0.5 ms |
+| 整根缓存命中 | 3/3 | 35.5 ms | <0.001 ms | 16.3 ms |
+| 单文件变化 | 0/3 | 213.1 ms | 163.6 ms | 13.8 ms |
+
+[真实 PTY 会话记录](junk-tui-progress-retention-2026-10-01.json)：同一最终 release 二进制另在三个独立、预置缓存的 32,768 文件项目上运行垃圾会话。历史首屏为 67.7/67.3/68.8 ms，当前 Complete 候选视图为 273.1/273.3/275.2 ms（从 wrapper 启动后的采样起点测量，含绘制轮询误差，不是 CLI 进程 wall）。每次 q 返回 0、终端属性及 alternate screen 恢复，普通 glob/stat 核对全部 payload 未变；没有发送删除键。TUI 使用文件事实复用并重新遍历目录，不能把普通报告的整根命中时间当作 TUI 完成时间。这三次未达到采样阈值，没取得停顿堆栈，之前 8,192 文件 debug PTY 的一次超时仍未定位，不能称为已修复。
+
+交付验证：固定 Rust 1.98.0 格式检查、工作区 all-targets/all-features clippy、Linux GNU 和 Windows GNU 工作区交叉 clippy（含目标测试代码）通过；工作区 809 项通过、0 失败、2 项原有基准 ignored。系统 Trash 成功路径仍显式排除同一已诊断挂起用例；Linux/Windows 宿主运行时及 MSVC 未验收。53 份 Markdown 检查、23 项文档检查器及 5 项基准验证器测试通过。没有新增 crate 或依赖；完整会话/TUI、系统模式、提前候选、大文件、重复文件及规则扩展仍按清单继续。

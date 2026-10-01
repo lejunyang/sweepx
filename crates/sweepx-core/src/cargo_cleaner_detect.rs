@@ -1143,6 +1143,7 @@ mod tests {
     #[test]
     fn cargo_layout_collection_is_globally_bounded() {
         let mut summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: Vec::new(),
             aggregates: Vec::new(),
@@ -1291,6 +1292,7 @@ mod tests {
         let mut target = child_entry(3, &other_root, "target", ObjectType::Directory, 11, 21);
         target.display_path = "/scan/root/target".to_string();
         let summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: vec![root, other_root],
             entries: vec![manifest, target],
             aggregates: Vec::new(),
@@ -1645,6 +1647,7 @@ mod tests {
             .into_iter()
             .collect();
         ScanSummary {
+            progress_retention: Default::default(),
             roots: vec![root],
             entries: vec![manifest, target],
             aggregates,

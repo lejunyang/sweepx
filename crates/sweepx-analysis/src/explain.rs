@@ -466,6 +466,7 @@ mod tests {
         };
         let aggregate = aggregate(stable_identity.entry_id.as_str(), 99, complete_coverage());
         let summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: vec![entry.clone()],
             aggregates: vec![aggregate],
@@ -532,6 +533,7 @@ mod tests {
             provenance: live_provenance(),
         };
         let summary = ScanSummary {
+            progress_retention: Default::default(),
             roots: Vec::new(),
             entries: vec![entry],
             aggregates: vec![aggregate(

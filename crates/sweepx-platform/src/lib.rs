@@ -999,6 +999,8 @@ pub struct ScanResourceLimits {
     /// is exact; only the per-file listing was truncated.
     pub max_retained_entries: usize,
     pub max_retained_boundaries: usize,
+    /// Maximum retained progress-log records. Omissions do not reduce filesystem coverage;
+    /// error counts and traversal terminal facts remain available independently of this log.
     pub max_progress_events: usize,
     /// Shared estimated bytes for classified rows, markers, coverage and optional reuse indexes.
     /// Allocator overhead is estimated separately from owned model storage; this is not an RSS cap.

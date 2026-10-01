@@ -1,0 +1,63 @@
+{
+  "dateUtc": "2026-10-01T11:32:17.447506+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.12.14"
+  },
+  "binary": {
+    "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/release/sweepx",
+    "version": "sweepx 0.0.1",
+    "sha256": "333a1ad86e6f730dd13e34c3600723abe614f449c289ad58011c6b729674e82e",
+    "buildLabel": "release progress-retention 2026-10-01"
+  },
+  "workload": {
+    "roots": 1,
+    "ordinaryFiles": 32768,
+    "payloadBytes": 8,
+    "repetitions": 3,
+    "cache": "preseeded SweepX cache, OS cache uncontrolled"
+  },
+  "measurement": "From sampling start after PTY wrapper launch to decoded historical/current screen; includes UI polling uncertainty, not command process wall time",
+  "verification": "Independent glob/stat count and logical bytes, original payload, terminal attributes and alternate-screen restoration. No deletion input.",
+  "samples": [
+    {
+      "historicalSeconds": 0.06765054200513987,
+      "completeSeconds": 0.2731138750023092,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    },
+    {
+      "historicalSeconds": 0.06727837499784073,
+      "completeSeconds": 0.2732607910002116,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    },
+    {
+      "historicalSeconds": 0.06876766699861037,
+      "completeSeconds": 0.27523166699393187,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    }
+  ],
+  "unresolved": "Prior debug 8192-file 10-second timeout did not reproduce; no slow stack captured, so cause remains unknown"
+}

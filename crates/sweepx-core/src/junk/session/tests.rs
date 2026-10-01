@@ -216,6 +216,18 @@ fn cache_publication_failure_keeps_fresh_scan_complete() {
 #[cfg(target_os = "macos")]
 #[test]
 fn warm_large_directory_finishes_with_fresh_identity_and_independent_logical_total() {
+    check_warm_directory(8192);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn progress_log_cap_does_not_make_large_cold_or_cached_directory_partial() {
+    // Exceeds the production progress cap without changing production resource limits.
+    check_warm_directory(32768);
+}
+
+#[cfg(target_os = "macos")]
+fn check_warm_directory(file_count: usize) {
     let _serial = SESSION_TESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -224,20 +236,45 @@ fn warm_large_directory_finishes_with_fresh_identity_and_independent_logical_tot
     let root = base.join("projects");
     fs::create_dir(&root).unwrap();
     let target = project(&root, "a", b"payload");
-    for index in 0..8192 {
+    for index in 0..file_count {
         fs::write(target.join(format!("file-{index:05}")), b"01234567").unwrap();
     }
-    let expected: u128 = fs::read_dir(&target)
+    let lengths: Vec<_> = fs::read_dir(&target)
         .unwrap()
         .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
-        .sum();
+        .collect();
+    let expected: u128 = lengths.iter().sum();
     let request = || {
         let mut request = JunkSessionRequest::new(vec![root.clone()]);
         request.cache_dir = Some(base.join("cache"));
         request
     };
     let cold = JunkSession::start(request()).unwrap();
-    let initial = current(&drain(&cold, JunkSessionRevision(1)));
+    let cold_events = drain(&cold, JunkSessionRevision(1));
+    assert!(matches!(
+        cold_events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            error_count: 0,
+            ..
+        }
+    ));
+    let initial = current(&cold_events);
+    assert_eq!(initial.len(), 1);
+    let aggregate = &initial.first_key_value().unwrap().1.aggregate;
+    assert_eq!(
+        aggregate.apparent_logical_bytes,
+        sweepx_model::ByteValue::Known {
+            value: sweepx_model::DecimalU128::new(expected)
+        }
+    );
+    assert_eq!(
+        aggregate.direct_child_count,
+        sweepx_model::CountValue::Known {
+            value: sweepx_model::DecimalU128::new(lengths.len() as u128)
+        }
+    );
     shutdown(&cold);
     let warm = JunkSession::start(request()).unwrap();
     let events = drain(&warm, JunkSessionRevision(1));
@@ -555,8 +592,9 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
     request.limits.scan.max_classified_metadata_bytes = 128 * 1024;
     request.limits.scan.max_classified_root_metadata_bytes = 128 * 1024;
     request.limits.scan.max_retained_boundaries = 0;
-    // Progress overflow itself declares incomplete details. Keep its normal budget so the
-    // initial scan is complete, while the later resource boundary cannot survive in summary.
+    request.limits.scan.max_progress_events = 0;
+    // Neither retained log can explain incompleteness; live failure/boundary observations
+    // still prevent removing old candidates under genuine metadata pressure.
     let session = JunkSession::start(request).unwrap();
     let initial = drain(&session, JunkSessionRevision(1));
     assert!(matches!(
