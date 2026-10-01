@@ -114,6 +114,8 @@ cargo run -p sweepx-cli -- cleaner cargo-detect /absolute/path/to/workspace
 cargo run -p sweepx-cli -- junk ~/Projects
 # 扫描当前平台经过核验的用户缓存根（只报告）
 cargo run -p sweepx-cli -- junk --system
+# 分阶段诊断：stderr 输出计时 JSON，stdout 报告格式保持不变
+cargo run -p sweepx-cli -- --format json junk --timings ~/Projects
 # Linux：生成陈旧临时对象计划，精确确认后复制到异盘恢复区
 cargo run -p sweepx-cli -- junk --system --clean-temp
 

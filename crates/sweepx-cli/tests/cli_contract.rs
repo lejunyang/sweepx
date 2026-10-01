@@ -884,6 +884,64 @@ fn project_junk_scan_does_not_launch_npm_inventory() {
     );
 }
 
+#[test]
+fn junk_timings_preserve_report_and_account_for_phases() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    let state = TempDir::new().unwrap();
+    let state_root = git_fixture_root(&state);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("target/artifact"), b"payload").unwrap();
+    let mut cmd = cli_command();
+    let output = cmd
+        .args(["--format", "json", "--state-dir"])
+        .arg(&state_root)
+        .args(["junk", "--timings"])
+        .arg(&root)
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "sweepx.junk.result/v1");
+    assert_eq!(report["candidateCount"], 1);
+    assert_eq!(
+        report["candidates"][0]["path"],
+        root.join("target").display().to_string()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let timings = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value["schema"] == "sweepx.junk.timings/v1")
+        .collect::<Vec<_>>();
+    assert_eq!(timings.len(), 1);
+    let timing = &timings[0];
+    assert_eq!(timing["complete"], true);
+    assert_eq!(timing["rootCount"], 1);
+    assert_eq!(timing["rootCacheHits"], 0);
+    assert_eq!(timing["rootCacheMisses"], 1);
+    assert_eq!(timing["candidateCount"], report["candidateCount"]);
+    let phases = timing["phasesNs"].as_object().unwrap();
+    for required in [
+        "discovery",
+        "setup",
+        "rootCacheValidation",
+        "subtreeCacheValidation",
+        "traversal",
+        "classification",
+        "gitEvidence",
+        "cacheWrite",
+        "report",
+    ] {
+        assert!(phases.contains_key(required), "missing phase {required}");
+    }
+    let accounted: u64 = phases.values().map(|value| value.as_u64().unwrap()).sum();
+    assert!(accounted <= timing["totalNs"].as_u64().unwrap());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn junk_scan_reports_only_marker_bound_project_artifacts() {

@@ -435,3 +435,7 @@ macOS 的 `junk` 缓存按批次校验根目录，避免逐根等待 FSEvents；
 `junk --system` 的根发现、分类和工具安装清单共用本次调用的探测快照，扫描结束后不会重新启动一轮探测。整批工具调用预算为 10 秒，单次最多 2 秒、stdout 最多 64 KiB，最多尝试启动 64 个进程；超时、取消、输出过量或工具不可用时保留 unknown，安装信息的缺失字段为 null。显式项目根扫描不探测无关的 npm 安装。
 
 根缓存未命中时，目录会重新枚举以重建本次扫描身份和分类标记；文件缓存只复用逻辑长度，缺失的物理分配、硬链接去重及可释放空间保持 unknown。不会通过复用旧候选来跳过整棵子树。
+
+`junk --timings` 在 stderr 输出一条 `sweepx.junk.timings/v1` JSON，包含发现、准备、根缓存验证、逐文件缓存验证、遍历、候选拼装、Git 证据、缓存写入和报告阶段的纳秒耗时，以及实际根命中/未命中数；stdout 的既有报告格式不变。计时仅用于只读报告，不能与 `--trash` 或 `--clean-temp` 同用。`complete` 表示报告流程走到结尾，覆盖是否完整仍以报告 `status` 为准。阶段计时从 junk 命令分发开始，不包含前面的 CLI 启动；完整进程耗时由基准脚本单独测量。
+
+先构建 `cargo build -p sweepx-cli --release`，再运行 `python3 scripts/benchmark-junk.py --build-label release --output /tmp/junk-benchmark.json`。脚本使用隔离状态目录，对比空 SweepX 缓存、热扫尝试和受控单文件变化，并核对候选及文件大小；`--root /absolute/project` 可测只读真实目录。它保留每次实际命中数，不把 OS 缓存等同 SweepX 缓存；小样本只汇报中位数。

@@ -29,6 +29,7 @@ use sweepx_core::junk::{
 };
 use sweepx_core::tools as tool_installations;
 use sweepx_core::tools::{ProbeLimits, ProbeRunner};
+mod junk_timings;
 mod trash_command;
 mod tui_adapter;
 use tui_adapter::tui_detail_rescan_provider;
@@ -213,6 +214,10 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     Junk {
+        /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
+        /// Measures report-only work; stdout keeps its existing format.
+        #[arg(long, conflicts_with_all = ["trash", "clean_temp"])]
+        timings: bool,
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
         #[arg(long)]
@@ -604,12 +609,14 @@ fn main() -> ProcessExitCode {
             }
         },
         Commands::Junk {
+            timings,
             system,
             clean_temp,
             trash,
             quarantine_dir,
             roots,
         } => {
+            let mut timings = junk_timings::JunkTimings::new(timings);
             let discovery_progress = ScanProgress::start(
                 context.locale(),
                 roots.len(),
@@ -624,6 +631,7 @@ fn main() -> ProcessExitCode {
                 }
             };
             discovery_progress.finish();
+            timings.phase("discovery");
             // Resolve the state directory for the per-root junk cache. A cache is best-effort: if
             // no state directory is available the scan simply runs uncached rather than failing.
             let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
@@ -644,6 +652,7 @@ fn main() -> ProcessExitCode {
                 },
                 trash,
                 cache_dir,
+                timings,
             );
         }
         Commands::SiteStorage {
@@ -1561,6 +1570,7 @@ fn run_junk_scan(
     // Directory holding the per-root junk cache (`<state>/junk-cache`); `None` when caching is
     // unavailable (non-macOS, or no usable state directory).
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cache_dir: Option<PathBuf>,
+    mut timings: junk_timings::JunkTimings,
 ) -> ProcessExitCode {
     if clean.enabled && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
         eprintln!(
@@ -1633,6 +1643,8 @@ fn run_junk_scan(
     #[cfg(target_os = "macos")]
     let scan_event_id = sweepx_core::current_event_id();
 
+    timings.phase("setup");
+
     // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
     #[cfg(target_os = "macos")]
     let (hit_records, miss_indexes): (Vec<junk_cache::StoredJunkRoot>, Vec<usize>) =
@@ -1671,6 +1683,12 @@ fn run_junk_scan(
         .map(|index| canonical_roots[*index].clone())
         .collect();
 
+    timings.cache_roots(
+        canonical_roots.len(),
+        canonical_roots.len() - miss_roots.len(),
+    );
+    timings.phase("rootCacheValidation");
+
     // Build the subtree-reuse provider for the roots being scanned. On a cache-validated run the
     // scanner reuses unchanged file lengths while traversing directories with current identities.
     #[cfg(target_os = "macos")]
@@ -1679,6 +1697,7 @@ fn run_junk_scan(
         &miss_roots,
     );
 
+    timings.phase("subtreeCacheValidation");
     let classified = if miss_roots.is_empty() {
         None
     } else {
@@ -1697,6 +1716,7 @@ fn run_junk_scan(
         ))
     };
     progress.finish();
+    timings.phase("traversal");
     let scan = match classified {
         Some(Ok(scan)) => Some(scan),
         Some(Err(error)) => {
@@ -1747,6 +1767,7 @@ fn run_junk_scan(
                 ));
             }
         }
+        timings.phase("classification");
         annotate_project_candidates_with_git(
             &scan.scan.summary,
             &scan.coverages,
@@ -1758,6 +1779,8 @@ fn run_junk_scan(
     if let Some((rule, discovery)) = &temp_discovery {
         fresh_candidates.extend(linux_temp_candidates(rule, discovery));
     }
+
+    timings.phase("gitEvidence");
 
     // Persist every scanned (miss) root with the candidates attributed to its deepest root, then
     // drop cache entries for roots no longer present. A root with zero candidates is still
@@ -1823,6 +1846,7 @@ fn run_junk_scan(
         }
     }
 
+    timings.phase("cacheWrite");
     let mut candidates = cached_candidates;
     candidates.append(&mut fresh_candidates);
     candidates.sort_by(|left, right| {
@@ -2060,6 +2084,8 @@ fn run_junk_scan(
             })
         );
     }
+    timings.phase("report");
+    timings.finish(candidates.len());
     if clean.enabled {
         #[cfg(target_os = "linux")]
         {

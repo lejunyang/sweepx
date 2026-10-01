@@ -140,3 +140,18 @@ macOS 仅为详情中的文件/链接保留一个短暂元数据句柄：相对 
 独立证据包含：`symlink_metadata` 核对 device/inode、类型与逻辑字节，另用 `getattrlist(ATTR_CMN_FSID, FSOPT_NOFOLLOW)` 对照 fsid；悬空链接证明未打开目标，真实权限拒绝仍返回拒绝。同名等长文件替换与替换成链接在观测前发生时均被拒绝，保留旧 inode 使反例不依赖分配顺序或时间竞态。TUI provider 从根准入结果分别进行直接列表、渐进递归统计和完整刷新，普通目录遍历对照名称集合、直接子项总数及递归逻辑字节；渐进列表仍为 lower bound，完整统计才是 exact，分配与可释放量仍为 unknown。
 
 交付验证（2026-10-01，arm64 macOS，Rust 1.98.0）：受影响 platform/scanner/CLI 的测试与 all-targets/all-features clippy、格式检查、工作区 clippy 均通过；工作区测试 712 项通过、0 失败、2 项原有基准 ignored。依旧显式排除 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 的已诊断系统 Trash 挂起，未验证该系统操作。首次在沙箱内执行的平台全量测试遭遇 FSEvents 服务启动拒绝，宿主环境完成了该套原生测试，未因此删除或跳过 FSEvents 用例。Linux GNU、Windows GNU 工作区交叉 clippy 通过，目标测试代码已编译但未在对应宿主执行；MSVC 未验收。53 份 Markdown 检查和 23 项文档检查器测试通过。未测端到端性能，不宣称额外身份观测会提高扫描速度。
+
+
+## 端到端计时基线（2026-10-01）
+
+已提供 `junk --timings`：独立 stderr JSON 记录阶段耗时及实际根缓存命中数，不改变结果 schema。可复现脚本为 [benchmark-junk.py](../../scripts/benchmark-junk.py)，原始基线记录见 [受控目录基线](junk-benchmark-2026-10-01.json)。本次为 arm64 macOS、Rust 1.98.0 release 构建，8 个 Cargo 项目根、每根 1,024 个普通文件，共 8,192 个产物文件；各状态运行 3 次。每个候选的逻辑总量都由普通 walk/stat 独立核对，冷/热候选的路径、规则、风险、数量、大小及证据状态一致；Git/tool 等动态解释不在这一等价比较内。
+
+| 状态 | 完整进程中位数 | 主要阶段中位数 |
+| --- | ---: | --- |
+| 空 SweepX 缓存 | 620.0 ms | 遍历 523.9 ms、缓存写入 47.0 ms |
+| 整根缓存命中（每次 8/8） | 275.5 ms | 根缓存读取/验证/回放 256.8 ms |
+| 单文件追加 8 字节 | 540.1 ms | 根验证 255.8 ms、逐文件索引验证 257.3 ms、遍历 9.5 ms |
+
+OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推断全盘或真实用户缓存目录的加速倍数，也不提供 p95/p99。沙箱初测未能启动 FSEvents，三次热扫全部未命中；正式基线在宿主环境取得，不能把这两组不同环境的耗时混用。
+
+测量明确指出下一步优化：单文件变化后，根缓存与逐文件索引分别等待原生事件历史；应共享覆盖充分的本次历史查询，保留各自游标、身份及覆盖检查。预算与逐根淘汰、共享分类/会话、大文件、重复文件和规则扩展仍按前述顺序推进。
