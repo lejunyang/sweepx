@@ -57,6 +57,11 @@ impl ReadBudget {
         }
     }
 
+    /// Allowance still available to the invocation's shared invalidation index.
+    pub(super) fn remaining_retained_bytes(&self) -> usize {
+        self.retained
+    }
+
     /// Refuses oversized, non-private or unstable observations before returning owned data.
     pub(super) fn read<T: serde::de::DeserializeOwned>(
         &mut self,

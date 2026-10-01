@@ -187,6 +187,11 @@ impl CacheReader {
         }
     }
 
+    /// Remaining owned-data estimate after both disk-cache layers were loaded.
+    pub fn remaining_retained_bytes(&self) -> usize {
+        self.budget.remaining_retained_bytes()
+    }
+
     /// Root identity and loaded rule bytes must match even before history is consulted.
     pub fn roots(&mut self, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
         roots
@@ -438,8 +443,13 @@ fn root_retained_bytes(root: &StoredJunkRoot) -> usize {
         + root.root_device.capacity()
         + root.root_inode.capacity()
         + root.candidates.capacity() * std::mem::size_of::<StoredJunkCandidate>();
+    bytes = bytes.saturating_add(
+        root.excluded_root_keys
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>()),
+    );
     for key in &root.excluded_root_keys {
-        bytes = bytes.saturating_add(32 + key.capacity());
+        bytes = bytes.saturating_add(key.capacity());
     }
     for candidate in &root.candidates {
         for text in [
@@ -988,5 +998,14 @@ mod tests {
         );
         assert!(!cache.join(record_file_name(&root)).exists());
         assert_eq!(fs::read(outside_file).unwrap(), b"must stay");
+    }
+    #[test]
+    fn root_scope_vector_reservations_count_as_retained_metadata() {
+        let (_fixture, cache) = temp_cache();
+        let mut record = StoredJunkRoot::capture(&cache, vec![], 1).unwrap();
+        let baseline = root_retained_bytes(&record);
+        record.excluded_root_keys = Vec::with_capacity(4096);
+        let owned_slots = record.excluded_root_keys.capacity() * std::mem::size_of::<String>();
+        assert!(root_retained_bytes(&record) >= baseline + owned_slots);
     }
 }

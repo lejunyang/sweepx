@@ -21,12 +21,13 @@ use sweepx_scanner::ChangeLog;
 /// Bounded wall time for the shared FSEvents drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+const MAX_CHANGE_PATHS: usize = 65_536;
+const MAX_CHANGE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Per-root validated state used to answer reuse queries.
 struct RootState {
     /// Stored index: carries directory coverage and cached file lengths.
     index: StoredSubtreeIndex,
-    /// Raw absolute paths FSEvents reported since the index event id.
-    changed: BTreeSet<PathBuf>,
     /// The drain asked for a full rescan (dropped/lost history) or failed; reuse is disabled.
     unusable: bool,
 }
@@ -35,12 +36,14 @@ struct RootState {
 pub struct SubtreeCacheProvider {
     cache_dir: PathBuf,
     roots: BTreeMap<PathBuf, RootState>,
+    /// One bounded path/cursor map, shared by every root rather than copied per consumer.
+    changes: Option<ChangeIndex>,
 }
 
 impl SubtreeCacheProvider {
     /// Loads both cache layers and validates them with one complete history drain.
     ///
-    /// The query covers every requested root from the oldest root/index cursor. Each consumer
+    /// The query covers every cached consumer from the oldest root/index cursor. Each consumer
     /// filters events by its own cursor, so older index events cannot invalidate newer root
     /// records. Both caches are loaded before querying: a subsequently loaded older index
     /// could otherwise require history that the shared observation did not cover.
@@ -55,18 +58,38 @@ impl SubtreeCacheProvider {
         roots: &[PathBuf],
         query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
     ) -> (Self, Vec<Option<StoredJunkRoot>>) {
+        Self::prepare_with_query_and_limits(
+            cache_dir,
+            roots,
+            query,
+            MAX_CHANGE_PATHS,
+            MAX_CHANGE_BYTES,
+        )
+    }
+
+    fn prepare_with_query_and_limits(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
+        change_count: usize,
+        change_bytes: usize,
+    ) -> (Self, Vec<Option<StoredJunkRoot>>) {
         let mut reader = junk_cache::CacheReader::new(cache_dir);
         let records = reader.roots(roots);
+        let max_roots = junk_cache::Limits::default().roots;
         let bindings: BTreeMap<_, _> = roots
             .iter()
-            .filter_map(|root| {
-                let metadata = fs::symlink_metadata(root).ok()?;
-                Some((root, (metadata.dev(), metadata.ino())))
+            .take(max_roots)
+            .map(|root| {
+                let identity = fs::symlink_metadata(root)
+                    .ok()
+                    .map(|metadata| (metadata.dev(), metadata.ino()));
+                (root, identity)
             })
             .collect();
         let indexes: BTreeMap<_, _> = roots
             .iter()
-            .take(junk_cache::Limits::default().roots)
+            .take(max_roots)
             .filter_map(|root| Some((root.clone(), reader.index(root)?)))
             .collect();
         let since = records
@@ -75,58 +98,90 @@ impl SubtreeCacheProvider {
             .map(StoredJunkRoot::since_event_id)
             .chain(indexes.values().map(StoredSubtreeIndex::since_event_id))
             .min();
-        let paths: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        let paths: Vec<&Path> = roots
+            .iter()
+            .take(max_roots)
+            .enumerate()
+            .filter(|(ordinal, root)| {
+                records[*ordinal].is_some() || indexes.contains_key(root.as_path())
+            })
+            .map(|(_, root)| root.as_path())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let log = since.and_then(|since| query(&paths, since).ok());
-        let records = junk_cache::validate_records_with_log(roots, records, log.as_ref());
+        let mut records = junk_cache::validate_records_with_log(roots, records, log.as_ref());
         // A root replaced while history was draining cannot lend its old listing to the
         // replacement tree, even if that change is delivered only in the next event batch.
         let rebound: BTreeSet<_> = roots
             .iter()
+            .take(max_roots)
             .filter(|root| {
                 let current = fs::symlink_metadata(root)
                     .ok()
                     .map(|meta| (meta.dev(), meta.ino()));
-                current.is_none() || current.as_ref() != bindings.get(root)
+                bindings.get(root).is_some_and(|before| before != &current)
             })
             .cloned()
             .collect();
-        let root_states = indexes
-            .into_iter()
-            .map(|(root, index)| {
-                let usable = log.as_ref().filter(|log| !log.must_rescan);
-                let mut changed: BTreeSet<PathBuf> = usable
-                    .map(|log| {
-                        log.events
-                            .iter()
-                            .filter(|event| {
-                                event.id > index.since_event_id()
-                                    && (Path::new(&event.path).starts_with(&root)
-                                        || root.starts_with(&event.path))
-                            })
-                            .map(|event| PathBuf::from(&event.path))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                changed.extend(
-                    rebound
+        // Binding observations are newer than the history validation above. They may expose a
+        // replacement before its event is delivered; complete root facts must also be rejected.
+        for (root, record) in roots.iter().zip(&mut records) {
+            if rebound
+                .iter()
+                .any(|changed| changed.starts_with(root) || root.starts_with(changed))
+            {
+                *record = None;
+            }
+        }
+        // Charge provider root keys/nodes before admitting the shared change map. Root count
+        // is bounded independently; this estimate is conservative rather than allocator RSS.
+        let auxiliary = roots.iter().take(max_roots).fold(0usize, |bytes, root| {
+            bytes.saturating_add(root.as_os_str().len().saturating_mul(2).saturating_add(256))
+        });
+        let remaining = reader
+            .remaining_retained_bytes()
+            .saturating_sub(auxiliary)
+            .min(change_bytes);
+        let changes = if auxiliary <= reader.remaining_retained_bytes() {
+            log.and_then(|log| ChangeIndex::capture(log, rebound, change_count, remaining))
+        } else {
+            None
+        };
+        if changes.is_none() {
+            records.fill(None);
+        }
+        let root_states = if changes.is_some() {
+            indexes
+                .into_iter()
+                .map(|(root, index)| {
+                    let current = fs::symlink_metadata(&root)
+                        .ok()
+                        .map(|meta| (meta.dev(), meta.ino()));
+                    let unchanged = current.is_some() && bindings.get(&root) == Some(&current);
+                    // Untracked extra requested roots cannot borrow an ancestor's index if their
+                    // binding was outside our bounded validation set.
+                    let untracked_overlap = roots
                         .iter()
-                        .filter(|changed| changed.starts_with(&root) || root.starts_with(changed))
-                        .cloned(),
-                );
-                (
-                    root.clone(),
-                    RootState {
-                        index,
-                        changed,
-                        unusable: usable.is_none() || rebound.contains(&root),
-                    },
-                )
-            })
-            .collect();
+                        .skip(max_roots)
+                        .any(|other| other.starts_with(&root) || root.starts_with(other));
+                    (
+                        root,
+                        RootState {
+                            index,
+                            unusable: !unchanged || untracked_overlap,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         (
             Self {
                 cache_dir: cache_dir.to_path_buf(),
                 roots: root_states,
+                changes,
             },
             records,
         )
@@ -162,6 +217,8 @@ impl SubtreeReuse for SubtreeCacheProvider {
         if state.unusable {
             return None;
         }
+        let changes = self.changes.as_ref()?;
+        let since = state.index.since_event_id();
         let path_text = dir_path.to_str()?;
         // The directory must be recorded as fully covered and have a stored child listing; without
         // either we cannot classify children without stating them.
@@ -172,10 +229,12 @@ impl SubtreeReuse for SubtreeCacheProvider {
 
         // The set is built once during preparation, not once per visited directory. Ancestor
         // events invalidate the entire listing; descendant events invalidate their own children.
-        if dir_path
-            .ancestors()
-            .any(|ancestor| state.changed.contains(ancestor))
-        {
+        if dir_path.ancestors().any(|ancestor| {
+            changes
+                .paths
+                .get(ancestor)
+                .is_some_and(|cursor| cursor.is_after(since))
+        }) {
             return None;
         }
 
@@ -188,8 +247,8 @@ impl SubtreeReuse for SubtreeCacheProvider {
                     };
                     // Reuse only a regular file recorded in the listing whose exact path is
                     // unchanged. Directories, unknown/new children and changed files are inspected.
-                    match listing.files.get(&name) {
-                        Some(logical_bytes) if !overlaps_changes(&state.changed, &child.path) => {
+                    match listing.files.get(name) {
+                        Some(logical_bytes) if !changes.overlaps(&child.path, since) => {
                             PlannedEntry::ReuseFile(CachedFileEntry {
                                 path: child.path.clone(),
                                 file_name: child.file_name.clone(),
@@ -204,21 +263,115 @@ impl SubtreeReuse for SubtreeCacheProvider {
     }
 }
 
-// Path ordering keeps descendants contiguous; query costs depth + log(events), without
-// allocating a second copy of the event history for every directory or child.
-fn overlaps_changes(changed: &BTreeSet<PathBuf>, path: &Path) -> bool {
-    path.ancestors().any(|ancestor| changed.contains(ancestor))
-        || changed
-            .range(path.to_path_buf()..)
-            .next()
-            .is_some_and(|event| event.starts_with(path))
+/// A native root replacement is unconditional; using MAX as a synthetic event id would
+/// incorrectly permit an index whose cursor already equals MAX.
+#[derive(Clone, Copy)]
+enum ChangeCursor {
+    Event(FsEventId),
+    Rebound,
+}
+impl ChangeCursor {
+    fn is_after(self, since: FsEventId) -> bool {
+        match self {
+            Self::Event(id) => id > since,
+            Self::Rebound => true,
+        }
+    }
+}
+
+/// Last event per path is sufficient: a change is relevant exactly when its largest cursor
+/// exceeds the consumer's cursor. Keeping one map avoids multiplying event retention by roots.
+struct ChangeIndex {
+    paths: BTreeMap<PathBuf, ChangeCursor>,
+    retained: usize,
+}
+
+impl ChangeIndex {
+    fn capture(
+        log: ChangeLog,
+        rebound: BTreeSet<PathBuf>,
+        event_limit: usize,
+        byte_limit: usize,
+    ) -> Option<Self> {
+        if log.must_rescan {
+            return None;
+        }
+        let mut index = Self {
+            paths: BTreeMap::new(),
+            retained: 0,
+        };
+        // Strings move into native paths without a second payload copy. The historical Vec is
+        // dropped here and only one bounded invalidation map remains throughout traversal.
+        for event in log.events {
+            index.insert(
+                PathBuf::from(event.path),
+                ChangeCursor::Event(event.id),
+                event_limit,
+                byte_limit,
+            )?;
+        }
+        for root in rebound {
+            // Native rebinding invalidates every consumer cursor, even before its event arrives.
+            index.insert(root, ChangeCursor::Rebound, event_limit, byte_limit)?;
+        }
+        Some(index)
+    }
+
+    fn insert(
+        &mut self,
+        path: PathBuf,
+        cursor: ChangeCursor,
+        event_limit: usize,
+        byte_limit: usize,
+    ) -> Option<()> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        if let Some(previous) = self.paths.get_mut(&path) {
+            *previous = match (*previous, cursor) {
+                (ChangeCursor::Event(old), ChangeCursor::Event(new)) => {
+                    ChangeCursor::Event(old.max(new))
+                }
+                _ => ChangeCursor::Rebound,
+            };
+            return Some(());
+        }
+        // Fixed node allowance includes the key/cursor and tree structure; path capacity is
+        // separate. Failure invalidates the entire map instead of losing a relevant change.
+        let retained = self
+            .retained
+            .checked_add(128)?
+            .checked_add(path.capacity())?;
+        if self.paths.len() >= event_limit || retained > byte_limit {
+            return None;
+        }
+        self.paths.insert(path, cursor);
+        self.retained = retained;
+        Some(())
+    }
+
+    fn overlaps(&self, path: &Path, since: FsEventId) -> bool {
+        path.ancestors().any(|ancestor| {
+            self.paths
+                .get(ancestor)
+                .is_some_and(|cursor| cursor.is_after(since))
+        }) || self
+            .paths
+            .range::<Path, _>((std::ops::Bound::Included(path), std::ops::Bound::Unbounded))
+            .take_while(|(changed, _)| changed.starts_with(path))
+            .any(|(_, cursor)| cursor.is_after(since))
+    }
 }
 
 /// Converts a native child name to the same marker string the scanner used when building listings.
 /// On macOS names are Unix bytes; UTF-8 is required (matches `native_basename_marker`).
-fn name_marker(name: &sweepx_model::NativeName) -> Option<String> {
+fn name_marker(name: &sweepx_model::NativeName) -> Option<&str> {
     match name {
-        sweepx_model::NativeName::UnixBytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+        sweepx_model::NativeName::UnixBytes(bytes) => std::str::from_utf8(bytes).ok(),
         sweepx_model::NativeName::WindowsUtf16(_) => None,
     }
 }
@@ -297,12 +450,27 @@ mod tests {
         assert!(records[1].is_none(), "new event must invalidate its root");
         let device = &provider.roots[&roots[0]];
         assert!(!device.unusable);
-        assert!(overlaps_changes(&device.changed, &roots[0].join("file")));
-        assert!(overlaps_changes(
-            &provider.roots[&roots[1]].changed,
-            &roots[1].join("file")
-        ));
-        assert!(!overlaps_changes(&device.changed, &roots[0].join("other")));
+        assert!(
+            provider
+                .changes
+                .as_ref()
+                .unwrap()
+                .overlaps(&roots[0].join("file"), device.index.since_event_id())
+        );
+        assert!(
+            provider
+                .changes
+                .as_ref()
+                .unwrap()
+                .overlaps(&roots[1].join("file"), 40)
+        );
+        assert!(
+            !provider
+                .changes
+                .as_ref()
+                .unwrap()
+                .overlaps(&roots[0].join("other"), 40)
+        );
     }
 
     #[test]
@@ -321,7 +489,8 @@ mod tests {
                     }
                 });
             assert!(records.iter().all(Option::is_none));
-            assert!(provider.roots.values().all(|device| device.unusable));
+            assert!(provider.roots.is_empty());
+            assert!(provider.changes.is_none());
         }
     }
 
@@ -341,8 +510,21 @@ mod tests {
         assert!(records[0].is_none());
         assert!(records[1].is_some());
         let state = &provider.roots[&roots[0]];
-        assert!(overlaps_changes(&state.changed, &roots[0].join("file")));
-        assert!(!overlaps_changes(&state.changed, &roots[1].join("file")));
+        assert!(state.unusable);
+        assert!(
+            provider
+                .changes
+                .as_ref()
+                .unwrap()
+                .overlaps(&roots[0].join("file"), 40)
+        );
+        assert!(
+            !provider
+                .changes
+                .as_ref()
+                .unwrap()
+                .overlaps(&roots[1].join("file"), 40)
+        );
     }
 
     #[test]
@@ -360,15 +542,18 @@ mod tests {
 
     #[test]
     fn history_preserves_ancestors_and_component_boundaries() {
-        let changed = ["/root/a", "/root/a/child", "/root/b/file"]
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let changed = ChangeIndex {
+            paths: ["/root/a", "/root/a/child", "/root/b/file"]
+                .into_iter()
+                .map(|path| (PathBuf::from(path), ChangeCursor::Event(1)))
+                .collect(),
+            retained: 0,
+        };
         for path in ["/", "/root", "/root/a/sibling", "/root/b", "/root/b/file"] {
-            assert!(overlaps_changes(&changed, Path::new(path)), "{path}");
+            assert!(changed.overlaps(Path::new(path), 0), "{path}");
         }
         for path in ["/root/ab", "/root/b/other", "/other"] {
-            assert!(!overlaps_changes(&changed, Path::new(path)), "{path}");
+            assert!(!changed.overlaps(Path::new(path), 0), "{path}");
         }
     }
     #[test]
@@ -422,5 +607,151 @@ mod tests {
                 expected
             );
         }
+    }
+    fn log_of(events: &[(&str, u64)]) -> ChangeLog {
+        ChangeLog {
+            must_rescan: false,
+            events: events
+                .iter()
+                .map(|(path, id)| sweepx_scanner::ChangeEvent {
+                    path: (*path).into(),
+                    id: *id,
+                    flags: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn shared_map_deduplicates_paths_and_matches_a_brute_force_cursor_oracle() {
+        let observations = [
+            ("/root/a/aaa", 10),
+            ("/root/a/file", 30),
+            ("/root/a/file", 20),
+            ("/root/a/zzz", 100),
+            ("/root/b", 5),
+        ];
+        let index = ChangeIndex::capture(log_of(&observations), BTreeSet::new(), 10, 4096).unwrap();
+        assert_eq!(index.paths.len(), 4);
+        for path in [
+            "/",
+            "/root",
+            "/root/a",
+            "/root/a/file",
+            "/root/a/aaa",
+            "/root/ab",
+            "/root/a/other",
+            "/root/b/child",
+            "/other",
+        ] {
+            for since in [0, 10, 20, 30, 50, 100, u64::MAX] {
+                let expected = observations.iter().any(|(changed, id)| {
+                    *id > since
+                        && (Path::new(changed).starts_with(path)
+                            || Path::new(path).starts_with(changed))
+                });
+                assert_eq!(
+                    index.overlaps(Path::new(path), since),
+                    expected,
+                    "{path} cursor={since}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_path_and_byte_limits_refuse_whole_index_but_duplicates_fit() {
+        let repeated = vec![("/root/file", 12); 100];
+        let index = ChangeIndex::capture(log_of(&repeated), BTreeSet::new(), 1, 512).unwrap();
+        assert_eq!(index.paths.len(), 1);
+        assert!(
+            ChangeIndex::capture(
+                log_of(&[("/root/a", 1), ("/root/b", 2)]),
+                BTreeSet::new(),
+                1,
+                4096
+            )
+            .is_none()
+        );
+        let long = format!("/root/{}", "x".repeat(700));
+        assert!(ChangeIndex::capture(log_of(&[(&long, 1)]), BTreeSet::new(), 10, 512).is_none());
+        assert!(
+            ChangeIndex::capture(log_of(&[("/root/../else", 1)]), BTreeSet::new(), 10, 4096)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_rebinding_is_unconditional_even_for_the_largest_event_cursor() {
+        let rebound = [PathBuf::from("/root/a")].into_iter().collect();
+        let index = ChangeIndex::capture(log_of(&[("/root/a", 0)]), rebound, 10, 4096).unwrap();
+        for path in ["/root", "/root/a", "/root/a/file"] {
+            assert!(index.overlaps(Path::new(path), u64::MAX));
+        }
+        assert!(!index.overlaps(Path::new("/root/ab"), u64::MAX));
+    }
+
+    #[test]
+    fn change_budget_failure_cannot_leave_either_cache_layer_enabled() {
+        let (_fixture, cache, roots) = seeded_cache();
+        for (count, bytes) in [(0, 4096), (10, 64)] {
+            let (provider, records) = SubtreeCacheProvider::prepare_with_query_and_limits(
+                &cache,
+                &roots,
+                |_, _| {
+                    // The event predates both complete root records but is relevant to the older
+                    // file index. Root records cannot mask a truncated invalidation map.
+                    Ok(log_of(&[(roots[0].join("file").to_str().unwrap(), 60)]))
+                },
+                count,
+                bytes,
+            );
+            assert!(records.iter().all(Option::is_none));
+            assert!(provider.changes.is_none());
+            for root in &roots {
+                let child = sweepx_platform::DirectoryEntryRecord {
+                    path: root.join("file"),
+                    file_name: sweepx_model::NativeName::UnixBytes(b"file".to_vec()),
+                };
+                assert!(provider.plan_entries(root, &[child]).is_none());
+            }
+        }
+    }
+    #[test]
+    fn uncached_extra_roots_do_not_expand_the_native_history_query() {
+        let (_fixture, cache, mut roots) = seeded_cache();
+        let cached = roots.clone();
+        let base = roots[0].parent().unwrap().to_path_buf();
+        roots.extend((0..300).map(|ordinal| base.join(format!("uncached-{ordinal}"))));
+        let (provider, records) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |paths, since| {
+                assert_eq!(since, 40);
+                assert_eq!(
+                    paths.iter().copied().collect::<BTreeSet<_>>(),
+                    cached.iter().map(PathBuf::as_path).collect()
+                );
+                Ok(log_of(&[]))
+            });
+        assert!(records[0].is_some() && records[1].is_some());
+        assert!(records[2..].iter().all(Option::is_none));
+        assert_eq!(provider.roots.len(), 2);
+        assert!(provider.changes.unwrap().paths.is_empty());
+    }
+    #[test]
+    fn a_nested_root_outside_the_binding_budget_cannot_borrow_an_ancestor_index() {
+        let (_fixture, cache, mut roots) = seeded_cache();
+        let parent = roots[0].clone();
+        let base = parent.parent().unwrap().to_path_buf();
+        roots.extend((0..254).map(|ordinal| base.join(format!("unrelated-{ordinal}"))));
+        let nested = parent.join("unvalidated");
+        fs::create_dir(&nested).unwrap();
+        roots.push(nested);
+        let (provider, _) =
+            SubtreeCacheProvider::prepare_with_query(&cache, &roots, |_, _| Ok(log_of(&[])));
+        let child = sweepx_platform::DirectoryEntryRecord {
+            path: parent.join("file"),
+            file_name: sweepx_model::NativeName::UnixBytes(b"file".to_vec()),
+        };
+        assert!(provider.plan_entries(&parent, &[child]).is_none());
     }
 }
