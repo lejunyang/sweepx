@@ -48,6 +48,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 | 用户表面 | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | 命令编排、机器/人类输出、有界只读视图 |
 | P3 模拟安全 | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | immutable binding、durable audit/recovery、sealed fake execution |
 
+`sweepx-core` 不依赖 `sweepx-tui`、ratatui 或 crossterm。CLI 的 `tui_adapter` 模块连接 browser 的详情请求和 scanner 的原生身份复验；scanner 继续负责 no-follow、mount、取消与资源限制。旧的 core JSON 浏览封装没有命令或调用者，已移除；只读 JSON 视图仍由 TUI 库提供，`scan --tui` 使用本次 typed summary。
+
 Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个最多 256 action 的封闭 R4 plan；普通文件执行一次 exact-basename `unlinkat`，目录按 manifest 后序逐项执行 `unlinkat`/nonrecursive `rmdir`。该 adapter 在非 Linux 构建中不存在。
 
 ## 状态与取消

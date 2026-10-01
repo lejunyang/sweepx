@@ -29,7 +29,6 @@ sweepx-i18n = { version = "0.0.1", path = "../sweepx-i18n" }
 sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
 sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
-sweepx-tui = { version = "0.0.1", path = "../sweepx-tui" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sweepx-event-journal = { version = "0.0.1", path = "../sweepx-event-journal" }

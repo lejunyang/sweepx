@@ -48,6 +48,8 @@ Cleaner types and validation live in `sweepx-catalog::schema`, deterministic eva
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 
+`sweepx-core` does not depend on `sweepx-tui`, ratatui or crossterm. The CLI's `tui_adapter` module connects browser detail requests to the scanner's native identity revalidation; no-follow, mount, cancellation and resource limits remain scanner-owned. The core JSON-browser wrapper had no command or callers and has been removed. Read-only JSON views remain available in the TUI library; `scan --tui` consumes the current typed summary.
+
 Linux `delete` reuses `sweepx-audit` exact authorization, claim, intent, outcome, and fencing, but does not make the general P3 executor native. The CLI constructs and persists one closed R4 plan of at most 256 actions. A file uses one exact-basename `unlinkat`; a directory runs manifest-bound `unlinkat`/nonrecursive `rmdir` actions in postorder. That adapter does not exist in non-Linux builds.
 
 ## State and cancellation

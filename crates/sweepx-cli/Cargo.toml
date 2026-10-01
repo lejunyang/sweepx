@@ -26,6 +26,7 @@ sweepx-i18n = { version = "0.0.1", path = "../sweepx-i18n" }
 sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 sweepx-platform = { version = "0.0.1", path = "../sweepx-platform" }
 sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
+sweepx-scanner = { version = "0.0.1", path = "../sweepx-scanner", default-features = false }
 sweepx-tui = { version = "0.0.1", path = "../sweepx-tui" }
 trash = { version = "5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 

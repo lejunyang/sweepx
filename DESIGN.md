@@ -854,7 +854,7 @@ crates/
   sweepx-safety/            # risk、protections、plan、approval、preflight；sealed permit
   sweepx-executor/          # fence、serial action loop、adapter dispatch
   sweepx-audit/             # intent/outcome journal、CAS、reconciliation
-  sweepx-core/              # use cases / SweepxService facade
+  sweepx-core/              # use cases / SweepxService facade; no terminal dependency
   sweepx-protocol/          # output/event v1、cursor、exit mapping
   sweepx-cli/               # clap front end + human/JSON/NDJSON renderers
   sweepx-tui/               # ratatui virtual client

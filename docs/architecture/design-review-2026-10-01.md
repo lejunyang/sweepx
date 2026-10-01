@@ -101,3 +101,29 @@ cargo test -p sweepx-cli benchmark_batched_root_validation -- --ignored --nocapt
 合并交付验证（2026-10-01，arm64 macOS）：工作区格式、`--all-targets --all-features` clippy 和测试通过，仍为 707 项通过、0 失败、2 项基准 ignored，显式排除上述系统 Trash 契约测试。独立对照合并前后的测试名称，共享契约、macOS 后端和 Windows 纯解析器的 75 项测试全部保留，仅增加平台模块前缀。仅契约、单后端以及无后端 scanner 的编译检查通过；仅契约的普通依赖树不含原生后端依赖。
 
 Linux GNU、Windows GNU 的全工作区交叉 clippy，以及各自单独启用后端 feature 的平台 crate clippy 均通过；这不覆盖目标宿主运行时或 Windows MSVC。53 份 Markdown 检查和 23 项文档检查器测试通过。17 个本地 package archive 已生成并独立核对：迁移源码、catalog 规则资源、后端 feature 均存在，规范化依赖清单没有已移除的五个 crate。打包使用 `--no-verify`，不代表从 registry 依赖构建已验收；发布脚本顺序覆盖全部 17 包并满足本地依赖顺序。
+
+## 第二轮精简评估：依赖方向优先于数量
+
+2026-10-01 根据本地 Cargo metadata、源码调用点和公开契约复查剩余 17 个 crate。表中的调用者只计当前 workspace 的直接普通依赖，按包去重、不计 dev dependency，不能据此推断 registry 用户不存在。此次不再减少包数量：没有发现与上一轮 schema/VM、平台后端同等明确的合并收益。
+
+| Crate | 保留依据与后续边界 |
+| --- | --- |
+| model、protocol | model 被 10 个其他包直接引用，protocol 被 5 个引用；类型/证据与输出 envelope 各自有独立契约，合并会把协议投影带入底层扫描 |
+| canonical、i18n | canonical 只有约 170 行但被 5 个包共用，i18n 被 3 个表面共用；分别保持摘要语义和语言选择，不能按文件长度判断冗余 |
+| platform、scanner、fixtures | 平台原生操作、遍历与聚合、共享测试夹具各有所有权；fixtures 仅是平台/scanner 的 dev dependency，合入生产层收益有限 |
+| cache、event-journal | 可丢弃预览与 Linux 已完成事件的持久 replay/校验不是同一种契约；journal 虽仅 core 使用，仍应避免把 SQLite/Linux 生命周期并入通用缓存 |
+| catalog、analysis | catalog 负责加载/校验/评估规则，analysis 负责候选和解释；analysis 也被 safety 使用，不能为了合并让安全层依赖 core 编排 |
+| core、cli、tui | 保留业务、入口和终端呈现的边界；修正 core 反向依赖 tui，而非合并成更大的入口包 |
+| audit、safety、executor | audit 有 core/CLI/safety/executor 多个消费者；safety 与 executor 保留不可伪造授权/permit 和 sealed simulation 执行之间的边界。executor 尚无 CLI 消费者，并不代表可以把其状态机或崩溃语义删除 |
+
+已落实：将原 core 内的 `TuiDetailRescanProvider`、转换逻辑和相关测试整体迁到 CLI 的 `tui_adapter` 模块。只组合已有 scanner 与 browser API，不复制遍历算法；身份 namespace、no-follow/mount 复验、单次取消状态和有界进度发送保持原有实现。`sweepx-core` 的正常依赖图中不再包含 tui、ratatui、crossterm。core 的 typed scan summary、根准入与已有 `into_tui_parts`/`scan_for_tui_with_store` 辅助方法保留，不依赖终端类型。
+
+同时删除没有命令或调用者的 `TuiReadRequest`、`TuiReadSuccess`、`tui_read_from_scan_json` 和错误映射封装；TUI 库的有界 JSON 视图仍保留。导入解释的错误类型由误命名的 `CoreError::TuiInput` 改为 `ScanInput`，仍返回 usage error。以上是 Rust API 调整，既有 CLI 选项、机器字段名与枚举值不变。
+
+此次没有统计“重复代码百分比”：同样使用 SHA-256、SQLite 或 filesystem helper，可能承担不同的 domain、事务或授权契约，文本相似度不能证明可以共用。后续精简优先下沉 CLI 的平台候选解释和拆分入口模块，再处理已经验证为同一契约的重复逻辑；不新增通用 util、插件或服务框架。
+
+验证中发现的两类问题分开处理：缓存测试以 PID/时间戳加 `create_dir_all` 命名，可能让并发测试共用目录，已单独改为原子创建的 `TempDir` 并保留其生命周期。macOS 文件详情则是产品层缺口：将原 Linux 完整详情用例临时扩展到本机后，普通文件返回 `IdentityUnavailable`；源码确认 macOS `inspect_child` 给文件/链接的 mount identity 为 `None`，而 detail scanner 要求它为已知。未通过复制父 mount 或放宽复验来掩盖它；原 Linux 成功详情用例保留平台范围，取消后空目录刷新用例扩展到三平台，并在本机通过。macOS 文件详情的成功路径仍待补充原生身份观察和独立回归，不能从这轮迁移的通过结果推断它已修复。
+
+第二轮交付验证（2026-10-01，arm64 macOS，Rust 1.98.0）：格式、受影响 core/CLI 的 all-targets/all-features clippy、工作区 clippy 通过；工作区测试 708 项通过、0 失败、2 项原有基准 ignored。仍用 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 排除已诊断的系统 Trash 挂起，该行为未验证。Linux GNU 与 Windows GNU 的工作区交叉 clippy 通过，包括迁移后的目标测试代码；未运行目标宿主测试，未验收 MSVC。53 份 Markdown 检查和 23 项检查器测试通过。
+
+独立复核包含：对照迁移前源码，适配器生产逻辑在可见性、注释与 rustfmt 规范化后完全一致；通过 core 的普通依赖树和 Cargo metadata 确认终端依赖已断开；core/CLI 的 package list 保留预期源码并包含 `tui_adapter.rs`；现有发布顺序仍覆盖 17 包并满足普通及开发依赖的先后关系。以上检查不包括 registry 依赖构建或发布，也不消除已记录的 macOS 文件详情缺口。

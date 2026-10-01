@@ -30,6 +30,8 @@
 
 CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择语言，也可以用 `--locale zh-CN` 或 `--locale en-US` 显式覆盖；机器输出字段和值保持稳定，不随翻译改变。
 
+库调用扫描与分类只需 `sweepx-core`，不依赖终端浏览器。CLI 在 `tui_adapter` 模块连接 `sweepx-scanner` 和 `sweepx-tui`；身份重验、取消和扫描资源限制继续由 scanner 负责。
+
 ## 安装
 
 发布页已提供 v0.0.1 的统一 `sweepx` 二进制。安装器下载与当前平台匹配的归档，校验 `SHA256SUMS`，并拒绝包含额外文件的归档。

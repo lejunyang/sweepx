@@ -30,6 +30,8 @@ use sweepx_core::junk::{
 use sweepx_core::tools as tool_installations;
 use sweepx_core::tools::{ProbeLimits, ProbeRunner};
 mod trash_command;
+mod tui_adapter;
+use tui_adapter::tui_detail_rescan_provider;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
@@ -44,7 +46,7 @@ use sweepx_core::{
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
     scan_for_tui_with_store, scan_junk_with_store, scan_ndjson_supported, scan_with_store,
     serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
-    tui_detail_rescan_provider, usage_error_output, validate_absolute_root,
+    usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
 use sweepx_core::{StatusReplayRequest, replay_completed_status};
