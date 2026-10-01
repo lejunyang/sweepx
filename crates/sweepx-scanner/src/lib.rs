@@ -329,6 +329,10 @@ pub trait ClassifiedScanObserver {
 
 /// Result of a classified scan: the pruned summary plus the rule id chosen per entry.
 pub struct ClassifiedScan {
+    /// Optional native root observations for cache publication, including non-candidate roots.
+    /// Charged to the shared metadata budget and evictable; absent evidence forbids publication.
+    /// These rows do not enter the candidate summary or machine output.
+    pub observed_roots: Vec<ScannedEntry>,
     /// Summary whose directory rows contain only classified candidates, with sparse `.git` file
     /// rows retained as worktree/submodule boundary facts.
     pub summary: ScanSummary,
@@ -364,6 +368,7 @@ impl std::fmt::Debug for CollectingScanSink<'_> {
 }
 struct CollectingScanSink<'a> {
     summary: ScanSummary,
+    observed_roots: Vec<ScannedEntry>,
     limits: ScanResourceLimits,
     overflowed_roots: BTreeSet<PathBuf>,
     overflow_count: usize,
@@ -419,6 +424,7 @@ impl<'a> CollectingScanSink<'a> {
                 progress: Vec::new(),
             },
             limits,
+            observed_roots: Vec::new(),
             overflowed_roots: BTreeSet::new(),
             overflow_count: 0,
             detail_overflowed_roots: BTreeSet::new(),
@@ -461,6 +467,7 @@ impl<'a> CollectingScanSink<'a> {
     /// subtree not having been traversed.
     fn finish_classified(self) -> ClassifiedScan {
         ClassifiedScan {
+            observed_roots: self.observed_roots,
             summary: self.summary,
             decisions: self.decisions,
             directory_markers: self.directory_markers,
@@ -485,6 +492,7 @@ impl<'a> CollectingScanSink<'a> {
         if required && !fits(self.metadata_bytes, self.root_metadata_bytes) {
             self.dir_listings.clear();
             self.covered_paths.clear();
+            self.observed_roots = Vec::new();
             self.metadata_bytes -= self.reuse_bytes;
             self.root_metadata_bytes -= self.root_reuse_bytes;
             self.reuse_bytes = 0;
@@ -697,6 +705,13 @@ impl ScanSink for CollectingScanSink<'_> {
                 return Ok(());
             }
             let id = identity.entry_id.clone();
+            if self.observed_roots.len() < self.limits.max_retained_entries
+                && self.admit_metadata(Self::row_cost(&entry).saturating_mul(2), false)
+            {
+                // Optional copies cannot displace required classification facts. Double the
+                // estimate to cover spare Vec capacity; pressure evicts them with file indexes.
+                self.observed_roots.push(entry.clone());
+            }
             self.pending_root_ids.insert(id.clone());
             self.pending_directories.insert(id, entry);
             return Ok(());
@@ -3724,6 +3739,12 @@ mod tests {
         assert_eq!(ordinary.coverages, live.coverages);
         assert_eq!(ordinary.covered_paths, live.covered_paths);
         assert_eq!(ordinary.dir_listings, live.dir_listings);
+        assert_eq!(ordinary.observed_roots, live.observed_roots);
+        assert_eq!(live.observed_roots.len(), 1);
+        assert!(
+            live.summary.roots.is_empty(),
+            "a non-candidate root is not junk"
+        );
         assert!(observed.finished);
         assert_eq!(observed.progress, live.summary.progress);
         assert_eq!(observed.boundaries, live.summary.boundaries);
@@ -3927,6 +3948,31 @@ mod tests {
                 .any(|event| matches!(event, ProgressEvent::EntryObserved { .. })),
             "metadata retention must not stop the filesystem walk"
         );
+    }
+
+    #[test]
+    fn required_evidence_evicts_optional_root_observations_and_releases_their_vector() {
+        let platform = NestedFanOutPlatform::new(0);
+        let root = platform.root.clone();
+        let source = Scanner::new(platform, ScannerOptions::default())
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap()
+            .roots
+            .remove(0);
+        let mut sink =
+            CollectingScanSink::new_classified(ScanResourceLimits::default(), &ObservedBranches);
+        sink.push_root(&root, source).unwrap();
+        assert_eq!(sink.observed_roots.len(), 1);
+        sink.limits.max_classified_metadata_bytes = sink.metadata_bytes;
+        // Fill the current admission budget, then request one required evidence byte. Optional
+        // publication facts must be discarded before required classification becomes partial.
+        assert!(sink.admit_metadata(1, true));
+        assert!(sink.observed_roots.is_empty());
+        assert_eq!(sink.observed_roots.capacity(), 0);
+        assert!(!sink.metadata_lost);
     }
 
     #[test]

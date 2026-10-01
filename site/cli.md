@@ -159,7 +159,7 @@ sweepx --format json junk --system
 
 项目产物规则统一由 catalog 加载、core 的 `JunkService` 使用现有 cleaner VM 评估，CLI 与后续交互界面可共享该入口。规则匹配只形成报告候选。
 
-`junk --tui ROOT...` 实时显示扫描阶段、进度及各根完成后的垃圾候选。默认按逻辑大小降序，`--sort path` 改为路径顺序；未知大小排在已知零字节之后，不当作零。方向键移动，Space 选择，`a` 全选（最多 256 项），`u` 清空，`r` 刷新所选或当前行，`c` 取消，`d/Delete` 移到系统回收站，`q/Esc` 退出。选择按稳定键保留；旧、不完整或回收失败的行标为历史证据，需要完整刷新后才能再次回收。回收在独立工作线程执行，逐项重验 no-follow、对象/filesystem/mount 身份；重要/保护目录拒绝，失败不永久删除。该模式要求终端和显式目录根，不能结合 `--system`、`--timings`、`--trash`、`--clean-temp`、`--quarantine-dir` 或机器输出，不读写历史候选缓存或 operation journal。选中刷新仍遍历原始根以保持父分类上下文；单个大根的完整候选仍要等该根结束。
+`junk --tui ROOT...` 实时显示扫描阶段、进度及各根完成后的垃圾候选。默认按逻辑大小降序，`--sort path` 改为路径顺序；未知大小排在已知零字节之后，不当作零。方向键移动，Space 选择，`a` 全选（最多 256 项），`u` 清空，`r` 刷新所选或当前行（空视图重扫全部），`R` 刷新全部原始根，`c` 取消，`d/Delete` 移到系统回收站，`q/Esc` 退出。选择按稳定键保留；旧、不完整或回收失败的行标为历史证据，需要完整刷新后才能再次回收。回收在独立工作线程执行，逐项重验 no-follow、对象/filesystem/mount 身份；重要/保护目录拒绝，失败不永久删除。该模式要求终端和显式目录根，不能结合 `--system`、`--timings`、`--trash`、`--clean-temp`、`--quarantine-dir` 或机器输出，macOS 会先显示历史候选缓存，并在后台核验文件索引、重新遍历目录及解释当前 Git 证据；历史行不能回收，刷新历史行会扫描全部原始根。其他平台继续现场扫描，不写 operation journal。选中刷新仍遍历原始根以保持父分类上下文；单个大根的完整候选仍要等该根结束。
 
 macOS 整根缓存命中后按本次工具快照重算 activity/staleFormats，并由 core 的 `GitEvidenceSession` 重建当前仓库、tracked 与 ignore 证据。缓存只保存遍历覆盖及候选内仓库边界事实，不保存 Git 查询结果；历史 `ignored` / `high` 不作为本次证据。当前确认未跟踪、被 ignore、完整覆盖且不含仓库的项目候选才增强置信度，失败保留基础 `known_generated` / `medium` 和明确 blocker。选定根之外的父仓库与排除配置也在本次观察。
 

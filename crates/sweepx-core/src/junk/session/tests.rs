@@ -7,6 +7,271 @@ use std::time::Instant;
 // and explicitly observe worker exit so a previous test cannot consume the next one's permit.
 static SESSION_TESTS: Mutex<()> = Mutex::new(());
 
+#[cfg(target_os = "macos")]
+#[test]
+fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    let target = project(&root, "a", b"initial-payload");
+    let cache = base.join("cache");
+    let request = || {
+        let mut request = JunkSessionRequest::new(vec![root.clone()]);
+        request.cache_dir = Some(cache.clone());
+        request.limits.max_events = 1;
+        request
+    };
+    let cold = JunkSession::start(request()).unwrap();
+    let rows = current(&drain(&cold, JunkSessionRevision(1)));
+    let (&key, original) = rows.first_key_value().unwrap();
+    shutdown(&cold);
+    assert!(
+        crate::junk::cache::CacheReader::new(&cache)
+            .index(&root)
+            .is_some()
+    );
+    fs::write(
+        target.join("payload"),
+        b"changed-and-larger-current-payload",
+    )
+    .unwrap();
+    let warm = JunkSession::start(request()).unwrap();
+    let events = drain(&warm, JunkSessionRevision(1));
+    let preview_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                JunkSessionEventKind::Candidate {
+                    state: JunkSessionCandidateState::Historical,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let discovery_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                JunkSessionEventKind::Phase(JunkSessionPhase::Discovery)
+            )
+        })
+        .unwrap();
+    assert!(preview_position < discovery_position);
+    let current_rows = current(&events);
+    let refreshed = &current_rows[&key];
+    assert_ne!(original.aggregate.scan_id, refreshed.aggregate.scan_id);
+    assert_eq!(
+        refreshed.aggregate.apparent_logical_bytes,
+        sweepx_model::ByteValue::Known {
+            value: sweepx_model::DecimalU128::new(
+                fs::symlink_metadata(target.join("payload"))
+                    .unwrap()
+                    .len()
+                    .into()
+            )
+        }
+    );
+    assert!(
+        !refreshed
+            .candidate
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "historical_cache")
+    );
+    fs::remove_file(root.join("a/Cargo.toml")).unwrap();
+    let revision = warm.refresh_all().unwrap();
+    let removed = drain(&warm, revision);
+    assert!(matches!(
+        removed.first().unwrap().kind,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All
+        }
+    ));
+    assert!(removed.iter().any(|event| matches!(event.kind,
+        JunkSessionEventKind::Removed { key: old } if old == key)));
+    shutdown(&warm);
+    let last = JunkSession::start(request()).unwrap();
+    let final_events = drain(&last, JunkSessionRevision(1));
+    assert!(!final_events.iter().any(|event| matches!(
+        event.kind,
+        JunkSessionEventKind::Candidate {
+            state: JunkSessionCandidateState::Historical,
+            ..
+        }
+    )));
+    assert!(
+        crate::junk::cache::CacheReader::new(&cache)
+            .index(&root)
+            .is_some()
+    );
+    shutdown(&last);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn preview_cancellation_preserves_history_until_complete_full_refresh() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    project(&root, "a", b"payload");
+    let cache = base.join("cache");
+    let request = || {
+        let mut request = JunkSessionRequest::new(vec![root.clone()]);
+        request.cache_dir = Some(cache.clone());
+        request.limits.max_events = 1;
+        request
+    };
+    let cold = JunkSession::start(request()).unwrap();
+    drain(&cold, JunkSessionRevision(1));
+    shutdown(&cold);
+    fs::remove_file(root.join("a/Cargo.toml")).unwrap();
+    let session = JunkSession::start(request()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let key = loop {
+        assert!(Instant::now() < deadline);
+        if let Some(event) = session
+            .next_event_timeout(Duration::from_millis(100))
+            .unwrap()
+        {
+            match event.kind {
+                JunkSessionEventKind::Candidate {
+                    key,
+                    state: JunkSessionCandidateState::Historical,
+                    ..
+                } => {
+                    session.cancel();
+                    break key;
+                }
+                JunkSessionEventKind::Completed { .. } => panic!("history missing"),
+                _ => {}
+            }
+        }
+    };
+    let cancelled = drain(&session, JunkSessionRevision(1));
+    assert!(matches!(
+        cancelled.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Cancelled,
+            replaced: false,
+            ..
+        }
+    ));
+    assert!(
+        !cancelled
+            .iter()
+            .any(|event| matches!(event.kind, JunkSessionEventKind::Removed { .. }))
+    );
+    let revision = session.refresh_all().unwrap();
+    let refreshed = drain(&session, revision);
+    assert!(refreshed.iter().any(|event| matches!(event.kind,
+        JunkSessionEventKind::Removed { key: old } if old == key)));
+    shutdown(&session);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cache_publication_failure_keeps_fresh_scan_complete() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    project(&root, "a", b"payload");
+    let cache = base.join("cache-file");
+    fs::write(&cache, b"not a directory").unwrap();
+    let mut request = JunkSessionRequest::new(vec![root]);
+    request.cache_dir = Some(cache.clone());
+    let session = JunkSession::start(request).unwrap();
+    let events = drain(&session, JunkSessionRevision(1));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, JunkSessionEventKind::CacheWarning(_)))
+    );
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            error_count: 0,
+            ..
+        }
+    ));
+    assert_eq!(fs::read(cache).unwrap(), b"not a directory");
+    shutdown(&session);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn warm_large_directory_finishes_with_fresh_identity_and_independent_logical_total() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    let target = project(&root, "a", b"payload");
+    for index in 0..8192 {
+        fs::write(target.join(format!("file-{index:05}")), b"01234567").unwrap();
+    }
+    let expected: u128 = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+        .sum();
+    let request = || {
+        let mut request = JunkSessionRequest::new(vec![root.clone()]);
+        request.cache_dir = Some(base.join("cache"));
+        request
+    };
+    let cold = JunkSession::start(request()).unwrap();
+    let initial = current(&drain(&cold, JunkSessionRevision(1)));
+    shutdown(&cold);
+    let warm = JunkSession::start(request()).unwrap();
+    let events = drain(&warm, JunkSessionRevision(1));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        JunkSessionEventKind::Candidate {
+            state: JunkSessionCandidateState::Historical,
+            ..
+        }
+    )));
+    let refreshed = current(&events);
+    assert_eq!(
+        initial.keys().collect::<Vec<_>>(),
+        refreshed.keys().collect::<Vec<_>>()
+    );
+    let (&key, row) = refreshed.first_key_value().unwrap();
+    assert_ne!(initial[&key].aggregate.scan_id, row.aggregate.scan_id);
+    assert_eq!(
+        row.aggregate.apparent_logical_bytes,
+        sweepx_model::ByteValue::Known {
+            value: sweepx_model::DecimalU128::new(expected)
+        }
+    );
+    shutdown(&warm);
+}
+
 fn fixture_root(fixture: &tempfile::TempDir) -> PathBuf {
     #[cfg(unix)]
     {

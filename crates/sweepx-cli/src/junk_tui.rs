@@ -21,8 +21,11 @@ pub(crate) fn run(
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
+    cache_dir: Option<PathBuf>,
 ) -> ExitCode {
-    let session = match JunkSession::start(JunkSessionRequest::new(roots)) {
+    let mut request = JunkSessionRequest::new(roots);
+    request.cache_dir = cache_dir;
+    let session = match JunkSession::start(request) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("{error}");
@@ -44,6 +47,7 @@ struct Row {
     native_key: JunkCandidateKey,
     revision: u64,
     current: bool,
+    preview: bool,
     row: Arc<JunkSessionCandidate>,
 }
 impl JunkRow for Row {
@@ -245,6 +249,8 @@ impl JunkProvider for Provider {
                         phase: match phase {
                             JunkSessionPhase::Rules => "rules",
                             JunkSessionPhase::Discovery => "discovery",
+                            JunkSessionPhase::Cache => "cache",
+                            JunkSessionPhase::CacheWrite => "cache_write",
                             JunkSessionPhase::Traversal => "traversal",
                             JunkSessionPhase::Git => "git",
                             JunkSessionPhase::Replacement => "replacement",
@@ -270,6 +276,7 @@ impl JunkProvider for Provider {
                         native_key: key,
                         revision,
                         current,
+                        preview: state == JunkSessionCandidateState::Historical,
                         row,
                     });
                     if current {
@@ -281,6 +288,7 @@ impl JunkProvider for Provider {
                     return Some(JunkEvent::Candidate {
                         revision,
                         current,
+                        historical: state == JunkSessionCandidateState::Historical,
                         row,
                     });
                 }
@@ -296,7 +304,7 @@ impl JunkProvider for Provider {
                         message: format!("{}: {}", boundary.path.display(), boundary.detail),
                     });
                 }
-                JunkSessionEventKind::Error(error) => {
+                JunkSessionEventKind::Error(error) | JunkSessionEventKind::CacheWarning(error) => {
                     return Some(JunkEvent::Error {
                         revision,
                         message: format!("{}: {}", error.code, error.detail),
@@ -341,14 +349,20 @@ impl JunkProvider for Provider {
         if self.busy || self.trash.is_some() {
             return Err("worker busy".into());
         }
-        let keys: Vec<_> = self
-            .selected(keys)?
-            .iter()
-            .map(|row| row.native_key)
-            .collect();
-        self.session
-            .refresh_selected(&keys)
-            .map_err(|error| error.to_string())?;
+        let rows = if keys.is_empty() {
+            Vec::new()
+        } else {
+            self.selected(keys)?
+        };
+        if keys.is_empty() || rows.iter().any(|row| row.preview) {
+            // Historical preview keys are display state, not the current binding registry.
+            // Refresh all original roots so replacement needs fresh complete observations.
+            self.session.refresh_all()
+        } else {
+            self.session
+                .refresh_selected(&rows.iter().map(|row| row.native_key).collect::<Vec<_>>())
+        }
+        .map_err(|error| error.to_string())?;
         self.busy = true;
         self.complete = false;
         Ok(())

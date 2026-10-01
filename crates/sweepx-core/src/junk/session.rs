@@ -4,6 +4,8 @@
 //! the session. Progress/statistics are coalesced. Drop closes the queue and cancels native work
 //! without joining on the UI thread: blocking OS calls remain cooperative, not interruptible.
 
+#[cfg(target_os = "macos")]
+mod cache;
 mod mailbox;
 
 use super::candidate::JunkCandidate;
@@ -69,6 +71,10 @@ pub enum JunkSessionScope {
 pub enum JunkSessionPhase {
     Rules,
     Discovery,
+    /// Historical preview reads and file-index change-history validation.
+    Cache,
+    /// Best-effort publication of freshly observed filesystem facts.
+    CacheWrite,
     Traversal,
     Git,
     Replacement,
@@ -77,6 +83,8 @@ pub enum JunkSessionPhase {
 /// Status of a candidate observation within a revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JunkSessionCandidateState {
+    /// Historical cache preview; no current interpretation or mutation authority.
+    Historical,
     /// Base rule and final traversal statistics; current Git interpretation is still pending.
     Base,
     /// Interpretation finished for this revision; may include explicit unknown evidence/blockers.
@@ -187,6 +195,8 @@ pub enum JunkSessionEventKind {
     Boundary(Box<sweepx_platform::BoundaryRecord>),
     /// A reliable diagnostic; completion follows with an explicit outcome.
     Error(JunkSessionFailure),
+    /// Optional cache failure; fresh scan validity is unaffected.
+    CacheWarning(JunkSessionFailure),
     /// Final event for the revision, delivered after every queued reliable observation.
     Completed {
         outcome: JunkSessionOutcome,
@@ -242,6 +252,8 @@ pub struct JunkSessionRequest {
     pub project_rule_bytes: Vec<u8>,
     /// Discover current platform context on the worker for each revision; false avoids tool probes.
     pub include_platform_rules: bool,
+    /// Optional private macOS cache directory. Other platforms scan fresh; no UI-thread I/O.
+    pub cache_dir: Option<PathBuf>,
     /// Storage, traversal and Git bounds.
     pub limits: JunkSessionLimits,
 }
@@ -252,6 +264,7 @@ impl JunkSessionRequest {
             roots,
             project_rule_bytes: PROJECT_RULES_JSON.as_bytes().to_vec(),
             include_platform_rules: false,
+            cache_dir: None,
             limits: JunkSessionLimits::default(),
         }
     }
@@ -295,6 +308,10 @@ impl JunkSession {
             return Err(JunkSessionControlError::InvalidRequest);
         }
         if request.roots.len() > MAX_ROOTS
+            || request
+                .cache_dir
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().len() > 64 * 1024)
             || request.project_rule_bytes.capacity() > 32 * 1024
             || request
                 .roots
@@ -324,6 +341,7 @@ impl JunkSession {
                     request,
                     session_id,
                     current: BTreeMap::new(),
+                    preview_keys: BTreeSet::new(),
                 };
                 let mut job = Job {
                     revision: JunkSessionRevision(1),
@@ -399,6 +417,12 @@ impl JunkSession {
         Ok(())
     }
 
+    /// Refreshes all original roots, including historical previews without current bindings.
+    /// Fresh complete observation is required before unseen old keys can be removed.
+    pub fn refresh_all(&self) -> Result<JunkSessionRevision, JunkSessionControlError> {
+        self.shared.refresh(Vec::new())
+    }
+
     /// Refreshes selected native subtrees, preserving their parent rule context.
     /// Unknown keys or changed native bindings fail asynchronously without erasing old rows.
     /// Fresh traversal currently covers their original roots, then filters to the selected ranges.
@@ -458,6 +482,9 @@ struct Worker {
     request: JunkSessionRequest,
     session_id: String,
     current: Rows,
+    // Historical display rows live in the bounded consumer queue/view, not the current binding
+    // registry. At most max_candidates fixed-size keys are kept for complete replacement.
+    preview_keys: BTreeSet<JunkCandidateKey>,
 }
 
 impl Worker {
@@ -475,6 +502,37 @@ impl Worker {
         }
         let service = JunkService::from_rule_bytes(&self.request.project_rule_bytes)
             .map_err(|error| JunkSessionFailure::new("rules_invalid", error.to_string()))?;
+        let rules_digest: [u8; 32] = {
+            let mut hash = Sha256::new();
+            hash.update(service.rule_bytes_digest);
+            hash.update([u8::from(self.request.include_platform_rules)]);
+            if self.request.include_platform_rules {
+                hash.update(super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes());
+            }
+            hash.finalize().into()
+        };
+        #[cfg(target_os = "macos")]
+        let cache = if let Some(directory) = self.request.cache_dir.clone() {
+            writer.phase(JunkSessionPhase::Cache)?;
+            // Capture before preview reads, validation and traversal. Racing changes belong to
+            // the next cache generation even if this revision later publishes complete facts.
+            let cursor = crate::current_event_id();
+            let mut reader = super::cache::CacheReader::with_rule_bytes(
+                &directory,
+                &self.request.project_rule_bytes,
+                super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
+            );
+            if job.revision.0 == 1 {
+                self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
+            }
+            Some((directory, cursor, reader))
+        } else {
+            None
+        };
+        if job.cancel.is_cancelled() {
+            writer.finish(JunkSessionOutcome::Cancelled, false, 0);
+            return Ok(());
+        }
         writer.phase(JunkSessionPhase::Discovery)?;
         let platform = if self.request.include_platform_rules {
             PlatformJunkSetup::discover_with_cancel(job.cancel.clone())
@@ -553,15 +611,24 @@ impl Worker {
             .map(ScanRoot::new)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| JunkSessionFailure::new("root_invalid", error.to_string()))?;
-        let rules_digest: [u8; 32] = {
-            let mut hash = Sha256::new();
-            hash.update(service.rule_bytes_digest);
-            hash.update([u8::from(self.request.include_platform_rules)]);
-            if self.request.include_platform_rules {
-                hash.update(super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes());
-            }
-            hash.finalize().into()
-        };
+        #[cfg(target_os = "macos")]
+        if cache.is_some() {
+            writer.phase(JunkSessionPhase::Cache)?;
+        }
+        #[cfg(target_os = "macos")]
+        let cache = cache.map(|(directory, cursor, reader)| {
+            let paths: Vec<_> = roots.iter().map(|root| root.path().to_path_buf()).collect();
+            let provider = super::cache::provider::SubtreeCacheProvider::prepare_files(
+                &directory, &paths, reader,
+            );
+            (directory, cursor, provider)
+        });
+        #[cfg(target_os = "macos")]
+        let reuse = cache
+            .as_ref()
+            .map(|(_, _, provider)| provider as &dyn crate::SubtreeReuse);
+        #[cfg(not(target_os = "macos"))]
+        let reuse = None;
         writer.phase(JunkSessionPhase::Traversal)?;
         let mut pending = Rows::new();
         let old_bytes = self
@@ -592,7 +659,7 @@ impl Worker {
             &roots,
             &job.cancel,
             &service.with_platform(&platform.rules, &platform.evidence),
-            None,
+            reuse,
             &mut observer,
         )
         .map_err(|error| JunkSessionFailure::new("scan_failed", error.to_string()))?;
@@ -666,11 +733,38 @@ impl Worker {
             writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
+        if let Some((directory, cursor, provider)) = &cache {
+            writer.phase(JunkSessionPhase::CacheWrite)?;
+            self.store_cache(
+                directory,
+                *cursor,
+                provider,
+                &scanned,
+                &pending,
+                &service,
+                &platform,
+                job,
+                partial || writer.error_count > 0,
+                writer,
+            )?;
+        }
+        if job.cancel.is_cancelled() {
+            writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
+            return Ok(());
+        }
         // All observations are finished. From Replacement onward the reliable commit stream
         // wins a racing cancel; close may still deliberately abandon consumption.
         writer.phase(JunkSessionPhase::Replacement)?;
         partial |= writer.error_count > 0;
         if !partial {
+            if job.selected.is_none() {
+                for key in std::mem::take(&mut self.preview_keys) {
+                    if !pending.contains_key(&key) && !self.current.contains_key(&key) {
+                        writer.send(JunkSessionEventKind::Removed { key })?;
+                    }
+                }
+            }
             let old_keys: Vec<_> = self
                 .current
                 .iter()

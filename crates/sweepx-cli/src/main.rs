@@ -10,13 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
-mod junk_cache;
+use sweepx_core::junk::cache as junk_cache;
 #[cfg(target_os = "linux")]
 use sweepx_core::junk::linux_temp;
 #[cfg(target_os = "linux")]
 mod permanent_delete_command;
 #[cfg(target_os = "macos")]
-mod subtree_provider;
+use sweepx_core::junk::cache::provider as subtree_provider;
 #[cfg(target_os = "macos")]
 mod tcc_access;
 #[cfg(target_os = "linux")]
@@ -210,6 +210,7 @@ enum Commands {
     Junk {
         /// Open the live junk view for explicit directory roots. Space selects; d moves selected
         /// current, complete candidates to Trash after native identity revalidation.
+        /// macOS shows historical caches first; only freshly verified rows can be moved.
         #[arg(long, conflicts_with_all = ["timings", "system", "trash", "clean_temp", "quarantine_dir"])]
         tui: bool,
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
@@ -636,7 +637,11 @@ fn main() -> ProcessExitCode {
                         return ProcessExitCode::from(2);
                     }
                 };
-                return junk_tui::run(roots, context.locale(), size_unit, sort);
+                let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
+                    .ok()
+                    .flatten()
+                    .map(|state_dir| state_dir.join("junk-cache"));
+                return junk_tui::run(roots, context.locale(), size_unit, sort, cache_dir);
             }
             if let Err(message) =
                 validate_junk_mutation_environment(clean_temp, trash, format, stdin_is_terminal)
@@ -1036,8 +1041,7 @@ struct JunkCleanOptions<'a> {
 // The first catalog is intentionally narrow: project outputs with deterministic names and a
 // rebuild contract. MangoDisk's broader inventory is research input, not license-compatible code
 // or automatic authority. Each future rule must carry its own source and safety review.
-#[cfg(target_os = "macos")]
-use sweepx_core::junk::PROJECT_RULES_JSON as PROJECT_JUNK_RULES_JSON;
+
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::candidate::GitIgnoreEvidence;
 use sweepx_core::junk::candidate::JunkCandidate;
@@ -1047,8 +1051,6 @@ use sweepx_core::junk::candidate::refresh_candidate_interpretation;
 use sweepx_core::junk::candidate::{assemble_platform_candidate, assemble_project_candidate};
 use sweepx_core::junk::git::{GitEvidenceLimits, GitEvidenceSession};
 
-#[cfg(target_os = "macos")]
-use sweepx_core::junk::platform::PLATFORM_JUNK_RULES_JSON;
 #[cfg(target_os = "macos")]
 use sweepx_core::junk::platform::PlatformJunkEvidence;
 #[cfg(target_os = "macos")]
@@ -1081,20 +1083,7 @@ fn deepest_root_for(path: &str, roots: &[PathBuf]) -> Option<usize> {
 /// Converts an in-memory candidate into the cache record's owned form.
 #[cfg(target_os = "macos")]
 fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunkCandidate {
-    junk_cache::StoredJunkCandidate {
-        path: candidate.path.clone(),
-        rule_id: candidate.rule_id.clone(),
-        risk: candidate.risk.clone(),
-        reclaimable: candidate.reclaimable.clone(),
-        evidence: candidate.evidence.clone(),
-        source_reviewed_at: candidate.source_reviewed_at.clone(),
-        references: candidate.references.clone(),
-        entry_id: candidate.entry_id.clone(),
-        ancestor_ids: candidate.ancestor_ids.clone(),
-        size_is_logical: candidate.size_is_logical,
-        source_entry: candidate.source_entry.clone(),
-        git_scan_facts: candidate.git_scan_facts,
-    }
+    junk_cache::StoredJunkCandidate::from_candidate(candidate)
 }
 
 /// Converts a cache record back into an in-memory candidate.
@@ -1109,43 +1098,12 @@ fn stored_candidate_to_junk(
     platform_rules: &[PlatformJunkRule],
     evidence: &PlatformJunkEvidence,
 ) -> Option<JunkCandidate> {
-    let source_entry = source_entry_from_stored(&stored);
     refresh_candidate_interpretation(
-        JunkCandidate {
-            path: stored.path,
-            rule_id: stored.rule_id,
-            risk: stored.risk,
-            reclaimable: stored.reclaimable,
-            evidence: stored.evidence,
-            source_reviewed_at: stored.source_reviewed_at,
-            references: stored.references,
-            entry_id: stored.entry_id,
-            ancestor_ids: stored.ancestor_ids,
-            activity: None,
-            stale_formats: Vec::new(),
-            size_is_logical: stored.size_is_logical,
-            git: None,
-            classification: None,
-            confidence: None,
-            blockers: Vec::new(),
-            source_entry,
-            git_scan_facts: stored.git_scan_facts,
-        },
+        stored.into_candidate(),
         project_rules,
         platform_rules,
         evidence,
     )
-}
-
-/// Reads the source `ScannedEntry` carried by a cached candidate.
-///
-/// Records written before the row was persisted (or by a path that had none) return `None`; that
-/// candidate then cannot be bulk-trashed from cache while its report stays accurate.
-#[cfg(target_os = "macos")]
-fn source_entry_from_stored(
-    stored: &junk_cache::StoredJunkCandidate,
-) -> Option<sweepx_model::ScannedEntry> {
-    stored.source_entry.clone()
 }
 
 fn validate_junk_mutation_environment(
@@ -1436,7 +1394,16 @@ fn run_junk_scan(
             let mut stored = Vec::new();
             for candidate in &fresh_candidates {
                 if deepest_root_for(&candidate.path, &canonical_roots) == Some(*index) {
-                    stored.push(junk_candidate_to_stored(candidate));
+                    let mut row = junk_candidate_to_stored(candidate);
+                    row.aggregate = scan
+                        .as_ref()
+                        .and_then(|scan| {
+                            scan.scan.summary.aggregates.iter().find(|aggregate| {
+                                aggregate.directory_identity == candidate.entry_id.as_str()
+                            })
+                        })
+                        .cloned();
+                    stored.push(row);
                 }
             }
             match junk_cache::StoredJunkRoot::capture(
@@ -1446,6 +1413,13 @@ fn run_junk_scan(
                 classification_context,
             )
             .and_then(|mut record| {
+                if !scan.as_ref().is_some_and(|scan| {
+                    scan.observed_roots
+                        .iter()
+                        .any(|source| record.matches_observed_root(source))
+                }) {
+                    return Err(std::io::Error::other("cache root changed after traversal"));
+                }
                 record.bind_scope(&canonical_roots);
                 junk_cache::write(cache, &record)
             }) {
@@ -1461,9 +1435,9 @@ fn run_junk_scan(
         // Persist file lengths only. Candidate rows cannot reconstruct subtree accounting or
         // current scan identities; directories are always traversed on a root-cache miss.
         if let Some(scan) = &scan {
-            for scan_root in &miss_roots {
-                if let Err(error) = subtree_provider.store_index(
-                    scan_root,
+            for source in &scan.observed_roots {
+                if let Err(error) = subtree_provider.store_observed_index(
+                    source,
                     &canonical_roots,
                     scan_event_id,
                     &scan.covered_paths,
@@ -1471,7 +1445,7 @@ fn run_junk_scan(
                 ) {
                     eprintln!(
                         "could not update subtree index for {}: {error}",
-                        scan_root.display()
+                        source.display_path
                     );
                 }
             }

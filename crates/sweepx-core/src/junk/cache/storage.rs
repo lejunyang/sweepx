@@ -12,6 +12,25 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The publishing process owns the critical section. CLOEXEC prevents inheritance after exec,
+/// but an in-progress fork/spawn can still hold a duplicate open file description. Closing only
+/// our descriptor would leave its flock alive in that child until exec/exit.
+pub(super) struct LockGuard {
+    file: File,
+    owner: libc::pid_t,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // An inherited Rust guard must not unlock its parent's live critical section. Parent
+        // release explicitly unlocks before closing; a child merely closes its duplicate.
+        // SAFETY: getpid takes no arguments; the guard owns the still-live locked descriptor.
+        if unsafe { libc::getpid() } == self.owner {
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
 /// Independent byte units: disk/input are encoded bytes; retained is owned-data estimates.
 #[derive(Clone, Copy)]
 pub(crate) struct Limits {
@@ -200,7 +219,7 @@ impl Directory {
 
     /// Nonblocking advisory serialization of publication and eviction across invocations.
     /// Contention makes this disposable cache unavailable rather than delaying a scan.
-    pub fn lock(&self) -> io::Result<File> {
+    pub fn lock(&self) -> io::Result<LockGuard> {
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
             libc::openat(
@@ -227,7 +246,11 @@ impl Directory {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(file)
+        Ok(LockGuard {
+            file,
+            // SAFETY: getpid has no arguments and records the process acquiring this flock.
+            owner: unsafe { libc::getpid() },
+        })
     }
 
     fn open_file(&self, name: &str) -> io::Result<File> {
@@ -446,6 +469,79 @@ impl<W: Write> Write for LimitedWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_lock_release_does_not_wait_for_an_inherited_child_descriptor() {
+        let (_fixture, _path, directory) = directory();
+        let lock = directory.lock().unwrap();
+        let mut pipe = [-1; 2];
+        // SAFETY: valid two-int output buffer; both descriptors get RAII owners below.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        // The child makes only async-signal-safe syscalls until _exit, never touching Rust
+        // allocation, assertions or the test framework after a multithreaded-process fork.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(writer.as_raw_fd());
+                let mut byte = 0u8;
+                libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        drop(reader);
+        struct Child {
+            pid: libc::pid_t,
+            release: Option<OwnedFd>,
+        }
+        impl Drop for Child {
+            fn drop(&mut self) {
+                // EOF releases this task-owned child on success or assertion unwinding. Bound
+                // shutdown and signal only this known child if the host cannot schedule it.
+                self.release.take();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    let waited =
+                        unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), libc::WNOHANG) };
+                    if waited == self.pid {
+                        return;
+                    }
+                    if waited < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                unsafe { libc::kill(self.pid, libc::SIGKILL) };
+                while unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) } < 0
+                    && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                }
+            }
+        }
+        let child = Child {
+            pid,
+            release: Some(writer),
+        };
+        assert!(
+            directory.lock().is_err(),
+            "a live publishing guard must remain exclusive"
+        );
+        drop(lock);
+        let _next = directory
+            .lock()
+            .expect("the parent finished even though the child keeps its inherited descriptor");
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            0
+        );
+        drop(child);
+    }
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn directory() -> (tempfile::TempDir, std::path::PathBuf, Directory) {

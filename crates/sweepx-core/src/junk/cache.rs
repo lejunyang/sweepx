@@ -31,15 +31,17 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::time::Duration;
 
+use crate::FsEventId;
+#[cfg(test)]
+use crate::current_event_id;
+#[cfg(test)]
+use crate::events_since;
 use sha2::{Digest, Sha256};
-use sweepx_core::FsEventId;
-#[cfg(test)]
-use sweepx_core::current_event_id;
-#[cfg(test)]
-use sweepx_core::events_since;
 use sweepx_model::{ByteValue, ScanEntryId};
 use sweepx_scanner::ChangeLog;
 
+/// Current directory enumeration with independently validated cached file lengths.
+pub mod provider;
 mod storage;
 use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
@@ -58,7 +60,7 @@ pub struct StoredJunkRoot {
     rules_digest: String,
     /// Current enabled rules and discovery scope, independent of filesystem history.
     classification_context: [u8; 32],
-    /// Canonical absolute path of the root at capture; verified before reuse.
+    /// Lossless absolute root spelling at capture; native identity is verified before reuse.
     root: String,
     /// Native identity of the root directory at capture.
     root_device: String,
@@ -73,31 +75,116 @@ pub struct StoredJunkRoot {
 /// Validated filesystem and rule-match facts, excluding transient tool and Git interpretations.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredJunkCandidate {
+    /// Display-only path; never filesystem authority.
     pub path: String,
+    /// Stable matched rule identifier.
     pub rule_id: String,
+    /// Risk tier from the loaded rule.
     pub risk: String,
+    /// Historical size evidence; interpretation depends on size_is_logical.
     pub reclaimable: ByteValue,
+    /// Rule explanation at capture.
     pub evidence: String,
+    /// Review date carried by the rule.
     pub source_reviewed_at: String,
+    /// Supporting rule references.
     pub references: Vec<String>,
+    /// Source scan identity, not a fresh observation.
     pub entry_id: ScanEntryId,
+    /// Ancestor identities in the source scan namespace.
     pub ancestor_ids: BTreeSet<ScanEntryId>,
+    /// Whether the size evidence is logical rather than allocation evidence.
     pub size_is_logical: bool,
     /// The source scanned row, restored so a cached candidate can be bulk-trashed with the same
     /// identity revalidation as a fresh one. `None` for records that never carried a row.
     #[serde(default)]
     pub source_entry: Option<sweepx_model::ScannedEntry>,
     /// Nested-repository and traversal coverage facts, excluding Git answers.
-    pub git_scan_facts: Option<sweepx_core::junk::git::GitScanFacts>,
+    pub git_scan_facts: Option<super::git::GitScanFacts>,
+    /// Optional historical recursive statistics; absent in older v7 records.
+    #[serde(default)]
+    pub aggregate: Option<sweepx_model::DirectoryAggregate>,
+}
+
+impl StoredJunkCandidate {
+    /// Copies only scan/rule facts, excluding environment-dependent activity and Git answers.
+    pub fn from_candidate(candidate: &super::candidate::JunkCandidate) -> Self {
+        Self {
+            path: candidate.path.clone(),
+            rule_id: candidate.rule_id.clone(),
+            risk: candidate.risk.clone(),
+            reclaimable: candidate.reclaimable.clone(),
+            evidence: candidate.evidence.clone(),
+            source_reviewed_at: candidate.source_reviewed_at.clone(),
+            references: candidate.references.clone(),
+            entry_id: candidate.entry_id.clone(),
+            ancestor_ids: candidate.ancestor_ids.clone(),
+            size_is_logical: candidate.size_is_logical,
+            source_entry: candidate.source_entry.clone(),
+            git_scan_facts: candidate.git_scan_facts,
+            aggregate: None,
+        }
+    }
+
+    /// Restores report facts with all transient interpretations cleared. The caller must either
+    /// retain historical status or rebuild interpretation from this invocation's evidence.
+    pub fn into_candidate(self) -> super::candidate::JunkCandidate {
+        super::candidate::JunkCandidate {
+            path: self.path,
+            rule_id: self.rule_id,
+            risk: self.risk,
+            reclaimable: self.reclaimable,
+            evidence: self.evidence,
+            source_reviewed_at: self.source_reviewed_at,
+            references: self.references,
+            entry_id: self.entry_id,
+            ancestor_ids: self.ancestor_ids,
+            activity: None,
+            stale_formats: Vec::new(),
+            size_is_logical: self.size_is_logical,
+            git: None,
+            classification: None,
+            confidence: None,
+            blockers: Vec::new(),
+            source_entry: self.source_entry,
+            git_scan_facts: self.git_scan_facts,
+        }
+    }
 }
 
 impl StoredJunkRoot {
-    /// Builds a record from freshly scanned candidates for one canonical root.
+    /// Rejects a root replaced between traversal and publication. This checks captured scan
+    /// facts against the record's native binding; display paths do not establish authority.
+    pub fn matches_observed_root(&self, source: &sweepx_model::ScannedEntry) -> bool {
+        observed_root_binding(source, Path::new(&self.root)).is_some_and(|(device, inode)| {
+            device.to_string() == self.root_device && inode.to_string() == self.root_inode
+        })
+    }
+    /// Builds a record from freshly scanned candidates for one absolute root.
     pub fn capture(
         canonical_root: &Path,
         candidates: Vec<StoredJunkCandidate>,
         since_event_id: FsEventId,
         classification_context: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::capture_with_rule_bytes(
+            canonical_root,
+            candidates,
+            since_event_id,
+            classification_context,
+            super::PROJECT_RULES_JSON.as_bytes(),
+            super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
+        )
+    }
+
+    /// Captures a root with the actual admitted rule source bytes, including editable catalogs.
+    pub fn capture_with_rule_bytes(
+        canonical_root: &Path,
+        candidates: Vec<StoredJunkCandidate>,
+        since_event_id: FsEventId,
+        classification_context: [u8; 32],
+        project_bytes: &[u8],
+        platform_bytes: &[u8],
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(canonical_root)?;
         if !metadata.is_dir() {
@@ -105,7 +192,7 @@ impl StoredJunkRoot {
         }
         Ok(Self {
             schema: STORED_SCHEMA.to_string(),
-            rules_digest: rules_digest().to_string(),
+            rules_digest: digest_rule_bytes(project_bytes, platform_bytes),
             classification_context,
             root: canonical_root
                 .to_str()
@@ -142,9 +229,14 @@ impl StoredJunkRoot {
     }
 
     /// Checks the root binding independently of event history.
+    #[cfg(test)]
     fn matches_root(&self, canonical_root: &Path) -> bool {
+        self.matches_root_with_rules(canonical_root, rules_digest())
+    }
+
+    fn matches_root_with_rules(&self, canonical_root: &Path, expected_rules: &str) -> bool {
         if self.schema != STORED_SCHEMA
-            || self.rules_digest != rules_digest()
+            || self.rules_digest != expected_rules
             || Some(self.root.as_str()) != canonical_root.to_str()
         {
             return false;
@@ -163,15 +255,23 @@ impl StoredJunkRoot {
     }
 }
 
+#[cfg(test)]
 fn rules_digest() -> &'static str {
     static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DIGEST.get_or_init(|| {
-        let mut hash = Sha256::new();
-        hash.update(super::PROJECT_JUNK_RULES_JSON.as_bytes());
-        hash.update([0]);
-        hash.update(super::PLATFORM_JUNK_RULES_JSON.as_bytes());
-        format!("{:x}", hash.finalize())
+        digest_rule_bytes(
+            super::PROJECT_RULES_JSON.as_bytes(),
+            super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
+        )
     })
+}
+
+fn digest_rule_bytes(project_bytes: &[u8], platform_bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(project_bytes);
+    hash.update([0]);
+    hash.update(platform_bytes);
+    format!("{:x}", hash.finalize())
 }
 
 /// Loads only records whose root identity and loaded rules still match.
@@ -180,16 +280,27 @@ pub struct CacheReader {
     directory: Option<Directory>,
     budget: ReadBudget,
     limits: Limits,
+    expected_rules: String,
 }
 
 impl CacheReader {
     /// Both cache layers share encoded-input and retained-data limits within an invocation.
     pub fn new(cache_dir: &Path) -> Self {
+        Self::with_rule_bytes(
+            cache_dir,
+            super::PROJECT_RULES_JSON.as_bytes(),
+            super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
+        )
+    }
+
+    /// Shares one input/retention budget and binds reports to the actual loaded rule bytes.
+    pub fn with_rule_bytes(cache_dir: &Path, project_bytes: &[u8], platform_bytes: &[u8]) -> Self {
         let limits = Limits::default();
         Self {
             directory: Directory::open(cache_dir, false).ok(),
             budget: ReadBudget::new(limits),
             limits,
+            expected_rules: digest_rule_bytes(project_bytes, platform_bytes),
         }
     }
 
@@ -220,7 +331,31 @@ impl CacheReader {
                     root_retained_bytes,
                 )?;
                 (record.classification_context == *context
-                    && record.matches_root(root)
+                    && record.matches_root_with_rules(root, &self.expected_rules)
+                    && record.excluded_root_keys == excluded_root_keys(root, roots))
+                .then_some(record)
+            })
+            .collect()
+    }
+
+    /// Loads report-only historical rows before discovery/history validation. A matching source
+    /// digest, native root binding and request scope do not establish current classification.
+    /// The caller must mark all returned rows historical and reobserve before any mutation.
+    pub fn historical_roots(&mut self, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+        roots
+            .iter()
+            .enumerate()
+            .map(|(ordinal, root)| {
+                if ordinal >= self.limits.roots {
+                    return None;
+                }
+                let record: StoredJunkRoot = self.budget.read(
+                    self.directory.as_ref()?,
+                    &record_file_name(root),
+                    self.limits,
+                    root_retained_bytes,
+                )?;
+                (record.matches_root_with_rules(root, &self.expected_rules)
                     && record.excluded_root_keys == excluded_root_keys(root, roots))
                 .then_some(record)
             })
@@ -240,6 +375,7 @@ impl CacheReader {
 }
 
 /// Checks each root against its own pre-scan cursor and rechecks its native binding.
+/// Input records must already have their loaded rule/context binding admitted by CacheReader.
 /// Missing/incomplete history makes every record a miss, never a partial cache hit.
 pub fn validate_records_with_log(
     roots: &[PathBuf],
@@ -248,7 +384,10 @@ pub fn validate_records_with_log(
 ) -> Vec<Option<StoredJunkRoot>> {
     for (root, record) in roots.iter().zip(&mut records) {
         let valid = match (log, record.as_ref()) {
-            (Some(log), Some(stored)) if !log.must_rescan && stored.matches_root(root) => {
+            (Some(log), Some(stored))
+                if !log.must_rescan
+                    && stored.matches_root_with_rules(root, &stored.rules_digest) =>
+            {
                 !log.events.iter().any(|event| {
                     event.id > stored.since_event_id && paths_overlap(Path::new(&event.path), root)
                 })
@@ -280,6 +419,21 @@ fn validate_records(
 /// Ancestor events cannot be discarded: a parent change may rename or replace a cached root.
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
+}
+
+fn observed_root_binding(source: &sweepx_model::ScannedEntry, root: &Path) -> Option<(u128, u128)> {
+    let identity = source.validated_identity().ok()??;
+    if source.object_type != sweepx_model::ObjectType::Directory
+        || identity.parent_id.is_some()
+        || identity.entry_id != identity.scan_root_id
+        || super::git::native_path(source)?.as_path() != root
+    {
+        return None;
+    }
+    match &identity.platform_file_identity {
+        sweepx_model::IdentityEvidence::Known { value } => Some((value.device.0, value.inode.0)),
+        _ => None,
+    }
 }
 
 /// Loads a stored record for `canonical_root`, returning `None` on any failure or absence.
@@ -486,6 +640,15 @@ fn root_retained_bytes(root: &StoredJunkRoot) -> usize {
         if let Some(entry) = &candidate.source_entry {
             bytes = bytes.saturating_add(entry.estimated_retained_bytes());
         }
+        if let Some(aggregate) = &candidate.aggregate {
+            bytes = bytes
+                .saturating_add(aggregate.scan_id.len())
+                .saturating_add(aggregate.directory_identity.capacity())
+                .saturating_add(
+                    aggregate.coverage.incomplete_reasons.capacity()
+                        * std::mem::size_of::<sweepx_model::ReasonCode>(),
+                );
+        }
     }
     bytes
 }
@@ -498,7 +661,7 @@ const SUBTREE_SCHEMA: &str = "sweepx.subtree-index/v4";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSubtreeIndex {
     schema: String,
-    /// Lossless canonical root path; non-UTF-8 roots are not persisted.
+    /// Lossless absolute root spelling; non-UTF-8 roots are not persisted.
     root: String,
     /// Native root binding, checked before and after history observation.
     device: u64,
@@ -523,6 +686,11 @@ pub struct StoredDirListing {
 }
 
 impl StoredSubtreeIndex {
+    /// Checks that index capture still refers to the root observed by the traversal.
+    pub fn matches_observed_root(&self, source: &sweepx_model::ScannedEntry) -> bool {
+        observed_root_binding(source, Path::new(&self.root))
+            == Some((u128::from(self.device), u128::from(self.inode)))
+    }
     /// Captures file facts under this root with the cursor taken before observation.
     pub fn new(
         root: &Path,
@@ -648,6 +816,63 @@ pub fn write_subtree_index(cache_dir: &Path, index: &StoredSubtreeIndex) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_reads_bind_actual_rule_bytes_without_claiming_current_context() {
+        let (_fixture, cache) = temp_cache();
+        let bytes = b"editable project source";
+        let platform = b"editable platform source";
+        let stored =
+            StoredJunkRoot::capture_with_rule_bytes(&cache, vec![], 42, [7; 32], bytes, platform)
+                .unwrap();
+        write(&cache, &stored).unwrap();
+        let roots = [cache.clone()];
+        assert!(
+            CacheReader::with_rule_bytes(&cache, bytes, platform).historical_roots(&roots)[0]
+                .is_some()
+        );
+        assert!(
+            CacheReader::with_rule_bytes(&cache, b"edited source", platform)
+                .historical_roots(&roots)[0]
+                .is_none()
+        );
+        assert!(
+            CacheReader::with_rule_bytes(&cache, bytes, platform).roots(&roots, Some(&[8; 32]))[0]
+                .is_none()
+        );
+        assert!(CacheReader::new(&cache).historical_roots(&roots)[0].is_none());
+    }
+
+    #[test]
+    fn publication_binding_rejects_a_root_replaced_after_observation() {
+        let (_fixture, base) = temp_cache();
+        let root = base.join("root");
+        fs::create_dir(&root).unwrap();
+        let summary = sweepx_scanner::Scanner::new(
+            sweepx_scanner::HostPlatformScanner::new(),
+            sweepx_scanner::ScannerOptions::default(),
+        )
+        .scan(
+            &[sweepx_platform::ScanRoot::new(root.clone()).unwrap()],
+            &sweepx_platform::CancellationToken::new(),
+        )
+        .unwrap();
+        let source = &summary.roots[0];
+        let initial = StoredJunkRoot::capture(&root, vec![], 42, [0; 32]).unwrap();
+        assert!(initial.matches_observed_root(source));
+        fs::rename(&root, base.join("original-root")).unwrap();
+        fs::create_dir(&root).unwrap();
+        let replacement = StoredJunkRoot::capture(&root, vec![], 42, [0; 32]).unwrap();
+        assert!(!replacement.matches_observed_root(source));
+        let index = StoredSubtreeIndex::new(&root, 42, BTreeMap::new(), BTreeMap::new()).unwrap();
+        assert!(!index.matches_observed_root(source));
+        assert_ne!(
+            fs::symlink_metadata(&root).unwrap().ino(),
+            fs::symlink_metadata(base.join("original-root"))
+                .unwrap()
+                .ino()
+        );
+    }
     fn temp_cache() -> (tempfile::TempDir, PathBuf) {
         // Atomic exclusive creation isolates parallel tests; a timestamp plus create_dir_all
         // can silently alias another fixture. Keep the guard alive through all native queries.
@@ -674,6 +899,7 @@ mod tests {
             size_is_logical: true,
             source_entry: None,
             git_scan_facts: None,
+            aggregate: None,
         }
     }
 

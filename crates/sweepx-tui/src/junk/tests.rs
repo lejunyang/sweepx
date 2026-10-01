@@ -58,11 +58,13 @@ fn initial() -> VecDeque<JunkEvent> {
         JunkEvent::Candidate {
             revision: 1,
             current: true,
+            historical: false,
             row: row("a", "/a"),
         },
         JunkEvent::Candidate {
             revision: 1,
             current: true,
+            historical: false,
             row: row("b", "/b"),
         },
         JunkEvent::Completed {
@@ -71,6 +73,51 @@ fn initial() -> VecDeque<JunkEvent> {
             replaced: true,
         },
     ])
+}
+
+#[test]
+fn cached_preview_stays_historical_and_preserves_selection_when_current_replaces_it() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    model.apply(JunkEvent::Started {
+        revision: 1,
+        keys: None,
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 1,
+        current: false,
+        historical: true,
+        row: row("a", "/a"),
+    });
+    model.reorder();
+    model.marked.insert("a".into());
+    assert!(model.rows["a"].historical);
+    assert!(!model.eligible("a"));
+    model.apply(JunkEvent::Completed {
+        revision: 1,
+        outcome: JunkOutcome::Complete,
+        replaced: true,
+    });
+    // A complete terminal cannot promote a cached row that never got a fresh observation.
+    assert!(!model.eligible("a"));
+    model.apply(JunkEvent::Started {
+        revision: 2,
+        keys: None,
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 2,
+        current: true,
+        historical: false,
+        row: row("a", "/a"),
+    });
+    model.apply(JunkEvent::Completed {
+        revision: 2,
+        outcome: JunkOutcome::Complete,
+        replaced: true,
+    });
+    model.reorder();
+    assert!(model.eligible("a"));
+    assert!(model.marked.contains("a"));
+    assert_eq!(model.order[model.cursor], "a");
 }
 
 #[test]
@@ -109,16 +156,19 @@ fn size_sort_keeps_unknown_last_and_path_sort_preserves_focus() {
     model.apply(JunkEvent::Candidate {
         revision: 1,
         current: true,
+        historical: false,
         row: large,
     });
     model.apply(JunkEvent::Candidate {
         revision: 1,
         current: true,
+        historical: false,
         row: unknown,
     });
     model.apply(JunkEvent::Candidate {
         revision: 1,
         current: true,
+        historical: false,
         row: zero,
     });
     model.reorder();
@@ -146,6 +196,7 @@ fn selection_and_cursor_survive_reordering_and_incomplete_replacement() {
     model.apply(JunkEvent::Candidate {
         revision: 2,
         current: true,
+        historical: false,
         row: row("a", "/z"),
     });
     model.reorder();
@@ -208,11 +259,13 @@ impl JunkProvider for Provider {
         self.events.push_back(JunkEvent::Candidate {
             revision: 2,
             current: true,
+            historical: false,
             row: row("a", "/a"),
         });
         self.events.push_back(JunkEvent::Candidate {
             revision: 2,
             current: true,
+            historical: false,
             row: row("b", "/b"),
         });
         self.events.push_back(JunkEvent::Completed {
@@ -268,6 +321,41 @@ fn loop_selects_refreshes_and_consumes_trash_without_leaving_the_view() {
 }
 
 #[test]
+fn empty_view_and_uppercase_refresh_request_all_roots() {
+    for code in [KeyCode::Char('r'), KeyCode::Char('R')] {
+        let mut provider = Provider {
+            events: VecDeque::from([
+                JunkEvent::Started {
+                    revision: 1,
+                    keys: None,
+                },
+                JunkEvent::Completed {
+                    revision: 1,
+                    outcome: JunkOutcome::Complete,
+                    replaced: true,
+                },
+            ]),
+            ..Provider::default()
+        };
+        let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+        let mut terminal = Terminal::new(TestBackend::new(120, 22)).unwrap();
+        let mut events = Events(VecDeque::from([code, KeyCode::Char('q')]));
+        assert_eq!(
+            run_junk_loop(
+                &mut terminal,
+                &mut model,
+                &mut events,
+                &mut provider,
+                &NeverTerminate
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(provider.refreshed, [Vec::<String>::new()]);
+    }
+}
+
+#[test]
 fn budget_loss_and_partial_rows_never_reach_trash() {
     let huge: Arc<dyn JunkRow> = Arc::new(FixtureRow {
         key: "oversize",
@@ -287,6 +375,7 @@ fn budget_loss_and_partial_rows_never_reach_trash() {
         JunkEvent::Candidate {
             revision: 1,
             current: true,
+            historical: false,
             row: huge,
         },
     );
@@ -329,6 +418,7 @@ fn renderer_preserves_lower_bounds_unknowns_and_locale() {
     model.apply(JunkEvent::Candidate {
         revision: 1,
         current: true,
+        historical: false,
         row,
     });
     model.apply(JunkEvent::Completed {

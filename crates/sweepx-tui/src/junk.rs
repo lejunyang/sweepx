@@ -68,6 +68,8 @@ pub enum JunkEvent {
     Candidate {
         revision: u64,
         current: bool,
+        /// Cached preview; fresh observations clear this independently of interpretation state.
+        historical: bool,
         row: Arc<dyn JunkRow>,
     },
     /// Confirmed disappearance after complete observation.
@@ -90,7 +92,8 @@ pub trait JunkProvider {
     fn poll(&mut self) -> Option<JunkEvent>;
     /// Request cooperative cancellation.
     fn cancel(&mut self);
-    /// Refresh selected stable keys; stale/unknown bindings fail on the worker.
+    /// Refresh selected stable keys; an empty selection requests all original roots.
+    /// Stale/unknown selected bindings fail on the worker.
     fn refresh(&mut self, keys: &[String]) -> Result<(), String>;
     /// Prioritize the native directory behind a presentation key; affects ordering only.
     fn prioritize(&mut self, key: &str);
@@ -231,7 +234,12 @@ impl JunkModel {
                 self.progress = Some(count);
                 self.path = path;
             }
-            JunkEvent::Candidate { current, row, .. } => {
+            JunkEvent::Candidate {
+                current,
+                historical,
+                row,
+                ..
+            } => {
                 let key = row.key();
                 let cost = row.retained_bytes().saturating_add(512);
                 let old = self
@@ -259,7 +267,7 @@ impl JunkModel {
                     ViewRow {
                         row,
                         revision,
-                        historical: false,
+                        historical,
                         current,
                     },
                 );
@@ -351,6 +359,8 @@ impl JunkModel {
     fn phase_label(&self) -> &str {
         match self.phase {
             "rules" => self.text("加载规则", "Loading rules"),
+            "cache" => self.text("读取与核验缓存", "Reading and validating cache"),
+            "cache_write" => self.text("保存扫描事实", "Saving scan facts"),
             "discovery" => self.text("发现上下文", "Discovering context"),
             "traversal" => self.text("扫描", "Scanning"),
             "git" => self.text("核验 Git", "Checking Git"),
@@ -482,8 +492,8 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         details,
     );
     frame.render_widget(Paragraph::new(model.text(
-        "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r 刷新选中 · c 取消扫描 · d/Delete 回收 · q 退出",
-        "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r Refresh selected · c Cancel scan · d/Delete Trash · q Quit",
+        "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新选中/全部 · c 取消扫描 · d/Delete 回收 · q 退出",
+        "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh selected/all · c Cancel scan · d/Delete Trash · q Quit",
     )).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
 }
 
@@ -564,13 +574,15 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                 }
             }
             KeyCode::Char('u') => model.marked.clear(),
-            KeyCode::Char('r') if !model.busy && model.trash_pending.is_empty() => {
-                let keys = model.chosen();
-                if !keys.is_empty() {
-                    match provider.refresh(&keys) {
-                        Ok(()) => model.busy = true,
-                        Err(error) => model.diagnostic(error),
-                    }
+            KeyCode::Char('r' | 'R') if !model.busy && model.trash_pending.is_empty() => {
+                let keys = if key.code == KeyCode::Char('R') {
+                    Vec::new()
+                } else {
+                    model.chosen()
+                };
+                match provider.refresh(&keys) {
+                    Ok(()) => model.busy = true,
+                    Err(error) => model.diagnostic(error),
                 }
             }
             KeyCode::Char('d') | KeyCode::Delete

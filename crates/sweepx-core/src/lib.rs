@@ -844,7 +844,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         None,
         None,
     )
-    .map(|(scan, _decisions, _directory_markers, _coverages, _covered_paths, _dir_listings)| scan)
+    .map(|result| result.scan)
 }
 
 /// Runs the junk scan: traversal classifies each directory against `classifier` while walking,
@@ -860,24 +860,16 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
     classifier: &dyn JunkClassifier,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
 ) -> Result<JunkScanSuccess, CoreError> {
-    let (scan, decisions, directory_markers, coverages, covered_paths, dir_listings) =
-        scan_with_store_options(
-            context,
-            request,
-            store,
-            ScannerOptions::default(),
-            Some(classifier),
-            reuse,
-            None,
-        )?;
-    Ok(JunkScanSuccess {
-        scan,
-        decisions,
-        directory_markers,
-        coverages,
-        covered_paths,
-        dir_listings,
-    })
+    scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        Some(classifier),
+        reuse,
+        None,
+    )
+    .map(Into::into)
 }
 
 /// Runs the existing junk workflow with caller-owned cancellation and borrowed live observations.
@@ -897,29 +889,24 @@ pub fn scan_junk_with_observer<S: SnapshotStore>(
     cancel: &CancellationToken,
     observer: &mut dyn ClassifiedScanObserver,
 ) -> Result<JunkScanSuccess, CoreError> {
-    let (scan, decisions, directory_markers, coverages, covered_paths, dir_listings) =
-        scan_with_store_options(
-            context,
-            request,
-            store,
-            ScannerOptions::default(),
-            Some(classifier),
-            reuse,
-            Some(JunkScanObservation { cancel, observer }),
-        )?;
-    Ok(JunkScanSuccess {
-        scan,
-        decisions,
-        directory_markers,
-        coverages,
-        covered_paths,
-        dir_listings,
-    })
+    scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        Some(classifier),
+        reuse,
+        Some(JunkScanObservation { cancel, observer }),
+    )
+    .map(Into::into)
 }
 
 /// Result of a junk scan: the scan output and the per-entry rule decisions.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub struct JunkScanSuccess {
+    /// Optional bounded native root observations, independent of junk candidacy. Missing facts
+    /// disable cache publication for that root; these rows do not enter the output envelope.
+    pub observed_roots: Vec<sweepx_model::ScannedEntry>,
     /// Scan envelope, snapshot and pruned summary (junk directory rows and sparse gitfile facts).
     pub scan: ScanSuccess,
     /// Rule id returned per entry, for candidate assembly.
@@ -1045,6 +1032,32 @@ type CoveredPathMap = std::collections::BTreeMap<String, bool>;
 /// Canonical path → captured child listing of a directory.
 type DirListingMap = std::collections::BTreeMap<String, sweepx_scanner::DirListing>;
 
+/// Internal scan facts, including optional roots kept outside the candidate envelope.
+struct ScanWorkResult {
+    scan: ScanSuccess,
+    decisions: JunkDecisions,
+    directory_markers: DirectoryMarkers,
+    coverages: DirectoryCoverageMap,
+    covered_paths: CoveredPathMap,
+    dir_listings: DirListingMap,
+    observed_roots: Vec<sweepx_model::ScannedEntry>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl From<ScanWorkResult> for JunkScanSuccess {
+    fn from(result: ScanWorkResult) -> Self {
+        Self {
+            scan: result.scan,
+            decisions: result.decisions,
+            directory_markers: result.directory_markers,
+            coverages: result.coverages,
+            covered_paths: result.covered_paths,
+            dir_listings: result.dir_listings,
+            observed_roots: result.observed_roots,
+        }
+    }
+}
+
 struct JunkScanObservation<'a> {
     cancel: &'a CancellationToken,
     observer: &'a mut dyn sweepx_scanner::ClassifiedScanObserver,
@@ -1058,17 +1071,7 @@ fn scan_with_store_options<S: SnapshotStore>(
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
     live: Option<JunkScanObservation<'_>>,
-) -> Result<
-    (
-        ScanSuccess,
-        JunkDecisions,
-        DirectoryMarkers,
-        DirectoryCoverageMap,
-        CoveredPathMap,
-        DirListingMap,
-    ),
-    CoreError,
-> {
+) -> Result<ScanWorkResult, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
     }
@@ -1106,8 +1109,8 @@ fn scan_with_store_options<S: SnapshotStore>(
             &started_at,
             monotonic.elapsed(),
         );
-        Ok((
-            ScanSuccess {
+        Ok(ScanWorkResult {
+            scan: ScanSuccess {
                 output,
                 events,
                 snapshot,
@@ -1119,12 +1122,13 @@ fn scan_with_store_options<S: SnapshotStore>(
                     progress: Vec::new(),
                 },
             },
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-        ))
+            decisions: std::collections::BTreeMap::new(),
+            directory_markers: std::collections::BTreeMap::new(),
+            coverages: std::collections::BTreeMap::new(),
+            covered_paths: std::collections::BTreeMap::new(),
+            dir_listings: std::collections::BTreeMap::new(),
+            observed_roots: Vec::new(),
+        })
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1146,37 +1150,46 @@ fn scan_with_store_options<S: SnapshotStore>(
         let default_cancel = CancellationToken::new();
         let cancel = live.as_ref().map_or(&default_cancel, |live| live.cancel);
         // In junk mode classify during the walk; otherwise retain every row as before.
-        let (summary, decisions, directory_markers, coverages, covered_paths, dir_listings) =
-            match classifier {
-                Some(classifier) => {
-                    let classified = match live {
-                        Some(live) => scanner.scan_classified_with_observer(
-                            &roots,
-                            cancel,
-                            classifier,
-                            reuse,
-                            live.observer,
-                        )?,
-                        None => scanner.scan_classified(&roots, cancel, classifier, reuse)?,
-                    };
-                    (
-                        classified.summary,
-                        classified.decisions,
-                        classified.directory_markers,
-                        classified.coverages,
-                        classified.covered_paths,
-                        classified.dir_listings,
-                    )
-                }
-                None => (
-                    scanner.scan(&roots, cancel)?,
-                    std::collections::BTreeMap::new(),
-                    std::collections::BTreeMap::new(),
-                    std::collections::BTreeMap::new(),
-                    std::collections::BTreeMap::new(),
-                    std::collections::BTreeMap::new(),
-                ),
-            };
+        let (
+            summary,
+            decisions,
+            directory_markers,
+            coverages,
+            covered_paths,
+            dir_listings,
+            observed_roots,
+        ) = match classifier {
+            Some(classifier) => {
+                let classified = match live {
+                    Some(live) => scanner.scan_classified_with_observer(
+                        &roots,
+                        cancel,
+                        classifier,
+                        reuse,
+                        live.observer,
+                    )?,
+                    None => scanner.scan_classified(&roots, cancel, classifier, reuse)?,
+                };
+                (
+                    classified.summary,
+                    classified.decisions,
+                    classified.directory_markers,
+                    classified.coverages,
+                    classified.covered_paths,
+                    classified.dir_listings,
+                    classified.observed_roots,
+                )
+            }
+            None => (
+                scanner.scan(&roots, cancel)?,
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                Vec::new(),
+            ),
+        };
         let stored_preview =
             store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
         let finished_at = timestamp_now();
@@ -1270,8 +1283,8 @@ fn scan_with_store_options<S: SnapshotStore>(
             store.save(&snapshot)?;
         }
 
-        Ok((
-            ScanSuccess {
+        Ok(ScanWorkResult {
+            scan: ScanSuccess {
                 output,
                 events,
                 snapshot,
@@ -1282,7 +1295,8 @@ fn scan_with_store_options<S: SnapshotStore>(
             coverages,
             covered_paths,
             dir_listings,
-        ))
+            observed_roots,
+        })
     }
 }
 

@@ -1,4 +1,4 @@
-//! CLI implementation of [`SubtreeReuse`], backed by the per-root file index and FSEvents.
+//! Shared implementation of [`SubtreeReuse`], backed by the per-root file index and FSEvents.
 //!
 //! One shared event-history drain indexes invalidations for cached file lengths. Directories
 //! are always traversed so current identities, rule markers and ancestor accounting are rebuilt.
@@ -12,10 +12,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sweepx_core::{FsEventId, PlannedEntry, SubtreeReuse, events_since};
+use crate::{FsEventId, PlannedEntry, SubtreeReuse, events_since};
 use sweepx_platform::CachedFileEntry;
 
-use crate::junk_cache::{self, StoredJunkRoot, StoredSubtreeIndex};
+use super::{self as junk_cache, StoredJunkRoot, StoredSubtreeIndex};
 use sweepx_scanner::ChangeLog;
 
 /// Bounded wall time for the shared FSEvents drain.
@@ -85,6 +85,45 @@ impl SubtreeCacheProvider {
     ) -> (Self, Vec<Option<StoredJunkRoot>>) {
         let mut reader = junk_cache::CacheReader::new(cache_dir);
         let records = reader.roots(roots, context);
+        Self::prepare_loaded(
+            cache_dir,
+            roots,
+            reader,
+            records,
+            query,
+            change_count,
+            change_bytes,
+        )
+    }
+
+    /// Validates file indexes using the budget already spent on historical preview reads.
+    /// No whole-root report is replayed as current; directories remain freshly observed.
+    pub fn prepare_files(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        reader: junk_cache::CacheReader,
+    ) -> Self {
+        Self::prepare_loaded(
+            cache_dir,
+            roots,
+            reader,
+            vec![None; roots.len()],
+            |paths, since| events_since(paths, since, DRAIN_TIMEOUT),
+            MAX_CHANGE_PATHS,
+            MAX_CHANGE_BYTES,
+        )
+        .0
+    }
+
+    fn prepare_loaded(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        mut reader: junk_cache::CacheReader,
+        records: Vec<Option<StoredJunkRoot>>,
+        query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
+        change_count: usize,
+        change_bytes: usize,
+    ) -> (Self, Vec<Option<StoredJunkRoot>>) {
         let max_roots = junk_cache::Limits::default().roots;
         let bindings: BTreeMap<_, _> = roots
             .iter()
@@ -208,6 +247,26 @@ impl SubtreeCacheProvider {
     ) -> std::io::Result<()> {
         let index =
             StoredSubtreeIndex::capture(scan_root, all_roots, since_event_id, covered, listings)?;
+        junk_cache::write_subtree_index(&self.cache_dir, &index)
+    }
+
+    /// Publishes file facts only if capture still matches the traversal's observed native root.
+    /// A root replaced before capture must never bind the old listing to the new directory.
+    pub fn store_observed_index(
+        &self,
+        source: &sweepx_model::ScannedEntry,
+        all_roots: &[PathBuf],
+        since_event_id: FsEventId,
+        covered: &BTreeMap<String, bool>,
+        listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+    ) -> std::io::Result<()> {
+        let root = crate::junk::git::native_path(source)
+            .ok_or_else(|| std::io::Error::other("observed cache root path unavailable"))?;
+        let index =
+            StoredSubtreeIndex::capture(&root, all_roots, since_event_id, covered, listings)?;
+        if !index.matches_observed_root(source) {
+            return Err(std::io::Error::other("cache root changed after traversal"));
+        }
         junk_cache::write_subtree_index(&self.cache_dir, &index)
     }
 }
@@ -387,8 +446,38 @@ fn name_marker(name: &sweepx_model::NativeName) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::StoredDirListing;
     use super::*;
-    use crate::junk_cache::StoredDirListing;
+
+    #[test]
+    fn historical_preview_and_file_index_share_the_encoded_input_allowance() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let roots = [roots[0].clone()];
+        let root_bytes = fs::metadata(cache.join(junk_cache::record_file_name(&roots[0])))
+            .unwrap()
+            .len() as usize;
+        let limits = junk_cache::Limits {
+            input_bytes: root_bytes,
+            ..junk_cache::Limits::default()
+        };
+        let mut reader = junk_cache::CacheReader::new(&cache);
+        reader.limits = limits;
+        reader.budget = junk_cache::ReadBudget::new(limits);
+        assert!(reader.historical_roots(&roots)[0].is_some());
+        let (provider, _) = SubtreeCacheProvider::prepare_loaded(
+            &cache,
+            &roots,
+            reader,
+            vec![None],
+            |_, _| panic!("no index was admitted, so history is unnecessary"),
+            MAX_CHANGE_PATHS,
+            MAX_CHANGE_BYTES,
+        );
+        assert!(
+            provider.roots.is_empty(),
+            "preview reads must not reset the index read budget"
+        );
+    }
 
     fn seeded_cache() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
         let fixture = tempfile::TempDir::new().unwrap();
@@ -425,7 +514,7 @@ mod tests {
 
     #[test]
     fn new_platform_context_rescans_empty_candidates_and_keeps_file_facts() {
-        use sweepx_core::junk::{
+        use crate::junk::{
             JunkService,
             platform::{PlatformJunkEvidence, load_platform_junk_rules},
         };
@@ -436,15 +525,15 @@ mod tests {
         let empty_evidence = PlatformJunkEvidence::default();
         let project_classifier = project.with_platform(&[], &empty_evidence);
         let old_context = project_classifier.classification_context_digest().unwrap();
-        let context = sweepx_core::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
             sweepx_i18n::Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let request = sweepx_core::ScanRequest {
+        let request = crate::ScanRequest {
             roots: vec![root.clone()],
             state_dir: None,
         };
-        let old = sweepx_core::scan_junk_with_store::<sweepx_core::MemorySnapshotStore>(
+        let old = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
             &context,
             &request,
             None,
@@ -501,7 +590,7 @@ mod tests {
             let plan = provider.plan_entries(root, &[child]).unwrap();
             assert!(matches!(&plan[0], PlannedEntry::ReuseFile(file)
                 if file.logical_bytes == u128::from(fs::symlink_metadata(root.join("file")).unwrap().len())));
-            let fresh = sweepx_core::scan_junk_with_store::<sweepx_core::MemorySnapshotStore>(
+            let fresh = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
                 &context,
                 &request,
                 None,

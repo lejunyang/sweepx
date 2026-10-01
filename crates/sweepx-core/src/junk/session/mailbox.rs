@@ -133,7 +133,7 @@ impl Shared {
         state.cancel = CancellationToken::new();
         state.job = Some(Job {
             revision,
-            selected: Some(keys),
+            selected: (!keys.is_empty()).then_some(keys),
             cancel: state.cancel.clone(),
         });
         state.idle = false;
@@ -364,7 +364,9 @@ fn event_cost(kind: &JunkSessionEventKind) -> usize {
             .capacity()
             .saturating_add(boundary.detail.capacity())
             .saturating_add(std::mem::size_of::<sweepx_platform::BoundaryRecord>()),
-        JunkSessionEventKind::Error(failure) => failure.detail.capacity(),
+        JunkSessionEventKind::Error(failure) | JunkSessionEventKind::CacheWarning(failure) => {
+            failure.detail.capacity()
+        }
         _ => 0,
     })
 }
