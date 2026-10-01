@@ -5,8 +5,6 @@
 //! same measurement and reference logic is used by the report and by the mutation preview, so a
 //! candidate cannot be presented under one rule and executed under another.
 
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, Metadata};
@@ -16,51 +14,74 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-pub(crate) const MIN_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-pub(crate) const MAX_CANDIDATES: usize = 1024;
-pub(crate) const MEASURE_DEADLINE: Duration = Duration::from_secs(180);
-pub(crate) const ACTIVITY_CODE: &str = "recursive_inactive_current_user_unreferenced";
-pub(crate) const CLASSIFICATION: &str = "stale_temp_report";
-pub(crate) const REFERENCE_BLOCKER: &str = "system_wide_reference_view_unavailable";
-pub(crate) const RULE_ID: &str = "linux.stale-temp-object";
+/// Minimum idle interval required by the temporary-object rule.
+pub const MIN_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Maximum retained report candidates; additional discoveries make coverage incomplete.
+pub const MAX_CANDIDATES: usize = 1024;
+/// Default budget for one native temporary-object measurement and reference check.
+pub const MEASURE_DEADLINE: Duration = Duration::from_secs(180);
+/// Stable machine activity label for current-user recursive inactivity evidence.
+pub const ACTIVITY_CODE: &str = "recursive_inactive_current_user_unreferenced";
+/// Stable report classification, independent of any later cleanup authorization.
+pub const CLASSIFICATION: &str = "stale_temp_report";
+/// Explicit limit: current-user observations do not prove a system-wide reference view.
+pub const REFERENCE_BLOCKER: &str = "system_wide_reference_view_unavailable";
+/// Stable catalog identifier for the Linux temporary-object report contract.
+pub const RULE_ID: &str = "linux.stale-temp-object";
 
-pub(crate) type TempEntryIdentity = (u64, u64, fs::FileType);
+/// No-follow device, inode and inode-type fingerprint; never a path execution permit.
+pub type TempEntryIdentity = (u64, u64, fs::FileType);
 
+/// A measured temporary-object candidate; cleanup must revalidate it independently.
 #[derive(Debug, Clone)]
-pub(crate) struct LinuxTempCandidate {
-    pub(crate) path: PathBuf,
-    pub(crate) measurement: LinuxTempMeasurement,
+pub struct LinuxTempCandidate {
+    /// Native candidate path retained for report and independently revalidated preview inputs.
+    pub path: PathBuf,
+    /// Complete native observation used for the report; not a mutation permit.
+    pub measurement: LinuxTempMeasurement,
 }
 
 /// Symlink targets captured once, together with the measurement observed after that capture.
 #[derive(Debug)]
-pub(crate) struct PreparedSymlinkCopy {
+pub struct PreparedSymlinkCopy {
     /// Relative path to the captured target for each symlink in the candidate tree.
-    pub(crate) targets: BTreeMap<PathBuf, PathBuf>,
+    pub targets: BTreeMap<PathBuf, PathBuf>,
     /// Measurement including the access-time update caused by reading each symlink target.
-    pub(crate) measurement: LinuxTempMeasurement,
+    pub measurement: LinuxTempMeasurement,
 }
 
+/// Report observations and explicit completeness; missing evidence is never an empty proof.
 #[derive(Debug, Clone)]
-pub(crate) struct LinuxTempDiscovery {
-    pub(crate) candidates: Vec<LinuxTempCandidate>,
-    pub(crate) complete: bool,
-    pub(crate) incomplete_reason: Option<String>,
+pub struct LinuxTempDiscovery {
+    /// Measured candidates retained up to the report limit.
+    pub candidates: Vec<LinuxTempCandidate>,
+    /// Whether enumeration and reference observations completed without uncertainty or a limit.
+    pub complete: bool,
+    /// Diagnostic for incomplete observations; None only when no failure was recorded.
+    pub incomplete_reason: Option<String>,
 }
 
+/// Native recursive allocation, timestamps and identity fingerprints observed without following links.
 #[derive(Debug, Clone)]
-pub(crate) struct LinuxTempMeasurement {
-    pub(crate) top: Metadata,
-    pub(crate) allocated_bytes: u128,
-    pub(crate) logical_bytes: u128,
+pub struct LinuxTempMeasurement {
+    /// No-follow metadata of the selected top object.
+    pub top: Metadata,
+    /// Sum of observed filesystem allocation in bytes, including the selected object.
+    pub allocated_bytes: u128,
+    /// Sum of ordinary-file logical lengths, distinct from allocation.
+    pub logical_bytes: u128,
     /// Complete no-follow fingerprint of every inode selected from the candidate tree.
-    pub(crate) entries: BTreeMap<PathBuf, TempEntryIdentity>,
+    pub entries: BTreeMap<PathBuf, TempEntryIdentity>,
     /// Inode numbers of named pipes inside the measured tree.
-    pub(crate) fifo_inodes: BTreeSet<u64>,
-    pub(crate) entry_count: u64,
-    pub(crate) last_accessed: SystemTime,
-    pub(crate) last_modified: SystemTime,
-    pub(crate) last_status_change: SystemTime,
+    pub fifo_inodes: BTreeSet<u64>,
+    /// Number of observed inodes, including the selected top object.
+    pub entry_count: u64,
+    /// Newest recursive access time observed in the selected tree.
+    pub last_accessed: SystemTime,
+    /// Newest recursive modification time observed in the selected tree.
+    pub last_modified: SystemTime,
+    /// Newest recursive inode status-change time observed in the selected tree.
+    pub last_status_change: SystemTime,
 }
 
 impl PartialEq for LinuxTempMeasurement {
@@ -107,7 +128,56 @@ impl LinuxTempMeasurement {
     }
 }
 
-pub(crate) fn report_temp_root() -> Option<PathBuf> {
+/// Interprets native discoveries through the admitted Linux temporary-object report rule.
+/// Complete or partial observations retain their blockers. No source scan row or deletion
+/// authority is manufactured; the CLI cleanup flow must still obtain a new native preview.
+pub fn report_candidates(
+    rule: &super::platform::PlatformJunkRule,
+    discovery: &LinuxTempDiscovery,
+) -> Vec<super::candidate::JunkCandidate> {
+    use std::os::unix::fs::MetadataExt;
+
+    discovery
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let metadata = &candidate.measurement.top;
+            let mut blockers = vec![REFERENCE_BLOCKER.to_string()];
+            if !discovery.complete {
+                blockers.push("linux_tmp_discovery_incomplete".to_string());
+            }
+            Some(super::candidate::JunkCandidate {
+                path: candidate.path.display().to_string(),
+                native_path: Some(candidate.path.clone()),
+                rule_id: rule.id.clone(),
+                risk: rule.risk.clone(),
+                reclaimable: sweepx_model::ByteValue::Known {
+                    value: sweepx_model::DecimalU128::new(candidate.measurement.allocated_bytes),
+                },
+                evidence: rule.evidence.clone(),
+                source_reviewed_at: rule.source_reviewed_at.clone(),
+                references: rule.references.clone(),
+                entry_id: sweepx_model::ScanEntryId::for_scan_ordinal(
+                    &sweepx_model::ScanId::new("linux-temp-report"),
+                    u128::from(metadata.ino()).saturating_add(1),
+                )
+                .ok()?,
+                ancestor_ids: BTreeSet::new(),
+                activity: Some(ACTIVITY_CODE.to_string()),
+                stale_formats: Vec::new(),
+                size_is_logical: false,
+                git: None,
+                classification: Some(CLASSIFICATION.to_string()),
+                confidence: Some("medium".to_string()),
+                blockers,
+                source_entry: None,
+            })
+        })
+        .collect()
+}
+
+/// Resolves the Linux temporary-object root, honoring the existing isolated integration fixture override.
+pub fn report_temp_root() -> Option<PathBuf> {
     std::env::var_os("SWEEPX_TEST_LINUX_TMP_ROOT")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -115,7 +185,9 @@ pub(crate) fn report_temp_root() -> Option<PathBuf> {
         .filter(|path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
 }
 
-pub(crate) fn discover(
+/// Observes eligible direct children with native ownership, identity, idle and reference checks.
+/// Deadline or uncertain observations mark the report incomplete; no mutation is performed.
+pub fn discover(
     temp_root: &Path,
     explicit_roots: Option<&[PathBuf]>,
     deadline: Instant,
@@ -173,14 +245,15 @@ pub(crate) fn discover(
     discovery
 }
 
-pub(crate) fn validate_candidate(
-    path: &Path,
-    temp_root: &Path,
-) -> Result<LinuxTempMeasurement, String> {
+/// Reobserves a candidate against the real process and clock context before cleanup preparation.
+/// Failure refuses the candidate; this observation does not authorize deletion.
+pub fn validate_candidate(path: &Path, temp_root: &Path) -> Result<LinuxTempMeasurement, String> {
     validate_candidate_with_seams(path, temp_root, false)
 }
 
-pub(crate) fn validate_candidate_with_seams(
+/// Reobserves a candidate while optionally enabling explicit integration observation seams.
+/// Production cleanup callers pass false; true honors the existing SWEEPX_TEST_LINUX_* fixtures.
+pub fn validate_candidate_with_seams(
     path: &Path,
     temp_root: &Path,
     allow_test_seams: bool,
@@ -194,7 +267,7 @@ pub(crate) fn validate_candidate_with_seams(
 }
 
 /// Revalidates a candidate after its symlink targets have intentionally been read.
-pub(crate) fn revalidate_prepared_candidate_with_seams(
+pub fn revalidate_prepared_candidate_with_seams(
     path: &Path,
     temp_root: &Path,
     allow_test_seams: bool,
@@ -208,7 +281,7 @@ pub(crate) fn revalidate_prepared_candidate_with_seams(
 }
 
 /// Reads symlink targets once and records the access-time effect on only those symlinks.
-pub(crate) fn prepare_symlink_copy(
+pub fn prepare_symlink_copy(
     path: &Path,
     temp_root: &Path,
     expected: &LinuxTempMeasurement,
@@ -468,7 +541,9 @@ impl CPath {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
+/// Enumerates a real directory without updating its access time, refusing a final symlink.
+/// Enumeration failure is returned to the caller, never interpreted as an empty directory.
+pub fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
     let path_bytes = CPath::new(path.as_os_str())?;
     // O_NOATIME keeps SweepX's own eligibility read from turning a stale directory into an active
     // one. O_NOFOLLOW and O_DIRECTORY reject a final-component symlink or non-directory race.
@@ -493,7 +568,9 @@ pub(crate) fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> 
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
+/// Enumerates using a duplicate of the retained directory descriptor without taking caller ownership.
+/// The caller must keep the original descriptor valid and exclusively owned throughout the call.
+pub fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
     struct DirectoryStream(*mut libc::DIR);
 
     impl Drop for DirectoryStream {
@@ -1156,68 +1233,6 @@ pub(crate) fn decode_mountinfo_path(encoded: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use std::sync::{Mutex, MutexGuard};
-    use tempfile::TempDir;
-
-    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Serializes tests that replace process observation and clock environment variables.
-    pub(crate) struct TestSeams {
-        _lock: MutexGuard<'static, ()>,
-        pub(crate) proc_root: TempDir,
-    }
-
-    impl TestSeams {
-        /// Installs empty `/proc` and Unix-socket fixtures without moving the reference clock.
-        pub(crate) fn new() -> Self {
-            let lock = TEST_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let proc_root = TempDir::new().unwrap();
-            fs::create_dir_all(proc_root.path().join("self")).unwrap();
-            fs::write(proc_root.path().join("self/mountinfo"), b"").unwrap();
-            let net_unix = proc_root.path().join("net-unix");
-            fs::write(
-                &net_unix,
-                b"Num       RefCount Protocol Flags    Type St Inode Path\n",
-            )
-            .unwrap();
-            // SAFETY: Tests holding `TEST_ENV_LOCK` are the only users of these process globals.
-            unsafe {
-                std::env::set_var("SWEEPX_TEST_LINUX_PROC_ROOT", proc_root.path());
-                std::env::set_var("SWEEPX_TEST_LINUX_PROC_NET_UNIX", net_unix);
-            }
-            Self {
-                _lock: lock,
-                proc_root,
-            }
-        }
-
-        /// Installs fixtures and projects the reference clock beyond every fixture timestamp.
-        pub(crate) fn future() -> Self {
-            let seams = Self::new();
-            // SAFETY: The shared test lock makes this process-global clock deterministic.
-            unsafe {
-                std::env::set_var("SWEEPX_TEST_LINUX_NOW_UNIX", "4000000000");
-            }
-            seams
-        }
-    }
-
-    impl Drop for TestSeams {
-        fn drop(&mut self) {
-            // SAFETY: Drop still holds the test-serialization lock.
-            unsafe {
-                std::env::remove_var("SWEEPX_TEST_LINUX_PROC_ROOT");
-                std::env::remove_var("SWEEPX_TEST_LINUX_PROC_NET_UNIX");
-                std::env::remove_var("SWEEPX_TEST_LINUX_NOW_UNIX");
-            }
-        }
-    }
-}
-#[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
@@ -1251,7 +1266,75 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    use super::test_support::TestSeams as TestProcSeams;
+    use sweepx_fixtures::linux_temp::TestSeams as TestProcSeams;
+
+    #[test]
+    fn native_discovery_and_report_are_callable_without_cli() {
+        let _seams = TestProcSeams::future();
+        let root = TempDir::new().unwrap();
+        let native_root = root.path().canonicalize().unwrap();
+        let path = native_root.join("unremarkable-user-owned-file");
+        fs::write(&path, [0x5a; 137]).unwrap();
+        let observed = fs::symlink_metadata(&path).unwrap();
+        let mut discovery = discover(
+            &native_root,
+            Some(std::slice::from_ref(&path)),
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert!(discovery.complete, "{:?}", discovery.incomplete_reason);
+        assert_eq!(discovery.candidates.len(), 1);
+        let measured = &discovery.candidates[0].measurement;
+        assert_eq!(measured.top.dev(), observed.dev());
+        assert_eq!(measured.top.ino(), observed.ino());
+        assert_eq!(measured.logical_bytes, u128::from(observed.len()));
+        // Linux stat's st_blocks unit is 512 bytes, independently of filesystem block size.
+        assert_eq!(
+            measured.allocated_bytes,
+            u128::from(observed.blocks()) * 512
+        );
+        assert_eq!(
+            *measured,
+            validate_candidate_with_seams(&path, &native_root, true).unwrap()
+        );
+
+        let rule = crate::junk::platform::load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.id == "linux.stale-temp-object")
+            .unwrap();
+        let report = report_candidates(&rule, &discovery);
+        assert_eq!(report.len(), 1);
+        let row = &report[0];
+        assert_eq!(row.native_path.as_deref(), Some(path.as_path()));
+        assert_eq!(row.rule_id, "linux.stale-temp-object");
+        assert_eq!(
+            row.reclaimable,
+            sweepx_model::ByteValue::Known {
+                value: sweepx_model::DecimalU128::new(u128::from(observed.blocks()) * 512)
+            }
+        );
+        assert!(!row.size_is_logical);
+        assert_eq!(row.classification.as_deref(), Some("stale_temp_report"));
+        assert_eq!(row.confidence.as_deref(), Some("medium"));
+        assert_eq!(row.blockers, ["system_wide_reference_view_unavailable"]);
+        assert!(row.source_entry.is_none());
+        assert!(row.git.is_none());
+
+        discovery.complete = false;
+        discovery.incomplete_reason = Some("controlled incomplete reference view".into());
+        assert_eq!(
+            report_candidates(&rule, &discovery)[0]
+                .blockers
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "system_wide_reference_view_unavailable",
+                "linux_tmp_discovery_incomplete"
+            ])
+        );
+    }
+
     #[test]
     fn recursive_child_timestamp_overrides_old_directory_mtime() {
         let root = TempDir::new().unwrap();

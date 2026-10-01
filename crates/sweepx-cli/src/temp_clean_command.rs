@@ -21,7 +21,7 @@ use serde_json::json;
 use sweepx_core::OutputFormat;
 use sweepx_i18n::Locale;
 
-use crate::linux_temp::{self, LinuxTempMeasurement};
+use sweepx_core::junk::linux_temp::{self, LinuxTempMeasurement};
 
 const PLAN_SCHEMA: &str = "sweepx.temp-clean.plan/v3";
 const RESULT_SCHEMA: &str = "sweepx.temp-clean.result/v3";
@@ -1922,7 +1922,7 @@ mod tests {
     #[test]
     fn verified_move_preserves_broken_symlink_and_special_inodes() {
         let root = TempDir::new().unwrap();
-        let _seams = linux_temp::test_support::TestSeams::future();
+        let _seams = sweepx_fixtures::linux_temp::TestSeams::future();
         let source = root.path().join("stale-object");
         let destination = root.path().join("recovered-object");
         fs::create_dir(&source).unwrap();
@@ -1996,7 +1996,7 @@ mod tests {
     #[test]
     fn verified_move_preserves_a_top_level_broken_symlink() {
         let root = TempDir::new().unwrap();
-        let _seams = linux_temp::test_support::TestSeams::future();
+        let _seams = sweepx_fixtures::linux_temp::TestSeams::future();
         let source = root.path().join("stale-link");
         let destination = root.path().join("recovered-link");
         std::os::unix::fs::symlink("missing-target", &source).unwrap();
@@ -2031,7 +2031,7 @@ mod tests {
         }
         let test = || -> Result<(), String> {
             let temporary_root = TempDir::new_in(shm).map_err(|error| error.to_string())?;
-            let _seams = linux_temp::test_support::TestSeams::future();
+            let _seams = sweepx_fixtures::linux_temp::TestSeams::future();
             let destination_root = TempDir::new().map_err(|error| error.to_string())?;
             let source = temporary_root.path().join("stale-cross-device");
             let destination = destination_root.path().join("recovered");

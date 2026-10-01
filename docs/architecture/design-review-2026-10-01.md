@@ -27,7 +27,7 @@
 
 ## 尚存的设计不足
 
-1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释仍在 CLI，需继续迁移才能关闭完整平台共享服务验收；Git 增强证据也尚待单独下沉。先完成具体业务边界，不新增插件框架。
+1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照及其路径绑定仍待收尾，Git 增强证据也尚待单独下沉。先完成具体业务边界，不新增插件框架。
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
@@ -187,7 +187,7 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 - [x] 端到端阶段计时、受控及真实目录冷/热测量、结果等价核验。
 - [x] 合并根/文件索引历史查询，移除完整历史后的固定等待。
 - [x] listing、marker 与多根缓存的统一字节预算、逐根淘汰及有界持久化读取；预算耗尽不能把缺失证据当作否定结论。
-- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用发现/分类/解释已下沉，Linux `/tmp` 专用发现及解释仍待迁移。
+- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用及 Linux `/tmp` 发现/分类/解释已下沉，浏览器/known-root 的有界发现快照及路径绑定仍待收尾。
 - [ ] 缓存命中后重建当前 Git 上下文及增强证据。
 - [ ] 核心垃圾扫描会话：开始、取消、可见目录优先级、选中范围刷新；有界阶段/进度/候选/统计/错误/终态事件，稳定候选键及 revision。
 - [ ] 垃圾交互 TUI：历史结果标记与逐项替换、自由选择和删除前原生身份重验。
@@ -279,3 +279,13 @@ core 的 `junk::platform` 接管工具及平台根发现、活动/格式解释�
 共享服务验收仍保留未完成：Linux `/tmp` 的专用 native 测量、引用证据与报告拼装仍在 CLI，下一步迁移时必须保持它与清理预览共用同一实现，并处理跨 crate 测试夹具。浏览器/known-root 匹配也仍沿用原来的现场发现调用；后续在共享服务内将这些结果纳入本次有界快照，避免逐候选重枚举，核对根自身与嵌套根的路径绑定。不得把缓存预算验收误读为所有发现路径已完成资源审计。Git、会话、TUI、大文件、重复文件及规则扩展的清单状态不变。
 
 本阶段验证：受影响 catalog/core/CLI 253 项测试通过、1 项原有基准 ignored、1 项系统 Trash 挂起显式排除；工作区 752 项通过、0 失败、2 项原有基准 ignored，同一 Trash 用例仍排除。格式、受影响及工作区 all-targets/all-features clippy 通过。交叉检查最初发现 CLI 的 macOS-only 导入未正确 cfg，修正门控后 Linux GNU、Windows GNU 工作区交叉 clippy 均通过，包含目标测试代码；未运行目标宿主测试或 MSVC。本次没有端到端性能测量，不声称模块迁移带来整机提速。
+
+## 共享 Linux 临时对象发现与报告（2026-10-01）
+
+Linux `/tmp` 的原生测量、当前用户引用证据及报告解释已迁入 `sweepx-core::junk::linux_temp`。CLI 报告与清理预览导入同一模块，不复制原生遍历或改变删除入口。公开测量是待复验的事实，不是执行 permit；候选仍保留系统范围引用不可证明的 blocker，部分发现另外保留 incomplete 标记。原有规则 ID、风险、活动代码、大小含义和报告身份生成保持不变。
+
+进程及未来时钟夹具放入现有 `sweepx-fixtures::linux_temp`，仅由 core/CLI 的 Linux 开发依赖使用；没有新增 crate 或生产依赖。对照迁移前 Git 源码，原生生产逻辑在文档、可见性、rustfmt 和夹具导入规范化后完全一致，15 项原有原生测试名称保留；报告拼装在类型导入规范化后也完全一致。新增直接调用 core 的 Linux 回归从受控文件经 discover 到 report，使用普通 no-follow metadata 交叉核对设备/inode、逻辑长度与 Linux stat 分配字节，核对预览测量一致性和部分覆盖 blocker。
+
+本次只完成业务迁移；Linux 原生目录名集合、递归 measurement map 和进程表读取的资源保留仍需进一步审计，不将此前缓存预算验收扩大到它们。浏览器/known-root 有界快照及路径绑定继续作为共享服务收尾，验收项暂不勾选。
+
+交付验证：受影响 core/CLI/fixtures 的本机测试 242 项通过、1 项基准 ignored、1 项系统 Trash 挂起显式排除；工作区 752 项通过、0 失败、2 项原有基准 ignored，仍以 `--skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 排除该原生行为。格式、受影响及工作区 all-targets/all-features clippy 通过；Linux GNU、Windows GNU 工作区交叉 clippy 通过，包括新增 Linux 测试代码。core/fixtures 包清单包含迁移模块；53 份 Markdown 检查与 23 项检查器测试通过。宿主为 arm64 macOS，未安装 Docker、Lima 或 QEMU Linux 运行器，Linux 原生测试尚未运行，Windows 宿主/MSVC 和系统 Trash 行为也未验证；不将交叉 lint 表述为运行时验收。本次未测端到端性能，模块迁移没有新的加速结论。

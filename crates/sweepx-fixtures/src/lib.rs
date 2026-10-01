@@ -1,3 +1,7 @@
+/// Controlled Linux temporary-object observation fixtures shared by core and CLI tests.
+#[cfg(target_os = "linux")]
+pub mod linux_temp;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 mod junk_cache;
 #[cfg(target_os = "linux")]
-mod linux_temp;
+use sweepx_core::junk::linux_temp;
 #[cfg(target_os = "linux")]
 mod permanent_delete_command;
 #[cfg(target_os = "macos")]
@@ -1101,7 +1101,7 @@ use sweepx_core::junk::candidate::{assemble_platform_candidate, assemble_project
 use sweepx_core::junk::platform::PLATFORM_JUNK_RULES_JSON;
 #[cfg(target_os = "macos")]
 use sweepx_core::junk::platform::PlatformJunkEvidence;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 use sweepx_core::junk::platform::PlatformJunkRule;
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::platform::load_platform_junk_rules;
@@ -1415,7 +1415,7 @@ fn run_junk_scan(
     }
     #[cfg(target_os = "linux")]
     if let Some((rule, discovery)) = &temp_discovery {
-        fresh_candidates.extend(linux_temp_candidates(rule, discovery));
+        fresh_candidates.extend(linux_temp::report_candidates(rule, discovery));
     }
 
     timings.phase("gitEvidence");
@@ -3148,52 +3148,6 @@ fn normalize_junk_roots(
         scan_roots,
         temp_roots: Vec::new(),
     })
-}
-
-#[cfg(target_os = "linux")]
-fn linux_temp_candidates(
-    rule: &PlatformJunkRule,
-    discovery: &linux_temp::LinuxTempDiscovery,
-) -> Vec<JunkCandidate> {
-    use std::os::unix::fs::MetadataExt;
-
-    discovery
-        .candidates
-        .iter()
-        .filter_map(|candidate| {
-            let metadata = &candidate.measurement.top;
-            let mut blockers = vec![linux_temp::REFERENCE_BLOCKER.to_string()];
-            if !discovery.complete {
-                blockers.push("linux_tmp_discovery_incomplete".to_string());
-            }
-            Some(JunkCandidate {
-                path: candidate.path.display().to_string(),
-                native_path: Some(candidate.path.clone()),
-                rule_id: rule.id.clone(),
-                risk: rule.risk.clone(),
-                reclaimable: ByteValue::Known {
-                    value: sweepx_model::DecimalU128::new(candidate.measurement.allocated_bytes),
-                },
-                evidence: rule.evidence.clone(),
-                source_reviewed_at: rule.source_reviewed_at.clone(),
-                references: rule.references.clone(),
-                entry_id: ScanEntryId::for_scan_ordinal(
-                    &sweepx_model::ScanId::new("linux-temp-report"),
-                    u128::from(metadata.ino()).saturating_add(1),
-                )
-                .ok()?,
-                ancestor_ids: BTreeSet::new(),
-                activity: Some(linux_temp::ACTIVITY_CODE.to_string()),
-                stale_formats: Vec::new(),
-                size_is_logical: false,
-                git: None,
-                classification: Some(linux_temp::CLASSIFICATION.to_string()),
-                confidence: Some("medium".to_string()),
-                blockers,
-                source_entry: None,
-            })
-        })
-        .collect()
 }
 
 fn default_full_scan_roots() -> Vec<PathBuf> {
