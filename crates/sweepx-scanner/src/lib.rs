@@ -161,6 +161,22 @@ pub trait ScanSink {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError>;
 
+    /// Whether the consumer needs lower-bound directory statistics between committed batches.
+    /// Disabled by default so ordinary scans do not build transient aggregate snapshots.
+    fn wants_directory_progress(&self) -> bool {
+        false
+    }
+
+    /// Reports statistics from a committed directory batch, before recursive coverage is known.
+    /// This is a provisional observation, never a replacement for the final aggregate.
+    fn note_directory_progress(&mut self, _path: &Path, _aggregate: &DirectoryAggregate) {}
+
+    /// Optional scheduling preference, sampled at the next directory round.
+    /// This path changes ordering only; it cannot admit or reopen an object.
+    fn preferred_directory(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Notes the canonical path of a directory the walk completed, with its coverage.
     ///
     /// Called for every directory, candidate or not, just before the aggregate may be dropped. A
@@ -205,21 +221,10 @@ pub trait ScanSink {
     }
 }
 
-/// Classifies a directory as junk while its walk is still running.
-///
-/// Implemented by the CLI against its loaded rule sets. The scanner calls it once per
-/// directory, at the moment that directory's own aggregate is pushed -- i.e. after every
-/// object directly under the directory has been observed, which is the earliest point marker
-/// checks are complete. Only a directory the classifier returns a rule id for is retained as a
-/// row; everything else is dropped on purpose rather than buffered for a post-scan pass. This
-/// is what keeps the result envelope small on a machine that produces hundreds of thousands
-/// of entries.
 /// The children of one directory captured during a scan, for file-level reuse.
 ///
-/// `files` maps a regular file's name to its logical size; `dirs` is the set of child directory
-/// names. This is exactly what the reuse provider needs to distinguish unchanged files (reuse
-/// size, no syscall) from directories and unknown entries (inspect). Only regular files with a
-/// known size are recorded.
+/// Known lengths may be proposed for reuse; current backend facts must still establish ordinary
+/// file type and length. The legacy `dirs` slot is empty in new scans.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DirListing {
     /// Observed regular file basenames with known logical lengths, subject to the optional index budget.
@@ -260,6 +265,11 @@ pub trait SubtreeReuse: Sync {
         None
     }
 }
+/// Classifies observed directories using one loaded rule service.
+///
+/// The collecting sink currently evaluates each directory when final root aggregates arrive,
+/// after marker observation for that root. Only matching rows and aggregates are retained.
+/// Provisional live statistics cannot establish marker absence or a final rule decision.
 pub trait JunkClassifier {
     /// Whether a file basename is needed as a classification marker.
     /// Defaults to retaining every name for custom evaluators. Built-in rule services can
@@ -280,6 +290,41 @@ pub trait JunkClassifier {
         entry: &ScannedEntry,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<String>;
+}
+
+/// Borrowed live observations from the existing classified traversal.
+///
+/// Callbacks run synchronously on the scan sequencer, not the directory workers. Consumers must
+/// keep them short and bound any owned copies or event queues. Classification still waits for
+/// the root's marker observations; a candidate callback is emitted only after its final aggregate
+/// and rule decision have been admitted. This interface does not provide Git enrichment, a UI
+/// queue or execution authority. Cancellation uses the scan's existing token.
+pub trait ClassifiedScanObserver {
+    /// Reports progress even when the retained progress log is full.
+    fn on_progress(&mut self, _root: &Path, _event: &ProgressEvent) {}
+
+    /// Reports a boundary even when the retained boundary log is full.
+    fn on_boundary(&mut self, _boundary: &BoundaryRecord) {}
+
+    /// Reports a committed directory batch as lower-bound statistics.
+    /// Final statistics for classified directories arrive with `on_candidate`.
+    fn on_directory_progress(&mut self, _path: &Path, _aggregate: &DirectoryAggregate) {}
+
+    /// Reports one retained base rule candidate; interpretation remains the caller's job.
+    fn on_candidate(
+        &mut self,
+        _entry: &ScannedEntry,
+        _rule_id: &str,
+        _aggregate: &DirectoryAggregate,
+    ) {
+    }
+
+    /// Selects a directory preference for the next bounded scheduling round.
+    /// The scanner prioritizes an already admitted path or its admitted ancestor/descendants.
+    /// Arbitrary or stale paths cannot add work, bypass boundaries or authorize execution.
+    fn preferred_directory(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Result of a classified scan: the pruned summary plus the rule id chosen per entry.
@@ -331,6 +376,7 @@ struct CollectingScanSink<'a> {
     /// When present, the sink runs in junk mode: non-directory rows feed only the marker index,
     /// and directory rows are classified when their aggregate is pushed.
     classifier: Option<&'a dyn JunkClassifier>,
+    observer: Option<&'a mut dyn ClassifiedScanObserver>,
     /// Directory rows observed but not yet classified (the aggregate arrives after the subtree
     /// walk completes). Keyed by the row's entry id.
     pending_directories: BTreeMap<ScanEntryId, ScannedEntry>,
@@ -379,6 +425,7 @@ impl<'a> CollectingScanSink<'a> {
             detail_overflow_count: 0,
             retained_directories: 0,
             classifier: None,
+            observer: None,
             pending_directories: BTreeMap::new(),
             pending_root_ids: BTreeSet::new(),
             file_markers: BTreeMap::new(),
@@ -532,10 +579,8 @@ impl<'a> CollectingScanSink<'a> {
     /// A missing required marker can make a negative predicate spuriously match. Once facts
     /// were lost, skip remaining classification for this root and report partial coverage of
     /// classification, while the ordinary traversal still computes its filesystem totals.
-    fn classify_pending(&mut self, id: &ScanEntryId) {
-        let Some(entry) = self.pending_directories.remove(id) else {
-            return;
-        };
+    fn classify_pending(&mut self, id: &ScanEntryId) -> Option<bool> {
+        let entry = self.pending_directories.remove(id)?;
         let is_root = self.pending_root_ids.remove(id);
         let cost = Self::row_cost(&entry);
         let decision = if self.metadata_lost {
@@ -550,7 +595,7 @@ impl<'a> CollectingScanSink<'a> {
         else {
             self.metadata_bytes -= cost;
             self.root_metadata_bytes -= cost;
-            return;
+            return None;
         };
         self.decisions.insert(id.clone(), rule_id);
         if is_root {
@@ -558,6 +603,7 @@ impl<'a> CollectingScanSink<'a> {
         } else {
             self.summary.entries.push(entry);
         }
+        Some(is_root)
     }
 
     /// Records loss of evidence a total or coverage claim depends on.
@@ -602,6 +648,9 @@ impl<'a> CollectingScanSink<'a> {
     }
 
     fn push_boundary_marker(&mut self, boundary: BoundaryRecord) {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_boundary(&boundary);
+        }
         Self::push_capped_replace_last(
             &mut self.summary.boundaries,
             boundary,
@@ -610,6 +659,9 @@ impl<'a> CollectingScanSink<'a> {
     }
 
     fn push_progress_marker(&mut self, event: ProgressEvent) {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_progress(&self.active_root, &event);
+        }
         Self::push_capped_replace_last(
             &mut self.summary.progress,
             event,
@@ -744,6 +796,9 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn push_boundary(&mut self, root: &Path, boundary: BoundaryRecord) -> Result<(), ScanError> {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_boundary(&boundary);
+        }
         if self.summary.boundaries.len() >= self.limits.max_retained_boundaries {
             // Losing a boundary record loses the evidence that something was skipped, so the
             // affected totals must be reported as lower bounds rather than exact.
@@ -755,6 +810,9 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn push_progress(&mut self, root: &Path, event: ProgressEvent) -> Result<(), ScanError> {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_progress(root, &event);
+        }
         if self.summary.progress.len() >= self.limits.max_progress_events {
             let overflow_path = match &event {
                 ProgressEvent::RootAccepted { path }
@@ -799,7 +857,7 @@ impl ScanSink for CollectingScanSink<'_> {
                 self.coverages
                     .insert(id.clone(), aggregate.coverage.clone());
             }
-            self.classify_pending(&id);
+            let classified_root = self.classify_pending(&id);
             if !self.decisions.contains_key(&id) {
                 // A non-candidate directory's bytes are not needed for any total: file entries are
                 // folded into every ancestor's state as they are visited (`propagate_file_entry`
@@ -820,6 +878,21 @@ impl ScanSink for CollectingScanSink<'_> {
                     "retained aggregate cap exceeded across classified candidates",
                 );
                 return Ok(());
+            }
+            if let Some(is_root) = classified_root
+                && let Some(observer) = self.observer.as_deref_mut()
+            {
+                let entry = if is_root {
+                    self.summary.roots.last()
+                } else {
+                    self.summary.entries.last()
+                }
+                .expect("classified row was retained");
+                let rule = self
+                    .decisions
+                    .get(&id)
+                    .expect("classified rule was retained");
+                observer.on_candidate(entry, rule, &aggregate);
             }
             self.summary.aggregates.push(aggregate);
             return Ok(());
@@ -846,6 +919,22 @@ impl ScanSink for CollectingScanSink<'_> {
 
     fn retained_aggregate_count(&self) -> usize {
         self.summary.aggregates.len()
+    }
+
+    fn wants_directory_progress(&self) -> bool {
+        self.observer.is_some()
+    }
+
+    fn note_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_directory_progress(path, aggregate);
+        }
+    }
+
+    fn preferred_directory(&self) -> Option<PathBuf> {
+        self.observer
+            .as_deref()
+            .and_then(ClassifiedScanObserver::preferred_directory)
     }
 
     fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
@@ -934,6 +1023,37 @@ struct DirectoryTask<D> {
 struct ScheduledDirectory<D> {
     current: FrontierDirectory<D>,
     child_directory_permits: usize,
+}
+
+/// Selects only from admitted capabilities. Unrelated preferences preserve depth-first order.
+/// A pending ancestor can advance discovery toward the requested directory, while deeper
+/// descendants retain the reserve strategy that bounds handles on wide trees.
+fn take_frontier_directory<D>(
+    frontier: &mut VecDeque<FrontierDirectory<D>>,
+    preferred: Option<&Path>,
+) -> FrontierDirectory<D> {
+    let selected = preferred.and_then(|preferred| {
+        frontier
+            .iter()
+            .enumerate()
+            .filter_map(|(index, current)| {
+                let relation = if current.path.starts_with(preferred) {
+                    2
+                } else if preferred.starts_with(&current.path) {
+                    1
+                } else {
+                    return None;
+                };
+                Some(((relation, current.path.components().count(), index), index))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, index)| index)
+    });
+    match selected {
+        Some(index) => frontier.remove(index),
+        None => frontier.pop_back(),
+    }
+    .expect("frontier round length was captured")
 }
 
 struct DirectoryTaskResult<D> {
@@ -1256,6 +1376,26 @@ where
         reuse: Option<&dyn SubtreeReuse>,
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
+        Ok(sink.finish_classified())
+    }
+
+    /// Runs the same classified walk while exposing borrowed live observations.
+    ///
+    /// The observer cannot change admission, resource accounting or rule decisions. It may
+    /// request an ordering preference for already admitted directories and cancel via the
+    /// supplied token. Final candidates are delivered before the traversal's `Finished` event;
+    /// an error return can occur without `Finished` and must be handled by the caller.
+    pub fn scan_classified_with_observer(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+        classifier: &dyn JunkClassifier,
+        reuse: Option<&dyn SubtreeReuse>,
+        observer: &mut dyn ClassifiedScanObserver,
+    ) -> Result<ClassifiedScan, ScanError> {
+        let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        sink.observer = Some(observer);
         self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
     }
@@ -1693,10 +1833,10 @@ where
                             .min(grantable.max(1));
                         let quotient = grantable / directory_count;
                         let remainder = grantable % directory_count;
+                        let preferred = sink.preferred_directory();
                         for index in 0..directory_count {
-                            let current = frontier
-                                .pop_back()
-                                .expect("frontier round length was captured");
+                            let current =
+                                take_frontier_directory(&mut frontier, preferred.as_deref());
                             let child_directory_permits = quotient
                                 .saturating_add(usize::from(index < remainder))
                                 .min(self.options.resource_limits.max_directory_batch_entries);
@@ -2259,6 +2399,16 @@ where
                     if continuation_reserved {
                         frontier.push_back(current);
                     }
+                    if sink.wants_directory_progress()
+                        && let Some(state) = directory_states.get(&path)
+                    {
+                        // Only committed batches reach consumers. Outstanding worker results
+                        // and unvisited descendants make every interim total a lower bound.
+                        sink.note_directory_progress(
+                            &path,
+                            &state.aggregate(&self.options.scan_id, false),
+                        );
+                    }
                 }
                 Ok(())
             })();
@@ -2336,8 +2486,17 @@ impl DirectoryState {
     }
 
     fn into_aggregate(self, scan_id: &ScanId) -> DirectoryAggregate {
-        let complete = self.incomplete_reasons.is_empty();
-        let reasons: Vec<_> = self.incomplete_reasons.into_iter().collect();
+        self.aggregate(scan_id, true)
+    }
+
+    /// Borrows the small scalar state without cloning the retained hard-link identity set.
+    /// A progress snapshot deliberately leaves recursive coverage incomplete.
+    fn aggregate(&self, scan_id: &ScanId, final_observation: bool) -> DirectoryAggregate {
+        let complete = final_observation && self.incomplete_reasons.is_empty();
+        let mut reasons: Vec<_> = self.incomplete_reasons.iter().cloned().collect();
+        if !final_observation && !reasons.contains(&ReasonCode::IncompleteStreamCoverage) {
+            reasons.push(ReasonCode::IncompleteStreamCoverage);
+        }
         let apparent = if complete {
             known_u128(self.apparent_logical_bytes)
         } else {
@@ -2351,8 +2510,8 @@ impl DirectoryState {
             Some(value) => lower_bound_u128(value, ReasonCode::IncompleteStreamCoverage),
             None => unknown_u128(ReasonCode::UnknownIdentity),
         };
-        let allocated = self.allocated_bytes.into_value(complete);
-        let reclaimable = self.reclaimable_bytes.into_value(complete);
+        let allocated = self.allocated_bytes.clone().into_value(complete);
+        let reclaimable = self.reclaimable_bytes.clone().into_value(complete);
 
         DirectoryAggregate {
             scan_id: scan_id.clone(),
@@ -2362,8 +2521,22 @@ impl DirectoryState {
             unique_logical_bytes: unique,
             filesystem_reported_allocated_bytes: allocated.clone(),
             potentially_reclaimable_bytes: reclaimable,
-            direct_child_count: known_count(self.direct_child_count),
-            recursive_entry_count: known_count(self.recursive_entry_count),
+            direct_child_count: if final_observation {
+                known_count(self.direct_child_count)
+            } else {
+                lower_bound_u128(
+                    self.direct_child_count,
+                    ReasonCode::IncompleteStreamCoverage,
+                )
+            },
+            recursive_entry_count: if final_observation {
+                known_count(self.recursive_entry_count)
+            } else {
+                lower_bound_u128(
+                    self.recursive_entry_count,
+                    ReasonCode::IncompleteStreamCoverage,
+                )
+            },
             coverage: Coverage {
                 state: if complete {
                     CoverageState::Complete
@@ -3454,6 +3627,247 @@ mod tests {
                 .any(|entry| matches!(&entry.native_basename,
                 NativeName::UnixBytes(bytes) if bytes.as_slice() == b"leaf"))
         );
+    }
+
+    struct ObservedBranches;
+    impl JunkClassifier for ObservedBranches {
+        fn classify(
+            &self,
+            entry: &ScannedEntry,
+            _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+        ) -> Option<String> {
+            native_basename_marker(&entry.native_basename)
+                .is_some_and(|name| name.starts_with("dir-"))
+                .then(|| "rule:branch".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct ObservationLog {
+        candidates: Vec<(ScannedEntry, String, DirectoryAggregate)>,
+        statistics: Vec<(PathBuf, DirectoryAggregate)>,
+        boundaries: Vec<BoundaryRecord>,
+        progress: Vec<ProgressEvent>,
+        finished: bool,
+        cancel_on_batch: Option<CancellationToken>,
+        preference_after_batch: Option<PathBuf>,
+    }
+
+    impl ClassifiedScanObserver for ObservationLog {
+        fn on_progress(&mut self, _: &Path, event: &ProgressEvent) {
+            self.finished |= matches!(event, ProgressEvent::Finished);
+            self.progress.push(event.clone());
+        }
+
+        fn on_boundary(&mut self, boundary: &BoundaryRecord) {
+            self.boundaries.push(boundary.clone());
+        }
+
+        fn on_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {
+            assert!(!self.finished, "batch statistics must precede Finished");
+            assert!(!aggregate.coverage.complete);
+            assert_eq!(aggregate.arithmetic_state, ArithmeticState::LowerBound);
+            assert!(matches!(
+                aggregate.apparent_logical_bytes,
+                EvidenceValue::LowerBound { .. }
+            ));
+            assert!(matches!(
+                aggregate.recursive_entry_count,
+                EvidenceValue::LowerBound { .. }
+            ));
+            self.statistics
+                .push((path.to_path_buf(), aggregate.clone()));
+            if let Some(cancel) = &self.cancel_on_batch {
+                cancel.cancel();
+            }
+        }
+
+        fn on_candidate(
+            &mut self,
+            entry: &ScannedEntry,
+            rule: &str,
+            aggregate: &DirectoryAggregate,
+        ) {
+            assert!(!self.finished, "final candidate must precede Finished");
+            self.candidates
+                .push((entry.clone(), rule.to_string(), aggregate.clone()));
+        }
+
+        fn preferred_directory(&self) -> Option<PathBuf> {
+            (!self.statistics.is_empty())
+                .then(|| self.preference_after_batch.clone())
+                .flatten()
+        }
+    }
+
+    #[test]
+    fn live_classified_observations_preserve_results_and_final_candidates() {
+        let platform = NestedFanOutPlatform::new(8);
+        let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
+        let scanner = Scanner::new(platform, ScannerOptions::default());
+        let ordinary = scanner
+            .scan_classified(&roots, &CancellationToken::new(), &ObservedBranches, None)
+            .unwrap();
+        let mut observed = ObservationLog::default();
+        let live = scanner
+            .scan_classified_with_observer(
+                &roots,
+                &CancellationToken::new(),
+                &ObservedBranches,
+                None,
+                &mut observed,
+            )
+            .unwrap();
+        assert_eq!(ordinary.summary, live.summary);
+        assert_eq!(ordinary.decisions, live.decisions);
+        assert_eq!(ordinary.directory_markers, live.directory_markers);
+        assert_eq!(ordinary.coverages, live.coverages);
+        assert_eq!(ordinary.covered_paths, live.covered_paths);
+        assert_eq!(ordinary.dir_listings, live.dir_listings);
+        assert!(observed.finished);
+        assert_eq!(observed.progress, live.summary.progress);
+        assert_eq!(observed.boundaries, live.summary.boundaries);
+        assert!(!observed.statistics.is_empty());
+        assert_eq!(observed.candidates.len(), 8);
+        for (entry, rule, aggregate) in observed.candidates {
+            let id = entry.identity.as_ref().unwrap().entry_id.clone();
+            assert_eq!(live.decisions.get(&id), Some(&rule));
+            assert!(live.summary.entries.contains(&entry));
+            assert!(live.summary.aggregates.contains(&aggregate));
+            assert!(aggregate.coverage.complete);
+            // The controlled fixture contains exactly one ordinary payload per branch.
+            assert_eq!(aggregate.recursive_entry_count, known_count(2));
+        }
+    }
+
+    #[test]
+    fn observer_cancels_between_batches_without_claiming_complete_statistics() {
+        let platform = NestedFanOutPlatform::new(8);
+        let roots = [ScanRoot::new(platform.root.clone()).unwrap()];
+        let cancel = CancellationToken::new();
+        let mut observed = ObservationLog {
+            cancel_on_batch: Some(cancel.clone()),
+            ..ObservationLog::default()
+        };
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                max_workers: 1,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified_with_observer(&roots, &cancel, &ObservedBranches, None, &mut observed)
+        .unwrap();
+        assert!(cancel.is_cancelled());
+        assert_eq!(observed.statistics.len(), 1);
+        assert!(observed.finished);
+        assert!(
+            observed
+                .progress
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::Cancelled { .. }))
+        );
+        assert!(
+            result
+                .summary
+                .aggregates
+                .iter()
+                .all(|aggregate| !aggregate.coverage.complete)
+        );
+        assert!(
+            observed
+                .candidates
+                .iter()
+                .all(|(_, _, aggregate)| !aggregate.coverage.complete)
+        );
+    }
+
+    #[test]
+    fn observer_delivers_boundaries_and_finish_outside_retained_log_caps() {
+        let root = test_path("observer-root");
+        let platform = FakePlatform::new(root.clone(), Vec::new(), BTreeMap::new())
+            .with_enumeration_failure(PlatformError::ResourceLimit(
+                "controlled enumeration limit".into(),
+            ));
+        let mut observed = ObservationLog::default();
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_progress_events: 0,
+                    max_retained_boundaries: 0,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified_with_observer(
+            &[ScanRoot::new(root).unwrap()],
+            &CancellationToken::new(),
+            &ObservedBranches,
+            None,
+            &mut observed,
+        )
+        .unwrap();
+        assert!(result.summary.progress.is_empty());
+        assert!(result.summary.boundaries.is_empty());
+        assert!(observed.finished);
+        assert!(
+            observed
+                .boundaries
+                .iter()
+                .any(|boundary| boundary.detail == "controlled enumeration limit")
+        );
+        assert!(
+            observed
+                .progress
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::ResourceLimit { .. }))
+        );
+    }
+
+    #[test]
+    fn a_live_preference_changes_admitted_dispatch_order_without_changing_coverage() {
+        let probe = Arc::new(SchedulerProbe::new(0));
+        let platform = SchedulingPlatform::new(4, Arc::clone(&probe));
+        let root = platform.root.clone();
+        let preferred = root.join("dir-000");
+        let mut observed = ObservationLog {
+            preference_after_batch: Some(preferred.clone()),
+            ..ObservationLog::default()
+        };
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                max_workers: 1,
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified_with_observer(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &ObservedBranches,
+            None,
+            &mut observed,
+        )
+        .unwrap();
+        let started = &probe.state.lock().unwrap().started_paths;
+        assert_eq!(started.first(), Some(&preferred));
+        let expected: BTreeSet<_> = (0..4)
+            .map(|index| root.join(format!("dir-{index:03}")))
+            .collect();
+        assert_eq!(started.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(result.decisions.len(), 4);
+        assert!(
+            result
+                .summary
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.coverage.complete
+                    && aggregate.recursive_entry_count == known_count(1))
+        );
+        assert!(result.summary.boundaries.is_empty());
+        assert!(!probe.same_handle_overlap.load(Ordering::SeqCst));
     }
 
     #[test]

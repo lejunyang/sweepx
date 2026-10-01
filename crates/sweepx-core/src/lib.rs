@@ -50,10 +50,10 @@ use sweepx_protocol::{
     QualificationKey, QualificationScope, QualificationValidity, QualificationValidityStatus,
     RuntimePrivilegeProfile,
 };
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub use sweepx_scanner::JunkClassifier;
 pub use sweepx_scanner::ScanSummary;
 pub use sweepx_scanner::SubtreeReuse;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub use sweepx_scanner::{ClassifiedScanObserver, JunkClassifier};
 pub use sweepx_scanner::{DirListing, PlannedEntry};
 #[cfg(target_os = "macos")]
 pub use sweepx_scanner::{FsEventId, current_event_id, events_since};
@@ -842,6 +842,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         ScannerOptions::default(),
         None,
         None,
+        None,
     )
     .map(|(scan, _decisions, _directory_markers, _coverages, _covered_paths, _dir_listings)| scan)
 }
@@ -867,6 +868,44 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
             ScannerOptions::default(),
             Some(classifier),
             reuse,
+            None,
+        )?;
+    Ok(JunkScanSuccess {
+        scan,
+        decisions,
+        directory_markers,
+        coverages,
+        covered_paths,
+        dir_listings,
+    })
+}
+
+/// Runs the existing junk workflow with caller-owned cancellation and borrowed live observations.
+///
+/// This synchronous seam is intended for a worker thread. It keeps rule decisions, retention,
+/// cache persistence and output assembly on the ordinary path, without a second traversal or
+/// evaluator. The observer's `Finished` event ends traversal only; callers must still handle this
+/// function's result and any later interpretation/Git phase before declaring a session complete.
+/// No durable UI event journal or event queue is introduced here.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn scan_junk_with_observer<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    classifier: &dyn JunkClassifier,
+    reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
+    cancel: &CancellationToken,
+    observer: &mut dyn ClassifiedScanObserver,
+) -> Result<JunkScanSuccess, CoreError> {
+    let (scan, decisions, directory_markers, coverages, covered_paths, dir_listings) =
+        scan_with_store_options(
+            context,
+            request,
+            store,
+            ScannerOptions::default(),
+            Some(classifier),
+            reuse,
+            Some(JunkScanObservation { cancel, observer }),
         )?;
     Ok(JunkScanSuccess {
         scan,
@@ -1006,6 +1045,11 @@ type CoveredPathMap = std::collections::BTreeMap<String, bool>;
 /// Canonical path → captured child listing of a directory.
 type DirListingMap = std::collections::BTreeMap<String, sweepx_scanner::DirListing>;
 
+struct JunkScanObservation<'a> {
+    cancel: &'a CancellationToken,
+    observer: &'a mut dyn sweepx_scanner::ClassifiedScanObserver,
+}
+
 fn scan_with_store_options<S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
@@ -1013,6 +1057,7 @@ fn scan_with_store_options<S: SnapshotStore>(
     scanner_options: ScannerOptions,
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
+    live: Option<JunkScanObservation<'_>>,
 ) -> Result<
     (
         ScanSuccess,
@@ -1098,12 +1143,22 @@ fn scan_with_store_options<S: SnapshotStore>(
                 ..scanner_options
             },
         );
-        let cancel = CancellationToken::new();
+        let default_cancel = CancellationToken::new();
+        let cancel = live.as_ref().map_or(&default_cancel, |live| live.cancel);
         // In junk mode classify during the walk; otherwise retain every row as before.
         let (summary, decisions, directory_markers, coverages, covered_paths, dir_listings) =
             match classifier {
                 Some(classifier) => {
-                    let classified = scanner.scan_classified(&roots, &cancel, classifier, reuse)?;
+                    let classified = match live {
+                        Some(live) => scanner.scan_classified_with_observer(
+                            &roots,
+                            cancel,
+                            classifier,
+                            reuse,
+                            live.observer,
+                        )?,
+                        None => scanner.scan_classified(&roots, cancel, classifier, reuse)?,
+                    };
                     (
                         classified.summary,
                         classified.decisions,
@@ -1114,7 +1169,7 @@ fn scan_with_store_options<S: SnapshotStore>(
                     )
                 }
                 None => (
-                    scanner.scan(&roots, &cancel)?,
+                    scanner.scan(&roots, cancel)?,
                     std::collections::BTreeMap::new(),
                     std::collections::BTreeMap::new(),
                     std::collections::BTreeMap::new(),
@@ -1125,7 +1180,13 @@ fn scan_with_store_options<S: SnapshotStore>(
         let stored_preview =
             store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
         let finished_at = timestamp_now();
-        let status = scan_status(&summary);
+        // A bounded progress log is not a reliable cancellation flag: its final marker can
+        // replace earlier observations. Caller-owned cancellation is the authoritative signal.
+        let status = if cancel.is_cancelled() {
+            OutputStatus::Cancelled
+        } else {
+            scan_status(&summary)
+        };
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
 
         let mut output = OutputEnvelope::new(
@@ -6854,6 +6915,140 @@ mod tests {
             !cleaner_is_core_compatible(&incompatible).expect("a valid range parses"),
             "a range excluding Core {CORE_VERSION} must be reported incompatible"
         );
+    }
+
+    #[test]
+    fn junk_live_observer_uses_native_facts_and_caller_cancellation() {
+        #[derive(Default)]
+        struct Observer {
+            candidates: Vec<(ScannedEntry, String, sweepx_model::DirectoryAggregate)>,
+            batches: usize,
+            finished: bool,
+            cancel_on_batch: Option<CancellationToken>,
+        }
+        impl ClassifiedScanObserver for Observer {
+            fn on_progress(&mut self, _: &Path, event: &ProgressEvent) {
+                self.finished |= matches!(event, ProgressEvent::Finished);
+            }
+            fn on_directory_progress(
+                &mut self,
+                _: &Path,
+                aggregate: &sweepx_model::DirectoryAggregate,
+            ) {
+                assert!(!self.finished);
+                assert!(!aggregate.coverage.complete);
+                self.batches += 1;
+                if let Some(cancel) = &self.cancel_on_batch {
+                    cancel.cancel();
+                }
+            }
+            fn on_candidate(
+                &mut self,
+                entry: &ScannedEntry,
+                rule: &str,
+                aggregate: &sweepx_model::DirectoryAggregate,
+            ) {
+                assert!(!self.finished);
+                assert!(entry.validated_native_locator().unwrap().is_some());
+                self.candidates
+                    .push((entry.clone(), rule.into(), aggregate.clone()));
+            }
+        }
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        #[cfg(not(unix))]
+        let root = fixture.path().to_path_buf();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        let payload = target.join("payload");
+        fs::write(&payload, b"observed").unwrap();
+        let request = ScanRequest {
+            roots: vec![root],
+            state_dir: None,
+        };
+        let service = junk::JunkService::built_in().unwrap();
+        let mut observed = Observer::default();
+        let result = scan_junk_with_observer::<MemorySnapshotStore>(
+            &context,
+            &request,
+            None,
+            &service,
+            None,
+            &CancellationToken::new(),
+            &mut observed,
+        )
+        .unwrap();
+        assert!(observed.finished && observed.batches > 0);
+        assert_eq!(observed.candidates.len(), 1);
+        let (entry, rule, aggregate) = &observed.candidates[0];
+        assert_eq!(entry.display_path, target.display().to_string());
+        assert_eq!(
+            result
+                .decisions
+                .get(&entry.identity.as_ref().unwrap().entry_id),
+            Some(rule)
+        );
+        assert!(result.scan.summary.aggregates.contains(aggregate));
+        // Ordinary native metadata and enumeration provide an independent accounting oracle.
+        let children: Vec<_> = fs::read_dir(&target).unwrap().map(Result::unwrap).collect();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].path(), payload);
+        let length = fs::symlink_metadata(&payload).unwrap().len();
+        assert_eq!(length, 8);
+        assert_eq!(
+            aggregate.apparent_logical_bytes,
+            sweepx_platform::known_u128(length.into())
+        );
+        assert_eq!(result.scan.output.status, OutputStatus::Ok);
+
+        let cancel = CancellationToken::new();
+        let mut observed = Observer {
+            cancel_on_batch: Some(cancel.clone()),
+            ..Observer::default()
+        };
+        let cancelled = scan_junk_with_observer::<MemorySnapshotStore>(
+            &context,
+            &request,
+            None,
+            &service,
+            None,
+            &cancel,
+            &mut observed,
+        )
+        .unwrap();
+        assert!(cancel.is_cancelled() && observed.finished);
+        assert_eq!(cancelled.scan.output.status, OutputStatus::Cancelled);
+        assert_eq!(cancelled.scan.output.exit_code, ExitCode::Cancelled);
+        assert!(
+            cancelled
+                .scan
+                .summary
+                .aggregates
+                .iter()
+                .all(|aggregate| !aggregate.coverage.complete)
+        );
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut observed = Observer::default();
+        let before_admission = scan_junk_with_observer::<MemorySnapshotStore>(
+            &context,
+            &request,
+            None,
+            &service,
+            None,
+            &cancel,
+            &mut observed,
+        )
+        .unwrap();
+        assert_eq!(before_admission.scan.output.status, OutputStatus::Cancelled);
+        assert!(observed.finished && observed.batches == 0 && observed.candidates.is_empty());
     }
 
     #[test]

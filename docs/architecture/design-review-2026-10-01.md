@@ -31,7 +31,7 @@
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根缓存不持久保存 activity、staleFormats、Git 查询结果、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则先恢复基础 known_generated/medium，再用共享 Git 会话重新观察当前仓库、tracked 与 ignore 证据，不回放历史 ignored/high。遍历覆盖及候选内仓库边界作为文件系统事实独立保存，不能代替当前 Git 查询。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
-5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；junk 当前仍是收集完再拼报告。`ScanSink` 已有事件入口，但这不是可直接订阅的、带背压的 junk 会话接口。
+5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；junk CLI 当前仍是收集完再拼报告。后续已加入共享 classified observer 和 caller-owned 取消入口，见文末；它提供借用的实时观察，不是可直接订阅的、带背压的 junk 会话接口。
 
 ## 支撑后续 TUI 的目标接口
 
@@ -341,3 +341,17 @@ Git 解释迁入 `sweepx-core::junk::git`。冷扫与整根缓存候选共用一
 Git 项完成后，继续核心扫描会话、垃圾 TUI、大文件、重复文件和规则扩展。工具/Linux 临时对象资源审计及目标宿主/系统 Trash 验证缺口仍保留。没有新 crate，没有端到端性能计时，不将增加当前 Git 查询说成扫描提速。
 
 交付验证（arm64 macOS，固定 Rust 1.98.0）：工作区测试 767 项通过、0 失败、2 项原有基准 ignored；随后修正 Git 环境变量隔离范围并增加当前配置选择回归，最终受影响 scanner/core/CLI 294 项测试通过、0 失败、1 项基准 ignored，其余未变测试复用上述工作区结果，不称为再次完整矩阵。两套命令仍显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 系统 Trash 挂起，该行为未验证。最终格式、受影响及工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy 通过；交叉检查包含目标测试代码，未执行对应宿主运行时或 MSVC 验收。53 份 Markdown 检查通过，core 包清单包含新 Git 模块；未发布包，也未验证 registry 依赖构建。
+
+## 核心会话的实时遍历接缝（2026-10-01）
+
+`ClassifiedScanObserver` 与 core 的 `scan_junk_with_observer` 复用现有分类 sink、规则 evaluator、原生批次和结果构造，不另外扫描或重写分类器。调用者传入取消 token；批次进度、目录统计、边界和已保留候选通过借用回调交给工作线程中的消费者。边界及结束观察独立于 summary 的日志截断；回调必须短且自行限制复制数据，现阶段不提供任何内置队列。扫描错误仍由返回值处理，遍历 `Finished` 不代表输出存储或后续 Git 解释已经完成。
+
+每个提交的目录批次提供大小和计数的 lower-bound 统计，不复制 hard-link 去重集合，不将尚未访问的子树说成 complete。最终候选沿用原有的根遍历结束后分类：必须先具备本根完整 marker 观察，不能用途中缺失 marker 做否定匹配。因此这一接缝能实时报告遍历状态，并在各根完成时报告基础候选，尚不能在单个大根中提前交付完整候选解释。普通非观察扫描不生成这些临时统计。
+
+可见目录偏好在下一调度轮读取，只选择 frontier 中已经准入的目录能力，优先推进对应目录、祖先或后代；无关路径保持原有深度优先顺序。偏好不增加根、不重开 display path、不绕过 no-follow/mount/预算检查，已在运行的批次不被强制抢占。取消结果由 caller token 决定，避免被截断的 progress log 或最终 `Finished` 覆盖为成功。
+
+受控后端回归核对有/无 observer 的所有最终扫描事实完全一致，覆盖候选先于结束、日志零容量时仍收到边界和结束、批次中取消以及动态偏好实际改变已准入目录的调度顺序而保留覆盖。core 原生夹具用普通 `read_dir`/`symlink_metadata` 独立核验一项 8 字节文件的候选总量，并验证扫描前及扫描中取消返回 cancelled。初次编译发现测试把 typed `ExitCode` 与 u8 比较，修正类型后保留原断言。
+
+核心会话验收项仍未勾选：下一步需要工作线程所有权、有界且可合并的队列、稳定候选键/revision、选中范围刷新及旧证据替换，并将当前解释与 Git 阶段纳入显式终态。随后才能接垃圾 TUI。没有新 CLI/TUI 功能或性能加速结论，没有新增 crate。
+
+交付验证（arm64 macOS，Rust 1.98.0）：受影响 scanner/core 177 项测试通过，工作区 773 项通过、0 失败、2 项原有基准 ignored；工作区命令继续显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 系统 Trash 挂起，该行为未验证。格式、受影响及工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy 和 53 份 Markdown 检查通过。交叉检查包含目标测试代码，未执行 Linux/Windows 宿主运行时或 MSVC 验收。没有端到端性能计时。
