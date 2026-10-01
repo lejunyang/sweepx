@@ -51,6 +51,9 @@ features:
 The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` override. Current machine scan output stays JSON, and `scan --format ndjson` remains disabled. `cache status` supports human/JSON only; NDJSON is a usage error. Missing state/cache returns `absent` without creating directories, and inspection is bounded to `preview-cache/current.json`, the current generation file, and the flat `generations/` / `quarantine/` directories; it does not scan, repair, quarantine, or reveal cached entries or path contents. Linux `status --watch --format ndjson` replays only a completed, persisted stream: it performs one same-snapshot full validation, then returns pages of at most 1024 events; an unknown but syntactically valid cursor yields `stream.reset_required`, while malformed cursor usage remains a usage error. Because events are still constructed after the scan, this is not live streaming, does not wait for new events, does not create a background operation, and does not support cancel.
 Release automation builds five target archives, checksums, installers, and this GitHub Pages site. The v0.0.1 development release is published; no stable release has been published yet.
 
+
+Browser and known-cache discovery in `junk --system` shares a bounded invocation snapshot with classification, avoiding profile enumeration for each candidate. Permission, observation or resource failures set `layoutDiscovery.complete` to false with an `incompleteReason`, report partial and return exit code 4. Confirmed results remain visible; an empty list does not prove there is no junk. The native deadline is cooperative between calls and cannot interrupt blocking OS access. Non-interactive cleanup/Trash requests are rejected before discovery.
+
 ## Read by question
 
 | What you want to know | Page |

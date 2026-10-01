@@ -207,7 +207,7 @@ enum Commands {
         command: CleanerCommands,
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
-    /// Reports partial results when resource limits prevent retaining complete evidence.
+    /// Reports partial results when discovery or scan evidence is incomplete.
     Junk {
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
         /// Measures report-only work; stdout keeps its existing format.
@@ -611,6 +611,13 @@ fn main() -> ProcessExitCode {
             quarantine_dir,
             roots,
         } => {
+            let stdin_is_terminal = std::io::stdin().is_terminal();
+            if let Err(message) =
+                validate_junk_mutation_environment(clean_temp, trash, format, stdin_is_terminal)
+            {
+                eprintln!("{message}");
+                return ProcessExitCode::from(2);
+            }
             let mut timings = junk_timings::JunkTimings::new(timings);
             let discovery_progress = ScanProgress::start(
                 context.locale(),
@@ -643,7 +650,7 @@ fn main() -> ProcessExitCode {
                 JunkCleanOptions {
                     enabled: clean_temp,
                     quarantine_dir: quarantine_dir.as_deref(),
-                    stdin_is_terminal: std::io::stdin().is_terminal(),
+                    stdin_is_terminal,
                 },
                 trash,
                 cache_dir,
@@ -1195,14 +1202,34 @@ fn source_entry_from_stored(
     stored.source_entry.clone()
 }
 
+fn validate_junk_mutation_environment(
+    clean_temp: bool,
+    trash: bool,
+    format: OutputFormat,
+    stdin_is_terminal: bool,
+) -> Result<(), &'static str> {
+    if format != OutputFormat::Human || !stdin_is_terminal {
+        if clean_temp {
+            return Err(
+                "junk --system --clean-temp requires human output and a foreground interactive terminal",
+            );
+        }
+        if trash {
+            return Err("junk --trash requires human output and a foreground interactive terminal");
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_junk_scan(
     context: &CoreContext,
     format: OutputFormat,
     size_unit: HumanSizeUnit,
     roots: Vec<PathBuf>,
-    temp_requested_roots: Vec<PathBuf>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] temp_requested_roots: Vec<
+        PathBuf,
+    >,
     platform: Option<PlatformJunkSetup>,
     clean: JunkCleanOptions<'_>,
     move_to_trash: bool,
@@ -1211,14 +1238,13 @@ fn run_junk_scan(
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cache_dir: Option<PathBuf>,
     mut timings: junk_timings::JunkTimings,
 ) -> ProcessExitCode {
-    if clean.enabled && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
-        eprintln!(
-            "junk --system --clean-temp requires human output and a foreground interactive terminal"
-        );
-        return ProcessExitCode::from(2);
-    }
-    if move_to_trash && (format != OutputFormat::Human || !clean.stdin_is_terminal) {
-        eprintln!("junk --trash requires human output and a foreground interactive terminal");
+    if let Err(message) = validate_junk_mutation_environment(
+        clean.enabled,
+        move_to_trash,
+        format,
+        clean.stdin_is_terminal,
+    ) {
+        eprintln!("{message}");
         return ProcessExitCode::from(2);
     }
     let project_service = match JunkService::built_in() {
@@ -1234,6 +1260,21 @@ fn run_junk_scan(
         rules: platform_rules,
         evidence,
     } = platform.unwrap_or_default();
+    let layout_failure = evidence.layout_failure();
+    if let Some(failure) = layout_failure
+        && format == OutputFormat::Human
+    {
+        eprintln!(
+            "{} ({})",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    "平台位置发现不完整：可能遗漏候选，空列表不能证明没有垃圾",
+                sweepx_i18n::Locale::EnUs =>
+                    "Platform layout discovery is incomplete: candidates may be missing; an empty list does not prove the scope contains no junk",
+            },
+            failure.code()
+        );
+    }
     let scan_roots = roots;
     #[cfg(target_os = "linux")]
     let temp_root = linux_temp::report_temp_root();
@@ -1427,6 +1468,11 @@ fn run_junk_scan(
     if let Some(cache) = &cache_dir {
         for index in &miss_indexes {
             let root = &canonical_roots[*index];
+            // Partial layout discovery may omit classifications despite complete filesystem
+            // traversal. Never freeze that omission into a whole-root candidate cache hit.
+            if layout_failure.is_some() {
+                continue;
+            }
             // Incomplete scans (including denied roots) must be retried, never frozen as hits.
             if !scan.as_ref().is_some_and(|scan| {
                 root.to_str()
@@ -1675,9 +1721,13 @@ fn run_junk_scan(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
-                "status": if scan_status_ok && temp_discovery_complete { "ok" } else { "partial" },
+                "status": if scan_status_ok && temp_discovery_complete && layout_failure.is_none() { "ok" } else { "partial" },
                 "readOnly": true,
                 "tempDiscovery": temp_discovery_json,
+                "layoutDiscovery": {
+                    "complete": layout_failure.is_none(),
+                    "incompleteReason": layout_failure.map(|failure| failure.code()),
+                },
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
                 "incompleteSizeCount": incomplete_size_count,
@@ -1742,9 +1792,16 @@ fn run_junk_scan(
     }
     // An all-cache run (no fresh scan) reports success; a run that scanned uses the fresh output's
     // conservative exit code so any partial coverage still degrades the code.
-    ProcessExitCode::from(scan.as_ref().map_or(0, |result| {
+    let scan_exit = scan.as_ref().map_or(0, |result| {
         result.scan.output.conservative_exit_code() as u8
-    }))
+    });
+    ProcessExitCode::from(
+        if scan_exit == 0 && (!temp_discovery_complete || layout_failure.is_some()) {
+            4
+        } else {
+            scan_exit
+        },
+    )
 }
 
 /// Adds bounded Git evidence to already-classified project candidates.

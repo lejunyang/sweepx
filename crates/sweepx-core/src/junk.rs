@@ -5,6 +5,7 @@
 
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;
+mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]
 pub mod linux_temp;

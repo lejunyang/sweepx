@@ -3,6 +3,8 @@
 //! Discovery is invocation-scoped and read-only; matching consumes captured native facts.
 //! Tool answers share a bounded runner and must not be persisted as filesystem evidence.
 
+use super::layout::{LayoutDiscovery, LayoutRoot};
+pub use super::layout::{LayoutDiscoveryFailure, LayoutDiscoveryLimits};
 use super::{
     JunkService, native_rule_name as native_name_for_rule,
     normalize_rule_name as normalized_rule_name,
@@ -11,6 +13,7 @@ use crate::tools::{self as tool_installations, ProbeLimits, ProbeRunner};
 use crate::{CancellationToken, JunkClassifier};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 pub use sweepx_catalog::junk::platform::{
     PLATFORM_JUNK_RULES_JSON, PlatformJunkRule, load_platform_junk_rules,
 };
@@ -39,6 +42,8 @@ pub struct PlatformJunkEvidence {
     /// Installation facts shared with inventory rendering.
     pub npm_installations: Vec<tool_installations::ToolInstallation>,
     by_rule: BTreeMap<String, PlatformRuleEvidence>,
+    layout_roots: BTreeMap<String, Vec<Arc<LayoutRoot>>>,
+    layout_failure: Option<LayoutDiscoveryFailure>,
 }
 
 impl PlatformJunkEvidence {
@@ -50,7 +55,7 @@ impl PlatformJunkEvidence {
     /// Uses the caller's cancellation token for all tool probes in this invocation.
     /// Filesystem discovery remains read-only and is subject to host filesystem call latency.
     pub fn precompute_with_cancel(rules: &[PlatformJunkRule], cancel: CancellationToken) -> Self {
-        let mut runner = ProbeRunner::new(ProbeLimits::default(), cancel);
+        let mut runner = ProbeRunner::new(ProbeLimits::default(), cancel.clone());
         let mut reported = BTreeMap::new();
         // Resolve non-npm roots first. npm's multi-installation inventory consumes the rest of
         // the same budget, and supplies both its cache candidates and the PATH default answer.
@@ -74,7 +79,7 @@ impl PlatformJunkEvidence {
             .iter()
             .find(|installation| installation.is_path_default)
             .and_then(|installation| installation.cache.clone());
-        Self::precompute_with(
+        Self::precompute_with_layout(
             rules,
             |rule| {
                 if rule.root_kind == "npm_reported_cache" {
@@ -84,6 +89,9 @@ impl PlatformJunkEvidence {
                 }
             },
             npm_installations,
+            LayoutDiscoveryLimits::default(),
+            cancel,
+            browser_base_dir,
         )
     }
 
@@ -91,10 +99,48 @@ impl PlatformJunkEvidence {
     /// Missing answers remain unknown. This performs read-only marker/layout discovery.
     pub fn precompute_with(
         rules: &[PlatformJunkRule],
-        mut resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
+        resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
         npm_installations: Vec<tool_installations::ToolInstallation>,
     ) -> Self {
+        Self::precompute_with_limits(
+            rules,
+            resolve,
+            npm_installations,
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+        )
+    }
+
+    /// Captures invocation-local layout facts with explicit resource limits and cancellation.
+    /// Tool answers are supplied by the resolver; neither layout nor tool facts are persisted.
+    pub fn precompute_with_limits(
+        rules: &[PlatformJunkRule],
+        resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
+        npm_installations: Vec<tool_installations::ToolInstallation>,
+        limits: LayoutDiscoveryLimits,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self::precompute_with_layout(
+            rules,
+            resolve,
+            npm_installations,
+            limits,
+            cancel,
+            browser_base_dir,
+        )
+    }
+
+    fn precompute_with_layout(
+        rules: &[PlatformJunkRule],
+        mut resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
+        npm_installations: Vec<tool_installations::ToolInstallation>,
+        limits: LayoutDiscoveryLimits,
+        cancel: CancellationToken,
+        mut resolve_base: impl FnMut(&str) -> Option<PathBuf>,
+    ) -> Self {
         let mut by_rule = BTreeMap::new();
+        let mut layout_roots = BTreeMap::new();
+        let mut discovery = LayoutDiscovery::new(limits, cancel);
         for rule in rules {
             let reported_root = resolve(rule);
             let cache_candidates =
@@ -106,11 +152,72 @@ impl PlatformJunkEvidence {
                     reported_root,
                 },
             );
+            if !matches!(
+                rule.match_kind.as_str(),
+                "verified_browser_cache" | "verified_known_root" | "verified_cache_root"
+            ) || !rule_applies_to_host(rule)
+                || !discovery.admit_rule(&rule.id)
+            {
+                continue;
+            }
+            let roots = match rule.match_kind.as_str() {
+                "verified_browser_cache" => {
+                    browser_cache_roots_with_base(rule, &mut resolve_base, &mut discovery)
+                }
+                "verified_known_root" => {
+                    known_roots_with_base(rule, &mut resolve_base, &mut discovery)
+                }
+                "verified_cache_root" => {
+                    chromium_render_cache_roots_with_base(&mut resolve_base, &mut discovery)
+                }
+                _ => Vec::new(),
+            };
+            // Required marker probes are bounded by catalog admission and use the admitted
+            // native parent; no symlink marker or replaced root can establish a layout match.
+            let roots = roots
+                .into_iter()
+                .filter(|root| discovery.has_markers(root, &rule.required_markers))
+                .collect();
+            layout_roots.insert(rule.id.clone(), roots);
         }
         Self {
             by_rule,
             npm_installations,
+            layout_roots,
+            layout_failure: discovery.failure,
         }
+    }
+
+    /// A missing layout observation means partial discovery, not proof of an empty scope.
+    pub fn layout_failure(&self) -> Option<LayoutDiscoveryFailure> {
+        self.layout_failure
+    }
+
+    /// Whether a known/browser root matches this invocation's native discovery facts.
+    pub fn matches_layout_root(
+        &self,
+        rule: &PlatformJunkRule,
+        entry: &sweepx_model::ScannedEntry,
+    ) -> bool {
+        let Some(roots) = self
+            .layout_roots
+            .get(&rule.id)
+            .filter(|roots| !roots.is_empty())
+        else {
+            return false;
+        };
+        let Some(locator) = entry.validated_native_locator().ok().flatten() else {
+            return false;
+        };
+        #[cfg(target_os = "macos")]
+        let path = if rule.match_kind == "verified_known_root" {
+            entry_native_absolute_path(locator)
+        } else {
+            locator.scan_root_absolute_path.clone()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let path = locator.scan_root_absolute_path.clone();
+        path.is_some_and(|path| roots.iter().any(|root| root.matches(&path, entry)))
     }
 
     /// Precomputed evidence for one rule, or `None` if the rule set this snapshot was built from
@@ -152,15 +259,6 @@ impl JunkClassifier for CombinedJunkClassifier<'_> {
         if let Some(decision) = self.project.classify(entry, markers) {
             return Some(decision);
         }
-        let platform = if cfg!(target_os = "linux") {
-            "linux"
-        } else if cfg!(target_os = "macos") {
-            "macos"
-        } else if cfg!(target_os = "windows") {
-            "windows"
-        } else {
-            "unsupported"
-        };
         // Specific, root-identifying rules win over generic catch-all rules when several
         // match one directory; ties keep file order. Measured: without this, the earlier
         // `macos.user-caches` (direct_children) shadowed `macos.homebrew-cache`/`yarn-cache`
@@ -169,7 +267,7 @@ impl JunkClassifier for CombinedJunkClassifier<'_> {
         for rule in self
             .platform_rules
             .iter()
-            .filter(|rule| rule.platform == platform || rule.platform == "any")
+            .filter(|rule| rule_applies_to_host(rule))
         {
             if platform_rule_classifies(rule, entry, self.evidence) {
                 let rank = platform_rule_specificity(rule);
@@ -180,6 +278,19 @@ impl JunkClassifier for CombinedJunkClassifier<'_> {
         }
         best.map(|(_, rule)| format!("platform:{}", rule.id))
     }
+}
+
+fn rule_applies_to_host(rule: &PlatformJunkRule) -> bool {
+    let platform = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unsupported"
+    };
+    rule.platform == platform || rule.platform == "any"
 }
 
 /// Specificity rank of a platform rule's match kind; lower wins.
@@ -224,9 +335,9 @@ fn platform_rule_classifies(
                 })
         }
         "verified_tool_root" => depth == 0 && tool_reported_root_matches(rule, entry, evidence),
-        "verified_cache_root" => depth == 0 && render_cache_root_matches(rule, entry),
-        "verified_browser_cache" => depth == 0 && browser_cache_root_matches(rule, entry),
-        "verified_known_root" => known_macos_root_matches(rule, entry),
+        "verified_cache_root" => depth == 0 && evidence.matches_layout_root(rule, entry),
+        "verified_browser_cache" => depth == 0 && evidence.matches_layout_root(rule, entry),
+        "verified_known_root" => evidence.matches_layout_root(rule, entry),
         #[cfg(target_os = "linux")]
         "stale_inactive_direct_child" => false,
         _ => false,
@@ -390,99 +501,46 @@ const INSTALL_RENDER_CACHES: &[&str] = &[
 /// Returns scan roots, not candidates: which rule claims each one is decided by that rule's marker,
 /// because the three backends have three different layouts. Nothing is filtered on size here — an
 /// empty blockfile cache still occupies its scaffolding, and hiding it would misreport the disk.
-fn chromium_render_cache_roots() -> Vec<PathBuf> {
+fn chromium_render_cache_roots_with_base(
+    resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
+    discovery: &mut LayoutDiscovery,
+) -> Vec<Arc<LayoutRoot>> {
     let mut roots = Vec::new();
-    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-    else {
-        return roots;
-    };
     for install in CHROMIUM_INSTALLS {
-        let mut user_data = local_app_data.clone();
-        for component in install.relative_user_data.split('/') {
-            user_data.push(component);
-        }
-        if !is_existing_real_directory(&user_data) {
-            continue;
-        }
-        for name in INSTALL_RENDER_CACHES {
-            let candidate = user_data.join(name);
-            if is_existing_real_directory(&candidate) {
-                roots.push(candidate);
-            }
-        }
-        // Profiles are enumerated from disk. Their names are a user-facing product concept
-        // (`Default`, `Profile 1`, …) and a hardcoded list would silently skip the rest.
-        let Ok(entries) = std::fs::read_dir(&user_data) else {
-            continue;
+        let spec = sweepx_catalog::junk::platform::BrowserCacheSpec {
+            base: "local_app_data".into(),
+            user_data: install
+                .relative_user_data
+                .split('/')
+                .map(str::to_owned)
+                .collect(),
+            shared_caches: INSTALL_RENDER_CACHES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            profile_caches: PROFILE_RENDER_CACHES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            shared_paths: Vec::new(),
+            profile_paths: Vec::new(),
+            profile_names: Vec::new(),
+            enumerate_named_profiles: true,
+            partition_containers: Vec::new(),
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name != "Default" && !name.starts_with("Profile ") {
-                continue;
-            }
-            let profile = user_data.join(name);
-            if !is_existing_real_directory(&profile) {
-                continue;
-            }
-            for cache in PROFILE_RENDER_CACHES {
-                let candidate = profile.join(cache);
-                if is_existing_real_directory(&candidate) {
-                    roots.push(candidate);
-                }
-            }
-        }
+        expand_browser_spec(&spec, resolve_base, discovery, &mut roots);
     }
     roots
 }
 
-/// Whether this scan root is the cache the rule describes.
-///
-/// Discovery yields every render cache of every installation, so a root reaching this point is some
-/// browser cache but not necessarily *this* rule's. The marker decides, and the three backends are
-/// told apart by it: the HTTP cache keeps entries under `Cache_Data`, the code cache under `js`, and
-/// the shader caches are blockfile roots holding `data_1`. An index file is not a usable
-/// discriminator — measured 2026-09-05, two of the three carry none at the root.
-fn render_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
-    let Some(locator) = entry.native_locator.as_ref() else {
-        return false;
-    };
-    // Same rule as everywhere else in this file: the captured native path is authority, the display
-    // path is presentation.
-    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
-        return false;
-    };
-    let Some(root) = chromium_render_cache_roots()
+#[cfg(test)]
+fn chromium_render_cache_roots() -> Vec<PathBuf> {
+    let mut discovery =
+        LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+    chromium_render_cache_roots_with_base(&mut browser_base_dir, &mut discovery)
         .into_iter()
-        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))
-    else {
-        return false;
-    };
-    rule.required_markers
-        .iter()
-        .all(|marker| root.join(marker).exists())
-}
-
-#[cfg(target_os = "macos")]
-fn known_macos_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
-    let Some(locator) = entry.native_locator.as_ref() else {
-        return false;
-    };
-    let Some(entry_path) = entry_native_absolute_path(locator) else {
-        return false;
-    };
-    // Exact, full-length match against each declared known root. The components are taken from
-    // the captured native chain, never from `display_path`, and an exact component count is
-    // required so a directory *inside* a known root (for example a Homebrew download) is not
-    // promoted.
-    known_macos_roots(rule)
-        .into_iter()
-        .find(|root| entry_path.equals_path(root).unwrap_or(false))
-        .is_some_and(|root| root_has_required_markers(&root, &rule.required_markers))
+        .map(|root| root.path.clone())
+        .collect()
 }
 
 /// Reconstructs an entry's own absolute native path from its locator chain.
@@ -529,34 +587,23 @@ fn entry_native_absolute_path(
     Some(sweepx_model::NativeAbsolutePath::unix(bytes))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn known_macos_root_matches(_rule: &PlatformJunkRule, _entry: &sweepx_model::ScannedEntry) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
-    let Some(home) = user_home_dir().filter(|home| home.is_absolute()) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = Vec::new();
+fn known_roots_with_base(
+    rule: &PlatformJunkRule,
+    resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
+    discovery: &mut LayoutDiscovery,
+) -> Vec<Arc<LayoutRoot>> {
+    let mut roots = Vec::new();
     for known in &rule.known_roots {
-        // Only a home-relative anchor is currently defined. A literal absolute base is refused
-        // rather than trusted, because rules must not encode one machine's layout.
-        if known.base != "home" {
+        let Some(mut path) = resolve_base(&known.base) else {
+            discovery.unavailable_anchor();
             continue;
-        }
-        let mut path: PathBuf = home.clone();
+        };
         for component in &known.components {
             path.push(component);
         }
-        if is_existing_real_directory(&path)
-            && !paths.iter().any(|existing| same_directory(existing, &path))
-        {
-            paths.push(path);
-        }
+        discovery.push_root(&path, &mut roots);
     }
-    paths
+    roots
 }
 
 /// Resolves a browser-cache spec's anchor to an absolute base directory.
@@ -565,10 +612,11 @@ fn known_macos_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
 /// Windows `%LOCALAPPDATA%`, and `home` is the user home. An unknown or unresolvable anchor
 /// yields `None` rather than a guessed path.
 fn browser_base_dir(base: &str) -> Option<PathBuf> {
-    let home = user_home_dir()?;
     match base {
-        "home" => Some(home),
-        "application_support" => Some(home.join("Library").join("Application Support")),
+        "home" => user_home_dir().filter(|path| path.is_absolute()),
+        "application_support" => user_home_dir()
+            .filter(|path| path.is_absolute())
+            .map(|home| home.join("Library").join("Application Support")),
         "local_app_data" => std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute()),
@@ -582,114 +630,74 @@ fn browser_base_dir(base: &str) -> Option<PathBuf> {
 /// `Default`/`Profile N` directory enumerated from disk, so no browser needs a code branch and no
 /// profile name is assumed. Only existing real directories are returned and duplicates are folded
 /// by filesystem identity, because two browsers (or an injected config) can resolve to one path.
-fn browser_cache_roots(rule: &PlatformJunkRule) -> Vec<PathBuf> {
-    browser_cache_roots_with_base(rule, browser_base_dir)
-}
-
-// Injecting the anchor makes layout tests independent of installed browsers and HOME changes.
 fn browser_cache_roots_with_base(
     rule: &PlatformJunkRule,
-    mut resolve_base: impl FnMut(&str) -> Option<PathBuf>,
-) -> Vec<PathBuf> {
+    resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
+    discovery: &mut LayoutDiscovery,
+) -> Vec<Arc<LayoutRoot>> {
     let mut roots = Vec::new();
     for spec in &rule.browser_caches {
-        let Some(base) = resolve_base(&spec.base) else {
-            continue;
-        };
-        let mut user_data = base;
-        for component in &spec.user_data {
-            user_data.push(component);
-        }
-        if !is_existing_real_directory(&user_data) {
-            continue;
-        }
-        for name in &spec.shared_caches {
-            let candidate = user_data.join(name);
-            push_browser_root(&candidate, &mut roots);
-        }
-        // Non-derived state paths resolved relative to user-data, split on `/` so the platform
-        // separator is applied consistently.
-        for relative in &spec.shared_paths {
-            let mut candidate = user_data.clone();
-            for component in relative.split('/') {
-                candidate.push(component);
-            }
-            push_browser_root(&candidate, &mut roots);
-        }
-        // Gather every directory that holds a profile/partition, then select its derived caches.
-        let mut profile_dirs: Vec<PathBuf> = Vec::new();
-        for name in &spec.profile_names {
-            profile_dirs.push(user_data.join(name));
-        }
-        if spec.enumerate_named_profiles {
-            // Read from disk: a fixed list would silently miss extra Default/Profile N entries.
-            if let Ok(entries) = std::fs::read_dir(&user_data) {
-                for entry in entries.flatten() {
-                    let file_name = entry.file_name();
-                    if let Some(name) = file_name.to_str()
-                        && (name == "Default" || name.starts_with("Profile "))
-                    {
-                        profile_dirs.push(entry.path());
-                    }
-                }
-            }
-        }
-        for container in &spec.partition_containers {
-            let dir = user_data.join(container);
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                // Every real-directory child is treated as a partition (UUIDs, hashes, …), so the
-                // product's naming scheme does not need to be encoded.
-                for entry in entries.flatten() {
-                    profile_dirs.push(entry.path());
-                }
-            }
-        }
-        for profile in profile_dirs {
-            if !is_existing_real_directory(&profile) {
-                continue;
-            }
-            for cache in &spec.profile_caches {
-                push_browser_root(&profile.join(cache), &mut roots);
-            }
-            // Profile-relative multi-component state paths.
-            for relative in &spec.profile_paths {
-                let mut candidate = profile.clone();
-                for component in relative.split('/') {
-                    candidate.push(component);
-                }
-                push_browser_root(&candidate, &mut roots);
-            }
-        }
+        expand_browser_spec(spec, resolve_base, discovery, &mut roots);
     }
     roots
 }
 
-fn push_browser_root(candidate: &Path, roots: &mut Vec<PathBuf>) {
-    if is_existing_real_directory(candidate)
-        && !roots
-            .iter()
-            .any(|existing| same_directory(existing, candidate))
-    {
-        roots.push(candidate.to_path_buf());
+fn expand_browser_spec(
+    spec: &sweepx_catalog::junk::platform::BrowserCacheSpec,
+    resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
+    discovery: &mut LayoutDiscovery,
+    roots: &mut Vec<Arc<LayoutRoot>>,
+) {
+    let Some(mut user_data) = resolve_base(&spec.base) else {
+        discovery.unavailable_anchor();
+        return;
+    };
+    for component in &spec.user_data {
+        user_data.push(component);
+    }
+    if discovery.directory(&user_data).is_none() {
+        return;
+    }
+    for relative in spec.shared_caches.iter().chain(&spec.shared_paths) {
+        discovery.push_root(&join_relative(&user_data, relative), roots);
+    }
+    // Explicit profiles are processed directly; enumerated profiles are shared across every
+    // rule for this user-data path. Do not retain a second unbounded profile-path vector.
+    for name in &spec.profile_names {
+        expand_profile(spec, &user_data.join(name), discovery, roots);
+    }
+    if spec.enumerate_named_profiles {
+        for profile in discovery.profiles(&user_data, true).iter() {
+            expand_profile(spec, profile, discovery, roots);
+        }
+    }
+    for container in &spec.partition_containers {
+        for profile in discovery.profiles(&user_data.join(container), false).iter() {
+            expand_profile(spec, profile, discovery, roots);
+        }
     }
 }
 
-/// Whether a scanned root is one of the derived caches this rule's browser specs expand to.
-///
-/// Comparison uses the captured native path, never the display string: display paths are not
-/// classification authority in this codebase. The directory's position inside a known browser
-/// user-data tree, together with its derived-cache name, is the evidence; the marker-bearing
-/// network caches elsewhere are a different rule.
-fn browser_cache_root_matches(rule: &PlatformJunkRule, entry: &sweepx_model::ScannedEntry) -> bool {
-    let Some(locator) = entry.native_locator.as_ref() else {
-        return false;
-    };
-    let Some(captured) = locator.scan_root_absolute_path.as_ref() else {
-        return false;
-    };
-    browser_cache_roots(rule)
-        .iter()
-        .any(|root| captured.equals_path(root).unwrap_or(false))
+fn expand_profile(
+    spec: &sweepx_catalog::junk::platform::BrowserCacheSpec,
+    profile: &Path,
+    discovery: &mut LayoutDiscovery,
+    roots: &mut Vec<Arc<LayoutRoot>>,
+) {
+    if discovery.directory(profile).is_none() {
+        return;
+    }
+    for relative in spec.profile_caches.iter().chain(&spec.profile_paths) {
+        discovery.push_root(&join_relative(profile, relative), roots);
+    }
+}
+
+fn join_relative(base: &Path, relative: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
+    }
+    path
 }
 
 /// One invocation's discovery facts, shared by root selection and classification. Keeping this
@@ -705,8 +713,14 @@ pub struct PlatformJunkSetup {
 impl PlatformJunkSetup {
     /// Discovers the shipped platform roots and tool evidence once for this invocation.
     pub fn discover() -> Result<Self, String> {
+        Self::discover_with_cancel(CancellationToken::new())
+    }
+
+    /// Shares the caller's cancellation token across tool and native layout discovery.
+    /// Cancellation is checked between native calls; OS calls themselves may block.
+    pub fn discover_with_cancel(cancel: CancellationToken) -> Result<Self, String> {
         let rules = load_platform_junk_rules().map_err(|error| error.to_string())?;
-        let evidence = PlatformJunkEvidence::precompute(&rules);
+        let evidence = PlatformJunkEvidence::precompute_with_cancel(&rules, cancel);
         Ok(Self { rules, evidence })
     }
 }
@@ -739,15 +753,19 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
             }
         }
     }
-    // Browser derived caches are declared in rule data (one spec per browser) and expanded here,
-    // so the same mechanism serves any platform whose spec anchor resolves.
     for rule in rules {
-        for root in browser_cache_roots(rule) {
+        for root in platform
+            .evidence
+            .layout_roots
+            .get(&rule.id)
+            .into_iter()
+            .flatten()
+        {
             if !roots
                 .iter()
-                .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
+                .any(|existing| same_directory(existing, &root.path))
             {
-                roots.push(root);
+                roots.push(root.path.clone());
             }
         }
     }
@@ -773,23 +791,13 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
     {
         // Apple defines Library/Caches as discardable, but candidate classification remains
         // report-only and no broader Library/Application Support root is admitted here.
-        if rules.iter().any(|rule| rule.platform == "macos") {
-            if let Some(cache) = user_home_dir()
+        if rules.iter().any(|rule| rule.platform == "macos")
+            && let Some(cache) = user_home_dir()
                 .filter(|home| home.is_absolute())
                 .map(|home| home.join("Library/Caches"))
                 .filter(|cache| is_existing_real_directory(cache))
-            {
-                roots.push(cache);
-            }
-            for rule in rules.iter().filter(|rule| rule.platform == "macos") {
-                for root in known_macos_roots(rule) {
-                    if !roots.iter().any(|existing: &PathBuf| {
-                        same_directory(existing.as_path(), root.as_path())
-                    }) {
-                        roots.push(root);
-                    }
-                }
-            }
+        {
+            roots.push(cache);
         }
     }
     #[cfg(target_os = "windows")]
@@ -804,22 +812,6 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
             && is_existing_real_directory(&packages)
         {
             roots.push(packages);
-        }
-        // Browser render caches are separate roots, one per cache directory, because each is an
-        // independent aggregate the user may keep or reclaim on its own. They are added only when a
-        // rule asks for them, so an installation nobody has a rule for is never walked.
-        if rules
-            .iter()
-            .any(|rule| rule.root_kind == "chromium_render_cache")
-        {
-            for root in chromium_render_cache_roots() {
-                if !roots
-                    .iter()
-                    .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
-                {
-                    roots.push(root);
-                }
-            }
         }
     }
     roots
@@ -1291,6 +1283,124 @@ mod tests {
     use super::*;
     use sweepx_model::{ByteValue, ReasonCode};
 
+    #[test]
+    fn missing_layout_anchor_does_not_claim_complete_empty_discovery() {
+        let rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.id == "macos.browser-derived-cache")
+            .unwrap();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        assert!(browser_cache_roots_with_base(&rule, &mut |_| None, &mut discovery).is_empty());
+        assert_eq!(
+            discovery.failure,
+            Some(LayoutDiscoveryFailure::ObservationUnavailable)
+        );
+        assert_eq!(discovery.enumerations, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn known_root_snapshot_binds_root_and_nested_rows_and_refuses_replacements() {
+        let owner = tempfile::tempdir().unwrap();
+        let base = owner.path().canonicalize().unwrap();
+        let cache = base.join("Library/Caches/Homebrew");
+        std::fs::create_dir_all(cache.join("downloads")).unwrap();
+        let rules = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .filter(|rule| rule.id == "macos.homebrew-cache")
+            .collect::<Vec<_>>();
+        let evidence = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| None,
+            Vec::new(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+            |_| Some(base.clone()),
+        );
+        assert!(evidence.layout_failure().is_none());
+        let project = JunkService::built_in().unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = |root: PathBuf, snapshot: &PlatformJunkEvidence| {
+            crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+                &context,
+                &crate::ScanRequest {
+                    roots: vec![root],
+                    state_dir: None,
+                },
+                None,
+                &project.with_platform(&rules, snapshot),
+                None,
+            )
+            .unwrap()
+        };
+        let own_root = scan(cache.clone(), &evidence);
+        let nested = scan(base.clone(), &evidence);
+        for result in [&own_root, &nested] {
+            assert_eq!(result.decisions.len(), 1);
+            let entry = result
+                .scan
+                .summary
+                .roots
+                .iter()
+                .chain(&result.scan.summary.entries)
+                .find(|entry| {
+                    result
+                        .decisions
+                        .contains_key(&entry.identity.as_ref().unwrap().entry_id)
+                })
+                .unwrap();
+            assert_eq!(entry.display_path, cache.display().to_string());
+            assert!(evidence.matches_layout_root(&rules[0], entry));
+            let mut presentation_only = entry.clone();
+            presentation_only.display_path = "/unrelated/display/string".into();
+            assert!(evidence.matches_layout_root(&rules[0], &presentation_only));
+        }
+        let old_entry = own_root.scan.summary.roots[0].clone();
+        let candidate = project
+            .interpret(
+                "platform:macos.homebrew-cache",
+                &old_entry,
+                &BTreeMap::new(),
+                &rules,
+                &evidence,
+            )
+            .unwrap();
+        std::fs::rename(&cache, base.join("retained-old-cache")).unwrap();
+        std::fs::create_dir_all(cache.join("downloads")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(
+            std::fs::symlink_metadata(&cache).unwrap().ino(),
+            std::fs::symlink_metadata(base.join("retained-old-cache"))
+                .unwrap()
+                .ino()
+        );
+        assert!(scan(cache.clone(), &evidence).decisions.is_empty());
+        let current = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| None,
+            Vec::new(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+            |_| Some(base.clone()),
+        );
+        assert_eq!(scan(cache, &current).decisions.len(), 1);
+        assert!(
+            super::super::candidate::refresh_candidate_interpretation(
+                candidate,
+                project.project_rules(),
+                &rules,
+                &current
+            )
+            .is_none()
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn captured_native_paths_match_root_and_nested_directory_walk() {
@@ -1655,39 +1765,30 @@ mod tests {
                 );
             }
         }
-        // On this host Postman and LarkShell are installed. Expansion must reach Postman's UUID
-        // partitions through the container and LarkShell's IronDefault/profile tree, proving the
-        // non-Default discovery forms work rather than only the Default/Profile convention.
-        let mut expanded: Vec<String> = browser_cache_roots(derived)
-            .into_iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        let home = user_home_dir().unwrap();
-        let postman_partitions = home.join("Library/Application Support/Postman/Partitions");
-        let mut found_partition_cache = 0;
-        if is_existing_real_directory(&postman_partitions) {
-            for entry in std::fs::read_dir(&postman_partitions).unwrap().flatten() {
-                if entry.path().join("Cache").is_dir() {
-                    found_partition_cache += 1;
-                }
-            }
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = fixture.path().to_path_buf();
+        let expected = BTreeSet::from([
+            base.join("Postman/Partitions/arbitrary-partition/Cache"),
+            base.join("LarkShell/GrShaderCache"),
+            base.join("LarkShell/IronDefault/GPUCache"),
+            base.join("Google/Chrome/Profile 7/GPUCache"),
+        ]);
+        for path in &expected {
+            std::fs::create_dir_all(path).unwrap();
         }
-        for path in &expanded {
-            assert!(!path.contains("/Cookies"));
-        }
-        let counted = expanded
-            .iter()
-            .filter(|path| path.contains("/Postman/Partitions/") && path.ends_with("/Cache"))
-            .count();
-        assert_eq!(counted, found_partition_cache);
-        let lark_shared = home.join("Library/Application Support/LarkShell/GrShaderCache");
-        if is_existing_real_directory(&lark_shared) {
-            assert!(
-                expanded
-                    .iter()
-                    .any(|path| path == lark_shared.to_str().unwrap())
-            );
-        }
+        std::fs::create_dir_all(base.join("Google/Chrome/Profile 7/Cookies")).unwrap();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let mut expanded =
+            browser_cache_roots_with_base(derived, &mut |_| Some(base.clone()), &mut discovery)
+                .into_iter()
+                .map(|root| root.path.clone())
+                .collect::<Vec<_>>();
+        assert!(discovery.failure.is_none(), "{:?}", discovery.failure);
+        assert_eq!(expanded.iter().cloned().collect::<BTreeSet<_>>(), expected);
         expanded.sort();
         let before = expanded.len();
         expanded.dedup();
@@ -1719,6 +1820,9 @@ mod tests {
             "IndexedDB",
         ];
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
         let base = fixture.path().to_path_buf();
         let must_exist = [
             base.join("Google/Chrome/Default/Service Worker/CacheStorage"),
@@ -1732,9 +1836,18 @@ mod tests {
         for name in forbidden {
             std::fs::create_dir_all(base.join("Google/Chrome/Default").join(name)).unwrap();
         }
-        let expanded = browser_cache_roots_with_base(state, |anchor| {
-            (anchor == "application_support").then(|| base.clone())
-        });
+        #[cfg(unix)]
+        let base = base.canonicalize().unwrap();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let expanded = browser_cache_roots_with_base(
+            state,
+            &mut |anchor| (anchor == "application_support").then(|| base.clone()),
+            &mut discovery,
+        )
+        .into_iter()
+        .map(|root| root.path.clone())
+        .collect::<Vec<_>>();
         assert_eq!(
             expanded.iter().cloned().collect::<BTreeSet<_>>(),
             must_exist.iter().cloned().collect::<BTreeSet<_>>()

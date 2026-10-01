@@ -836,6 +836,7 @@ fn noninteractive_permanent_delete_leaves_directory_and_link_inputs_unchanged() 
 #[test]
 fn junk_temp_cleanup_requires_a_foreground_human_confirmation() {
     let mut cmd = cli_command();
+    cmd.timeout(std::time::Duration::from_secs(10));
     cmd.arg("--format")
         .arg("json")
         .arg("junk")
@@ -990,6 +991,51 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
     assert_eq!(target["confidence"], "medium");
     assert_eq!(target["git"], Value::Null);
     assert_eq!(json["incompleteSizeCount"], 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn junk_system_reports_incomplete_discovery_without_following_layout_ancestor_links() {
+    let fixture = TempDir::new().unwrap();
+    let root = resolved_fixture_root(&fixture);
+    let home = root.join("home");
+    let cache = home.join("Library/Caches/Homebrew");
+    let support = home.join("Library/Application Support");
+    let outside = root.join("unrelated-browser-data");
+    let empty_path = root.join("empty-path");
+    fs::create_dir_all(cache.join("downloads")).unwrap();
+    fs::create_dir_all(&support).unwrap();
+    fs::create_dir_all(outside.join("Chrome/Default/GPUCache")).unwrap();
+    fs::create_dir(&empty_path).unwrap();
+    std::os::unix::fs::symlink(&outside, support.join("Google")).unwrap();
+    let mut cmd = cli_command();
+    cmd.env("HOME", &home)
+        .env("PATH", &empty_path)
+        .arg("--format")
+        .arg("json")
+        .arg("--state-dir")
+        .arg(root.join("private-state"))
+        .args(["junk", "--system"]);
+    let output = cmd.assert().code(4).get_output().clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["layoutDiscovery"]["complete"], false);
+    assert_eq!(
+        report["layoutDiscovery"]["incompleteReason"],
+        "observation_unavailable"
+    );
+    let candidates = report["candidates"].as_array().unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|row| row["ruleId"] == "macos.homebrew-cache"
+                && row["path"] == cache.display().to_string())
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|row| !row["path"].as_str().unwrap().contains("GPUCache"))
+    );
 }
 
 #[test]

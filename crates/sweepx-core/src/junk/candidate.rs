@@ -198,6 +198,21 @@ pub fn refresh_candidate_interpretation(
     if !is_project && platform_rule.is_none() {
         return None;
     }
+    if let Some(rule) = platform_rule
+        && matches!(
+            rule.match_kind.as_str(),
+            "verified_browser_cache" | "verified_cache_root" | "verified_known_root"
+        )
+        && candidate
+            .source_entry
+            .as_ref()
+            .is_none_or(|entry| !evidence.matches_layout_root(rule, entry))
+    {
+        // A valid filesystem cache does not establish the current discovery scope or layout.
+        // Decline a row whose native object is absent from this invocation's snapshot. The
+        // caller separately reports incomplete discovery, so omission cannot claim an empty scope.
+        return None;
+    }
     candidate.git = None;
     candidate.classification = is_project.then(|| "known_generated".to_string());
     candidate.confidence = is_project.then(|| "medium".to_string());

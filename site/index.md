@@ -51,6 +51,9 @@ features:
 CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖。当前 `scan` 机器输出使用 JSON，`scan --format ndjson` 仍 disabled。`cache status` 只支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录；检查范围只限 `preview-cache/current.json`、current generation、`generations/` 与 `quarantine/` 的浅层结构和健康，不 scan、不 repair、不 quarantine，也不暴露 cache 条目或 path 内容。Linux 的 `status --watch --format ndjson` 只重放已完成且已持久化的 stream：先做一次同 snapshot 全量校验，再按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，它不是 live stream，不等待新事件，不创建后台 operation，也不支持 cancel。
 发布基础设施会构建五个目标归档、checksum 与安装器，并发布本站到 GitHub Pages；v0.0.1 开发版本已发布，稳定版本尚未发布。
 
+
+`junk --system` 的浏览器/已知缓存位置发现与分类共享本次有界快照，分类不再逐候选重枚举 profile。权限、观察或资源不足时，`layoutDiscovery.complete` 为 false 并给出 `incompleteReason`，报告 partial、退出码 4；已确认的结果仍可显示，空列表不能证明没有垃圾。原生期限是调用间的合作检查，不能中断阻塞的操作系统访问。非交互清理/Trash 请求在发现前拒绝。
+
 ## 按你的问题阅读
 
 | 你想了解 | 页面 |

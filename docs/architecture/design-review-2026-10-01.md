@@ -27,7 +27,7 @@
 
 ## 尚存的设计不足
 
-1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照及其路径绑定仍待收尾，Git 增强证据也尚待单独下沉。先完成具体业务边界，不新增插件框架。
+1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照和路径绑定已落地，整根候选缓存还需绑定本次启用规则与发现范围，Git 增强证据也尚待单独下沉。先完成具体业务边界，不新增插件框架。
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
@@ -187,7 +187,7 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 - [x] 端到端阶段计时、受控及真实目录冷/热测量、结果等价核验。
 - [x] 合并根/文件索引历史查询，移除完整历史后的固定等待。
 - [x] listing、marker 与多根缓存的统一字节预算、逐根淘汰及有界持久化读取；预算耗尽不能把缺失证据当作否定结论。
-- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用及 Linux `/tmp` 发现/分类/解释已下沉，浏览器/known-root 的有界发现快照及路径绑定仍待收尾。
+- [ ] 平台垃圾规则与候选解释迁到可独立调用的共享服务；通用及 Linux `/tmp` 发现/分类/解释、有界浏览器/known-root 快照及路径绑定已下沉；整根候选缓存仍需绑定当前分类上下文，避免遗漏新引入的候选。
 - [ ] 缓存命中后重建当前 Git 上下文及增强证据。
 - [ ] 核心垃圾扫描会话：开始、取消、可见目录优先级、选中范围刷新；有界阶段/进度/候选/统计/错误/终态事件，稳定候选键及 revision。
 - [ ] 垃圾交互 TUI：历史结果标记与逐项替换、自由选择和删除前原生身份重验。
@@ -297,3 +297,19 @@ Linux `/tmp` 的原生测量、当前用户引用证据及报告解释已迁入 
 回归以独立 read_dir/symlink_metadata 收集受控目录全集，分别扫描宽根和已知缓存目录本身，核对所有目录 native path。移除根行修复后，该回归在根路径匹配处失败；恢复修复后通过。最初测试误用只保留候选行的 junk scan 入口而得到空集，已改为完整 scan 入口，不放宽全集相等断言。
 
 提交前格式、core all-targets/all-features clippy 及 core 113 项本机测试通过。改动均在 macOS cfg 分支，Linux GNU/Windows GNU 未改变编译分支，复用前一阶段的工作区交叉 lint 结果；目标宿主/MSVC、系统 Trash 仍未验证。交付边界工作区 clippy 通过，工作区测试 753 项通过、0 失败、2 项基准 ignored，仍显式排除已诊断的系统 Trash 挂起用例，该行为未验证；53 份 Markdown 检查通过。
+
+## 有界布局发现快照（2026-10-01）
+
+浏览器 profile/partition、Chromium render cache 和 macOS known-root 发现已进入本次共享快照。已声明的路径通过现有 HostPlatformScanner 的 no-follow 原生准入；必要 marker 相对 retained parent 检查，不读取 payload。根选择复用捕获的路径，分类比较原生 path、文件身份、filesystem/mount 身份和 scanner fingerprint，不逐候选重枚举。已知根仍支持自身和较宽扫描范围中的嵌套目录；发现后被同名新对象替换的根不能沿用旧身份。原有独立 Chromium 枚举改为共用声明式 browser layout evaluator，不复制一套发现算法。
+
+布局发现单独限制最多 4,096 个不同目录探测（包括不存在的路径）、16,384 条返回枚举记录、1,024 个跨规则根引用、8 MiB 保留估算。路径/原生编码容量、memoization 节点、profile 列表和规则根表均计入估算；共享 Arc 不复制完整事实，列表只保留选中的 profile/partition 名称。原生每批最多 256 条/64 KiB，最多同时保留一个枚举 cursor 或 root 加一个 transient marker-directory handle。5 秒合作期限及取消检查覆盖调用间边界，不能中断阻塞的 OS 文件操作，也不代表 RSS 精确上限。工具及 Linux 临时对象发现的其他保留路径不因此视为已审计。
+
+预算、取消、期限或原生观察失败保留全局 incomplete 原因，已验证的正向根不丢弃，缺项不解释成 absence proof。CLI human 提示可能遗漏；JSON 新增 `layoutDiscovery.complete/incompleteReason`，总体为 partial 并返回 4，既有机器字段和风险值保持不变。不完整布局不写整根候选缓存，文件长度索引仍只保存完整的文件系统事实。旧 browser/known-root 缓存行必须重新匹配本次快照，否则拒绝回放。
+
+共享服务验收仍不勾选：旧整根缓存行无法补出当前环境/启用平台规则新引入的候选，下一步需要绑定当前分类上下文并在变化时拒绝旧整根候选命中，逐文件事实缓存可继续复用。单独更新旧候选的活动字段不足以证明分类范围相同。其后继续 Git 当前证据、会话、TUI、大文件、重复文件和规则扩展。
+
+受控回归覆盖 profile 快照只枚举一次、下一调用发现新 profile、零/条数/根数/字节预算、取消和期限、链接祖先及 marker 拒绝、宽根与根自身的 native binding、同名对象替换，以及旧缓存行不能沿用旧根身份。原先要求宿主装有 Postman/LarkShell 的规则测试改为受控 partition、显式 profile、枚举 profile 和共享 cache 全集比较，保留用户数据反例。CLI 集成回归在隔离 HOME 的子进程中制造浏览器祖先链接，同时保留真实 known cache，独立验证既有正向候选、未跟随链接、partial 字段和退出码。
+
+首次受影响矩阵在原有 `junk_temp_cleanup_requires_a_foreground_human_confirmation` 挂起，后续 core 步骤未运行。对本次子进程采样确认：它在 normalize/discovery 的原生 admit_root/open 阻塞，尚未到达前台确认拒绝。仅终止该已确认的测试子进程后，矩阵如实失败。修复将清理/Trash 的 human/foreground 前置条件提前到根发现之前，入口内部仍调用同一验证器；保留并加 10 秒上限的原有拒绝测试在修复后通过。此项证明无效调用不再触发发现，不证明真实系统目录的 open 不会阻塞；原生合作期限仍保持上述边界。
+
+交付验证：修复后受影响 core/CLI 234 项测试通过、1 项基准 ignored、1 项原有系统 Trash 挂起显式排除；工作区 758 项通过、0 失败、2 项基准 ignored，同一 Trash 用例仍排除。随后仅补缺失 anchor 的不完整语义，core 118 项及 CLI 部分发现集成回归通过，其余未变测试复用上述工作区结果，不称为再次完整矩阵。格式、受影响及工作区 clippy、Linux GNU/Windows GNU 工作区交叉 clippy 通过；core 包清单包含布局模块，仍为 17 个 crate；53 份 Markdown 检查及 23 项检查器测试通过。交叉检查包含目标测试代码，未运行 Linux/Windows 宿主测试或 MSVC；系统 Trash 行为未验证。本阶段没有端到端性能计时，只证明发现枚举不再按候选重复及结果/资源契约，不宣称整机加速倍数。
