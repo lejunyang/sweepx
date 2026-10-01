@@ -15,8 +15,6 @@ members = [
   "crates/sweepx-core",
   "crates/sweepx-cli",
   "crates/sweepx-analysis",
-  "crates/sweepx-cleaner-schema",
-  "crates/sweepx-cleaner-vm",
   "crates/sweepx-catalog",
   "crates/sweepx-tui",
   "crates/sweepx-safety",

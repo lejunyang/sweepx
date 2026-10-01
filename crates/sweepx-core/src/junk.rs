@@ -4,8 +4,8 @@
 //! no filesystem I/O and starts no subprocesses. Platform root discovery remains a separate input.
 
 use std::collections::{BTreeMap, BTreeSet};
-use sweepx_cleaner_schema::{Predicate, PredicateArg, PredicateOp};
-use sweepx_cleaner_vm::{EvaluationContext, VmValue, evaluate_predicate};
+use sweepx_catalog::schema::{Predicate, PredicateArg, PredicateOp};
+use sweepx_catalog::vm::{EvaluationContext, VmValue, evaluate_predicate};
 use sweepx_model::{NativeName, ObjectType, ScanEntryId, ScannedEntry};
 
 pub use sweepx_catalog::junk::{

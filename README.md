@@ -11,7 +11,7 @@
 
 | 能力 | 当前状态 | 边界 |
 |---|---|---|
-| Rust workspace | 可构建、可打包的 22 crate 工作区 | v0.0.1 与五目标二进制已发布，但尚未作稳定性承诺 |
+| Rust workspace | 源码工作区已收敛为 20 个 crate（2026-10-01） | v0.0.1 与五目标二进制已发布，但尚未作稳定性承诺 |
 | `sweepx scan` | **Linux、macOS、Windows：development-grade/degraded** 的同步、只读目录扫描 | 不传路径时扫描当前平台的文件系统根；也可显式给一个或多个绝对根。macOS 使用 handle-bound traversal，Windows 使用 handle-relative traversal |
 | `sweepx status` | Linux journal-first 读取 terminal snapshot，并支持对已完成且已持久化的 journal stream 做 degraded 的 `--watch` completed replay；macOS 读取 legacy operation snapshot | Linux `--watch` 只支持 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` 的 completed-stream replay：先做一次同 snapshot 全量校验，随后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回单独的 `stream.reset_required`；malformed cursor/usage 返回 usage error；它不等待新事件、不创建后台 operation，也不支持 cancel。macOS 仍无 journal replay/watch；Windows 已支持 durable state（默认 `%LOCALAPPDATA%\sweepx\state`，强制 current-user-private DACL 与 owner 校验，并拒绝 reparse point），但尚无 journal replay/watch |
 | `sweepx cancel` | 命令存在并诚实返回 disposition | 当前没有 live in-process operation registry，能力为 disabled，不能取消同步扫描 |
@@ -116,6 +116,8 @@ cargo run -p sweepx-cli -- junk --system
 cargo run -p sweepx-cli -- junk --system --clean-temp
 
 ```
+
+规则加载、类型校验与纯评估已合并到 `sweepx-catalog`，分别保留 `schema` / `vm` 模块，减少内部包依赖。
 
 项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
 

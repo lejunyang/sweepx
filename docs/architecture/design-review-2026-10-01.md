@@ -27,7 +27,7 @@
 
 ## 尚存的设计不足
 
-1. **规则系统统一（部分落地）。** `sweepx-catalog` / `sweepx-cleaner-vm` 与 CLI 的 `project-junk-rules.json` / `platform-junk-rules.json` 各自承担发现、匹配或解释。项目规则已迁入 `sweepx-catalog::junk`，由 `sweepx-core::junk::JunkService` 统一校验并调用已有 cleaner VM；CLI 不再维护另一套项目匹配逻辑。规则字节、机器 ID、风险和匹配行为保持一致，输入规模有界；规则加载时建立有序名称索引并预先规范化父标记，普通目录不再逐规则分配规范化字符串。平台规则发现与候选解释暂时仍在 CLI，需要继续扩展这个服务：输入扫描事实与本次探测证据，输出候选、依据、风险和 blockers。先统一内部类型与评估入口，不急于新增插件框架。
+1. **规则系统统一（部分落地）。** `sweepx-catalog` 的 `schema` / `vm` 模块与 CLI 的 `project-junk-rules.json` / `platform-junk-rules.json` 各自承担发现、匹配或解释。项目规则已迁入 `sweepx-catalog::junk`，由 `sweepx-core::junk::JunkService` 统一校验并调用已有 cleaner VM；CLI 不再维护另一套项目匹配逻辑。规则字节、机器 ID、风险和匹配行为保持一致，输入规模有界；规则加载时建立有序名称索引并预先规范化父标记，普通目录不再逐规则分配规范化字符串。平台规则发现与候选解释暂时仍在 CLI，需要继续扩展这个服务：输入扫描事实与本次探测证据，输出候选、依据、风险和 blockers。先统一内部类型与评估入口，不急于新增插件框架。
 2. **缓存不止一种。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，尚缺统一字节预算及逐根淘汰。不能因为结果行少就认为内存也少。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
 4. **缓存的活动状态解释（已分层）。** 整根 schema v4 不再持久保存 activity、staleFormats、Git、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则恢复基础 known_generated/medium，并显式标记 git_evidence_not_revalidated，不回放历史 ignored/high。当前没有缓存重建 Git 仓库上下文，需冷扫才能重新取得 Git 增强解释。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
@@ -93,3 +93,7 @@ cargo test -p sweepx-cli benchmark_batched_root_validation -- --ignored --nocapt
 交叉验证（2026-10-01，arm64 macOS，Rust 1.98.0、Zig 0.16.0）：工作区 `--all-targets --all-features` clippy 对 `x86_64-unknown-linux-gnu` 和 `x86_64-pc-windows-gnu` 均通过。包含目标平台测试代码的编译，但未运行 Linux/Windows 测试二进制，也不代表 Windows MSVC 配置验收。检查发现的既有 Unix Trash 路径测试已按实际适用平台门控。
 
 下一步顺序：先补逐文件 listing、marker 索引与多根缓存的统一字节预算和淘汰；随后提供可取消、带有界事件队列的 junk 会话并继续下沉平台候选解释；大文件分析再接同一次遍历，重复文件检测作为独立、显式内容读取阶段。当前这些能力尚未实现。
+
+## Crate 收敛进展
+
+规则三包已合入现有 `sweepx-catalog`（`schema` / `vm` / `junk` 模块），workspace 从 22 减为 20。原有 package 准入 API 保留，schema/VM 的 Rust 导入路径迁移到 catalog 模块；机器 schema ID、规则资源字节与风险值不变。平台四包随后合入 `sweepx-platform` 的各平台模块，目标为 17 个 crate。已经发布的旧包不属于本地 workspace，也不在新的发布顺序中；此次修改不发布或撤回 registry 包。

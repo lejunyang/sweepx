@@ -87,13 +87,11 @@ sweepx-canonical
 sweepx-i18n
 sweepx-model
 sweepx-cache
-sweepx-cleaner-schema
 sweepx-fixtures
 sweepx-platform
 sweepx-protocol
 sweepx-audit
 sweepx-catalog
-sweepx-cleaner-vm
 sweepx-event-journal
 sweepx-platform-linux
 sweepx-platform-macos

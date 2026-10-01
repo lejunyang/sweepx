@@ -29,8 +29,8 @@ use sweepx_cache::{
     PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration, admit_preview,
 };
 use sweepx_canonical::canonicalize_value;
+use sweepx_catalog::vm::{EvaluationContext, evaluate_rule};
 use sweepx_catalog::{BUILT_INS, LoadedCleanerPackage};
-use sweepx_cleaner_vm::{EvaluationContext, evaluate_rule};
 #[cfg(target_os = "linux")]
 use sweepx_event_journal::{EventJournal, FinalSnapshotMetadata};
 use sweepx_i18n::{Catalog, Locale, LocaleResolution, MessageArgs, MessageKey};
@@ -958,7 +958,7 @@ pub enum CoreError {
     #[error("production cleaner catalog trust failed: {0}")]
     ProductionCatalogTrust(#[source] Box<sweepx_catalog::CatalogError>),
     #[error("cleaner rule evaluation failed: {0}")]
-    CleanerVm(#[from] sweepx_cleaner_vm::VmError),
+    CleanerVm(#[from] sweepx_catalog::vm::VmError),
     #[error("cleaner reference is invalid: {0}")]
     InvalidCleanerRef(String),
     #[error("cleaner catalog trust is invalid: {0}")]
@@ -4368,7 +4368,7 @@ fn cleaner_show_entry(
 }
 
 fn cleaner_rule_entry(
-    rule: &sweepx_cleaner_schema::CleanerRule,
+    rule: &sweepx_catalog::schema::CleanerRule,
     path: &str,
 ) -> Result<Value, CoreError> {
     let evaluation = evaluate_rule(rule, &synthetic_cleaner_context())?;
@@ -4387,54 +4387,54 @@ fn cleaner_rule_entry(
 
 fn synthetic_cleaner_context() -> EvaluationContext {
     EvaluationContext::new()
-        .insert("coverage.complete", sweepx_cleaner_vm::VmValue::Bool(true))
+        .insert("coverage.complete", sweepx_catalog::vm::VmValue::Bool(true))
         .insert(
             "candidate.relativePath",
-            sweepx_cleaner_vm::VmValue::String("target".to_string()),
+            sweepx_catalog::vm::VmValue::String("target".to_string()),
         )
         .insert(
             "candidate.relativeComponents",
-            sweepx_cleaner_vm::VmValue::StringList(vec!["Cache".to_string()]),
+            sweepx_catalog::vm::VmValue::StringList(vec!["Cache".to_string()]),
         )
         .insert(
             "cargo.targetDir",
-            sweepx_cleaner_vm::VmValue::String("target".to_string()),
+            sweepx_catalog::vm::VmValue::String("target".to_string()),
         )
         .insert(
             "cargo.targetShape",
-            sweepx_cleaner_vm::VmValue::String("recognized_generated_structure".to_string()),
+            sweepx_catalog::vm::VmValue::String("recognized_generated_structure".to_string()),
         )
         .insert(
             "cargo.workspaceId",
-            sweepx_cleaner_vm::VmValue::String("workspace-1".to_string()),
+            sweepx_catalog::vm::VmValue::String("workspace-1".to_string()),
         )
         .insert(
             "exclusiveReclaimableBytes",
-            sweepx_cleaner_vm::VmValue::String("known".to_string()),
+            sweepx_catalog::vm::VmValue::String("known".to_string()),
         )
         .insert(
             "objectType",
-            sweepx_cleaner_vm::VmValue::String("Directory".to_string()),
+            sweepx_catalog::vm::VmValue::String("Directory".to_string()),
         )
         .insert(
             "sharing.state",
-            sweepx_cleaner_vm::VmValue::String("private".to_string()),
+            sweepx_catalog::vm::VmValue::String("private".to_string()),
         )
         .insert(
             "activity.state",
-            sweepx_cleaner_vm::VmValue::String("inactive".to_string()),
+            sweepx_catalog::vm::VmValue::String("inactive".to_string()),
         )
         .insert(
             "browser.profileStillness",
-            sweepx_cleaner_vm::VmValue::String("verified".to_string()),
+            sweepx_catalog::vm::VmValue::String("verified".to_string()),
         )
         .insert(
             "browser.storageClass",
-            sweepx_cleaner_vm::VmValue::String("rebuildable_http_or_code_cache".to_string()),
+            sweepx_catalog::vm::VmValue::String("rebuildable_http_or_code_cache".to_string()),
         )
         .insert(
             "browser.runningState",
-            sweepx_cleaner_vm::VmValue::String("stopped".to_string()),
+            sweepx_catalog::vm::VmValue::String("stopped".to_string()),
         )
 }
 
@@ -4452,11 +4452,11 @@ fn parse_cleaner_ref(raw: &str) -> Result<(String, Option<String>), CoreError> {
     }
 }
 
-fn eval_state_label(state: sweepx_cleaner_vm::EvalState) -> &'static str {
+fn eval_state_label(state: sweepx_catalog::vm::EvalState) -> &'static str {
     match state {
-        sweepx_cleaner_vm::EvalState::Known(true) => "known_true",
-        sweepx_cleaner_vm::EvalState::Known(false) => "known_false",
-        sweepx_cleaner_vm::EvalState::Unknown => "unknown",
+        sweepx_catalog::vm::EvalState::Known(true) => "known_true",
+        sweepx_catalog::vm::EvalState::Known(false) => "known_false",
+        sweepx_catalog::vm::EvalState::Unknown => "unknown",
     }
 }
 
@@ -7332,7 +7332,8 @@ mod tests {
                 let evaluation = evaluate_rule(rule, &synthetic_cleaner_context()).unwrap();
                 assert!(matches!(
                     evaluation.fact_state,
-                    sweepx_cleaner_vm::EvalState::Known(_) | sweepx_cleaner_vm::EvalState::Unknown
+                    sweepx_catalog::vm::EvalState::Known(_)
+                        | sweepx_catalog::vm::EvalState::Unknown
                 ));
             }
         }

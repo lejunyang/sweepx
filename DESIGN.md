@@ -852,10 +852,8 @@ crates/
   sweepx-platform-linux/    # Linux scan/trash/permanent/holder
   sweepx-scanner/           # scheduler、queues、budget、aggregate、cancel
   sweepx-cache/             # generations、field provenance、spill/index
-  sweepx-cleaner-schema/    # manifest/rule/evidence JSON Schema + validation
-  sweepx-cleaner-vm/        # pure typed AST evaluator
   sweepx-probe-host/        # first-party helper protocol/sandbox
-  sweepx-catalog/           # built-in data rules、version adapters
+  sweepx-catalog/           # schema/vm modules, package admission and built-in rules
   sweepx-safety/            # risk、protections、plan、approval、preflight；sealed permit
   sweepx-executor/          # fence、serial action loop、adapter dispatch
   sweepx-audit/             # intent/outcome journal、CAS、reconciliation

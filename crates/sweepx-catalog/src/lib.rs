@@ -1,8 +1,14 @@
+//! Cleaner rule admission, schemas and deterministic evaluation in one package.
+
 pub mod junk;
+/// Validated cleaner manifests, rules and bounded predicate syntax.
+pub mod schema;
+/// Deterministic evaluation over captured facts; never performs filesystem actions.
+pub mod vm;
+use crate::schema::{CleanerManifest, CleanerRule, ValidationError};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Deserializer;
 use sha2::{Digest, Sha256};
-use sweepx_cleaner_schema::{CleanerManifest, CleanerRule, ValidationError};
 use thiserror::Error;
 
 /// A cleaner package compiled into the executable.
@@ -543,7 +549,7 @@ mod tests {
         let loaded = CHROMIUM_CACHE.load().expect("chromium cleaner loads");
         assert_eq!(
             loaded.manifest.target_versions.unknown,
-            sweepx_cleaner_schema::UnknownVersionBehavior::ReportOnly
+            crate::schema::UnknownVersionBehavior::ReportOnly
         );
     }
 

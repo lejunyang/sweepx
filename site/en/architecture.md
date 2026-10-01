@@ -36,11 +36,13 @@ The Scanner also now exposes a bounded locator batch reader so read-only upper l
 
 ## Crate responsibilities
 
+Cleaner types and validation live in `sweepx-catalog::schema`, deterministic evaluation in `sweepx-catalog::vm`, and built-in resources and package admission in the same crate. The standalone schema/VM packages have left the workspace; machine schema IDs, rule bytes and risk values remain unchanged.
+
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
 | Platform and scan | `sweepx-platform*`, `sweepx-scanner`, `sweepx-cache`, `sweepx-event-journal` | Platform boundaries and read-only traversal/aggregation on all three platforms; the Linux bounded SQLite journal; the macOS legacy snapshot |
-| Analysis and Cleaner | `sweepx-analysis`, `sweepx-cleaner-*`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
+| Analysis and Cleaner | `sweepx-analysis`, `sweepx-catalog` | Candidates/explanations, declarative rules, built-in packages |
 | User surfaces | `sweepx-core`, `sweepx-cli`, `sweepx-tui` | Command orchestration, human/machine output, bounded read-only views |
 | P3 simulated safety | `sweepx-safety`, `sweepx-audit`, `sweepx-executor` | Immutable binding, durable audit/recovery, sealed fake execution |
 

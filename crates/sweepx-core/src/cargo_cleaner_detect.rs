@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::json;
-use sweepx_cleaner_schema::RiskTier;
-use sweepx_cleaner_vm::{EvalState, EvaluationContext, RuleEvaluation, VmValue, evaluate_rule};
+use sweepx_catalog::schema::RiskTier;
+use sweepx_catalog::vm::{EvalState, EvaluationContext, RuleEvaluation, VmValue, evaluate_rule};
 use sweepx_model::{
     ArithmeticState, ByteValue, Coverage, CoverageState, DecimalU128, DirectoryAggregate,
     EvidenceValue, FieldProvenance, NativeLocatorEvidence, NativeName, ObjectType, ScanEntryId,

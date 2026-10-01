@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
-use sweepx_cleaner_schema::{
+use crate::schema::{
     CleanerRule, MAX_AST_DEPTH, MAX_AST_NODES, MonotonicRaise, Predicate, PredicateArg,
     PredicateOp, RiskTier, UnknownPolicy, ValidationError,
 };
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,8 +433,8 @@ pub fn resolve_monotonic_raises(
 
 #[cfg(test)]
 mod tests {
+    use crate::schema::CleanerRule;
     use serde_json::json;
-    use sweepx_cleaner_schema::CleanerRule;
 
     use super::*;
 

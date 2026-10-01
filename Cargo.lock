@@ -1204,36 +1204,14 @@ dependencies = [
 name = "sweepx-catalog"
 version = "0.0.1"
 dependencies = [
+ "base64",
+ "schemars",
+ "semver",
  "serde",
  "serde_ignored",
  "serde_json",
  "sha2",
  "sweepx-canonical",
- "sweepx-cleaner-schema",
- "thiserror",
-]
-
-[[package]]
-name = "sweepx-cleaner-schema"
-version = "0.0.1"
-dependencies = [
- "base64",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "sweepx-canonical",
- "thiserror",
-]
-
-[[package]]
-name = "sweepx-cleaner-vm"
-version = "0.0.1"
-dependencies = [
- "semver",
- "serde_json",
- "sweepx-cleaner-schema",
  "thiserror",
 ]
 
@@ -1278,8 +1256,6 @@ dependencies = [
  "sweepx-cache",
  "sweepx-canonical",
  "sweepx-catalog",
- "sweepx-cleaner-schema",
- "sweepx-cleaner-vm",
  "sweepx-event-journal",
  "sweepx-i18n",
  "sweepx-model",
