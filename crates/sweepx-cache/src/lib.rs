@@ -1800,24 +1800,22 @@ impl PreviewSummaryExt for PreviewSummary {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestTempDir {
+        // Keep the atomically created directory alive for the complete fixture lifetime.
+        _directory: tempfile::TempDir,
         path: PathBuf,
     }
 
     impl TestTempDir {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time must be after epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "sweepx-cache-test-{}-{}",
-                std::process::id(),
-                nonce
-            ));
-            fs::create_dir_all(&path).expect("test temp dir must be creatable");
+            // Wall-clock nanoseconds are not unique across threads. create_dir_all would
+            // silently share a colliding fixture, letting another test remove its live files.
+            let directory = tempfile::Builder::new()
+                .prefix("sweepx-cache-test-")
+                .tempdir()
+                .expect("test temp dir must be atomically creatable");
+            let path = directory.path().to_path_buf();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1842,17 +1840,14 @@ mod tests {
             let path = path
                 .canonicalize()
                 .expect("test temp dir must be resolvable");
-            Self { path }
+            Self {
+                _directory: directory,
+                path,
+            }
         }
 
         fn path(&self) -> &Path {
             &self.path
-        }
-    }
-
-    impl Drop for TestTempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 

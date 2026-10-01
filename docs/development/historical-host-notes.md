@@ -148,4 +148,17 @@ Prefer maintained scripts over reconstructing the examples below:
 - A green step proves only that step, and this applies to the release too: `crates-io` failing part
   way leaves `release` skipped and the tag uncreated, while the crates it did upload stay uploaded.
   Check the registry itself rather than the workflow conclusion.
+## Cache test directory isolation (2026-10-01)
 
+On arm64 macOS with Rust 1.98.0, the workspace run stopped in
+`corrupted_generation_falls_back_to_miss_and_quarantines`: writing the deliberately corrupted
+generation returned `NotFound` after a successful publication. Its fixture used PID plus
+`SystemTime::now().as_nanos()` with `create_dir_all`, which does not reserve an exclusive directory;
+another fixture sharing that name could remove its live files on drop. An independent eight-thread
+probe sampled 80,000 timestamps and observed 2,469 cross-thread repeated values. A nanosecond field
+does not imply nanosecond clock resolution or uniqueness.
+
+The fixture now owns an atomically created `tempfile::TempDir`, retaining the existing Unix-only
+canonicalization and private permissions. The corruption/quarantine contract test remains intact;
+all 34 cache tests passed after this change. The interrupted workspace run does not establish
+results for the later packages; the subsequent delivery must run those checks too.
