@@ -482,3 +482,5 @@ After `cargo build -p sweepx-cli --release`, run `python3 scripts/benchmark-junk
 On macOS, root records and file indexes share one FSEvents query covering every requested root, then interpret events against their own cursors. Missing history or query failure still falls back to fresh observations. With `--timings`, both layers are included in `rootCacheValidation`; `subtreeCacheValidation` remains a near-zero phase boundary.
 
 The history query ends its run-loop wait as soon as the complete-history marker arrives. Handling one source alone does not establish completeness; timeouts and history gaps still refuse reuse.
+
+Classified directory rows, markers, coverage and optional reuse indexes share an estimated-byte budget (256 MiB per invocation and 128 MiB per root by default), which is not a process RSS limit. Rebuildable indexes are evicted before required rule facts. If required facts still cannot fit, the report is `partial` and human output explains that candidates may be missing. Built-in rules select file markers from the loaded requiredParentMarkers; arbitrary custom evaluators retain all names by default.

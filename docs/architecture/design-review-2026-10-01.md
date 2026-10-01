@@ -198,3 +198,14 @@ OS 缓存没有清空，“冷”只表示空 SweepX 缓存。该结果不能推
 Linux/Windows 宿主运行时、MSVC 与系统 Trash 挂起用例仍是独立验证缺口，不因性能测量通过而视为完成。
 
 本阶段交付验证（2026-10-01）：原生 platform 测试、受影响 crate lint、格式和工作区 clippy 通过；工作区 719 项通过、0 失败、2 项基准 ignored，1 项已诊断系统 Trash 挂起显式排除。共享历史查询阶段的 Linux GNU/Windows GNU 工作区交叉 lint 已通过；后续 run loop 改动仅在 macOS cfg 内，不改变这两个目标编译的源码分支，复用对应通过结果。53 份 Markdown 检查、23 项文档检查器测试和 5 项基准验证器测试通过。未执行 Linux/Windows 宿主运行时或 MSVC 验收。
+
+
+## 分类元数据预算（2026-10-01）
+
+分类目录行、file/directory marker、coverage/path 与可选 listing 已接入同一内存估算预算，默认整批 256 MiB、单根 128 MiB，通过 `ScanResourceLimits` 配置。模型行计入 native lineage、字符串与 Vec 的容量，不通过 JSON 大小或文件逻辑长度猜测内存；索引采用固定容器估算额度。这不是 allocator RSS 或文件分配大小的精确上限。
+
+必需证据入场前可清除可重建 listing/covered-path 索引以腾出预算。若必需证据依旧无法保留，本根后续分类停止，避免缺失 marker 让否定谓词错误匹配；资源边界使结果为 partial，human 明确提示可能遗漏，仍继续现场遍历和原有字节累计。缺失 covered-path 不保存成整根命中。可选 listing 不要求保存每个文件；未知条目下次重新观察，既有已验证长度在预算内进入下一代。
+
+内置分类器只保留本次规则实际需要的项目文件 marker，名称集合从规则字节加载结果派生；自定义分类器默认仍保留全部 marker，以保持其契约。目录名称只保留一次 identity-keyed lineage；不再在 listing 的旧 dirs 字段中重复存储。回归覆盖零预算下的否定谓词、可选索引压力下保住必需 marker、自定义规则 marker 变更，以及 native lineage/预留容量计入模型内存估算。
+
+本条完成扫描中的共享预算；持久化文件的有界读取、跨根预算与逐根淘汰还未完成，上一节对应验收项暂不勾选。

@@ -222,7 +222,10 @@ pub trait ScanSink {
 /// known size are recorded.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DirListing {
+    /// Observed regular file basenames with known logical lengths, subject to the optional index budget.
     pub files: BTreeMap<String, u128>,
+    /// Legacy directory-name slot; new scans keep directory lineage in `directory_markers` only.
+    /// Reuse always enumerates current children and does not need a second copy of directory names.
     pub dirs: BTreeSet<String>,
 }
 
@@ -256,6 +259,13 @@ pub trait SubtreeReuse: Sync {
     }
 }
 pub trait JunkClassifier {
+    /// Whether a file basename is needed as a classification marker.
+    /// Defaults to retaining every name for custom evaluators. Built-in rule services can
+    /// restrict this to their admitted marker set without changing rule semantics.
+    fn needs_file_marker(&self, _name: &NativeName) -> bool {
+        true
+    }
+
     /// Returns the stable id of the rule that makes this directory a junk candidate, or
     /// `None` when no rule matches.
     ///
@@ -339,6 +349,14 @@ struct CollectingScanSink<'a> {
     dir_listings: BTreeMap<String, DirListing>,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
+    // One budget spans required facts and optional reuse indexes. Per-root counters reset only
+    // when sequential root admission begins; global retained storage remains charged.
+    metadata_bytes: usize,
+    root_metadata_bytes: usize,
+    reuse_bytes: usize,
+    root_reuse_bytes: usize,
+    active_root: PathBuf,
+    metadata_lost: bool,
 }
 
 impl<'a> CollectingScanSink<'a> {
@@ -366,6 +384,12 @@ impl<'a> CollectingScanSink<'a> {
             covered_paths: BTreeMap::new(),
             dir_listings: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            metadata_bytes: 0,
+            root_metadata_bytes: 0,
+            reuse_bytes: 0,
+            root_reuse_bytes: 0,
+            active_root: PathBuf::new(),
+            metadata_lost: false,
         }
     }
 
@@ -396,28 +420,137 @@ impl<'a> CollectingScanSink<'a> {
         }
     }
 
-    /// Classifies a pending directory whose aggregate has just been pushed, then routes its
-    /// row to `roots` or `entries`. Called only in junk mode.
-    ///
-    /// The marker set is removed afterwards to keep retained state proportional to open
-    /// directories: every child marker keyed its own parent id, and the parent is now done.
+    /// Admits retained metadata, evicting optional indexes before losing classification facts.
+    /// These estimates include owned strings and fixed container allowances; they do
+    /// not claim to measure allocator RSS. Optional index omissions only force fresh metadata.
+    fn admit_metadata(&mut self, bytes: usize, required: bool) -> bool {
+        let fits = |global: usize, root: usize| {
+            global
+                .checked_add(bytes)
+                .is_some_and(|next| next <= self.limits.max_classified_metadata_bytes)
+                && root
+                    .checked_add(bytes)
+                    .is_some_and(|next| next <= self.limits.max_classified_root_metadata_bytes)
+        };
+        if required && !fits(self.metadata_bytes, self.root_metadata_bytes) {
+            self.dir_listings.clear();
+            self.covered_paths.clear();
+            self.metadata_bytes -= self.reuse_bytes;
+            self.root_metadata_bytes -= self.root_reuse_bytes;
+            self.reuse_bytes = 0;
+            self.root_reuse_bytes = 0;
+        }
+        if !fits(self.metadata_bytes, self.root_metadata_bytes) {
+            if required {
+                self.metadata_lost = true;
+                let root = self.active_root.clone();
+                self.mark_detail_overflow(
+                    &root,
+                    &root,
+                    "classified metadata byte budget exhausted",
+                );
+            }
+            return false;
+        }
+        self.metadata_bytes += bytes;
+        self.root_metadata_bytes += bytes;
+        if !required {
+            self.reuse_bytes += bytes;
+            self.root_reuse_bytes += bytes;
+        }
+        true
+    }
+
+    fn row_cost(entry: &ScannedEntry) -> usize {
+        entry
+            .estimated_retained_bytes()
+            .saturating_add(512)
+            .saturating_add(
+                entry
+                    .identity
+                    .as_ref()
+                    .map_or(0, |id| id.entry_id.as_str().len()),
+            )
+    }
+
+    fn record_file(
+        &mut self,
+        parent_id: &ScanEntryId,
+        name: &NativeName,
+        path: &Path,
+        size: Option<u128>,
+    ) {
+        let Some(marker) = native_basename_marker(name) else {
+            return;
+        };
+        if self
+            .classifier
+            .is_some_and(|classifier| classifier.needs_file_marker(name))
+            && !self
+                .file_markers
+                .get(parent_id)
+                .is_some_and(|markers| markers.contains(&marker))
+            && self.admit_metadata(
+                256usize
+                    .saturating_add(marker.capacity())
+                    .saturating_add(parent_id.as_str().len()),
+                true,
+            )
+        {
+            self.file_markers
+                .entry(parent_id.clone())
+                .or_default()
+                .insert(marker.clone());
+        }
+        if let Some(parent) = path.parent()
+            && let Some(size) = size
+        {
+            let parent = parent.display().to_string();
+            if !self
+                .dir_listings
+                .get(&parent)
+                .is_some_and(|listing| listing.files.contains_key(&marker))
+                && self.admit_metadata(
+                    256usize
+                        .saturating_add(parent.capacity())
+                        .saturating_add(marker.capacity()),
+                    false,
+                )
+            {
+                self.dir_listings
+                    .entry(parent)
+                    .or_default()
+                    .files
+                    .insert(marker, size);
+            }
+        }
+    }
+
+    /// A missing required marker can make a negative predicate spuriously match. Once facts
+    /// were lost, skip remaining classification for this root and report partial coverage of
+    /// classification, while the ordinary traversal still computes its filesystem totals.
     fn classify_pending(&mut self, id: &ScanEntryId) {
         let Some(entry) = self.pending_directories.remove(id) else {
             return;
         };
-        // Marker sets are retained until the sink drops: a directory's own markers are read by
-        // its child directories' parent-marker checks, and aggregates are pushed in identity
-        // order -- parents before children -- so eager removal made project rules miss their
-        // parent markers. Names-only state is cheap (the full row was already dropped).
-        let Some(rule_id) = self
-            .classifier
-            .expect("classified sink carries a classifier")
-            .classify(&entry, &self.file_markers)
+        let is_root = self.pending_root_ids.remove(id);
+        let cost = Self::row_cost(&entry);
+        let decision = if self.metadata_lost {
+            None
+        } else {
+            self.classifier
+                .expect("classified sink carries a classifier")
+                .classify(&entry, &self.file_markers)
+        };
+        let Some(rule_id) = decision
+            .filter(|rule| self.admit_metadata(128usize.saturating_add(rule.capacity()), true))
         else {
+            self.metadata_bytes -= cost;
+            self.root_metadata_bytes -= cost;
             return;
         };
         self.decisions.insert(id.clone(), rule_id);
-        if self.pending_root_ids.remove(id) {
+        if is_root {
             self.summary.roots.push(entry);
         } else {
             self.summary.entries.push(entry);
@@ -501,6 +634,13 @@ impl ScanSink for CollectingScanSink<'_> {
             let Some(identity) = entry.identity.as_ref() else {
                 return Ok(());
             };
+            self.active_root = root.to_path_buf();
+            self.root_metadata_bytes = 0;
+            self.root_reuse_bytes = 0;
+            self.metadata_lost = false;
+            if !self.admit_metadata(Self::row_cost(&entry), true) {
+                return Ok(());
+            }
             let id = identity.entry_id.clone();
             self.pending_root_ids.insert(id.clone());
             self.pending_directories.insert(id, entry);
@@ -518,57 +658,41 @@ impl ScanSink for CollectingScanSink<'_> {
         if self.classifier.is_some() {
             match entry.object_type {
                 ObjectType::Directory => {
-                    // Record the directory child's name first: post-scan checks may need to
-                    // know it existed even though its row itself is dropped unless classified.
                     let Some(identity) = entry.identity.as_ref() else {
                         return Ok(());
                     };
                     if let Some(parent_id) = identity.parent_id.as_ref()
                         && let Some(name) = native_basename_marker(&entry.native_basename)
+                        && self.admit_metadata(
+                            384usize
+                                .saturating_add(name.capacity())
+                                .saturating_add(identity.entry_id.as_str().len())
+                                .saturating_add(parent_id.as_str().len()),
+                            true,
+                        )
                     {
                         self.directory_markers
                             .entry(parent_id.clone())
                             .or_default()
-                            .insert(name.clone(), identity.entry_id.clone());
-                        // Record the child directory under its parent's reuse listing.
-                        if let Some(parent_path) = Path::new(&entry.display_path).parent() {
-                            self.dir_listings
-                                .entry(parent_path.display().to_string())
-                                .or_default()
-                                .dirs
-                                .insert(name);
-                        }
+                            .insert(name, identity.entry_id.clone());
                     }
-                    // Wait for the aggregate; the classifier needs the complete marker set.
-                    self.pending_directories
-                        .insert(identity.entry_id.clone(), entry);
+                    if self.admit_metadata(Self::row_cost(&entry), true) {
+                        self.pending_directories
+                            .insert(identity.entry_id.clone(), entry);
+                    }
                 }
                 ObjectType::File => {
-                    // Record only the marker name; the row is dropped intentionally. Junk
-                    // candidates never include file rows, and marker checks need the basename.
-                    let Some(identity) = entry.identity.as_ref() else {
+                    let Some(parent_id) =
+                        entry.identity.as_ref().and_then(|id| id.parent_id.as_ref())
+                    else {
                         return Ok(());
                     };
-                    let Some(parent_id) = identity.parent_id.as_ref() else {
-                        return Ok(());
-                    };
-                    if let Some(name) = native_basename_marker(&entry.native_basename) {
-                        self.file_markers
-                            .entry(parent_id.clone())
-                            .or_default()
-                            .insert(name.clone());
-                        // Capture name → logical size under the parent's reuse listing, only when
-                        // the size was measured exactly.
-                        if let Some(parent_path) = Path::new(&entry.display_path).parent()
-                            && let Some(size) = extract_known_u128(&entry.logical_bytes)
-                        {
-                            self.dir_listings
-                                .entry(parent_path.display().to_string())
-                                .or_default()
-                                .files
-                                .insert(name, size);
-                        }
-                    }
+                    self.record_file(
+                        parent_id,
+                        &entry.native_basename,
+                        Path::new(&entry.display_path),
+                        extract_known_u128(&entry.logical_bytes),
+                    );
                 }
                 // Symlinks and reparse/other rows feed no junk rule; symlinks are already
                 // recorded as boundaries.
@@ -651,8 +775,19 @@ impl ScanSink for CollectingScanSink<'_> {
             let id = ScanEntryId::from_loaded(aggregate.directory_identity.clone());
             // Retain coverage for every completed directory, candidate or not, before the aggregate
             // is dropped or kept; downstream evidence checks read this rather than the aggregate.
-            self.coverages
-                .insert(id.clone(), aggregate.coverage.clone());
+            if self.admit_metadata(
+                256usize.saturating_add(id.as_str().len()).saturating_add(
+                    aggregate
+                        .coverage
+                        .incomplete_reasons
+                        .len()
+                        .saturating_mul(std::mem::size_of::<ReasonCode>()),
+                ),
+                true,
+            ) {
+                self.coverages
+                    .insert(id.clone(), aggregate.coverage.clone());
+            }
             self.classify_pending(&id);
             if !self.decisions.contains_key(&id) {
                 // A non-candidate directory's bytes are not needed for any total: file entries are
@@ -703,10 +838,11 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
-        // Only classified scans build the reuse index; an ordinary scan records nothing here.
-        if self.classifier.is_some() {
-            self.covered_paths
-                .insert(path.display().to_string(), coverage.complete);
+        if self.classifier.is_some() && !self.metadata_lost {
+            let path = path.display().to_string();
+            if self.admit_metadata(256usize.saturating_add(path.capacity()), false) {
+                self.covered_paths.insert(path, coverage.complete);
+            }
         }
     }
 
@@ -715,22 +851,15 @@ impl ScanSink for CollectingScanSink<'_> {
         parent_id: &ScanEntryId,
         file: &sweepx_platform::CachedFileEntry,
     ) {
-        if self.classifier.is_some()
-            && let Some(marker) = native_basename_marker(&file.file_name)
-        {
-            self.file_markers
-                .entry(parent_id.clone())
-                .or_default()
-                .insert(marker.clone());
-            // Carry validated lengths into the next generation. Dropping reused rows here makes
-            // every other warm scan cold again even when the filesystem never changes.
-            if let Some(parent) = file.path.parent() {
-                self.dir_listings
-                    .entry(parent.display().to_string())
-                    .or_default()
-                    .files
-                    .insert(marker, file.logical_bytes);
-            }
+        if self.classifier.is_some() {
+            // Validated lengths are carried into the next generation under the same optional
+            // budget as fresh files. Missing listings force inspection on subsequent scans.
+            self.record_file(
+                parent_id,
+                &file.file_name,
+                &file.path,
+                Some(file.logical_bytes),
+            );
         }
     }
 }
@@ -3304,6 +3433,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn metadata_budget_exhaustion_never_turns_missing_markers_into_a_match() {
+        struct NegativePredicate(std::cell::Cell<usize>);
+        impl JunkClassifier for NegativePredicate {
+            fn classify(
+                &self,
+                _: &ScannedEntry,
+                markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                self.0.set(self.0.get() + 1);
+                markers
+                    .is_empty()
+                    .then(|| "absence-is-not-proof".to_string())
+            }
+        }
+        let platform = NestedFanOutPlatform::new(2);
+        let root = platform.root.clone();
+        let classifier = NegativePredicate(std::cell::Cell::new(0));
+        let result = Scanner::new(
+            platform,
+            ScannerOptions {
+                resource_limits: ScanResourceLimits {
+                    max_classified_metadata_bytes: 0,
+                    ..ScanResourceLimits::default()
+                },
+                ..ScannerOptions::default()
+            },
+        )
+        .scan_classified(
+            &[ScanRoot::new(root).unwrap()],
+            &CancellationToken::new(),
+            &classifier,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            classifier.0.get(),
+            0,
+            "no evaluator may see falsely complete missing facts"
+        );
+        assert!(result.decisions.is_empty());
+        assert!(result.covered_paths.is_empty());
+        assert!(
+            result
+                .summary
+                .boundaries
+                .iter()
+                .any(|boundary| boundary.kind == BoundaryKind::ResourceLimit)
+        );
+        assert!(
+            result
+                .summary
+                .progress
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::EntryObserved { .. })),
+            "metadata retention must not stop the filesystem walk"
+        );
+    }
+
+    #[test]
+    fn required_marker_evicts_optional_file_indexes_within_the_shared_budget() {
+        struct MarkerOnly;
+        impl JunkClassifier for MarkerOnly {
+            fn needs_file_marker(&self, name: &NativeName) -> bool {
+                name == &test_native_name("Cargo.toml")
+            }
+            fn classify(
+                &self,
+                _: &ScannedEntry,
+                _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                None
+            }
+        }
+        let mut sink = CollectingScanSink::new_classified(
+            ScanResourceLimits {
+                max_classified_metadata_bytes: 1024,
+                max_classified_root_metadata_bytes: 1024,
+                ..ScanResourceLimits::default()
+            },
+            &MarkerOnly,
+        );
+        let parent = ScanEntryId::from_loaded("parent".into());
+        let root = test_path("root");
+        for index in 0..20 {
+            let name = format!("payload-{index:03}");
+            sink.note_cached_file(
+                &parent,
+                &sweepx_platform::CachedFileEntry {
+                    path: root.join(&name),
+                    file_name: test_native_name(&name),
+                    logical_bytes: 7,
+                },
+            );
+            assert!(sink.metadata_bytes <= 1024);
+            assert!(sink.root_metadata_bytes <= 1024);
+        }
+        assert!(sink.reuse_bytes > 0);
+        assert!(sink.file_markers.is_empty());
+        sink.note_cached_file(
+            &parent,
+            &sweepx_platform::CachedFileEntry {
+                path: root.join("Cargo.toml"),
+                file_name: test_native_name("Cargo.toml"),
+                logical_bytes: 123,
+            },
+        );
+        assert!(sink.file_markers[&parent].contains("Cargo.toml"));
+        assert!(
+            !sink.metadata_lost,
+            "optional cache pressure must not lose required evidence"
+        );
+        assert_eq!(sink.detail_overflow_count(), 0);
+        assert!(sink.metadata_bytes <= 1024);
+        assert!(
+            sink.dir_listings
+                .values()
+                .flat_map(|listing| listing.files.keys())
+                .all(|name| name == "Cargo.toml")
+        );
+    }
+
     /// Losing a *boundary* record is different in kind, and must still degrade the totals.
     ///
     /// A boundary is the evidence that a subtree was skipped. Once it is dropped there is no
@@ -3683,6 +3934,7 @@ mod tests {
                 max_retained_entries: 16_384,
                 max_retained_boundaries: 16_384,
                 max_progress_events: 16_384,
+                ..ScanResourceLimits::default()
             },
             ..ScannerOptions::default()
         });
@@ -4068,6 +4320,7 @@ mod tests {
                 max_retained_entries: 16_384,
                 max_retained_boundaries: 16_384,
                 max_progress_events: 16_384,
+                ..ScanResourceLimits::default()
             },
             ..ScannerOptions::default()
         });
@@ -4104,6 +4357,7 @@ mod tests {
                 max_retained_entries: 1,
                 max_retained_boundaries: 4,
                 max_progress_events: 8,
+                ..ScanResourceLimits::default()
             },
             ..ScannerOptions::default()
         });

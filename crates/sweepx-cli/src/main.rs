@@ -213,6 +213,7 @@ enum Commands {
         command: CleanerCommands,
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
+    /// Reports partial results when resource limits prevent retaining complete evidence.
     Junk {
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
         /// Measures report-only work; stdout keeps its existing format.
@@ -1352,6 +1353,10 @@ struct CliJunkClassifier<'a> {
 }
 
 impl JunkClassifier for CliJunkClassifier<'_> {
+    fn needs_file_marker(&self, name: &sweepx_model::NativeName) -> bool {
+        self.project.needs_project_marker(name)
+    }
+
     fn classify(
         &self,
         entry: &sweepx_model::ScannedEntry,
@@ -1723,6 +1728,21 @@ fn run_junk_scan(
         }
         None => None,
     };
+    if format == OutputFormat::Human
+        && scan
+            .as_ref()
+            .is_some_and(|scan| scan.scan.output.status != sweepx_protocol::OutputStatus::Ok)
+    {
+        eprintln!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    "扫描证据不完整：候选列表可能有遗漏；没有候选不表示该范围没有垃圾。",
+                sweepx_i18n::Locale::EnUs =>
+                    "Scan evidence is incomplete: candidates may be missing; an empty list does not establish that the scope contains no junk.",
+            }
+        );
+    }
 
     // Assemble freshly scanned candidates. Applicability was joined during the walk through scan
     // identities and lossless native names; aggregates carry each directory's size.

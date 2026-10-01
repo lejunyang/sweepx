@@ -1356,6 +1356,82 @@ pub struct ScannedEntry {
 }
 
 impl ScannedEntry {
+    /// Estimates owned storage including native lineage and container capacities.
+    ///
+    /// Excludes allocator overhead and external map nodes; callers must charge those separately.
+    /// Saturation fails closed when compared against a finite retention budget. This is a memory
+    /// admission estimate, never a filesystem allocation or reclaimable-space measurement.
+    pub fn estimated_retained_bytes(&self) -> usize {
+        fn name(value: &NativeName) -> usize {
+            match value {
+                NativeName::UnixBytes(bytes) => bytes.capacity(),
+                NativeName::WindowsUtf16(units) => units.capacity().saturating_mul(2),
+            }
+        }
+        fn provenance(value: &FieldProvenance) -> usize {
+            match value {
+                FieldProvenance::LiveObservation { observed_at, .. }
+                | FieldProvenance::StalePreview { observed_at } => observed_at.capacity(),
+                FieldProvenance::ValidatedCache {
+                    observed_at, token, ..
+                } => observed_at.capacity().saturating_add(token.capacity()),
+                FieldProvenance::DerivedFromCurrent { inputs, algorithm } => inputs.iter().fold(
+                    inputs
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>())
+                        .saturating_add(algorithm.capacity()),
+                    |sum, item| sum.saturating_add(item.capacity()),
+                ),
+                FieldProvenance::Unknown { .. } => 0,
+            }
+        }
+        fn component(value: &NativePathComponent) -> usize {
+            name(&value.native_basename)
+                .saturating_add(value.entry_id.0.capacity())
+                .saturating_add(value.parent_id.as_ref().map_or(0, |id| id.0.capacity()))
+                .saturating_add(value.metadata_fingerprint.capacity())
+        }
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.scan_id.value.capacity())
+            .saturating_add(self.display_path.capacity())
+            .saturating_add(name(&self.native_basename))
+            .saturating_add(self.metadata_fingerprint.capacity())
+            .saturating_add(provenance(&self.provenance))
+            .saturating_add(provenance(&self.coverage.provenance))
+            .saturating_add(
+                self.coverage
+                    .incomplete_reasons
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ReasonCode>()),
+            );
+        if let Some(identity) = &self.identity {
+            bytes = bytes
+                .saturating_add(identity.entry_id.0.capacity())
+                .saturating_add(identity.scan_root_id.0.capacity())
+                .saturating_add(identity.parent_id.as_ref().map_or(0, |id| id.0.capacity()));
+        }
+        if let Some(locator) = &self.native_locator {
+            bytes = bytes
+                .saturating_add(component(&locator.scan_root))
+                .saturating_add(component(&locator.entry))
+                .saturating_add(
+                    locator
+                        .parent_reopen_recipe
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<NativePathComponent>()),
+                );
+            for part in &locator.parent_reopen_recipe {
+                bytes = bytes.saturating_add(component(part));
+            }
+            bytes = bytes.saturating_add(match &locator.scan_root_absolute_path {
+                Some(NativeAbsolutePath::UnixBytes(value)) => value.capacity(),
+                Some(NativeAbsolutePath::WindowsUtf16(value)) => value.capacity().saturating_mul(2),
+                None => 0,
+            });
+        }
+        bytes
+    }
+
     /// Returns validated current-format identity, or `Ok(None)` for legacy records.
     pub fn validated_identity(&self) -> Result<Option<&ScanObjectIdentity>, ScanEntryIdError> {
         if let Some(identity) = &self.identity {
@@ -1979,6 +2055,59 @@ mod tests {
             entry.validated_native_locator(),
             Err(ScanEntryIdError::InvalidFormat)
         );
+    }
+
+    #[test]
+    fn retained_storage_accounts_for_reserved_capacity_and_native_lineage() {
+        let (scan_id, identity, locator) = child_locator_fixture();
+        let mut entry = ScannedEntry {
+            scan_id,
+            identity: Some(identity),
+            native_locator: Some(locator),
+            display_path: "/root/ancestor/parent/item".into(),
+            native_basename: host_native_name("item"),
+            object_type: ObjectType::File,
+            logical_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            allocated_bytes: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            reclaimable_estimate: EvidenceValue::Known {
+                value: DecimalU128::ZERO,
+            },
+            metadata_fingerprint: "fp-4".into(),
+            coverage: Coverage {
+                state: CoverageState::Complete,
+                complete: true,
+                incomplete_reasons: vec![],
+                details_lost: false,
+                provenance: FieldProvenance::Unknown {
+                    reason: ReasonCode::NotRevalidated,
+                },
+            },
+            provenance: FieldProvenance::Unknown {
+                reason: ReasonCode::NotRevalidated,
+            },
+        };
+        let before = entry.estimated_retained_bytes();
+        let path = entry.display_path.clone();
+        entry.display_path.reserve(16 * 1024);
+        assert_eq!(
+            entry.display_path, path,
+            "reserved capacity changes memory, not evidence"
+        );
+        assert!(entry.estimated_retained_bytes() >= before + 16 * 1024);
+        let before = entry.estimated_retained_bytes();
+        let lineage = &mut entry.native_locator.as_mut().unwrap().parent_reopen_recipe;
+        let old_capacity = lineage.capacity();
+        lineage.reserve(100);
+        let new_slots = lineage.capacity() - old_capacity;
+        assert!(
+            entry.estimated_retained_bytes()
+                >= before + new_slots * std::mem::size_of::<NativePathComponent>()
+        );
+        assert!(entry.validated_native_locator().is_ok());
     }
 
     #[test]

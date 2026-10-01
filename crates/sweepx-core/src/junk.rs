@@ -21,6 +21,7 @@ pub struct JunkService {
     // normalization/allocation on every ordinary directory in a large traversal.
     by_name: BTreeMap<String, Vec<usize>>,
     parent_markers: Vec<Vec<String>>,
+    marker_names: BTreeSet<String>,
 }
 
 impl JunkService {
@@ -88,17 +89,33 @@ impl JunkService {
                     .collect()
             })
             .collect();
+        let marker_names = rules
+            .iter()
+            .flat_map(|rule| rule.required_parent_markers.iter())
+            .map(|name| normalize_rule_name(name))
+            .collect();
         Ok(Self {
             rules,
             predicates,
             by_name,
             parent_markers,
+            marker_names,
         })
     }
 
     /// Returns admitted rules for rendering their existing risk and evidence fields.
     pub fn project_rules(&self) -> &[ProjectJunkRule] {
         &self.rules
+    }
+
+    /// Whether an observed file name supplies evidence needed by the loaded project rules.
+    pub fn needs_project_marker(&self, name: &NativeName) -> bool {
+        if !cfg!(windows)
+            && let NativeName::UnixBytes(bytes) = name
+        {
+            return std::str::from_utf8(bytes).is_ok_and(|name| self.marker_names.contains(name));
+        }
+        native_rule_name(name).is_some_and(|name| self.marker_names.contains(&name))
     }
 
     /// Matches lossless observed names and identity-keyed parent markers, never display paths.
@@ -277,5 +294,17 @@ mod tests {
                 .match_project(&NativeName::UnixBytes(vec![255]), None, &BTreeMap::new())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn marker_selection_follows_loaded_rules_not_a_hand_maintained_list() {
+        let service = JunkService::built_in().unwrap();
+        assert!(service.needs_project_marker(&name("Cargo.toml")));
+        assert!(!service.needs_project_marker(&name("ordinary-payload.bin")));
+        let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        rules[0]["requiredParentMarkers"] = serde_json::json!(["custom.marker"]);
+        let service = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
+        assert!(service.needs_project_marker(&name("custom.marker")));
+        assert!(!service.needs_project_marker(&name("Cargo.toml")));
     }
 }

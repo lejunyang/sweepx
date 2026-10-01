@@ -1000,6 +1000,11 @@ pub struct ScanResourceLimits {
     pub max_retained_entries: usize,
     pub max_retained_boundaries: usize,
     pub max_progress_events: usize,
+    /// Shared estimated bytes for classified rows, markers, coverage and optional reuse indexes.
+    /// Allocator overhead is estimated separately from owned model storage; this is not an RSS cap.
+    pub max_classified_metadata_bytes: usize,
+    /// Estimated classified metadata retained for one scan root within the shared budget.
+    pub max_classified_root_metadata_bytes: usize,
 }
 
 impl Default for ScanResourceLimits {
@@ -1026,6 +1031,8 @@ impl Default for ScanResourceLimits {
             max_retained_entries: 131_072,
             max_retained_boundaries: 16_384,
             max_progress_events: 16_384,
+            max_classified_metadata_bytes: 256 * 1024 * 1024,
+            max_classified_root_metadata_bytes: 128 * 1024 * 1024,
         }
     }
 }
