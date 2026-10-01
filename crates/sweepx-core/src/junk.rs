@@ -17,6 +17,10 @@ pub use sweepx_catalog::junk::{
 pub struct JunkService {
     rules: Vec<ProjectJunkRule>,
     predicates: Vec<Predicate>,
+    // Immutable indexes preserve catalog order for overlapping names while avoiding repeated
+    // normalization/allocation on every ordinary directory in a large traversal.
+    by_name: BTreeMap<String, Vec<usize>>,
+    parent_markers: Vec<Vec<String>>,
 }
 
 impl JunkService {
@@ -66,7 +70,30 @@ impl JunkService {
                 }
             })
             .collect();
-        Ok(Self { rules, predicates })
+        let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, rule) in rules.iter().enumerate() {
+            for name in &rule.names {
+                let indexes = by_name.entry(normalize_rule_name(name)).or_default();
+                if indexes.last() != Some(&index) {
+                    indexes.push(index);
+                }
+            }
+        }
+        let parent_markers = rules
+            .iter()
+            .map(|rule| {
+                rule.required_parent_markers
+                    .iter()
+                    .map(|name| normalize_rule_name(name))
+                    .collect()
+            })
+            .collect();
+        Ok(Self {
+            rules,
+            predicates,
+            by_name,
+            parent_markers,
+        })
     }
 
     /// Returns admitted rules for rendering their existing risk and evidence fields.
@@ -85,20 +112,16 @@ impl JunkService {
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<&ProjectJunkRule> {
         let name = native_rule_name(name)?;
-        for (rule, predicate) in self.rules.iter().zip(&self.predicates) {
-            // Most scanned names match no rule. Avoid constructing/cloning VM facts for those
-            // directories, and never copy a potentially huge parent marker set into the VM.
-            if !rule
-                .names
-                .iter()
-                .any(|candidate| normalize_rule_name(candidate) == name)
-            {
-                continue;
-            }
-            let parent_match = parent.and_then(|id| markers.get(id)).map(|observed| {
-                rule.required_parent_markers
+        let observed_parent = parent.and_then(|id| markers.get(id));
+        for &index in self.by_name.get(&name)? {
+            let rule = &self.rules[index];
+            let predicate = &self.predicates[index];
+            // Only matching names reach the VM. Marker sets stay borrowed and identity-bound;
+            // no subtree-sized facts are cloned into the per-candidate context.
+            let parent_match = observed_parent.map(|observed| {
+                self.parent_markers[index]
                     .iter()
-                    .any(|marker| observed.contains(&normalize_rule_name(marker)))
+                    .any(|marker| observed.contains(marker))
             });
             let mut context =
                 EvaluationContext::new().insert("entry.name", VmValue::String(name.clone()));
@@ -199,6 +222,36 @@ mod tests {
             service
                 .match_project(&name("target"), None, &markers)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn overlapping_names_keep_catalog_priority() {
+        let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        rules[1]["names"] = serde_json::json!(["target", "target"]);
+        rules[1]["requiredParentMarkers"] = serde_json::json!(["Cargo.toml"]);
+        let parent =
+            ScanEntryId::for_scan_ordinal(&sweepx_model::ScanId::new("priority"), 1).unwrap();
+        let markers = BTreeMap::from([(
+            parent.clone(),
+            BTreeSet::from([normalize_rule_name("Cargo.toml")]),
+        )]);
+        let service = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
+        assert_eq!(
+            service
+                .match_project(&name("target"), Some(&parent), &markers)
+                .unwrap()
+                .id,
+            "rust.target"
+        );
+        rules.as_array_mut().unwrap().swap(0, 1);
+        let service = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
+        assert_eq!(
+            service
+                .match_project(&name("target"), Some(&parent), &markers)
+                .unwrap()
+                .id,
+            "node.modules"
         );
     }
 
