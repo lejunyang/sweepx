@@ -170,6 +170,8 @@ With no explicit root, Linux `--system` reports XDG caches and enumerates every 
 
 Linux temporary-object analysis and cleanup revalidation each have independent resource budgets: by default, 1,000,000 observations and a 64 MiB cumulative retained-data estimate; at most 65,536 names and 8 MiB of name bytes per directory; 4 MiB per mount/socket table and 64 MiB of table input per invocation. These are not RSS limits. Cancellation, deadlines and exhausted budgets remain incomplete evidence. A truncated table prefix cannot establish absence of process references, and missing candidates cannot establish absence of junk.
 
+Quarantine preview and execution share `sweepx-core::junk::quarantine`; the CLI renders and confirms. Display paths and digests cannot recreate the opaque native preview. Plans bind the actual loaded rule bytes, and session callers can require equality with the originally selected measurement. Batches contain at most 256 objects. Default cumulative path admission is estimated at 64 MiB, with 1,000,000 path visits, depth 128, a 1 TiB copy/verification I/O budget and a cooperative 15-minute deadline. Directory enumeration, copy, verification and source removal share cancellation. Reads use the planned length, so concurrent growth cannot cause an unbounded copy. Confirmation input retains at most 256 bytes. Cancellation or exhaustion stops later actions; once removal starts, a partial source tree and a complete recovery copy can remain. This is not atomic rollback, an RSS cap or a hard timeout for blocking kernel calls. Interactive TUI quarantine confirmation remains pending.
+
 Linux can explicitly quarantine this stale temporary-object set:
 
 ```bash

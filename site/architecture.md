@@ -60,6 +60,8 @@ Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、
 
 Linux 临时对象服务提供共享预算与合作式取消；目录名、递归身份指纹、进程枚举和 mount/socket 表输入都有界。资源失败不可恢复为本次完整阴性结论；报告与清理重验复用同一实现，各次调用独立建立预算和当前引用证据。
 
+`junk::quarantine` 将 Linux 临时对象的原生预览/执行与 CLI 打印、stdin 确认分离。不可由序列化显示计划重建的预览保留捕获身份与执行预算，执行消费一次并重验当前原生事实；摘要绑定实际规则字节。清理路径、目录枚举和内容 I/O 合作式取消且有界；待移除的同层对象共享父目录 fd，避免宽目录逐名称复制句柄。移除开始后的失败可能留下部分源和完整恢复副本，没有原子回滚或永久删除兜底。TUI 的计划确认接入尚未完成。
+
 进度日志也有保留上限；仅截断进度不会把完整扫描变成 partial。错误计数、取消和真实资源不足独立保留，现场会话继续收到可靠错误与终态。
 
 CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并在单个事务中把完整流与 terminal snapshot 写入 bounded SQLite journal；Core `status` journal-first，并支持 degraded 的 `sweepx --format ndjson status --operation-id ID --watch [--after SXCUR1]` completed replay：先做一次同 snapshot 全量校验，再对已完成且已持久化的 stream 按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。由于事件仍在 scan 后批量构造，该 surface 不是 live sink，不等待新事件，不创建后台 operation，也不支持 cancel。macOS 与 Windows 仍写 legacy operation snapshot；Windows state directory 由 current-user-private DACL、owner 校验和逐级 reparse-point 拒绝保护。`scan --no-state` 会跳过对应的 operation-state 写入，适合不需要后续 status/operation state 或 state filesystem 不支持 journal 的只读扫描，并与 `--state-dir` 冲突。`cancel` 只返回诚实 disposition；这就是 capability 被标记 disabled 的原因。

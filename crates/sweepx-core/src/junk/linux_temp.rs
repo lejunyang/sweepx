@@ -8,7 +8,7 @@
 mod observation;
 
 pub use observation::LinuxTempObservationLimits;
-use observation::Observation;
+pub(crate) use observation::Observation;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, Metadata};
@@ -305,10 +305,25 @@ pub fn validate_candidate_with_seams(
         CancellationToken::new(),
         LinuxTempObservationLimits::default(),
     );
-    inspect_candidate(path, temp_root, &mut observation, allow_test_seams, true).map_err(|error| {
-        match error {
-            InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
-        }
+    validate_observed(path, temp_root, &mut observation, allow_test_seams, true)
+}
+
+pub(crate) fn validate_observed(
+    path: &Path,
+    temp_root: &Path,
+    observation: &mut Observation,
+    allow_test_seams: bool,
+    observe_symlink_access: bool,
+) -> Result<LinuxTempMeasurement, String> {
+    inspect_candidate(
+        path,
+        temp_root,
+        observation,
+        allow_test_seams,
+        observe_symlink_access,
+    )
+    .map_err(|error| match error {
+        InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
     })
 }
 
@@ -337,27 +352,46 @@ pub fn prepare_symlink_copy(
     expected: &LinuxTempMeasurement,
     allow_test_seams: bool,
 ) -> Result<PreparedSymlinkCopy, String> {
-    let before = snapshot_entry_metadata(path, expected)?;
-    let mut targets = BTreeMap::new();
-    for (relative, (_device, _inode, file_type)) in &expected.entries {
-        if file_type.is_symlink() {
-            let symlink_path = entry_path(path, relative);
-            let target = fs::read_link(&symlink_path)
-                .map_err(|error| format!("read symlink {}: {error}", symlink_path.display()))?;
-            targets.insert(relative.clone(), target);
-        }
-    }
-    assert_only_symlink_access_times_changed(path, expected, &before)?;
-
     let mut observation = Observation::new(
         Instant::now() + MEASURE_DEADLINE,
         CancellationToken::new(),
         LinuxTempObservationLimits::default(),
     );
-    let measurement = inspect_candidate(path, temp_root, &mut observation, allow_test_seams, false)
-        .map_err(|error| match error {
-            InspectError::Ineligible(reason) | InspectError::Incomplete(reason) => reason,
-        })?;
+    prepare_symlink_copy_observed(
+        path,
+        temp_root,
+        expected,
+        allow_test_seams,
+        &mut observation,
+    )
+}
+
+pub(crate) fn prepare_symlink_copy_observed(
+    path: &Path,
+    temp_root: &Path,
+    expected: &LinuxTempMeasurement,
+    allow_test_seams: bool,
+    observation: &mut Observation,
+) -> Result<PreparedSymlinkCopy, String> {
+    observation.check()?;
+    let before = snapshot_entry_metadata(path, expected, observation)?;
+    let mut targets = BTreeMap::new();
+    for (relative, (_device, _inode, file_type)) in &expected.entries {
+        observation.observe()?;
+        if file_type.is_symlink() {
+            let symlink_path = entry_path(path, relative);
+            let target = fs::read_link(&symlink_path)
+                .map_err(|error| format!("read symlink {}: {error}", symlink_path.display()))?;
+            observation.retain(
+                256usize
+                    .saturating_add(relative.capacity())
+                    .saturating_add(target.capacity()),
+            )?;
+            targets.insert(relative.clone(), target);
+        }
+    }
+    assert_only_symlink_access_times_changed(path, expected, &before, observation)?;
+    let measurement = validate_observed(path, temp_root, observation, allow_test_seams, false)?;
     if !measurement.identity_equals_ignoring_access_time(expected) {
         return Err("source changed while symlink targets were captured".to_string());
     }
@@ -370,9 +404,12 @@ pub fn prepare_symlink_copy(
 fn snapshot_entry_metadata(
     root: &Path,
     expected: &LinuxTempMeasurement,
+    observation: &mut Observation,
 ) -> Result<BTreeMap<PathBuf, Metadata>, String> {
     let mut snapshot = BTreeMap::new();
     for (relative, expected_identity) in &expected.entries {
+        observation.observe()?;
+        observation.retain(512usize.saturating_add(relative.capacity()))?;
         let entry_path = entry_path(root, relative);
         let metadata = fs::symlink_metadata(&entry_path)
             .map_err(|error| format!("inspect {}: {error}", entry_path.display()))?;
@@ -391,8 +428,10 @@ fn assert_only_symlink_access_times_changed(
     root: &Path,
     expected: &LinuxTempMeasurement,
     before: &BTreeMap<PathBuf, Metadata>,
+    observation: &mut Observation,
 ) -> Result<(), String> {
     for (relative, expected_identity) in &expected.entries {
+        observation.observe()?;
         let entry_path = entry_path(root, relative);
         let after = fs::symlink_metadata(&entry_path)
             .map_err(|error| format!("inspect {}: {error}", entry_path.display()))?;
@@ -643,7 +682,7 @@ pub fn read_dir_names_no_atime(path: &Path) -> io::Result<Vec<OsString>> {
     )
 }
 
-fn read_dir_names_no_atime_observed(
+pub(crate) fn read_dir_names_no_atime_observed(
     path: &Path,
     observation: &mut Observation,
 ) -> io::Result<Vec<OsString>> {
@@ -685,7 +724,10 @@ pub fn read_dir_names_at(fd: i32) -> io::Result<Vec<OsString>> {
     )
 }
 
-fn read_dir_names_at_observed(fd: i32, observation: &mut Observation) -> io::Result<Vec<OsString>> {
+pub(crate) fn read_dir_names_at_observed(
+    fd: i32,
+    observation: &mut Observation,
+) -> io::Result<Vec<OsString>> {
     observation.check().map_err(io::Error::other)?;
     struct DirectoryStream(*mut libc::DIR);
 

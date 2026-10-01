@@ -38,7 +38,7 @@ impl Default for LinuxTempObservationLimits {
     }
 }
 
-pub(super) struct Observation {
+pub(crate) struct Observation {
     pub limits: LinuxTempObservationLimits,
     deadline: Instant,
     cancel: CancellationToken,

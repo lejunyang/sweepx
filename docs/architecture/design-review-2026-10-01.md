@@ -473,3 +473,18 @@ Linux 系统 revision 在目录/Git 后调用已有有界临时对象服务，�
 交付验证（arm64 macOS，Rust 1.98.0）：受影响 core/CLI/TUI 的 361 项测试通过，1 项原有 core 基准 ignored，系统 Trash 挂起测试显式排除。包含 CLI 无终端在发现前拒绝、系统选项准入，以及上述范围变化/缓存回归；未修改的其他 crate 测试复用前一单元的工作区通过结果。格式、工作区 all-targets/all-features clippy 和 Linux GNU/Windows GNU 工作区交叉 clippy（含测试）通过。过程中的新测试把 predicates crate 写成 predicate，已修正并重新完成受影响检查，没有移除断言或放宽 cfg。core 包清单包含 session/linux_temp.rs，没有新 crate 或依赖。
 
 [真实 PTY 系统入口记录](junk-tui-system-entry-2026-10-01.json)使用 release 二进制和隔离状态目录，三次分别在 Discovering context 阶段用 q、Ctrl-C、定向 SIGTERM 退出，返回 4/130/143，终端属性及 alternate screen 恢复，受控 payload 未变；未发送删除键。首轮 harness 将发现中 q 错误预期为 0，源码核对确认未完成扫描的既有约定是 4，仅修正测试预期后重验；没有修改产品退出语义。它验证系统入口、发现期间退出与终端恢复，不证明全系统扫描完成、吞吐性能、Linux 临时对象运行或系统 Trash 成功。目标宿主/MSVC、Trash 成功及之前 debug 热缓存 PTY 超时的缺口继续保留。
+
+
+## TUI 隔离前置：独立预览与有界执行（2026-10-01）
+
+Linux 临时对象的原生规划、耐久复制、内容核验和 fd-relative 源移除已从 CLI 迁入 `sweepx-core::junk::quarantine`，CLI 保留前台打印与 stdin 确认。没有新增 crate 或依赖。`preview_temp_clean` 返回不能从序列化计划重建的 opaque preview；执行消费一次，精确要求 `clean <完整 canonical digest>`，重验权限、当前原生事实和实际加载的规则字节摘要。计划 v3 兼容增加 ruleBytesDigest 字段，已有机器 ID、字段名及枚举不变。调用者可提供选中行的原 measurement；相同分配字节但身份或活动改变必须拒绝，不把预览时新对象升级成用户先前所选对象。
+
+默认每批最多 256 项，清理路径累计准入估算 64 MiB、1,000,000 次路径访问、最大深度 128、复制/核验 I/O 请求预算 1 TiB、合作期限 15 分钟。可配置限制保留在 preview 中供执行使用，原生 observation 仍有自己的每次有界事实/进程表观察，较小的调用者限制同时约束其条数及模型准入。目录枚举、复制、核验和源移除都使用同一取消令牌；这些是准入估算及合作检查，不是峰值 RSS 或阻塞内核调用的硬超时。资源拒绝保持粘滞，失败不能通过回退重新获得预算。稀疏区间截到计划长度，逻辑回退按固定长度分块读取，不能因文件增长变成无界 io::copy；源打开使用 no-follow/nonblocking，打开后确认普通文件身份与修改指纹，拒绝 FIFO 替换后阻塞。待移除的同层名称共享一个保留父目录 fd，避免宽目录逐名称复制句柄。
+
+取消在源移除之前发生时保留源对象；移除开始后允许留下部分源树及完整、已核验并同步的恢复副本，不承诺原子回滚。失败停止后续候选并保留 reconciliation/outcomes，没有永久删除兜底。生产仍硬绑定真实 `/tmp`、当前非 root/无 capability 进程和异文件系统私有恢复区，报告 fixture override 不提供执行权限。当前用户进程观察不是系统范围原子快照，pathname 祖先竞态等已有能力边界没有因迁移消失。前台确认最多保留 256 字节，恢复路径和候选打印转义控制字符。
+
+独立核对原 CLI 的 15 项测试名称全部保留：14 项原生测试迁到 core，精确前台确认测试留在 CLI。新增 3 项可移植测试实际运行，覆盖取消/期限/粘滞 I/O 预算、独立路径/深度/模型预算、固定长度复制以及读操作触发取消后不写目标。新增 5 项 Linux 原生回归覆盖移除前取消与权限保留、I/O 拒绝及 FIFO 替换、同分配大小的新 inode、独立 procfs 统计宽目录保留 fd、opaque preview 的精确确认与规则摘要绑定；它们仅交叉编译/lint，没有 Linux 宿主运行证据。原异盘复制测试依赖 `/dev/shm` 和实际不同 device，缺少时不能证明该运行时路径。
+
+交付验证（arm64 macOS，Rust 1.98.0）：受影响 core/CLI 283 项测试通过，1 项原有 core 基准 ignored，系统 Trash 挂起用例仍显式排除；最后可移植预算访问器变化后单独重跑 3 项并通过，其余未变宿主用例复用上述结果。格式、工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy（含目标测试代码）通过。过程中 Linux lint 发现多余借用，后续新增测试一度被放到 tests 模块之外且前台确认保留了未使用导入；均修正并完成最终检查，没有放宽 cfg 或移除断言。core 打包清单包含 quarantine.rs 及 operation.rs。53 份 Markdown 与 23 项文档检查器测试通过。
+
+这是 TUI 隔离流程的共享服务前置，尚未交付 TUI 的后台预览、精确输入确认和执行结果流；当前未完成项清单保持不变。Linux/Windows 原生运行、MSVC、实际系统 Trash 成功及 debug 热缓存 PTY 停顿仍未验证或定位，整项目目标继续推进。

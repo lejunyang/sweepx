@@ -1542,6 +1542,7 @@ fn run_junk_scan(
             Some(temp_clean_command::TempCleanInput {
                 path: candidate.native_path.clone()?,
                 allocated_bytes: value.0,
+                expected: None,
             })
         })
         .collect::<Vec<_>>();
