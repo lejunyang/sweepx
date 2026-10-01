@@ -50,6 +50,8 @@ Cleaner types and validation live in `sweepx-catalog::schema`, deterministic eva
 
 `sweepx-core` does not depend on `sweepx-tui`, ratatui or crossterm. The CLI's `tui_adapter` module connects browser detail requests to the scanner's native identity revalidation; no-follow, mount, cancellation and resource limits remain scanner-owned. The core JSON-browser wrapper had no command or callers and has been removed. Read-only JSON views remain available in the TUI library; `scan --tui` consumes the current typed summary.
 
+macOS detail scans use `inspect_bound_child_with_mount_identity` to observe each file/link's own filesystem identity. A transient metadata descriptor is opened relative to the retained parent, object identity and the current basename binding are checked, and `fstatfs` observes fsid. Links are observed themselves; no payload is read and no parent mount is copied. Ordinary bulk scans retain their existing path; only identity-bound details incur the extra calls. Denial, changes and missing evidence still fail the refresh. Allocation/reclaimable bytes remain unknown, and pre-deletion identity revalidation runs independently.
+
 Linux `delete` reuses `sweepx-audit` exact authorization, claim, intent, outcome, and fencing, but does not make the general P3 executor native. The CLI constructs and persists one closed R4 plan of at most 256 actions. A file uses one exact-basename `unlinkat`; a directory runs manifest-bound `unlinkat`/nonrecursive `rmdir` actions in postorder. That adapter does not exist in non-Linux builds.
 
 ## State and cancellation

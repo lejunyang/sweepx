@@ -178,6 +178,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Scan {
+        /// Browse directories interactively and scan details on demand.
         #[arg(long)]
         tui: bool,
         #[arg(long)]

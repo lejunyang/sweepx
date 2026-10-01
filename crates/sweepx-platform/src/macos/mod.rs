@@ -626,6 +626,94 @@ mod backend {
             Ok(observed.regular_file_observation(mount_identity))
         }
 
+        /// Completes detail metadata from one transient no-follow descriptor.
+        ///
+        /// Ordinary bulk scanning keeps its cheaper observations; only identity-bound details
+        /// pay for child fsid evidence. Object replacement or inconsistent observations fail closed.
+        pub(super) fn observe_child_mount_metadata(
+            parent: &OpenDirectory,
+            child: &DirectoryEntryRecord,
+            expected: &EntryMetadata,
+            cancel: &CancellationToken,
+        ) -> Result<EntryMetadata, PlatformError> {
+            Self::ensure_not_cancelled(cancel)?;
+            child.validate_for_parent(&parent.path).map_err(|error| {
+                PlatformError::InvalidDirectoryEntry {
+                    parent: parent.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+            Self::assert_directory_identity_current(parent)?;
+            let parent_fd =
+                Self::dirfd(parent).map_err(|error| PlatformError::io(&child.path, error))?;
+            let child_name = Self::name_c_string(&child.file_name)?;
+            // SAFETY: open only the validated basename relative to the retained parent. O_SYMLINK
+            // opens a link itself, never its target; combining it with O_NOFOLLOW rejects links
+            // with ELOOP on this host. fstat rejects substituted kinds before accepting evidence.
+            // O_EVTONLY requests metadata/event access; no payload read is issued. O_NONBLOCK
+            // prevents a substituted FIFO from blocking here. Host access checks still apply.
+            let raw_fd = unsafe {
+                libc::openat(
+                    parent_fd,
+                    child_name.as_ptr(),
+                    libc::O_EVTONLY | libc::O_SYMLINK | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
+            if raw_fd < 0 {
+                return Err(PlatformError::io(&child.path, io::Error::last_os_error()));
+            }
+            // SAFETY: openat returned a fresh fd, released on every success/error/cancel path.
+            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            Self::ensure_not_cancelled(cancel)?;
+            let observe = || -> io::Result<EntryMetadata> {
+                let before = Self::fstat(&fd)?;
+                if !matches!(expected.kind, EntryKind::File | EntryKind::Symlink)
+                    || expected.kind != before.identity().kind
+                    || expected.identity.as_ref()
+                        != Some(&EntryIdentity::from_unix(
+                            before.stat.st_dev as u64,
+                            before.stat.st_ino,
+                        ))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "child identity changed before mount observation",
+                    ));
+                }
+                let mount = Self::fstatfs_raw(fd.as_raw_fd())?;
+                let after = Self::fstat(&fd)?;
+                let rebound = Self::fstatat_raw(parent_fd, &child_name)?;
+                // O_EVTONLY does not pin a mounted volume. Recheck fsid, object metadata and
+                // the parent's current no-follow binding; stale open handles cannot license rows.
+                if mount != Self::fstatfs_raw(fd.as_raw_fd())?
+                    || before.identity() != after.identity()
+                    || after.identity() != rebound.identity()
+                    || before.stat.st_size != after.stat.st_size
+                    || after.stat.st_size != rebound.stat.st_size
+                    || regular_file_change_stamp(&before.stat)
+                        != regular_file_change_stamp(&after.stat)
+                    || regular_file_change_stamp(&after.stat)
+                        != regular_file_change_stamp(&rebound.stat)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "child changed during mount observation",
+                    ));
+                }
+                Ok(Self::metadata_to_entry(
+                    &child.path,
+                    child.file_name.clone(),
+                    &after,
+                    Some(mount),
+                    known_count(after.stat.st_nlink as u128),
+                ))
+            };
+            let observed = observe().map_err(|error| PlatformError::io(&child.path, error))?;
+            Self::assert_directory_identity_current(parent)?;
+            Self::ensure_not_cancelled(cancel)?;
+            Ok(observed)
+        }
+
         fn classify_open_failure_after_preview(
             parent: &OpenDirectory,
             child_name: &CString,
@@ -870,6 +958,23 @@ mod backend {
                 cancel,
                 DirectoryHandleAdmission::Allow,
             )
+        }
+
+        fn inspect_child_with_mount_identity(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            match self.inspect_child(parent, child, cancel)? {
+                WalkEntry::File(metadata) => Ok(WalkEntry::File(
+                    Self::observe_child_mount_metadata(parent, child, &metadata, cancel)?,
+                )),
+                WalkEntry::Link(metadata) => Ok(WalkEntry::Link(
+                    Self::observe_child_mount_metadata(parent, child, &metadata, cancel)?,
+                )),
+                entry => Ok(entry),
+            }
         }
 
         fn inspect_child_with_directory_admission(
@@ -1302,6 +1407,171 @@ mod tests {
 
     fn read_request(bytes: &[u8], max_bytes: usize) -> BoundedRegularFileReadRequest {
         BoundedRegularFileReadRequest::establish_live(name(bytes), max_bytes).unwrap()
+    }
+
+    fn independently_observed_fsid(path: &Path) -> u64 {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut attrs = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: libc::ATTR_CMN_FSID,
+            volattr: 0,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        // Independent native API: length followed by fsid_t, all packed/aligned to four bytes.
+        // No fd or fstatfs from the implementation is used, and a link observes itself.
+        let mut result = [0u32; 3];
+        // SAFETY: attrlist and the twelve-byte aligned output are initialized and writable;
+        // the resolved fixture path is NUL-terminated for the duration of the call.
+        let status = unsafe {
+            libc::getattrlist(
+                path.as_ptr(),
+                std::ptr::from_mut(&mut attrs).cast(),
+                result.as_mut_ptr().cast(),
+                std::mem::size_of_val(&result),
+                libc::FSOPT_NOFOLLOW,
+            )
+        };
+        assert_eq!(
+            status,
+            0,
+            "getattrlist: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(result[0], 12);
+        u64::from_ne_bytes(
+            [result[1].to_ne_bytes(), result[2].to_ne_bytes()]
+                .concat()
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn detail_mount_evidence_observes_files_and_dangling_links_without_payload_reads() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = TempDir::new("detail-mount");
+        let file = fixture.path().join("file");
+        fs::write(&file, b"1234").unwrap();
+        symlink("missing-target", fixture.path().join("link")).unwrap();
+        let scanner = MacosPlatformScanner::new();
+        let cancel = CancellationToken::new();
+        let admission = scanner
+            .admit_root(&ScanRoot::new(fixture.path()).unwrap(), &cancel)
+            .unwrap();
+        for basename in [b"file".as_slice(), b"link".as_slice()] {
+            let child = child_record(fixture.path(), basename);
+            let fast = scanner
+                .inspect_child(&admission.directory, &child, &cancel)
+                .unwrap();
+            let fast_metadata = match fast {
+                WalkEntry::File(metadata) | WalkEntry::Link(metadata) => metadata,
+                other => panic!("unexpected fast observation: {other:?}"),
+            };
+            assert!(fast_metadata.mount_identity.is_none());
+            let detailed = crate::inspect_bound_child_with_mount_identity(
+                &scanner,
+                &admission.directory,
+                fixture.path(),
+                &child,
+                &cancel,
+            )
+            .unwrap();
+            let metadata = match detailed {
+                WalkEntry::File(metadata) | WalkEntry::Link(metadata) => metadata,
+                other => panic!("unexpected detail observation: {other:?}"),
+            };
+            let independent = fs::symlink_metadata(&child.path).unwrap();
+            assert_eq!(
+                metadata.identity,
+                Some(crate::EntryIdentity::from_unix(
+                    independent.dev(),
+                    independent.ino(),
+                ))
+            );
+            assert_eq!(metadata.kind, fast_metadata.kind);
+            assert_eq!(
+                metadata.logical_bytes,
+                crate::known_u128(independent.len() as u128)
+            );
+            assert_eq!(
+                metadata.mount_identity,
+                Some(crate::MountIdentity {
+                    value: independently_observed_fsid(&child.path),
+                })
+            );
+            assert!(matches!(
+                metadata.allocated_bytes,
+                EvidenceValue::Unknown { .. }
+            ));
+        }
+        // Metadata-only descriptors still respect host access checks; do not broaden rights.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_err() {
+            assert!(matches!(
+                scanner.inspect_child_with_mount_identity(
+                    &admission.directory,
+                    &child_record(fixture.path(), b"file"),
+                    &cancel,
+                ),
+                Err(PlatformError::Io {
+                    io_kind: Some(std::io::ErrorKind::PermissionDenied),
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn detail_mount_evidence_rejects_replaced_objects_and_preserves_cancellation() {
+        let fixture = TempDir::new("detail-mount-race");
+        fs::write(fixture.path().join("child"), b"old").unwrap();
+        let scanner = MacosPlatformScanner::new();
+        let cancel = CancellationToken::new();
+        let admission = scanner
+            .admit_root(&ScanRoot::new(fixture.path()).unwrap(), &cancel)
+            .unwrap();
+        let child = child_record(fixture.path(), b"child");
+        let WalkEntry::File(before) = scanner
+            .inspect_child(&admission.directory, &child, &cancel)
+            .unwrap()
+        else {
+            panic!("expected file");
+        };
+        // Retain the old inode to make replacement deterministic, rather than relying on inode
+        // allocation or a timing race. Both replacements have no right to inherit its evidence.
+        fs::rename(&child.path, fixture.path().join("old-inode")).unwrap();
+        for replacement_is_link in [false, true] {
+            if replacement_is_link {
+                fs::remove_file(&child.path).unwrap();
+                symlink("missing-target", &child.path).unwrap();
+            } else {
+                fs::write(&child.path, b"new").unwrap();
+            }
+            let result = MacosPlatformScanner::observe_child_mount_metadata(
+                &admission.directory,
+                &child,
+                &before,
+                &cancel,
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(PlatformError::Io {
+                        io_kind: Some(std::io::ErrorKind::InvalidData),
+                        ..
+                    })
+                ),
+                "replacement_is_link={replacement_is_link}: {result:?}"
+            );
+        }
+        cancel.cancel();
+        assert!(matches!(
+            scanner.inspect_child_with_mount_identity(&admission.directory, &child, &cancel,),
+            Err(PlatformError::Cancelled)
+        ));
     }
 
     #[test]

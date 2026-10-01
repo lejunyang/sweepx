@@ -50,6 +50,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 `sweepx-core` 不依赖 `sweepx-tui`、ratatui 或 crossterm。CLI 的 `tui_adapter` 模块连接 browser 的详情请求和 scanner 的原生身份复验；scanner 继续负责 no-follow、mount、取消与资源限制。旧的 core JSON 浏览封装没有命令或调用者，已移除；只读 JSON 视图仍由 TUI 库提供，`scan --tui` 使用本次 typed summary。
 
+macOS 详情扫描通过 `inspect_bound_child_with_mount_identity` 补充文件/链接自身的文件系统身份：相对已保留父句柄打开临时元数据句柄，核对对象与当前 basename 绑定，再由 `fstatfs` 观察 fsid。链接只观察自身；没有内容读取，也不复制父目录 mount。普通批量扫描保持原路径，只有需要身份复验的详情扫描承担额外系统调用。拒绝、变化和缺失证据仍使刷新失败；分配/可释放字节不因此变为已知，删除前的身份重验仍独立执行。
+
 Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个最多 256 action 的封闭 R4 plan；普通文件执行一次 exact-basename `unlinkat`，目录按 manifest 后序逐项执行 `unlinkat`/nonrecursive `rmdir`。该 adapter 在非 Linux 构建中不存在。
 
 ## 状态与取消

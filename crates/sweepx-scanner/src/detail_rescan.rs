@@ -16,7 +16,7 @@ use sweepx_model::{
 use sweepx_platform::{
     BoundaryKind, CancellationToken, DirectoryEntryRecord, DirectoryReadLimits, EntryKind,
     EntryMetadata, ErrorKind, HardLinkKey, PlatformError, PlatformScanner, RootAdmission,
-    ScanResourceLimits, ScanRoot, WalkEntry, inspect_bound_child, known_count,
+    ScanResourceLimits, ScanRoot, WalkEntry, inspect_bound_child_with_mount_identity, known_count,
 };
 use thiserror::Error;
 
@@ -142,7 +142,8 @@ pub enum DetailRescanError {
 ///
 /// Only the lossless native root in `NativeLocatorEvidence` is admitted as a root. Every
 /// descendant component is then reopened relative to the retained parent handle with
-/// `inspect_bound_child`; no display path is accepted as input or used to regain authority.
+/// `inspect_bound_child_with_mount_identity`; no display path is accepted as input or used to
+/// regain authority.
 pub struct DetailRescanner<P> {
     platform: P,
     limits: ScanResourceLimits,
@@ -370,7 +371,7 @@ where
                 expected.native_basename.clone(),
             )
             .map_err(|_| DetailRescanError::InvalidRequest)?;
-            let walked = inspect_bound_child(
+            let walked = inspect_bound_child_with_mount_identity(
                 &self.platform,
                 &current_handle,
                 &current_path,
@@ -516,7 +517,7 @@ where
                     .ok_or(DetailRescanError::ResourceLimit)?;
 
                 for child in batch.entries {
-                    let walked = inspect_bound_child(
+                    let walked = inspect_bound_child_with_mount_identity(
                         &self.platform,
                         &current.handle,
                         &current.path,
@@ -809,7 +810,7 @@ where
                     .checked_add(batch_bytes.expect("batch bytes checked"))
                     .ok_or(DetailRescanError::ResourceLimit)?;
                 for child in batch.entries {
-                    let walked = inspect_bound_child(
+                    let walked = inspect_bound_child_with_mount_identity(
                         &self.platform,
                         &current.handle,
                         &current.path,

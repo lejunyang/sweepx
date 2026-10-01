@@ -122,8 +122,21 @@ Linux GNU、Windows GNU 的全工作区交叉 clippy，以及各自单独启用�
 
 此次没有统计“重复代码百分比”：同样使用 SHA-256、SQLite 或 filesystem helper，可能承担不同的 domain、事务或授权契约，文本相似度不能证明可以共用。后续精简优先下沉 CLI 的平台候选解释和拆分入口模块，再处理已经验证为同一契约的重复逻辑；不新增通用 util、插件或服务框架。
 
-验证中发现的两类问题分开处理：缓存测试以 PID/时间戳加 `create_dir_all` 命名，可能让并发测试共用目录，已单独改为原子创建的 `TempDir` 并保留其生命周期。macOS 文件详情则是产品层缺口：将原 Linux 完整详情用例临时扩展到本机后，普通文件返回 `IdentityUnavailable`；源码确认 macOS `inspect_child` 给文件/链接的 mount identity 为 `None`，而 detail scanner 要求它为已知。未通过复制父 mount 或放宽复验来掩盖它；原 Linux 成功详情用例保留平台范围，取消后空目录刷新用例扩展到三平台，并在本机通过。macOS 文件详情的成功路径仍待补充原生身份观察和独立回归，不能从这轮迁移的通过结果推断它已修复。
+验证中发现的两类问题分开处理：缓存测试以 PID/时间戳加 `create_dir_all` 命名，可能让并发测试共用目录，已单独改为原子创建的 `TempDir` 并保留其生命周期。macOS 文件详情则是产品层缺口：将原 Linux 完整详情用例临时扩展到本机后，普通文件返回 `IdentityUnavailable`；源码确认 macOS `inspect_child` 给文件/链接的 mount identity 为 `None`，而 detail scanner 要求它为已知。未通过复制父 mount 或放宽复验来掩盖它；原 Linux 成功详情用例保留平台范围，取消后空目录刷新用例扩展到三平台，并在本机通过。这是第二轮依赖迁移交付时的缺口；后续原生观测修复见下一节，不能从依赖迁移的通过结果推断详情契约已成立。
 
 第二轮交付验证（2026-10-01，arm64 macOS，Rust 1.98.0）：格式、受影响 core/CLI 的 all-targets/all-features clippy、工作区 clippy 通过；工作区测试 708 项通过、0 失败、2 项原有基准 ignored。仍用 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 排除已诊断的系统 Trash 挂起，该行为未验证。Linux GNU 与 Windows GNU 的工作区交叉 clippy 通过，包括迁移后的目标测试代码；未运行目标宿主测试，未验收 MSVC。53 份 Markdown 检查和 23 项检查器测试通过。
 
-独立复核包含：对照迁移前源码，适配器生产逻辑在可见性、注释与 rustfmt 规范化后完全一致；通过 core 的普通依赖树和 Cargo metadata 确认终端依赖已断开；core/CLI 的 package list 保留预期源码并包含 `tui_adapter.rs`；现有发布顺序仍覆盖 17 包并满足普通及开发依赖的先后关系。以上检查不包括 registry 依赖构建或发布，也不消除已记录的 macOS 文件详情缺口。
+独立复核包含：对照迁移前源码，适配器生产逻辑在可见性、注释与 rustfmt 规范化后完全一致；通过 core 的普通依赖树和 Cargo metadata 确认终端依赖已断开；core/CLI 的 package list 保留预期源码并包含 `tui_adapter.rs`；现有发布顺序仍覆盖 17 包并满足普通及开发依赖的先后关系。以上检查不包括 registry 依赖构建或发布，也不验证当时的 macOS 文件详情缺口；该缺口随后单独修复。
+
+
+## macOS 详情 mount 身份修复
+
+问题已经修复（2026-10-01）：详情 scanner 需要文件/链接的 mount 身份，普通 macOS 批量观察则没有提供。直接复制父目录身份会把缺失证据升级为结论；为每个普通扫描文件增加打开操作又会放弃批量快路径。因此在现有 platform 契约内新增详情专用的 `inspect_child_with_mount_identity` 和带同一组绑定检查的 `inspect_bound_child_with_mount_identity`。普通遍历不变，详情和递归详情使用这个入口；已有 Linux/Windows backend 默认复用它们本来就有 mount 证据的检查。
+
+macOS 仅为详情中的文件/链接保留一个短暂元数据句柄：相对 retained parent 的 native basename 做 `openat`，`fstat` 校验设备、inode 和类型，`fstatfs` 观察对象自身的 fsid；再次核对 fsid、大小/修改指纹、父目录状态和 no-follow basename 当前绑定。所有返回/错误/取消路径关闭该句柄，不读取 payload。权限/TCC 拒绝、无法观测或替换/变化均拒绝详情刷新，不产生猜测的 identity。`f_fsid` 沿用原后端的文件系统身份定义，不宣称由此取得文件系统原子快照或新的跨平台发布资格。
+
+打开使用 `O_EVTONLY | O_SYMLINK | O_CLOEXEC | O_NONBLOCK`。`O_SYMLINK` 请求链接自身而不是目标；[Apple XNU 的打开实现](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_vnops.c) 会清除跟随行为。本机实测，把 `O_NOFOLLOW` 同时加入会使合法的链接观察返回 ELOOP，因此不能靠把两个名字都带有 no-follow 意义的选项叠加来保证契约。`O_EVTONLY` 不阻止卷卸载，故观测前后仍要核对 fsid。它仍受宿主权限检查；元数据访问不代表可以绕过权限，也不承诺文件系统/provider 调用具有硬实时期限。
+
+独立证据包含：`symlink_metadata` 核对 device/inode、类型与逻辑字节，另用 `getattrlist(ATTR_CMN_FSID, FSOPT_NOFOLLOW)` 对照 fsid；悬空链接证明未打开目标，真实权限拒绝仍返回拒绝。同名等长文件替换与替换成链接在观测前发生时均被拒绝，保留旧 inode 使反例不依赖分配顺序或时间竞态。TUI provider 从根准入结果分别进行直接列表、渐进递归统计和完整刷新，普通目录遍历对照名称集合、直接子项总数及递归逻辑字节；渐进列表仍为 lower bound，完整统计才是 exact，分配与可释放量仍为 unknown。
+
+交付验证（2026-10-01，arm64 macOS，Rust 1.98.0）：受影响 platform/scanner/CLI 的测试与 all-targets/all-features clippy、格式检查、工作区 clippy 均通过；工作区测试 712 项通过、0 失败、2 项原有基准 ignored。依旧显式排除 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 的已诊断系统 Trash 挂起，未验证该系统操作。首次在沙箱内执行的平台全量测试遭遇 FSEvents 服务启动拒绝，宿主环境完成了该套原生测试，未因此删除或跳过 FSEvents 用例。Linux GNU、Windows GNU 工作区交叉 clippy 通过，目标测试代码已编译但未在对应宿主执行；MSVC 未验收。53 份 Markdown 检查和 23 项文档检查器测试通过。未测端到端性能，不宣称额外身份观测会提高扫描速度。

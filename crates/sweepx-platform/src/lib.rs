@@ -1121,6 +1121,22 @@ pub trait PlatformScanner: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError>;
 
+    /// Inspects a child with native mount evidence for an identity-bound detail query.
+    ///
+    /// The default preserves backends whose ordinary inspection already observes mounts.
+    /// Other backends may perform an additional metadata-only, no-follow observation, binding
+    /// it to the inspected child identity. Missing evidence must remain unknown or fail; copying
+    /// the parent's mount is not an observation of the child. Callers use
+    /// [`inspect_bound_child_with_mount_identity`] for the non-overridable binding checks.
+    fn inspect_child_with_mount_identity(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        self.inspect_child(parent, child, cancel)
+    }
+
     /// Performs the same bound inspection while optionally denying creation of
     /// a retained child-directory handle. Implementations must classify a
     /// denied directory without first constructing its retained handle; this
@@ -1195,6 +1211,35 @@ pub fn inspect_bound_child_with_directory_admission<P: PlatformScanner + ?Sized>
     cancel: &CancellationToken,
     directory_admission: DirectoryHandleAdmission,
 ) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    inspect_checked_child(parent_path, child, cancel, || {
+        platform.inspect_child_with_directory_admission(parent, child, cancel, directory_admission)
+    })
+}
+
+/// Contract-checking inspection with native child mount evidence for detail queries.
+///
+/// This may cost an additional metadata handle on backends with a cheaper ordinary scan path.
+/// It neither reads payloads nor turns an unknown mount into an inferred parent mount. Missing
+/// evidence still requires the caller to refuse an identity-bound result.
+pub fn inspect_bound_child_with_mount_identity<P: PlatformScanner + ?Sized>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    inspect_checked_child(parent_path, child, cancel, || {
+        platform.inspect_child_with_mount_identity(parent, child, cancel)
+    })
+}
+
+// Both entry points enforce the same authority checks; optional evidence cannot bypass binding.
+fn inspect_checked_child<H>(
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    inspect: impl FnOnce() -> Result<WalkEntry<H>, PlatformError>,
+) -> Result<WalkEntry<H>, PlatformError> {
     if cancel.is_cancelled() {
         return Err(PlatformError::Cancelled);
     }
@@ -1204,12 +1249,7 @@ pub fn inspect_bound_child_with_directory_admission<P: PlatformScanner + ?Sized>
             detail: error.to_string(),
         }
     })?;
-    let inspected = platform.inspect_child_with_directory_admission(
-        parent,
-        child,
-        cancel,
-        directory_admission,
-    )?;
+    let inspected = inspect()?;
     inspected
         .validate_for_child(parent_path, child)
         .map_err(|error| PlatformError::InvalidDirectoryEntry {

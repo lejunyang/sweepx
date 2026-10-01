@@ -227,7 +227,6 @@ mod tui_detail_rescan_provider_tests {
     };
     use sweepx_tui::{DetailRescanBinding, DetailRescanReason};
 
-    #[cfg(target_os = "linux")]
     fn encoded_name(name: &std::ffi::OsStr) -> String {
         #[cfg(unix)]
         {
@@ -463,7 +462,6 @@ mod tui_detail_rescan_provider_tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn live_provider_echoes_binding_and_returns_complete_direct_detail() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -533,5 +531,128 @@ mod tui_detail_rescan_provider_tests {
             }
         );
         assert!(detail.aggregate.coverage.complete);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn progressive_details_observe_files_links_and_nested_bytes_on_macos() {
+        use sweepx_model::EvidenceValue;
+        let fixture = tempfile::TempDir::new().unwrap();
+        let root_path = std::fs::canonicalize(fixture.path()).unwrap().join("root");
+        std::fs::create_dir(&root_path).unwrap();
+        std::fs::write(root_path.join("child"), b"1234").unwrap();
+        std::fs::create_dir(root_path.join("nested")).unwrap();
+        std::fs::write(root_path.join("nested/file"), b"12345").unwrap();
+        std::os::unix::fs::symlink("missing-target", root_path.join("link")).unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Default,
+        ));
+        let scan = sweepx_core::scan_for_tui_with_store(
+            &context,
+            &ScanRequest {
+                roots: vec![root_path.clone()],
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+        )
+        .unwrap();
+        let root = &scan.summary.roots[0];
+        let identity = root.validated_identity().unwrap().unwrap();
+        let provider = tui_detail_rescan_provider(&scan.summary);
+        let mut names: Vec<_> = std::fs::read_dir(&root_path)
+            .unwrap()
+            .map(|entry| encoded_name(&entry.unwrap().file_name()))
+            .collect();
+        names.sort();
+        // Traverse the controlled fixture with ordinary metadata to check recursive accounting
+        // independently. No symlink targets are opened; host-created files remain in the totals.
+        fn ordinary_bytes(directory: &std::path::Path) -> u128 {
+            std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let metadata = std::fs::symlink_metadata(entry.path()).unwrap();
+                    if metadata.is_dir() {
+                        ordinary_bytes(&entry.path())
+                    } else if metadata.is_file() {
+                        metadata.len() as u128
+                    } else {
+                        0
+                    }
+                })
+                .sum()
+        }
+        let expected_bytes = ordinary_bytes(&root_path);
+        assert!(expected_bytes >= 9);
+        for (index, reason) in [
+            DetailRescanReason::ProgressiveListing,
+            DetailRescanReason::ProgressiveAggregate,
+            DetailRescanReason::Evicted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            provider.prepare_detail_rescan();
+            let binding = DetailRescanBinding {
+                source_scan_id: root.scan_id.clone(),
+                source_root_identity: identity.clone(),
+                source_directory_identity: identity.clone(),
+                base_revision: DecimalU128::new(index as u128 + 1),
+                revision: DecimalU128::new(index as u128 + 2),
+            };
+            let request = TuiDetailRescanRequest {
+                binding: binding.clone(),
+                directory_locator: root.executable_native_locator().unwrap().unwrap().clone(),
+                reason,
+                max_rows: 16,
+            };
+            let result = provider.rescan_detail(&request);
+            let TuiDetailRescanResult::Refreshed(detail) = result else {
+                panic!("{reason:?}: {result:?}");
+            };
+            assert_eq!(detail.binding, binding);
+            let mut observed: Vec<_> = detail
+                .rows
+                .iter()
+                .map(|row| row.native_basename.encoded_value())
+                .collect();
+            observed.sort();
+            assert_eq!(observed, names);
+            assert_eq!(
+                detail.aggregate.direct_child_count,
+                EvidenceValue::Known {
+                    value: DecimalU128::new(names.len() as u128)
+                }
+            );
+            for row in &detail.rows {
+                assert!(matches!(
+                    row.validated_identity()
+                        .unwrap()
+                        .unwrap()
+                        .volume_or_mount_identity,
+                    IdentityEvidence::Known { .. }
+                ));
+            }
+            if reason == DetailRescanReason::ProgressiveListing {
+                assert!(!detail.aggregate.coverage.complete);
+                assert!(matches!(
+                    detail.aggregate.apparent_logical_bytes,
+                    EvidenceValue::LowerBound { .. }
+                ));
+            } else {
+                assert!(detail.aggregate.coverage.complete);
+                assert_eq!(
+                    detail.aggregate.apparent_logical_bytes,
+                    EvidenceValue::Known {
+                        value: DecimalU128::new(expected_bytes)
+                    }
+                );
+            }
+            assert!(matches!(
+                detail.aggregate.filesystem_reported_allocated_bytes,
+                EvidenceValue::Unknown { .. }
+            ));
+        }
     }
 }
