@@ -54,6 +54,8 @@ pub struct TempCleanPlanBody {
     pub temp_root: String,
     /// Display-only recovery base; the preview retains its native path privately.
     pub quarantine_base: String,
+    /// Lossless recovery-base bytes, bound into the digest even when its display spelling is lossy.
+    pub quarantine_base_bytes: Vec<u8>,
     /// Required recursive idle interval.
     pub minimum_idle_seconds: u64,
     /// Current-user observation contract; not a system-wide snapshot.
@@ -245,7 +247,7 @@ pub fn execute_temp_clean(
     confirmation: &str,
     cancel: &CancellationToken,
 ) -> Result<TempCleanExecution, String> {
-    if confirmation.trim() != format!("clean {}", preview.digest) {
+    if confirmation.len() > 256 || confirmation.trim() != format!("clean {}", preview.digest) {
         return Err("exact plan confirmation required".into());
     }
     if cancel.is_cancelled() {
@@ -594,6 +596,7 @@ fn plan_body(
         rule_bytes_digest: loaded_rule_digest(),
         temp_root: temp_root.display().to_string(),
         quarantine_base: quarantine_base.display().to_string(),
+        quarantine_base_bytes: quarantine_base.as_os_str().as_bytes().to_vec(),
         minimum_idle_seconds: linux_temp::MIN_IDLE.as_secs(),
         process_observation: "current_user_proc_per_network_namespace_unix_sockets",
         blockers: [linux_temp::REFERENCE_BLOCKER],
@@ -1912,6 +1915,28 @@ mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use tempfile::TempDir;
+
+    #[test]
+    fn lossy_recovery_spellings_do_not_alias_canonical_plan_digests() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        fs::write(&source, b"selected").unwrap();
+        let captures = vec![CapturedCandidate {
+            path: source.clone(),
+            measurement: measurement_fixture(&source),
+        }];
+        let first = PathBuf::from(OsString::from_vec(b"/volume/recovery-\xff".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"/volume/recovery-\xfe".to_vec()));
+        let a = plan_body(&captures, root.path(), &first);
+        let b = plan_body(&captures, root.path(), &second);
+        assert_eq!(a.quarantine_base, b.quarantine_base);
+        assert_ne!(a.quarantine_base_bytes, b.quarantine_base_bytes);
+        assert_ne!(
+            sweepx_canonical::plan_digest_hex(&a).unwrap(),
+            sweepx_canonical::plan_digest_hex(&b).unwrap()
+        );
+    }
 
     #[test]
     fn verified_removal_unlinks_only_the_measured_tree() {

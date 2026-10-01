@@ -242,6 +242,9 @@ struct Provider {
     refreshed: Vec<Vec<String>>,
     trashed: Vec<Vec<String>>,
     cancelled: bool,
+    previews: Vec<Vec<String>>,
+    confirmations: Vec<String>,
+    dismissed: Vec<u64>,
 }
 impl JunkProvider for Provider {
     fn poll(&mut self) -> Option<JunkEvent> {
@@ -287,6 +290,228 @@ impl JunkProvider for Provider {
         Ok(())
     }
     fn close(&mut self) {}
+    fn preview_quarantine(&mut self, keys: &[String]) -> Result<u64, String> {
+        self.previews.push(keys.to_vec());
+        let operation = self.previews.len() as u64;
+        self.events.push_back(JunkEvent::QuarantinePreview {
+            operation,
+            digest: "0".repeat(64),
+            plan: "selected /a\nlogical=8 allocated=4096\nRecovery directory: /volume/recovery"
+                .into(),
+        });
+        Ok(operation)
+    }
+    fn confirm_quarantine(&mut self, operation: u64, answer: &str) -> Result<(), String> {
+        self.confirmations.push(answer.into());
+        self.events.push_back(JunkEvent::QuarantineFinished {
+            operation,
+            moved: self.previews.last().unwrap().clone(),
+            failed: false,
+            message: "Confirmed transitions.\nRecovery directory: /volume/recovery".into(),
+        });
+        Ok(())
+    }
+    fn dismiss_quarantine(&mut self, operation: u64) {
+        self.dismissed.push(operation);
+    }
+}
+
+#[test]
+fn quarantine_loop_requires_full_typed_digest_and_shows_recovery_result() {
+    let mut provider = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let mut keys = VecDeque::from([KeyCode::Char('x'), KeyCode::Enter]);
+    keys.extend(
+        format!("clean {}", "0".repeat(64))
+            .chars()
+            .map(KeyCode::Char),
+    );
+    keys.extend([KeyCode::Enter, KeyCode::Esc, KeyCode::Char('q')]);
+    let exit = run_junk_loop(
+        &mut terminal,
+        &mut model,
+        &mut Events(keys),
+        &mut provider,
+        &NeverTerminate,
+    )
+    .unwrap();
+    assert_eq!(exit, 0);
+    assert_eq!(provider.previews, [vec!["a"]]);
+    assert_eq!(
+        provider.confirmations,
+        [format!("clean {}", "0".repeat(64))]
+    );
+    assert!(!model.rows.contains_key("a"));
+    assert!(model.rows.contains_key("b"));
+    assert!(provider.trashed.is_empty());
+}
+
+#[test]
+fn prefix_confirmation_and_dismissal_do_not_submit_or_remove_rows() {
+    let mut provider = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(100, 22)).unwrap();
+    let mut keys = VecDeque::from([KeyCode::Char('x')]);
+    keys.extend(
+        format!("clean {}", "0".repeat(63))
+            .chars()
+            .map(KeyCode::Char),
+    );
+    keys.extend([KeyCode::Enter, KeyCode::Esc, KeyCode::Char('q')]);
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut Events(keys),
+            &mut provider,
+            &NeverTerminate
+        )
+        .unwrap(),
+        0
+    );
+    assert!(provider.confirmations.is_empty());
+    assert_eq!(provider.dismissed, [1]);
+    assert_eq!(model.rows.len(), 2);
+}
+
+#[test]
+fn quarantine_rejects_stale_oversized_and_uppercase_digest_events() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    for event in initial() {
+        model.apply(event);
+    }
+    model.quarantine = Some(QuarantineView::new(2, vec!["a".into()]));
+    model.apply(JunkEvent::QuarantinePreview {
+        operation: 1,
+        digest: "0".repeat(64),
+        plan: "stale".into(),
+    });
+    let mut provider = Provider::default();
+    model.quarantine_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut provider,
+    );
+    assert!(provider.confirmations.is_empty());
+    model.apply(JunkEvent::QuarantineFinished {
+        operation: 1,
+        moved: vec!["a".into()],
+        message: "stale".into(),
+        failed: false,
+    });
+    assert!(model.rows.contains_key("a"));
+    for (digest, plan) in [
+        ("a".repeat(64), "x".repeat(1024 * 1024 + 1)),
+        ("A".repeat(64), "small".into()),
+    ] {
+        model.quarantine = Some(QuarantineView::new(2, vec!["a".into()]));
+        model.apply(JunkEvent::QuarantinePreview {
+            operation: 2,
+            digest,
+            plan,
+        });
+        model.quarantine_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut provider,
+        );
+        assert!(provider.confirmations.is_empty());
+    }
+}
+
+#[test]
+fn cancelling_execution_keeps_view_until_confirmed_and_uncertain_outcomes_arrive() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    for event in initial() {
+        model.apply(event);
+    }
+    model.quarantine = Some(QuarantineView::new(1, vec!["a".into(), "b".into()]));
+    model.apply(JunkEvent::QuarantinePreview {
+        operation: 1,
+        digest: "0".repeat(64),
+        plan: "recovery=/volume/private".into(),
+    });
+    let mut provider = Provider {
+        previews: vec![vec!["a".into(), "b".into()]],
+        ..Default::default()
+    };
+    for character in format!("clean {}", "0".repeat(64)).chars() {
+        model.quarantine_key(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut provider,
+        );
+    }
+    model.quarantine_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut provider,
+    );
+    model.quarantine_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &mut provider,
+    );
+    assert!(model.quarantine.is_some());
+    assert_eq!(provider.dismissed, [1]);
+    model.apply(JunkEvent::QuarantineFinished {
+        operation: 1,
+        moved: vec!["a".into()],
+        message: "Recovery directory: /volume/private\npartial source retained".into(),
+        failed: true,
+    });
+    assert!(!model.rows.contains_key("a"));
+    assert!(model.rows["b"].historical);
+    assert_eq!(model.outcome, Some(JunkOutcome::Partial));
+    assert!(!model.eligible("b"));
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("/volume/private"));
+    assert!(screen.contains("partial source retained"));
+}
+
+#[test]
+fn quarantine_typing_is_bounded_and_does_not_trigger_scan_or_trash_keys() {
+    let mut model = JunkModel::new(Locale::ZhCn, HumanSizeUnit::Bytes);
+    model.quarantine = Some(QuarantineView::new(1, vec!["a".into()]));
+    model.apply(JunkEvent::QuarantinePreview {
+        operation: 1,
+        digest: "0".repeat(64),
+        plan: "safe\u{1b}[31m native evidence".into(),
+    });
+    let mut provider = Provider::default();
+    for _ in 0..200 {
+        model.quarantine_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut provider,
+        );
+    }
+    model.quarantine_key(
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        &mut provider,
+    );
+    assert!(provider.refreshed.is_empty());
+    assert!(provider.trashed.is_empty());
+    assert!(provider.confirmations.is_empty());
+    let mut terminal = Terminal::new(TestBackend::new(90, 22)).unwrap();
+    terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!screen.contains('\u{1b}'));
 }
 
 #[test]

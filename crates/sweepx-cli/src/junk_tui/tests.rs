@@ -45,7 +45,7 @@ fn temporary_reports_keep_logical_bytes_and_refuse_generic_trash_then_refresh_al
         candidate,
         facts: JunkSessionFacts::LinuxTemporary {
             logical_bytes: sweepx_platform::known_u128(u128::from(metadata.len())),
-            measurement: Box::new(measurement),
+            measurement: Arc::new(measurement),
         },
     });
     assert!(row.complete());
@@ -128,6 +128,54 @@ fn complete(provider: &mut Provider) -> Vec<JunkEvent> {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+#[test]
+fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without_native_mutation() {
+    let fixture = tempfile::TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    let outer = root.join("target");
+    let selected = outer.join("target");
+    let descendant = selected.join("target");
+    fs::create_dir_all(&descendant).unwrap();
+    for parent in [&root, &outer, &selected] {
+        fs::write(parent.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    }
+    fs::write(descendant.join("payload"), b"native payload retained").unwrap();
+    let mut provider =
+        Provider::new(JunkSession::start(JunkSessionRequest::new(vec![root])).unwrap());
+    complete(&mut provider);
+    let key_for = |path: &std::path::Path| {
+        provider
+            .rows
+            .iter()
+            .find(|(_, row)| row.row.observed_native_path().as_deref() == Some(path))
+            .map(|(key, _)| key.clone())
+            .unwrap()
+    };
+    let ancestor_key = key_for(&outer);
+    let selected_key = key_for(&selected);
+    let child_key = key_for(&descendant);
+    provider.confirmed_moves(std::slice::from_ref(&selected_key));
+    assert!(!provider.rows.contains_key(&selected_key));
+    assert!(!provider.rows.contains_key(&child_key));
+    assert!(provider.rows.contains_key(&ancestor_key));
+    assert!(provider.historical.contains(&ancestor_key));
+    assert!(provider.pending.iter().any(|event| matches!(event, JunkEvent::Candidate { historical: true, row, .. } if row.key() == ancestor_key)));
+    assert_eq!(
+        fs::read(descendant.join("payload")).unwrap(),
+        b"native payload retained"
+    );
+    provider.close();
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
 }
 
 #[test]

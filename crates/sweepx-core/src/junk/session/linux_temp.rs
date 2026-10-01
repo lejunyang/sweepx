@@ -91,7 +91,7 @@ impl Worker {
             let row = Arc::new(JunkSessionCandidate {
                 candidate,
                 facts: JunkSessionFacts::LinuxTemporary {
-                    measurement: Box::new(measurement),
+                    measurement: Arc::new(measurement),
                     logical_bytes,
                 },
             });

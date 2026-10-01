@@ -104,8 +104,9 @@ pub enum JunkSessionFacts {
     /// Independent temporary-object facts; not a generic directory locator or Trash authority.
     #[cfg(target_os = "linux")]
     LinuxTemporary {
-        /// Complete recursive identity and activity observations for independent revalidation.
-        measurement: Box<super::linux_temp::LinuxTempMeasurement>,
+        /// Shared recursive identity and activity observations; selection must not deep-copy them on
+        /// the UI thread. Native previews independently reobserve and compare these facts.
+        measurement: Arc<super::linux_temp::LinuxTempMeasurement>,
         /// Logical file bytes, distinct from the report's allocation evidence.
         logical_bytes: sweepx_model::ByteValue,
     },

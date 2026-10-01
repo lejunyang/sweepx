@@ -211,8 +211,8 @@ enum Commands {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
         /// macOS shows historical caches first; only freshly verified rows can be moved.
-        /// Linux temporary objects require the separate --clean-temp quarantine preview.
-        #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp", "quarantine_dir"])]
+        /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
+        #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
         tui: bool,
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
         /// Measures report-only work; stdout keeps its existing format.
@@ -239,7 +239,8 @@ enum Commands {
         ///
         /// Defaults to `$XDG_DATA_HOME/sweepx/quarantine` or
         /// `$HOME/.local/share/sweepx/quarantine`.
-        #[arg(long, value_name = "ABSOLUTE_DIRECTORY", requires = "clean_temp")]
+        /// Requires `--system` with `--clean-temp` or `--tui`.
+        #[arg(long, value_name = "ABSOLUTE_DIRECTORY", requires = "system")]
         quarantine_dir: Option<PathBuf>,
         #[arg(value_name = "ROOT")]
         roots: Vec<OsString>,
@@ -617,6 +618,10 @@ fn main() -> ProcessExitCode {
             quarantine_dir,
             roots,
         } => {
+            if quarantine_dir.is_some() && !clean_temp && !tui {
+                eprintln!("--quarantine-dir requires --system with --clean-temp or --tui");
+                return ProcessExitCode::from(2);
+            }
             let stdin_is_terminal = std::io::stdin().is_terminal();
             if tui {
                 if let Err(message) = validate_tui_environment(
@@ -646,7 +651,15 @@ fn main() -> ProcessExitCode {
                     .ok()
                     .flatten()
                     .map(|state_dir| state_dir.join("junk-cache"));
-                return junk_tui::run(roots, system, context.locale(), size_unit, sort, cache_dir);
+                return junk_tui::run(
+                    roots,
+                    system,
+                    context.locale(),
+                    size_unit,
+                    sort,
+                    cache_dir,
+                    quarantine_dir,
+                );
             }
             if let Err(message) =
                 validate_junk_mutation_environment(clean_temp, trash, format, stdin_is_terminal)
@@ -3201,6 +3214,39 @@ mod tests {
         let cli = Cli::try_parse_from(["sweepx", "junk", "--system", "--tui"]).unwrap();
         assert!(
             matches!(cli.command, Commands::Junk { system: true, tui: true, roots, .. } if roots.is_empty())
+        );
+    }
+
+    #[test]
+    fn quarantine_location_accepts_system_tui_and_requires_system_scope() {
+        let cli = Cli::try_parse_from([
+            "sweepx",
+            "junk",
+            "--system",
+            "--tui",
+            "--quarantine-dir",
+            "/volume/private",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Junk {
+                tui: true,
+                system: true,
+                quarantine_dir: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "sweepx",
+                "junk",
+                "--tui",
+                "--quarantine-dir",
+                "/volume/private",
+                "/project"
+            ])
+            .is_err()
         );
     }
 

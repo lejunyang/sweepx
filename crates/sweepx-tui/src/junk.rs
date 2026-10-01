@@ -19,6 +19,8 @@ use sweepx_model::{ByteValue, EvidenceValue, HumanSizeUnit, ScanSort};
 const MAX_ROWS: usize = 16_384;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SELECTION: usize = 256;
+mod quarantine;
+use quarantine::QuarantineView;
 
 /// Shared presentation data; no display field can authorize filesystem operations.
 pub trait JunkRow: Send + Sync {
@@ -84,6 +86,26 @@ pub enum JunkEvent {
     },
     /// Result from the separate Trash worker; success removes this selected row.
     TrashResult { key: String, error: Option<String> },
+    /// Display-only plan from the worker retaining the native preview privately.
+    QuarantinePreview {
+        /// Invocation-local worker ID, separate from scan revisions and execution authority.
+        operation: u64,
+        /// Full lowercase canonical digest; never auto-filled into the confirmation input.
+        digest: String,
+        /// Complete display-only plan, at most 1 MiB; truncation must refuse confirmation.
+        plan: String,
+    },
+    /// Reliable final observation; only confirmed transitions may remove rows.
+    QuarantineFinished {
+        /// ID of the worker that retained this preview and received its explicit confirmation.
+        operation: u64,
+        /// Selected stable keys whose source-to-recovery transitions were confirmed.
+        moved: Vec<String>,
+        /// Recovery location and failure reconciliation, retained for user review.
+        message: String,
+        /// Partial, cancelled, ambiguous or failed execution; unconfirmed rows remain historical.
+        failed: bool,
+    },
 }
 
 /// Nonblocking bridge to scanning and Trash workers. Implementations must not do native work here.
@@ -100,6 +122,16 @@ pub trait JunkProvider {
     fn prioritize(&mut self, key: &str);
     /// Begin a bounded, explicitly selected Trash batch on a worker.
     fn trash(&mut self, keys: &[String]) -> Result<(), String>;
+    /// Begin an independent quarantine preview; return an invocation-local operation ID.
+    fn preview_quarantine(&mut self, _keys: &[String]) -> Result<u64, String> {
+        Err("temporary-object quarantine is unavailable on this provider".into())
+    }
+    /// Send explicitly typed confirmation to the worker retaining that native preview.
+    fn confirm_quarantine(&mut self, _operation: u64, _answer: &str) -> Result<(), String> {
+        Err("no quarantine preview is pending".into())
+    }
+    /// Dismiss an unexecuted preview or cooperatively cancel an executing operation.
+    fn dismiss_quarantine(&mut self, _operation: u64) {}
     /// Close without joining a possibly blocked OS worker on the UI thread.
     fn close(&mut self);
 }
@@ -132,6 +164,7 @@ pub struct JunkModel {
     diagnostic: String,
     dirty: bool,
     rejected: bool,
+    quarantine: Option<QuarantineView>,
 }
 
 impl JunkModel {
@@ -157,6 +190,7 @@ impl JunkModel {
             diagnostic: String::new(),
             dirty: false,
             rejected: false,
+            quarantine: None,
         }
     }
 
@@ -187,6 +221,9 @@ impl JunkModel {
     }
 
     fn apply(&mut self, event: JunkEvent) {
+        if self.apply_quarantine_event(&event) {
+            return;
+        }
         if let JunkEvent::TrashResult { key, error } = event {
             self.trash_pending.remove(&key);
             if let Some(error) = error {
@@ -209,6 +246,9 @@ impl JunkModel {
             | JunkEvent::Error { revision, .. }
             | JunkEvent::Completed { revision, .. } => *revision,
             JunkEvent::TrashResult { .. } => unreachable!(),
+            JunkEvent::QuarantinePreview { .. } | JunkEvent::QuarantineFinished { .. } => {
+                unreachable!()
+            }
         };
         if revision < self.revision {
             return;
@@ -296,6 +336,9 @@ impl JunkModel {
                 }
             }
             JunkEvent::TrashResult { .. } => unreachable!(),
+            JunkEvent::QuarantinePreview { .. } | JunkEvent::QuarantineFinished { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -392,6 +435,10 @@ impl JunkModel {
 
 /// Renders only bounded presentation data; logical size is never labeled reclaimable.
 pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
+    if let Some(view) = &model.quarantine {
+        quarantine::render(frame, model, view);
+        return;
+    }
     let [header, list, details, help] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(3),
@@ -497,8 +544,8 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         details,
     );
     frame.render_widget(Paragraph::new(model.text(
-        "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新选中/全部 · c 取消扫描 · d/Delete 回收 · q 退出",
-        "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh selected/all · c Cancel scan · d/Delete Trash · q Quit",
+        "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新 · c 取消 · d/Delete 回收 · x 临时对象隔离 · q 退出",
+        "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh · c Cancel · d/Delete Trash · x Quarantine temporary objects · q Quit",
     )).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
 }
 
@@ -519,6 +566,11 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
             let Some(event) = provider.poll() else {
                 break;
             };
+            if matches!(event, JunkEvent::Started { .. })
+                && let Some(view) = model.quarantine.take()
+            {
+                provider.dismiss_quarantine(view.operation);
+            }
             model.apply(event);
         }
         if model.rejected && model.busy {
@@ -535,6 +587,12 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
             continue;
         };
         if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(130);
+        }
+        if model.quarantine_key(key, provider) {
             continue;
         }
         match key.code {
@@ -608,6 +666,26 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                             .text(
                                 "先完整刷新选中项，再移到回收站",
                                 "Complete a refresh of selected rows before moving to Trash",
+                            )
+                            .into(),
+                    );
+                }
+            }
+            KeyCode::Char('x') if !model.busy && model.trash_pending.is_empty() => {
+                let keys = model.chosen();
+                if !keys.is_empty() && keys.iter().all(|key| model.eligible(key)) {
+                    match provider.preview_quarantine(&keys) {
+                        Ok(operation) => {
+                            model.quarantine = Some(QuarantineView::new(operation, keys))
+                        }
+                        Err(error) => model.diagnostic(error),
+                    }
+                } else {
+                    model.diagnostic(
+                        model
+                            .text(
+                                "先完整刷新所选临时对象",
+                                "Complete a refresh of selected temporary objects first",
                             )
                             .into(),
                     );
