@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-01",
+  "host": "arm64 macOS Darwin 25.5.0",
+  "build": "Rust 1.98.0 release",
+  "scope": "system mode entry, cancellation during discovery and terminal restoration; no scan-completion or Trash-success claim",
+  "initialHarnessFailure": "Initial quit assertion expected 0 during discovery; source review confirmed the existing incomplete-scan contract is exit 4. Only the harness expectation was corrected.",
+  "runs": [
+    {
+      "mode": "quit",
+      "exitCode": 4,
+      "systemDiscoveryPhaseObserved": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "controlledPayloadUnchanged": true,
+      "scanCompletionObserved": false,
+      "deleteKeysSent": false
+    },
+    {
+      "mode": "ctrlc",
+      "exitCode": 130,
+      "systemDiscoveryPhaseObserved": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "controlledPayloadUnchanged": true,
+      "scanCompletionObserved": false,
+      "deleteKeysSent": false
+    },
+    {
+      "mode": "sigterm",
+      "exitCode": 143,
+      "systemDiscoveryPhaseObserved": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "controlledPayloadUnchanged": true,
+      "scanCompletionObserved": false,
+      "deleteKeysSent": false
+    }
+  ],
+  "binarySHA256": "f3fcac2d67cddaa4653eedfec624e7cc9d7b3f73217945fa6e5a18a30f5b12d3"
+}

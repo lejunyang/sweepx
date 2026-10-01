@@ -68,6 +68,9 @@ pub(crate) fn trash_session_candidate(
     if cancel.is_cancelled() {
         return Err("cancelled".into());
     }
+    let aggregate = row
+        .directory_aggregate()
+        .ok_or_else(|| "temporary objects require independent quarantine preview".to_string())?;
     let entry = row
         .candidate
         .source_entry
@@ -75,8 +78,8 @@ pub(crate) fn trash_session_candidate(
         .ok_or_else(|| "native source unavailable".to_string())?;
     if !entry.coverage.complete
         || entry.coverage.details_lost
-        || !row.aggregate.coverage.complete
-        || row.aggregate.coverage.details_lost
+        || !aggregate.coverage.complete
+        || aggregate.coverage.details_lost
     {
         return Err("candidate coverage incomplete".into());
     }

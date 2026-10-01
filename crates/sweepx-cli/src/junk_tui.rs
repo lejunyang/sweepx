@@ -18,12 +18,17 @@ use sweepx_tui::junk::{JunkEvent, JunkOutcome, JunkProvider, JunkRow, run_junk_b
 
 pub(crate) fn run(
     roots: Vec<PathBuf>,
+    system: bool,
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
     cache_dir: Option<PathBuf>,
 ) -> ExitCode {
-    let mut request = JunkSessionRequest::new(roots);
+    let mut request = if system {
+        JunkSessionRequest::system()
+    } else {
+        JunkSessionRequest::new(roots)
+    };
     request.cache_dir = cache_dir;
     let session = match JunkSession::start(request) {
         Ok(session) => session,
@@ -75,22 +80,13 @@ impl JunkRow for Row {
         )
     }
     fn logical_bytes(&self) -> &ByteValue {
-        &self.row.aggregate.apparent_logical_bytes
+        self.row.logical_bytes()
     }
     fn complete(&self) -> bool {
-        self.row
-            .candidate
-            .source_entry
-            .as_ref()
-            .is_some_and(|entry| entry.coverage.complete && !entry.coverage.details_lost)
-            && self.row.aggregate.coverage.complete
-            && !self.row.aggregate.coverage.details_lost
+        self.row.complete()
     }
     fn retained_bytes(&self) -> usize {
-        self.row
-            .candidate
-            .estimated_retained_bytes()
-            .saturating_add(2048)
+        self.row.estimated_retained_bytes().saturating_add(2048)
     }
 }
 
@@ -252,6 +248,8 @@ impl JunkProvider for Provider {
                             JunkSessionPhase::Cache => "cache",
                             JunkSessionPhase::CacheWrite => "cache_write",
                             JunkSessionPhase::Traversal => "traversal",
+                            #[cfg(target_os = "linux")]
+                            JunkSessionPhase::TemporaryObjects => "temporary_objects",
                             JunkSessionPhase::Git => "git",
                             JunkSessionPhase::Replacement => "replacement",
                         },
@@ -354,7 +352,11 @@ impl JunkProvider for Provider {
         } else {
             self.selected(keys)?
         };
-        if keys.is_empty() || rows.iter().any(|row| row.preview) {
+        if keys.is_empty()
+            || rows
+                .iter()
+                .any(|row| row.preview || row.row.directory_aggregate().is_none())
+        {
             // Historical preview keys are display state, not the current binding registry.
             // Refresh all original roots so replacement needs fresh complete observations.
             self.session.refresh_all()
@@ -379,6 +381,12 @@ impl JunkProvider for Provider {
             return Err("complete the scan or refresh first".into());
         }
         let rows = self.selected(keys)?;
+        if rows
+            .iter()
+            .any(|row| row.row.directory_aggregate().is_none())
+        {
+            return Err("Linux temporary objects require the separate junk --system --clean-temp quarantine preview and typed plan confirmation".into());
+        }
         if rows
             .iter()
             .any(|row| !row.current || self.historical.contains(&row.key) || !row.complete())

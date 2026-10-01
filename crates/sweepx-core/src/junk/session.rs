@@ -1,4 +1,4 @@
-//! Worker-owned directory junk scans. No terminal rendering, mutation or durable UI journal.
+//! Worker-owned explicit/system junk scans. No terminal rendering, mutation or durable UI journal.
 //!
 //! Reliable events apply backpressure; consumers must keep draining after cancellation or close
 //! the session. Progress/statistics are coalesced. Drop closes the queue and cancels native work
@@ -6,11 +6,13 @@
 
 #[cfg(target_os = "macos")]
 mod cache;
+#[cfg(target_os = "linux")]
+mod linux_temp;
 mod mailbox;
 
 use super::candidate::JunkCandidate;
 use super::git::{GitEvidenceLimits, GitEvidenceSession, native_path, native_root_path};
-use super::platform::PlatformJunkSetup;
+use super::platform::{PlatformJunkSetup, default_platform_junk_roots};
 use super::{JunkService, PROJECT_RULES_JSON};
 use mailbox::{Shared, Writer};
 use sha2::{Digest, Sha256};
@@ -60,7 +62,7 @@ impl JunkSessionRevision {
 /// Scope whose old evidence must be marked historical until this revision completes.
 #[derive(Debug, Clone)]
 pub enum JunkSessionScope {
-    /// All originally requested directory roots.
+    /// Entire observation scope; a full system revision rediscovers its roots.
     All,
     /// Native candidate subtrees, identified by keys from this session.
     Selected(Arc<[JunkCandidateKey]>),
@@ -76,6 +78,9 @@ pub enum JunkSessionPhase {
     /// Best-effort publication of freshly observed filesystem facts.
     CacheWrite,
     Traversal,
+    /// Native Linux temporary-object measurement and current-user reference observations.
+    #[cfg(target_os = "linux")]
+    TemporaryObjects,
     Git,
     Replacement,
 }
@@ -91,19 +96,76 @@ pub enum JunkSessionCandidateState {
     Current,
 }
 
-/// Shared candidate and directory statistics from one fresh scan namespace.
+/// Facts retained for a candidate, without promoting one observation contract into another.
+#[derive(Debug, Clone)]
+pub enum JunkSessionFacts {
+    /// Traversal statistics for a native directory candidate.
+    Directory(Box<DirectoryAggregate>),
+    /// Independent temporary-object facts; not a generic directory locator or Trash authority.
+    #[cfg(target_os = "linux")]
+    LinuxTemporary {
+        /// Complete recursive identity and activity observations for independent revalidation.
+        measurement: Box<super::linux_temp::LinuxTempMeasurement>,
+        /// Logical file bytes, distinct from the report's allocation evidence.
+        logical_bytes: sweepx_model::ByteValue,
+    },
+}
+
+/// Shared report and typed facts from one fresh observation.
 #[derive(Debug, Clone)]
 pub struct JunkSessionCandidate {
     /// Report-only interpretation, including the current native source row.
     pub candidate: JunkCandidate,
-    /// Final traversal aggregate; partial coverage remains partial.
-    pub aggregate: DirectoryAggregate,
+    /// Directory traversal or independent temporary-object facts, never interchangeable.
+    pub facts: JunkSessionFacts,
 }
 impl JunkSessionCandidate {
+    /// Returns directory statistics only for directory observations.
+    pub fn directory_aggregate(&self) -> Option<&DirectoryAggregate> {
+        match &self.facts {
+            JunkSessionFacts::Directory(aggregate) => Some(aggregate),
+            #[cfg(target_os = "linux")]
+            JunkSessionFacts::LinuxTemporary { .. } => None,
+        }
+    }
+
+    /// Logical bytes for display; allocation and reclaimable evidence remain separate.
+    pub fn logical_bytes(&self) -> &sweepx_model::ByteValue {
+        match &self.facts {
+            JunkSessionFacts::Directory(aggregate) => &aggregate.apparent_logical_bytes,
+            #[cfg(target_os = "linux")]
+            JunkSessionFacts::LinuxTemporary { logical_bytes, .. } => logical_bytes,
+        }
+    }
+
+    /// Whether observed facts are complete, independent of any later execution permission.
+    pub fn complete(&self) -> bool {
+        match &self.facts {
+            JunkSessionFacts::Directory(aggregate) => {
+                self.candidate
+                    .source_entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.coverage.complete && !entry.coverage.details_lost)
+                    && aggregate.coverage.complete
+                    && !aggregate.coverage.details_lost
+            }
+            #[cfg(target_os = "linux")]
+            JunkSessionFacts::LinuxTemporary { .. } => !self
+                .candidate
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "linux_tmp_discovery_incomplete"),
+        }
+    }
+
     /// Lossless observed path for presentation and scope comparison, decoded with fixed bounds.
     /// It never authorizes reopening or deletion; native binding checks remain independent.
     pub fn observed_native_path(&self) -> Option<PathBuf> {
-        native_path(self.candidate.source_entry.as_ref()?)
+        match &self.facts {
+            JunkSessionFacts::Directory(_) => native_path(self.candidate.source_entry.as_ref()?),
+            #[cfg(target_os = "linux")]
+            JunkSessionFacts::LinuxTemporary { .. } => self.candidate.native_path.clone(),
+        }
     }
 
     /// Revalidates the captured directory chain with no-follow object/filesystem/mount checks.
@@ -114,22 +176,45 @@ impl JunkSessionCandidate {
         cancel: &CancellationToken,
         limits: ScanResourceLimits,
     ) -> Result<(), JunkSessionFailure> {
+        if self.directory_aggregate().is_none() {
+            return Err(JunkSessionFailure::new(
+                "temporary_requires_quarantine",
+                "temporary objects require independent quarantine preview",
+            ));
+        }
         validate_directory_binding(self, cancel, limits)
     }
 
-    fn cost(&self) -> usize {
+    /// Conservative retained-data estimate including typed native facts; not allocator RSS.
+    pub fn estimated_retained_bytes(&self) -> usize {
+        let facts = match &self.facts {
+            JunkSessionFacts::Directory(aggregate) => aggregate
+                .scan_id
+                .len()
+                .saturating_add(aggregate.directory_identity.capacity())
+                .saturating_add(
+                    aggregate
+                        .coverage
+                        .incomplete_reasons
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<sweepx_model::ReasonCode>()),
+                ),
+            #[cfg(target_os = "linux")]
+            JunkSessionFacts::LinuxTemporary { measurement, .. } => {
+                measurement.entries.keys().fold(
+                    1024usize.saturating_add(measurement.fifo_inodes.len().saturating_mul(64)),
+                    |sum, path| sum.saturating_add(256).saturating_add(path.capacity()),
+                )
+            }
+        };
         self.candidate
             .estimated_retained_bytes()
             .saturating_add(1024)
-            .saturating_add(self.aggregate.scan_id.len())
-            .saturating_add(self.aggregate.directory_identity.capacity())
-            .saturating_add(
-                self.aggregate
-                    .coverage
-                    .incomplete_reasons
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<sweepx_model::ReasonCode>()),
-            )
+            .saturating_add(facts)
+    }
+
+    fn cost(&self) -> usize {
+        self.estimated_retained_bytes()
     }
 }
 
@@ -230,6 +315,9 @@ pub struct JunkSessionLimits {
     pub scan: ScanResourceLimits,
     /// Current Git observation and subprocess limits, renewed for each revision.
     pub git: GitEvidenceLimits,
+    /// Shared native temporary-object budgets for one full Linux system revision.
+    #[cfg(target_os = "linux")]
+    pub linux_temp: super::linux_temp::LinuxTempObservationLimits,
 }
 impl Default for JunkSessionLimits {
     fn default() -> Self {
@@ -240,14 +328,19 @@ impl Default for JunkSessionLimits {
             max_candidate_bytes: 64 * 1024 * 1024,
             scan: ScanResourceLimits::default(),
             git: GitEvidenceLimits::default(),
+            #[cfg(target_os = "linux")]
+            linux_temp: super::linux_temp::LinuxTempObservationLimits::default(),
         }
     }
 }
 
-/// Inputs for explicit directory-root junk analysis. Linux temporary-object cleanup is separate.
+/// Inputs for explicit directory roots or worker-discovered system junk analysis.
 pub struct JunkSessionRequest {
     /// Absolute user-selected roots; normalized without following or collapsing linked ancestors.
     pub roots: Vec<PathBuf>,
+    /// Discover conservative platform roots each full revision; requires empty explicit roots
+    /// and platform rules. Linux temporary objects use independent facts and cleanup contracts.
+    pub system: bool,
     /// Loaded editable rule bytes, admitted and digested on the worker.
     pub project_rule_bytes: Vec<u8>,
     /// Discover current platform context on the worker for each revision; false avoids tool probes.
@@ -262,10 +355,20 @@ impl JunkSessionRequest {
     pub fn new(roots: Vec<PathBuf>) -> Self {
         Self {
             roots,
+            system: false,
             project_rule_bytes: PROJECT_RULES_JSON.as_bytes().to_vec(),
             include_platform_rules: false,
             cache_dir: None,
             limits: JunkSessionLimits::default(),
+        }
+    }
+
+    /// Requests platform roots on the worker; performs no filesystem or tool discovery here.
+    pub fn system() -> Self {
+        Self {
+            system: true,
+            include_platform_rules: true,
+            ..Self::new(Vec::new())
         }
     }
 }
@@ -297,9 +400,10 @@ pub struct JunkSession {
 }
 
 impl JunkSession {
-    /// Starts an explicit directory junk scan; no traversal, rule parsing or tool probe runs here.
+    /// Starts junk analysis; no traversal, rule parsing, system discovery or tool probe runs here.
     pub fn start(mut request: JunkSessionRequest) -> Result<Self, JunkSessionControlError> {
-        if request.roots.is_empty()
+        if (request.roots.is_empty() && !request.system)
+            || (request.system && (!request.roots.is_empty() || !request.include_platform_rules))
             || request.limits.max_events == 0
             || request.limits.max_event_bytes < 4096
             || request.limits.max_candidates == 0
@@ -320,8 +424,10 @@ impl JunkSession {
         {
             return Err(JunkSessionControlError::ResourceLimit);
         }
-        request.roots = crate::normalize_scan_roots(&request.roots)
-            .map_err(|_| JunkSessionControlError::InvalidRequest)?;
+        if !request.system {
+            request.roots = crate::normalize_scan_roots(&request.roots)
+                .map_err(|_| JunkSessionControlError::InvalidRequest)?;
+        }
         ACTIVE_SESSIONS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAX_SESSIONS).then_some(active + 1)
@@ -342,6 +448,7 @@ impl JunkSession {
                     session_id,
                     current: BTreeMap::new(),
                     preview_keys: BTreeSet::new(),
+                    scan_roots: Vec::new(),
                 };
                 let mut job = Job {
                     revision: JunkSessionRevision(1),
@@ -417,7 +524,8 @@ impl JunkSession {
         Ok(())
     }
 
-    /// Refreshes all original roots, including historical previews without current bindings.
+    /// Refreshes the entire scope, including historical previews without current bindings.
+    /// Full system refresh rediscovers current roots and includes independent temporary objects.
     /// Fresh complete observation is required before unseen old keys can be removed.
     pub fn refresh_all(&self) -> Result<JunkSessionRevision, JunkSessionControlError> {
         self.shared.refresh(Vec::new())
@@ -485,10 +593,32 @@ struct Worker {
     // Historical display rows live in the bounded consumer queue/view, not the current binding
     // registry. At most max_candidates fixed-size keys are kept for complete replacement.
     preview_keys: BTreeSet<JunkCandidateKey>,
+    // Last full discovery scope. Selected refresh preserves original native directory contexts;
+    // full system refresh rediscovers roots rather than retaining stale environment answers.
+    scan_roots: Vec<PathBuf>,
 }
 
 impl Worker {
     fn run(&mut self, job: &Job, writer: &mut Writer) -> Result<(), JunkSessionFailure> {
+        let system = self.request.system;
+        self.run_with_discovery(job, writer, move |cancel| {
+            PlatformJunkSetup::discover_with_cancel(cancel).map(|setup| {
+                let roots = if system {
+                    default_platform_junk_roots(&setup)
+                } else {
+                    Vec::new()
+                };
+                (setup, roots)
+            })
+        })
+    }
+
+    fn run_with_discovery(
+        &mut self,
+        job: &Job,
+        writer: &mut Writer,
+        discover: impl FnOnce(CancellationToken) -> Result<(PlatformJunkSetup, Vec<PathBuf>), String>,
+    ) -> Result<(), JunkSessionFailure> {
         writer.send(JunkSessionEventKind::Started {
             scope: match &job.selected {
                 Some(keys) => JunkSessionScope::Selected(keys.clone().into()),
@@ -511,8 +641,11 @@ impl Worker {
             }
             hash.finalize().into()
         };
+        if !self.request.system {
+            self.scan_roots = self.request.roots.clone();
+        }
         #[cfg(target_os = "macos")]
-        let cache = if let Some(directory) = self.request.cache_dir.clone() {
+        let mut cache = if let Some(directory) = self.request.cache_dir.clone() {
             writer.phase(JunkSessionPhase::Cache)?;
             // Capture before preview reads, validation and traversal. Racing changes belong to
             // the next cache generation even if this revision later publishes complete facts.
@@ -522,7 +655,7 @@ impl Worker {
                 &self.request.project_rule_bytes,
                 super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
             );
-            if job.revision.0 == 1 {
+            if job.revision.0 == 1 && !self.request.system {
                 self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
             }
             Some((directory, cursor, reader))
@@ -534,11 +667,11 @@ impl Worker {
             return Ok(());
         }
         writer.phase(JunkSessionPhase::Discovery)?;
-        let platform = if self.request.include_platform_rules {
-            PlatformJunkSetup::discover_with_cancel(job.cancel.clone())
+        let (platform, discovered_roots) = if self.request.include_platform_rules {
+            discover(job.cancel.clone())
                 .map_err(|error| JunkSessionFailure::new("discovery_failed", error))?
         } else {
-            PlatformJunkSetup::default()
+            (PlatformJunkSetup::default(), Vec::new())
         };
         let mut partial = platform.evidence.layout_failure().is_some();
         if partial {
@@ -546,6 +679,28 @@ impl Worker {
                 "discovery_incomplete",
                 "current platform layout discovery is incomplete",
             ));
+        }
+        if job.cancel.is_cancelled() {
+            writer.finish(JunkSessionOutcome::Cancelled, false, 0);
+            return Ok(());
+        }
+        if self.request.system && job.selected.is_none() {
+            self.scan_roots = normalize_discovered_roots(discovered_roots)?;
+            #[cfg(not(target_os = "linux"))]
+            if self.scan_roots.is_empty() {
+                return Err(JunkSessionFailure::new(
+                    "roots_unavailable",
+                    "no supported platform junk root is available",
+                ));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if self.request.system
+            && job.revision.0 == 1
+            && let Some((_, _, reader)) = &mut cache
+        {
+            writer.phase(JunkSessionPhase::Cache)?;
+            self.restore_history(reader, &service, rules_digest, job, writer)?;
         }
         let selected = job
             .selected
@@ -604,7 +759,7 @@ impl Worker {
                 JunkSessionFailure::new("refresh_binding_unavailable", error.to_string())
             })?
         } else {
-            self.request.roots.clone()
+            self.scan_roots.clone()
         };
         let roots = roots
             .into_iter()
@@ -725,6 +880,11 @@ impl Worker {
             // A cancelled/partial scope may still deliver useful current rows. Retain those
             // bindings for later refresh, without treating unseen old rows as absent.
             self.current.insert(*key, Arc::clone(row));
+        }
+        #[cfg(target_os = "linux")]
+        if self.request.system && job.selected.is_none() {
+            partial |=
+                self.observe_temporary_objects(&platform, &mut pending, rules_digest, job, writer)?;
         }
         if let Some(rows) = &selected {
             validate_selected(rows, &job.cancel, self.request.limits.scan)?;
@@ -897,7 +1057,7 @@ impl ClassifiedScanObserver for Observer<'_> {
         };
         let row = Arc::new(JunkSessionCandidate {
             candidate,
-            aggregate: aggregate.clone(),
+            facts: JunkSessionFacts::Directory(Box::new(aggregate.clone())),
         });
         if self.retained_rows >= self.limits.max_candidates
             || self.retained_bytes.saturating_add(row.cost()) > self.limits.max_candidate_bytes
@@ -921,6 +1081,21 @@ impl ClassifiedScanObserver for Observer<'_> {
         }
         self.pending.insert(key, row);
     }
+}
+
+fn normalize_discovered_roots(roots: Vec<PathBuf>) -> Result<Vec<PathBuf>, JunkSessionFailure> {
+    // Count raw discovery rows before deduplication so duplicates cannot hide resource pressure.
+    if roots.len() > MAX_ROOTS || roots.iter().any(|path| path.as_os_str().len() > 64 * 1024) {
+        return Err(JunkSessionFailure::new(
+            "resource_limit",
+            "system root discovery exceeds session limits",
+        ));
+    }
+    if roots.is_empty() {
+        return Ok(roots);
+    }
+    crate::normalize_scan_roots(&roots)
+        .map_err(|error| JunkSessionFailure::new("root_invalid", error.to_string()))
 }
 
 fn candidate_key(candidate: &JunkCandidate, path: &Path) -> Option<JunkCandidateKey> {

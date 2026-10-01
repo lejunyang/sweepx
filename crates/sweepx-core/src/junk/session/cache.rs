@@ -24,7 +24,7 @@ impl Worker {
             Vec::new()
         };
         for record in reader
-            .historical_roots(&self.request.roots)
+            .historical_roots(&self.scan_roots)
             .into_iter()
             .flatten()
         {
@@ -51,7 +51,7 @@ impl Worker {
                 let Some(root) = native_root_path(entry) else {
                     continue;
                 };
-                if !self.request.roots.contains(&root) || !path.starts_with(&root) {
+                if !self.scan_roots.contains(&root) || !path.starts_with(&root) {
                     continue;
                 }
                 let aggregate = historical_aggregate(&stored, entry);
@@ -68,7 +68,7 @@ impl Worker {
                 }
                 let row = Arc::new(JunkSessionCandidate {
                     candidate,
-                    aggregate,
+                    facts: JunkSessionFacts::Directory(Box::new(aggregate)),
                 });
                 if row
                     .cost()
@@ -107,7 +107,7 @@ impl Worker {
         let context = service
             .with_platform(&platform.rules, &platform.evidence)
             .classification_context_digest();
-        for root in &self.request.roots {
+        for root in &self.scan_roots {
             if job.cancel.is_cancelled() {
                 break;
             }
@@ -131,8 +131,7 @@ impl Worker {
                     .values()
                     .filter(|row| {
                         row.observed_native_path().is_some_and(|path| {
-                            self.request
-                                .roots
+                            self.scan_roots
                                 .iter()
                                 .filter(|root| path.starts_with(root))
                                 .max_by_key(|root| root.components().count())
@@ -141,7 +140,7 @@ impl Worker {
                     })
                     .map(|row| {
                         let mut stored = StoredJunkCandidate::from_candidate(&row.candidate);
-                        stored.aggregate = Some(row.aggregate.clone());
+                        stored.aggregate = row.directory_aggregate().cloned();
                         stored
                     })
                     .collect();
@@ -157,7 +156,7 @@ impl Worker {
                     if !record.matches_observed_root(source_root) {
                         return Err(std::io::Error::other("cache root changed after traversal"));
                     }
-                    record.bind_scope(&self.request.roots);
+                    record.bind_scope(&self.scan_roots);
                     crate::junk::cache::write(directory, &record)
                 });
                 if let Err(error) = result {
@@ -175,7 +174,7 @@ impl Worker {
             }
             if let Err(error) = provider.store_observed_index(
                 source_root,
-                &self.request.roots,
+                &self.scan_roots,
                 cursor,
                 &scanned.covered_paths,
                 &scanned.dir_listings,

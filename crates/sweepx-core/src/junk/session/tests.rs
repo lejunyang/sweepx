@@ -7,6 +7,156 @@ use std::time::Instant;
 // and explicitly observe worker exit so a previous test cannot consume the next one's permit.
 static SESSION_TESTS: Mutex<()> = Mutex::new(());
 
+#[test]
+fn system_admission_rejects_explicit_roots_and_disabled_platform_rules() {
+    let fixture = tempfile::tempdir().unwrap();
+    let mut request = JunkSessionRequest::system();
+    request.roots.push(fixture_root(&fixture));
+    assert!(matches!(
+        JunkSession::start(request),
+        Err(JunkSessionControlError::InvalidRequest)
+    ));
+    let mut request = JunkSessionRequest::system();
+    request.include_platform_rules = false;
+    assert!(matches!(
+        JunkSession::start(request),
+        Err(JunkSessionControlError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn discovered_root_admission_is_bounded_and_preserves_link_sensitive_spelling() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    assert_eq!(
+        normalize_discovered_roots(Vec::new()).unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    assert!(normalize_discovered_roots(vec![root.clone(); 257]).is_err());
+    assert!(normalize_discovered_roots(vec![PathBuf::from("relative")]).is_err());
+    assert_eq!(
+        normalize_discovered_roots(vec![root.clone(), root.join("nested")]).unwrap(),
+        vec![root.clone()]
+    );
+    let sensitive = root.join("linked/../candidate");
+    assert_eq!(
+        normalize_discovered_roots(vec![sensitive.clone()]).unwrap(),
+        vec![sensitive]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let a = project(&base, "a", b"a-payload");
+    let b = project(&base, "b", b"b-larger-payload");
+    let cache = base.join("cache");
+    let request = || {
+        let mut request = JunkSessionRequest::system();
+        request.cache_dir = Some(cache.clone());
+        request
+    };
+    let new_worker = || Worker {
+        request: request(),
+        session_id: "controlled-system-session".into(),
+        current: Rows::new(),
+        preview_keys: BTreeSet::new(),
+        scan_roots: Vec::new(),
+    };
+    let run = |worker: &mut Worker, revision, root: PathBuf| {
+        // Inject only discovery inventory; native traversal, interpretation, cache publication
+        // and replacement are real. No process-global HOME or tool configuration is mutated.
+        let shared = Arc::new(Shared::new(worker.request.limits));
+        let job = Job {
+            revision: JunkSessionRevision(revision),
+            selected: None,
+            cancel: CancellationToken::new(),
+        };
+        let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+        worker
+            .run_with_discovery(&job, &mut writer, |_| {
+                Ok((PlatformJunkSetup::default(), vec![root]))
+            })
+            .unwrap();
+        let session = JunkSession { shared };
+        let events = drain(&session, job.revision);
+        session.close();
+        events
+    };
+    let mut worker = new_worker();
+    let first = run(&mut worker, 1, a.parent().unwrap().to_path_buf());
+    let rows = current(&first);
+    let (&a_key, a_row) = rows.first_key_value().unwrap();
+    assert_eq!(a_row.observed_native_path().as_ref(), Some(&a));
+    assert_eq!(
+        a_row.logical_bytes(),
+        &sweepx_platform::known_u128(u128::from(fs::metadata(a.join("payload")).unwrap().len()))
+    );
+    let second = run(&mut worker, 2, b.parent().unwrap().to_path_buf());
+    assert!(
+        second.iter().any(
+            |event| matches!(event.kind, JunkSessionEventKind::Removed { key } if key == a_key)
+        )
+    );
+    let b_rows = current(&second);
+    assert_eq!(
+        b_rows
+            .values()
+            .next()
+            .unwrap()
+            .observed_native_path()
+            .as_ref(),
+        Some(&b)
+    );
+    assert_eq!(worker.scan_roots, vec![b.parent().unwrap().to_path_buf()]);
+    assert!(!worker.current.contains_key(&a_key));
+    let mut warm = new_worker();
+    let events = run(&mut warm, 1, b.parent().unwrap().to_path_buf());
+    let history: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            JunkSessionEventKind::Candidate {
+                state: JunkSessionCandidateState::Historical,
+                row,
+                ..
+            } => row.observed_native_path(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(history, vec![b]);
+    let position = |predicate: fn(&JunkSessionEventKind) -> bool| {
+        events
+            .iter()
+            .position(|event| predicate(&event.kind))
+            .unwrap()
+    };
+    assert!(
+        position(|kind| matches!(
+            kind,
+            JunkSessionEventKind::Phase(JunkSessionPhase::Discovery)
+        )) < position(|kind| matches!(
+            kind,
+            JunkSessionEventKind::Candidate {
+                state: JunkSessionCandidateState::Historical,
+                ..
+            }
+        ))
+    );
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id() {
@@ -65,9 +215,15 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
     assert!(preview_position < discovery_position);
     let current_rows = current(&events);
     let refreshed = &current_rows[&key];
-    assert_ne!(original.aggregate.scan_id, refreshed.aggregate.scan_id);
+    assert_ne!(
+        original.directory_aggregate().unwrap().scan_id,
+        refreshed.directory_aggregate().unwrap().scan_id
+    );
     assert_eq!(
-        refreshed.aggregate.apparent_logical_bytes,
+        refreshed
+            .directory_aggregate()
+            .unwrap()
+            .apparent_logical_bytes,
         sweepx_model::ByteValue::Known {
             value: sweepx_model::DecimalU128::new(
                 fs::symlink_metadata(target.join("payload"))
@@ -262,7 +418,12 @@ fn check_warm_directory(file_count: usize) {
     ));
     let initial = current(&cold_events);
     assert_eq!(initial.len(), 1);
-    let aggregate = &initial.first_key_value().unwrap().1.aggregate;
+    let aggregate = &initial
+        .first_key_value()
+        .unwrap()
+        .1
+        .directory_aggregate()
+        .unwrap();
     assert_eq!(
         aggregate.apparent_logical_bytes,
         sweepx_model::ByteValue::Known {
@@ -299,9 +460,12 @@ fn check_warm_directory(file_count: usize) {
         refreshed.keys().collect::<Vec<_>>()
     );
     let (&key, row) = refreshed.first_key_value().unwrap();
-    assert_ne!(initial[&key].aggregate.scan_id, row.aggregate.scan_id);
+    assert_ne!(
+        initial[&key].directory_aggregate().unwrap().scan_id,
+        row.directory_aggregate().unwrap().scan_id
+    );
     assert_eq!(
-        row.aggregate.apparent_logical_bytes,
+        row.directory_aggregate().unwrap().apparent_logical_bytes,
         sweepx_model::ByteValue::Known {
             value: sweepx_model::DecimalU128::new(expected)
         }
@@ -432,7 +596,7 @@ fn fresh_sessions_and_selected_refresh_keep_stable_keys_current_git_and_native_a
     assert_eq!(children.len(), 1);
     assert_eq!(fs::symlink_metadata(children[0].path()).unwrap().len(), 8);
     assert_eq!(
-        a_row.aggregate.apparent_logical_bytes,
+        a_row.directory_aggregate().unwrap().apparent_logical_bytes,
         sweepx_platform::known_u128(8)
     );
     let initial_scan = a_row
@@ -486,7 +650,10 @@ fn fresh_sessions_and_selected_refresh_keep_stable_keys_current_git_and_native_a
     let native_length = fs::symlink_metadata(a.join("payload")).unwrap().len();
     assert_eq!(native_length, 16);
     assert_eq!(
-        fresh[a_key].aggregate.apparent_logical_bytes,
+        fresh[a_key]
+            .directory_aggregate()
+            .unwrap()
+            .apparent_logical_bytes,
         sweepx_platform::known_u128(native_length.into())
     );
     assert!(

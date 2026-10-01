@@ -208,10 +208,11 @@ enum Commands {
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
     Junk {
-        /// Open the live junk view for explicit directory roots. Space selects; d moves selected
-        /// current, complete candidates to Trash after native identity revalidation.
+        /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
+        /// current, complete directory candidates to Trash after native identity revalidation.
         /// macOS shows historical caches first; only freshly verified rows can be moved.
-        #[arg(long, conflicts_with_all = ["timings", "system", "trash", "clean_temp", "quarantine_dir"])]
+        /// Linux temporary objects require the separate --clean-temp quarantine preview.
+        #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp", "quarantine_dir"])]
         tui: bool,
         /// Emit phase timings and root-cache hit counts as one JSON diagnostic on stderr.
         /// Measures report-only work; stdout keeps its existing format.
@@ -627,7 +628,11 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
                 let roots = match normalize_roots(&roots) {
-                    Ok(roots) if !roots.is_empty() => roots,
+                    Ok(roots) if system && !roots.is_empty() => {
+                        eprintln!("junk --tui --system cannot be combined with explicit roots");
+                        return ProcessExitCode::from(2);
+                    }
+                    Ok(roots) if system || !roots.is_empty() => roots,
                     Ok(_) => {
                         eprintln!("junk --tui requires explicit directory roots");
                         return ProcessExitCode::from(2);
@@ -641,7 +646,7 @@ fn main() -> ProcessExitCode {
                     .ok()
                     .flatten()
                     .map(|state_dir| state_dir.join("junk-cache"));
-                return junk_tui::run(roots, context.locale(), size_unit, sort, cache_dir);
+                return junk_tui::run(roots, system, context.locale(), size_unit, sort, cache_dir);
             }
             if let Err(message) =
                 validate_junk_mutation_environment(clean_temp, trash, format, stdin_is_terminal)
@@ -3188,6 +3193,14 @@ mod tests {
         assert!(validate_tui_environment(OutputFormat::Ndjson, true, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, false, true).is_err());
         assert!(validate_tui_environment(OutputFormat::Human, true, false).is_err());
+    }
+
+    #[test]
+    fn system_junk_tui_parses_without_explicit_roots() {
+        let cli = Cli::try_parse_from(["sweepx", "junk", "--system", "--tui"]).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Junk { system: true, tui: true, roots, .. } if roots.is_empty())
+        );
     }
 
     #[test]

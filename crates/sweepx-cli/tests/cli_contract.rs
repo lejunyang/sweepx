@@ -856,6 +856,21 @@ fn junk_tui_rejects_nonterminals_machine_formats_and_conflicting_modes_before_sc
 }
 
 #[test]
+fn system_junk_tui_requires_a_terminal_before_discovery_or_state_creation() {
+    let fixture = TempDir::new().unwrap();
+    let state = fixture.path().join("state");
+    let mut cmd = cli_command();
+    cmd.timeout(std::time::Duration::from_secs(5));
+    cmd.arg("--state-dir")
+        .arg(&state)
+        .args(["junk", "--tui", "--system"]);
+    cmd.assert()
+        .code(2)
+        .stderr(predicates::str::contains("terminal"));
+    assert!(!state.exists());
+}
+
+#[test]
 fn junk_temp_cleanup_requires_a_foreground_human_confirmation() {
     let mut cmd = cli_command();
     cmd.timeout(std::time::Duration::from_secs(10));

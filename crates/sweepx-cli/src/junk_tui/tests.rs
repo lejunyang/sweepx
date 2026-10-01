@@ -2,6 +2,117 @@ use super::*;
 use std::fs;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[test]
+fn temporary_reports_keep_logical_bytes_and_refuse_generic_trash_then_refresh_all() {
+    use sweepx_core::junk::linux_temp::{
+        LinuxTempCandidate, LinuxTempDiscovery, LinuxTempMeasurement, report_candidates,
+    };
+    use sweepx_core::junk::session::JunkSessionFacts;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    let path = root.join("ordinary-temporary-file");
+    fs::write(&path, b"preserve-temporary-payload").unwrap();
+    let metadata = fs::symlink_metadata(&path).unwrap();
+    // This fixture tests report presentation and action routing, not eligibility. Deliberately
+    // different allocation evidence prevents logical display from silently using report size.
+    let measurement = LinuxTempMeasurement {
+        top: metadata.clone(),
+        allocated_bytes: 8192,
+        logical_bytes: u128::from(metadata.len()),
+        entries: BTreeMap::new(),
+        fifo_inodes: BTreeSet::new(),
+        entry_count: 1,
+        last_accessed: metadata.accessed().unwrap(),
+        last_modified: metadata.modified().unwrap(),
+        last_status_change: metadata.modified().unwrap(),
+    };
+    let discovery = LinuxTempDiscovery {
+        candidates: vec![LinuxTempCandidate {
+            path: path.clone(),
+            measurement: measurement.clone(),
+        }],
+        complete: true,
+        incomplete_reason: None,
+    };
+    let rule = sweepx_core::junk::platform::load_platform_junk_rules()
+        .unwrap()
+        .into_iter()
+        .find(|rule| rule.root_kind == "linux_tmp")
+        .unwrap();
+    let candidate = report_candidates(&rule, &discovery).remove(0);
+    let row = Arc::new(JunkSessionCandidate {
+        candidate,
+        facts: JunkSessionFacts::LinuxTemporary {
+            logical_bytes: sweepx_platform::known_u128(u128::from(metadata.len())),
+            measurement: Box::new(measurement),
+        },
+    });
+    assert!(row.complete());
+    assert!(row.directory_aggregate().is_none());
+    assert_eq!(row.observed_native_path().as_ref(), Some(&path));
+    assert_eq!(
+        row.logical_bytes(),
+        &sweepx_platform::known_u128(u128::from(metadata.len()))
+    );
+    assert!(
+        row.revalidate_native_binding(&CancellationToken::new(), Default::default())
+            .is_err()
+    );
+    assert!(
+        crate::trash_command::trash_session_candidate(&row, &CancellationToken::new())
+            .unwrap_err()
+            .contains("quarantine")
+    );
+    let session = JunkSession::start(JunkSessionRequest::new(vec![root])).unwrap();
+    let mut provider = Provider::new(session);
+    complete(&mut provider);
+    // Reuse an opaque key from a controlled scan as a fixture. Action routing must inspect the
+    // typed facts rather than assuming the key itself supplies directory authority.
+    fs::write(
+        fixture.path().join("Cargo.toml"),
+        b"[workspace]\nmembers=[]\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.path().join("target")).unwrap();
+    provider.refresh(&[]).unwrap();
+    complete(&mut provider);
+    let native_key = provider.rows.values().next().unwrap().native_key;
+    let key = "controlled-temporary-presentation".to_string();
+    provider.rows.insert(
+        key.clone(),
+        Arc::new(Row {
+            key: key.clone(),
+            native_key,
+            revision: provider.revision,
+            current: true,
+            preview: false,
+            row,
+        }),
+    );
+    assert!(
+        provider
+            .trash(std::slice::from_ref(&key))
+            .unwrap_err()
+            .contains("quarantine")
+    );
+    assert!(provider.trash.is_none());
+    provider.refresh(std::slice::from_ref(&key)).unwrap();
+    let events = complete(&mut provider);
+    assert!(matches!(
+        events.first().unwrap(),
+        JunkEvent::Started { keys: None, .. }
+    ));
+    assert_eq!(fs::read(path).unwrap(), b"preserve-temporary-payload");
+    provider.close();
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
+}
+
 fn complete(provider: &mut Provider) -> Vec<JunkEvent> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
@@ -43,7 +154,11 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
     ));
     let key = provider.rows.keys().next().unwrap().clone();
     assert_eq!(
-        provider.rows[&key].row.aggregate.apparent_logical_bytes,
+        provider.rows[&key]
+            .row
+            .directory_aggregate()
+            .unwrap()
+            .apparent_logical_bytes,
         sweepx_platform::known_u128(8)
     );
     fs::write(target.join("payload"), b"updated-current").unwrap();
@@ -53,7 +168,11 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
         matches!(events.first().unwrap(), JunkEvent::Started { revision: 2, keys: Some(keys) } if keys == std::slice::from_ref(&key))
     );
     assert_eq!(
-        provider.rows[&key].row.aggregate.apparent_logical_bytes,
+        provider.rows[&key]
+            .row
+            .directory_aggregate()
+            .unwrap()
+            .apparent_logical_bytes,
         sweepx_platform::known_u128(u128::from(
             fs::symlink_metadata(target.join("payload")).unwrap().len()
         ))

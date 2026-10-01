@@ -92,7 +92,8 @@ pub trait JunkProvider {
     fn poll(&mut self) -> Option<JunkEvent>;
     /// Request cooperative cancellation.
     fn cancel(&mut self);
-    /// Refresh selected stable keys; an empty selection requests all original roots.
+    /// Refresh selected stable keys; an empty selection requests the entire current scope.
+    /// A system provider rediscovers its roots for full refresh.
     /// Stale/unknown selected bindings fail on the worker.
     fn refresh(&mut self, keys: &[String]) -> Result<(), String>;
     /// Prioritize the native directory behind a presentation key; affects ordering only.
@@ -363,6 +364,10 @@ impl JunkModel {
             "cache_write" => self.text("保存扫描事实", "Saving scan facts"),
             "discovery" => self.text("发现上下文", "Discovering context"),
             "traversal" => self.text("扫描", "Scanning"),
+            "temporary_objects" => self.text(
+                "核验临时对象与进程引用",
+                "Checking temporary objects and process references",
+            ),
             "git" => self.text("核验 Git", "Checking Git"),
             "replacement" => self.text("更新结果", "Replacing results"),
             _ => self.phase,
