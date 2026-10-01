@@ -57,7 +57,7 @@
 
 ## 验证说明
 
-工作区使用固定 Rust 1.98.0。执行格式检查、workspace clippy 和本机 workspace 测试；原有 macOS 移入废纸篓集成测试卡在系统调用，已单独排除，不能将其记为通过。Linux/Windows 条件分支和运行时行为尚未在对应宿主复验。
+工作区使用固定 Rust 1.98.0。执行格式检查、workspace clippy 和本机 workspace 测试；原有 macOS 移入废纸篓集成测试 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 卡在系统调用，已单独排除，不能将其记为通过。后续交付已补齐 Linux/Windows 的工作区交叉 lint；对应宿主运行时仍未复验。
 
 原生缓存微基准可运行：
 
@@ -77,4 +77,19 @@ cargo test -p sweepx-cli benchmark_batched_root_validation -- --ignored --nocapt
 
 三个样本的中位数约从 11.07 s 降到 0.426 s（约 26 倍），两条路径的 24 个命中完全一致。这不覆盖全盘遍历、工具发现、冷启动、规则评估或真实用户目录变化。
 
-本轮本机 workspace 测试汇总为 694 项通过、0 失败、1 项原有 ignored；另显式排除了卡住的系统 Trash 契约测试。上面的手动微基准单独运行并通过。
+首轮审视时本机 workspace 测试汇总为 694 项通过、0 失败、1 项原有 ignored；另显式排除了卡住的系统 Trash 契约测试。上面的手动微基准单独运行并通过。
+
+## 后续交付与下一步
+
+本次后续修改以四个功能单元提交，未增加 crate：
+
+- 共享有界工具探测和安装快照，避免扫描后重复询问 npm；显式项目扫描不触发无关安装探测。
+- 项目规则迁入 catalog，core 的 `JunkService` 调用现有 cleaner VM；平台规则和候选解释仍待继续迁移。
+- 名称索引及预规范化父标记减少每目录的重复分配，重叠名称保持 catalog 顺序；未进行端到端扫描计时，不宣称整机加速倍数。
+- 根缓存 schema v4 保存扫描与规则匹配事实，活动状态按本次工具证据重建；缺少 Git 仓库上下文时明确降回基础解释。
+
+最终本机交付检查（2026-10-01，arm64 macOS）：格式检查和工作区 `--all-targets --all-features` clippy 通过；工作区 `--all-features` 测试 707 项通过、0 失败，2 项原有基准 ignored，另排除上述 1 项系统 Trash 契约测试。53 份 Markdown 的文档检查和 23 项文档检查器测试通过；catalog 打包清单包含迁移后的规则资源。
+
+交叉验证（2026-10-01，arm64 macOS，Rust 1.98.0、Zig 0.16.0）：工作区 `--all-targets --all-features` clippy 对 `x86_64-unknown-linux-gnu` 和 `x86_64-pc-windows-gnu` 均通过。包含目标平台测试代码的编译，但未运行 Linux/Windows 测试二进制，也不代表 Windows MSVC 配置验收。检查发现的既有 Unix Trash 路径测试已按实际适用平台门控。
+
+下一步顺序：先补逐文件 listing、marker 索引与多根缓存的统一字节预算和淘汰；随后提供可取消、带有界事件队列的 junk 会话并继续下沉平台候选解释；大文件分析再接同一次遍历，重复文件检测作为独立、显式内容读取阶段。当前这些能力尚未实现。
