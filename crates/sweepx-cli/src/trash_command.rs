@@ -856,6 +856,8 @@ mod tests {
         );
     }
 
+    // These home-relative Trash layouts exist only on Linux and macOS.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn protected_trees_include_descendants() {
         #[cfg(unix)]
