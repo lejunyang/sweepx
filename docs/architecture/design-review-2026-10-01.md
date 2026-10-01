@@ -209,3 +209,9 @@ Linux/Windows 宿主运行时、MSVC 与系统 Trash 挂起用例仍是独立验
 内置分类器只保留本次规则实际需要的项目文件 marker，名称集合从规则字节加载结果派生；自定义分类器默认仍保留全部 marker，以保持其契约。目录名称只保留一次 identity-keyed lineage；不再在 listing 的旧 dirs 字段中重复存储。回归覆盖零预算下的否定谓词、可选索引压力下保住必需 marker、自定义规则 marker 变更，以及 native lineage/预留容量计入模型内存估算。
 
 本条完成扫描中的共享预算；持久化文件的有界读取、跨根预算与逐根淘汰还未完成，上一节对应验收项暂不勾选。
+
+缓存预算核对还发现了路径歧义：不同非 UTF-8 Unix 原生目录名可能得到相同 display string。逐文件索引不再把 lossy display path 当作键；无法无损表达的目录不保存 covered-path/listing，而原生身份和规则 marker 仍保留，后续现场观察。独立回归使用两个不同原生路径产生同一个 display string，证明不会串用文件长度。
+
+本阶段验证：工作区 724 项通过、0 失败、2 项基准 ignored，系统 Trash 挂起用例仍单独排除；格式、工作区 clippy、Linux GNU/Windows GNU 工作区交叉 lint 和 53 份 Markdown 检查通过。受影响 crate 提交前检查为 359 项通过、2 项 ignored、1 项 Trash 排除。
+
+相同 release、8 根/8,192 文件、每状态 3 次的 [预算后原始复测](junk-benchmark-metadata-2026-10-01.json)通过独立候选与逻辑字节核验：冷扫中位数 116.3 ms、整根命中 29.0 ms、单文件变化 48.8 ms。OS 缓存不受控；热扫与上一轮 23.3 ms 存在宿主/事件服务波动，不能宣称预算本身提高了整机速度。这次验证的是资源受限时的诚实降级和正常负载的结果等价性。

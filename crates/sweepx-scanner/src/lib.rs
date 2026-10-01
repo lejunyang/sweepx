@@ -502,10 +502,10 @@ impl<'a> CollectingScanSink<'a> {
                 .or_default()
                 .insert(marker.clone());
         }
-        if let Some(parent) = path.parent()
+        if let Some(parent) = path.parent().and_then(Path::to_str)
             && let Some(size) = size
         {
-            let parent = parent.display().to_string();
+            let parent = parent.to_string();
             if !self
                 .dir_listings
                 .get(&parent)
@@ -838,8 +838,11 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
-        if self.classifier.is_some() && !self.metadata_lost {
-            let path = path.display().to_string();
+        if self.classifier.is_some()
+            && !self.metadata_lost
+            && let Some(path) = path.to_str()
+        {
+            let path = path.to_string();
             if self.admit_metadata(256usize.saturating_add(path.capacity()), false) {
                 self.covered_paths.insert(path, coverage.complete);
             }
@@ -4471,6 +4474,51 @@ mod tests {
             sink.finish_classified().dir_listings[&root.display().to_string()].files["Cargo.toml"],
             123
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_display_paths_are_not_file_cache_keys() {
+        use std::os::unix::ffi::OsStringExt;
+        struct NoCandidates;
+        impl JunkClassifier for NoCandidates {
+            fn classify(
+                &self,
+                _: &ScannedEntry,
+                _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                None
+            }
+        }
+        let mut sink =
+            CollectingScanSink::new_classified(ScanResourceLimits::default(), &NoCandidates);
+        let left = PathBuf::from(std::ffi::OsString::from_vec(b"/root/a\xff".to_vec()));
+        let right = PathBuf::from(std::ffi::OsString::from_vec(b"/root/a\xfe".to_vec()));
+        assert_ne!(left, right);
+        assert_eq!(
+            left.display().to_string(),
+            right.display().to_string(),
+            "independent lossy-path collision"
+        );
+        let coverage = complete_coverage();
+        for (path, parent) in [(left, "left"), (right, "right")] {
+            let parent = ScanEntryId::from_loaded(parent.into());
+            sink.note_cached_file(
+                &parent,
+                &sweepx_platform::CachedFileEntry {
+                    path: path.join("Cargo.toml"),
+                    file_name: test_native_name("Cargo.toml"),
+                    logical_bytes: 7,
+                },
+            );
+            sink.note_directory_coverage(&path, &coverage);
+            assert!(
+                sink.file_markers[&parent].contains("Cargo.toml"),
+                "native marker evidence remains available"
+            );
+        }
+        assert!(sink.dir_listings.is_empty());
+        assert!(sink.covered_paths.is_empty());
     }
 
     #[test]

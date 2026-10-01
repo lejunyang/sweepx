@@ -484,3 +484,5 @@ On macOS, root records and file indexes share one FSEvents query covering every 
 The history query ends its run-loop wait as soon as the complete-history marker arrives. Handling one source alone does not establish completeness; timeouts and history gaps still refuse reuse.
 
 Classified directory rows, markers, coverage and optional reuse indexes share an estimated-byte budget (256 MiB per invocation and 128 MiB per root by default), which is not a process RSS limit. Rebuildable indexes are evicted before required rule facts. If required facts still cannot fit, the report is `partial` and human output explains that candidates may be missing. Built-in rules select file markers from the loaded requiredParentMarkers; arbitrary custom evaluators retain all names by default.
+
+File-cache keys require a lossless directory path. Native paths that cannot be represented as UTF-8 do not store covered-path/listing entries and fall back to fresh observations; native identities and rule markers remain available. Display paths cannot substitute for execution authority or cache keys.
