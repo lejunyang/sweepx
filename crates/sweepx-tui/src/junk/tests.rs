@@ -428,6 +428,164 @@ impl JunkProvider for Provider {
     }
 }
 
+struct TimedEvents {
+    script: VecDeque<Option<KeyCode>>,
+    waits: Vec<Duration>,
+}
+impl BrowserEventSource for TimedEvents {
+    fn poll_event(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        self.waits.push(timeout);
+        Ok(self
+            .script
+            .pop_front()
+            .expect("script exhausted")
+            .map(|code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE))))
+    }
+}
+
+#[test]
+fn active_batches_do_not_wait_for_input_and_preserve_result_selection() {
+    let mut queued = VecDeque::from([
+        JunkEvent::Started {
+            revision: 1,
+            keys: None,
+        },
+        JunkEvent::Candidate {
+            revision: 1,
+            current: false,
+            historical: false,
+            row: row("a", "/a"),
+        },
+    ]);
+    // The first 128-event batch contains the base row but not its current replacement. This
+    // fixture pins the public per-tick limit independently of producer timing or native I/O.
+    for count in 0..126 {
+        queued.push_back(JunkEvent::Progress {
+            revision: 1,
+            count,
+            path: "/a".into(),
+        });
+    }
+    queued.extend([
+        JunkEvent::Candidate {
+            revision: 1,
+            current: true,
+            historical: false,
+            row: row("a", "/a"),
+        },
+        JunkEvent::Candidate {
+            revision: 1,
+            current: true,
+            historical: false,
+            row: row("b", "/b"),
+        },
+        JunkEvent::Completed {
+            revision: 1,
+            outcome: JunkOutcome::Complete,
+            replaced: true,
+        },
+    ]);
+    let mut provider = Provider {
+        events: queued,
+        ..Default::default()
+    };
+    let mut input = TimedEvents {
+        // Select the base before the next drain, then let the full terminal event arrive.
+        script: VecDeque::from([Some(KeyCode::Char(' ')), None, Some(KeyCode::Char('q'))]),
+        waits: Vec::new(),
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut input,
+            &mut provider,
+            &NeverTerminate,
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        input.waits,
+        [Duration::ZERO, Duration::ZERO, Duration::from_millis(50)]
+    );
+    assert!(input.script.is_empty() && provider.events.is_empty());
+    assert_eq!(model.marked, BTreeSet::from(["a".into()]));
+    assert_eq!(model.rows.len(), 2);
+    assert!(model.rows["a"].current && model.rows["b"].current);
+    assert_eq!(model.outcome, Some(JunkOutcome::Complete));
+    assert!(!model.busy && !provider.cancelled && provider.trashed.is_empty());
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Complete") && screen.contains("Current"));
+}
+
+#[test]
+fn short_active_batch_returns_to_idle_input_wait_when_provider_is_empty() {
+    let mut provider = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut input = TimedEvents {
+        script: VecDeque::from([None, None, Some(KeyCode::Char('q'))]),
+        waits: Vec::new(),
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut input,
+            &mut provider,
+            &NeverTerminate,
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        input.waits,
+        [
+            Duration::ZERO,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        ]
+    );
+    assert_eq!(model.outcome, Some(JunkOutcome::Complete));
+    assert!(input.script.is_empty() && provider.events.is_empty());
+}
+
+#[test]
+fn initially_empty_view_keeps_idle_wait_and_can_exit_before_completion() {
+    let mut provider = Provider::default();
+    let mut input = TimedEvents {
+        script: VecDeque::from([None, Some(KeyCode::Char('q'))]),
+        waits: Vec::new(),
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut input,
+            &mut provider,
+            &NeverTerminate,
+        )
+        .unwrap(),
+        4
+    );
+    assert_eq!(input.waits, [Duration::from_millis(50); 2]);
+    assert!(model.busy && input.script.is_empty());
+}
+
 #[test]
 fn duplicate_keeper_key_updates_the_row_and_prevents_its_trash_selection() {
     let mut provider = Provider {

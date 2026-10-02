@@ -684,10 +684,12 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
             return Ok(128u8.saturating_add(signal));
         }
         // Bound work per tick so a fast producer cannot starve input or painting.
+        let mut received_event = false;
         for _ in 0..128 {
             let Some(event) = provider.poll() else {
                 break;
             };
+            received_event = true;
             if matches!(event, JunkEvent::Started { .. })
                 && let Some(view) = model.quarantine.take()
             {
@@ -700,7 +702,15 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
         }
         model.reorder();
         terminal.draw(|frame| render_junk(frame, model))?;
-        let event = match events.poll_event(Duration::from_millis(50)) {
+        // A bounded producer can temporarily run out of queued events before this batch fills.
+        // Give it another drain opportunity after any activity, while still checking keyboard
+        // input each tick. The next empty batch restores the idle wait, avoiding a busy loop.
+        let input_wait = if received_event {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(50)
+        };
+        let event = match events.poll_event(input_wait) {
             Ok(event) => event,
             Err(_) if termination.termination_signal().is_some() => continue,
             Err(error) => return Err(error.into()),

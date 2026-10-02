@@ -1,0 +1,388 @@
+{
+  "schema": "sweepx.warm-pty-audit/v1",
+  "date": "2026-10-02",
+  "host": "macOS-26.5.2-arm64-arm-64bit",
+  "binarySha256": "f77b26e420710ca1bf882214f676ec4284471e49c29405172ccbf5b57edd8c80",
+  "buildReceipt": {
+    "command": "cargo build -p sweepx-cli --all-features --locked",
+    "exitStatus": 0,
+    "build": "debug/all-features",
+    "rust": "1.98.0",
+    "binarySha256": "f77b26e420710ca1bf882214f676ec4284471e49c29405172ccbf5b57edd8c80",
+    "sourceSha256": {
+      "crates/sweepx-core/src/tools/mod.rs": "65929ae5d2830d9e0aebea738559be4bc3ece0e1c1094f21f2091acd60c6dcd7",
+      "crates/sweepx-tui/src/junk.rs": "eb3f5e689558ff0763f93a7d9eb7e042731c3e4c3111f6999eb3318148573b4e",
+      "crates/sweepx-core/src/junk/manifest/scope.rs": "dfb3303f4303939e33b9b4d069c00baede3f04a1d491734e8c6a7b36b91691a7",
+      "crates/sweepx-cli/src/junk_tui.rs": "f844d6cb5fe43af0322ec9fbdf786a20cb1a9f26d4a6f76e97027ee11d36bffa"
+    }
+  },
+  "osCache": "uncontrolled",
+  "sweepxCache": "each isolated fixture seeded by complete ordinary junk report; Historical observed in TUI; ordinary root-cache hit counts recorded, not asserted for TUI",
+  "diagnosticAttempts": [
+    {
+      "phase": "PTY ownership",
+      "error": "First direct-child session leader exited before parent checked terminal attributes; tcgetattr returned ENOTTY. The experiment now keeps an owned shell session leader alive through restoration checks, verifies tool PID is its direct child before signals/sample, and releases it only afterward. This harness failure did not demonstrate a product hang."
+    },
+    {
+      "phase": "admission",
+      "error": "Existing executable checksum differed from previous default-feature oracle because it had subsequently been rebuilt by all-feature workspace tests; stopped before creating fixtures or launching scans. Rebuilt current source explicitly and bound the final experiment to the new checksum."
+    }
+  ],
+  "fixedCases": 6,
+  "records": [
+    {
+      "case": 0,
+      "mode": "quit",
+      "locale": "en-US",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 224004583,
+          "phasesNs": {
+            "discovery": 108916,
+            "setup": 2091667,
+            "rootCacheValidation": 3871083,
+            "subtreeCacheValidation": 250,
+            "traversal": 178238667,
+            "classification": 111583,
+            "projectFormats": 10163792,
+            "gitEvidence": 2030333,
+            "cacheWrite": 23658084,
+            "report": 241041,
+            "tail": 3472625
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.03240733398706652,
+      "completeSeconds": 0.21149820898426697,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67077,
+      "ownedTuiPid": 67078,
+      "exitCode": 0,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 6662,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 0,
+      "wrapperExitCode": 0,
+      "allChecksPassed": true
+    },
+    {
+      "case": 1,
+      "mode": "quit",
+      "locale": "en-US",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 206090750,
+          "phasesNs": {
+            "discovery": 16542,
+            "setup": 839125,
+            "rootCacheValidation": 2812416,
+            "subtreeCacheValidation": 125,
+            "traversal": 170233917,
+            "classification": 48625,
+            "projectFormats": 5623833,
+            "gitEvidence": 3094542,
+            "cacheWrite": 19546958,
+            "report": 198250,
+            "tail": 3662042
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.03186787498998456,
+      "completeSeconds": 0.2163949169917032,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67200,
+      "ownedTuiPid": 67201,
+      "exitCode": 0,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 7052,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 0,
+      "wrapperExitCode": 0,
+      "allChecksPassed": true
+    },
+    {
+      "case": 2,
+      "mode": "quit",
+      "locale": "en-US",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 253059459,
+          "phasesNs": {
+            "discovery": 833417,
+            "setup": 19090708,
+            "rootCacheValidation": 4603209,
+            "subtreeCacheValidation": 41,
+            "traversal": 190923459,
+            "classification": 550916,
+            "projectFormats": 8223959,
+            "gitEvidence": 2580250,
+            "cacheWrite": 21455791,
+            "report": 284292,
+            "tail": 4496042
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.037819166987901554,
+      "completeSeconds": 0.2238701669848524,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67307,
+      "ownedTuiPid": 67308,
+      "exitCode": 0,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 7003,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 0,
+      "wrapperExitCode": 0,
+      "allChecksPassed": true
+    },
+    {
+      "case": 3,
+      "mode": "ctrl-c",
+      "locale": "en-US",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 248578625,
+          "phasesNs": {
+            "discovery": 1414375,
+            "setup": 11442709,
+            "rootCacheValidation": 5694500,
+            "subtreeCacheValidation": 83,
+            "traversal": 186168250,
+            "classification": 563667,
+            "projectFormats": 8198875,
+            "gitEvidence": 3796416,
+            "cacheWrite": 26616375,
+            "report": 428167,
+            "tail": 4234500
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.030232334014726803,
+      "completeSeconds": 0.20840966701507568,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67583,
+      "ownedTuiPid": 67584,
+      "exitCode": 130,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 6622,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 130,
+      "wrapperExitCode": 130,
+      "allChecksPassed": true
+    },
+    {
+      "case": 4,
+      "mode": "sigterm",
+      "locale": "en-US",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 256223167,
+          "phasesNs": {
+            "discovery": 819250,
+            "setup": 7475583,
+            "rootCacheValidation": 27360834,
+            "subtreeCacheValidation": 416,
+            "traversal": 181756167,
+            "classification": 350667,
+            "projectFormats": 7321666,
+            "gitEvidence": 3272792,
+            "cacheWrite": 23514750,
+            "report": 254625,
+            "tail": 4076458
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.030288250010926276,
+      "completeSeconds": 0.2102486669900827,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67723,
+      "ownedTuiPid": 67724,
+      "exitCode": 143,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 6661,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 143,
+      "wrapperExitCode": 143,
+      "allChecksPassed": true
+    },
+    {
+      "case": 5,
+      "mode": "quit",
+      "locale": "zh-CN",
+      "ordinaryTargetFiles": 8193,
+      "independentLogicalBytes": 65557,
+      "inputDigest": "2c66df96b8ac4828957755a052d4401e6234e3295c5c2ecf729f3fa97dd65cbb",
+      "seedExitCode": 0,
+      "seedFacts": {
+        "ruleId": "rust.target",
+        "risk": "R2",
+        "reclaimable": {
+          "state": "known",
+          "value": "65557"
+        },
+        "sizeIsLogical": true
+      },
+      "seedTimings": [
+        {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 253625500,
+          "phasesNs": {
+            "discovery": 789583,
+            "setup": 7275583,
+            "rootCacheValidation": 27319375,
+            "subtreeCacheValidation": 42,
+            "traversal": 181098167,
+            "classification": 301166,
+            "projectFormats": 8362334,
+            "gitEvidence": 1637083,
+            "cacheWrite": 22274958,
+            "report": 253209,
+            "tail": 4293708
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      ],
+      "historicalSeconds": 0.02828504200442694,
+      "completeSeconds": 0.20295062501099892,
+      "originalTenSecondCompletion": true,
+      "stackSampleRequested": false,
+      "ownedWrapperPid": 67848,
+      "ownedTuiPid": 67849,
+      "exitCode": 0,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "capturedBytes": 6885,
+      "namesAndSHA256Unchanged": true,
+      "targetFileCountUnchanged": true,
+      "logicalBytesUnchanged": true,
+      "expectedExitCode": 0,
+      "wrapperExitCode": 0,
+      "allChecksPassed": true
+    }
+  ],
+  "harnessSource": "import os, pty, termios, fcntl, struct, subprocess, select, time, tempfile, pathlib, json, re, unicodedata, signal, hashlib, platform, errno, ctypes\nrepo = pathlib.Path.cwd()\n# This decoder is the previously independently checked file-analysis PTY decoder, including\n# cursor movement/erase and wide-cell replacement. Its controlled overwrite oracle is retained.\nparser = pathlib.Path('/private/tmp/sweepx-file-analysis-pty.py').read_text().split('import hashlib, platform')[0]\nexec(parser.split('def check(')[0])\nbinary = repo / 'target/debug/sweepx'\nassert hashlib.sha256(binary.read_bytes()).hexdigest() == 'f77b26e420710ca1bf882214f676ec4284471e49c29405172ccbf5b57edd8c80'\nartifact_root = pathlib.Path(tempfile.mkdtemp(prefix='sweepx-warm-pty-audit-', dir='/private/tmp'))\nrecords=[]\nlib=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True)\nlib.proc_listchildpids.argtypes=[ctypes.c_int,ctypes.c_void_p,ctypes.c_int]\nlib.proc_listchildpids.restype=ctypes.c_int\ndef children(pid):\n    buffer=(ctypes.c_int*64)()\n    count=lib.proc_listchildpids(pid,buffer,ctypes.sizeof(buffer))\n    return list(buffer[:max(0,min(count,64))])\ndef hashes(root):\n    return {str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}\ndef check(index, mode, locale):\n    base = artifact_root / str(index); base.mkdir()\n    root = base / 'projects'; root.mkdir(); state=base/'state'\n    (root/'Cargo.toml').write_bytes(b'[workspace]\\nmembers=[]\\n')\n    target=root/'target'; target.mkdir()\n    (target/'payload').write_bytes(b'unchanged-pty-fixture')\n    for n in range(8192): (target/('probe-%05d'%n)).write_bytes(b'01234567')\n    originals=hashes(root)\n    expected_bytes=sum(p.stat().st_size for p in target.iterdir())\n    record={'case':index,'mode':mode,'locale':locale,'ordinaryTargetFiles':8193,'independentLogicalBytes':expected_bytes,'inputDigest':hashlib.sha256(json.dumps(originals,sort_keys=True).encode()).hexdigest()}\n    seed_cmd=[str(binary),'--locale',locale,'--state-dir',str(state),'--format','json','junk','--timings',str(root)]\n    # Bounded deterministic fixture has one candidate; output is retained in files and verified\n    # against a 2 MiB admission ceiling. Never dump arbitrary process output to the conversation.\n    with (base/'seed.json').open('wb') as out, (base/'seed.stderr').open('wb') as err:\n        proc=subprocess.Popen(seed_cmd,stdout=out,stderr=err,start_new_session=True)\n        try: code=proc.wait(timeout=15)\n        except subprocess.TimeoutExpired:\n            os.killpg(proc.pid,signal.SIGKILL); proc.wait(timeout=3); record['seedTimedOut']=True; return record\n    assert (base/'seed.json').stat().st_size <= 2*1048576\n    assert (base/'seed.stderr').stat().st_size <= 2*1048576\n    record['seedExitCode']=code\n    seed=json.loads((base/'seed.json').read_text())\n    assert code==0 and seed['status']=='ok' and len(seed['candidates'])==1\n    row=seed['candidates'][0]\n    assert row['path']==str(target) and row['ruleId']=='rust.target'\n    if row['sizeIsLogical']: assert int(row['reclaimable']['value'])==expected_bytes\n    record['seedFacts']={k:row[k] for k in ('ruleId','risk','reclaimable','sizeIsLogical')}\n    record['seedTimings']=[json.loads(line) for line in (base/'seed.stderr').read_text().splitlines() if line.startswith('{')]\n    assert list((state/'junk-cache').glob('*.json'))\n    master,slave=pty.openpty(); fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,140,0,0)); before=termios.tcgetattr(slave)\n    def child(): os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0)\n    env=os.environ.copy(); env['TERM']='xterm-256color'\n    command=[str(binary),'--locale',locale,'--state-dir',str(state),'junk','--tui',str(root)]\n    wrapper='\"$1\" --locale \"$2\" --state-dir \"$3\" junk --tui \"$4\" <&0 & sx_child=$!; printf \"\\\\nSX_TUI_PID:%s\\\\n\" \"$sx_child\"; wait \"$sx_child\"; sx_code=$?; printf \"\\\\nSX_TUI_EXIT:%s\\\\n\" \"$sx_code\"; IFS= read -r continuation; exit \"$sx_code\"'\n    proc=subprocess.Popen(['/bin/sh','-c',wrapper,'sweepx-pty-wrapper',str(binary),locale,str(state),str(root)],stdin=slave,stdout=slave,stderr=slave,env=env,preexec_fn=child)\n    started=time.monotonic(); output=bytearray(); sampler=None; view=''; complete=None; historical=None\n    def drain(wait):\n        if select.select([master],[],[],wait)[0]:\n            try: chunk=os.read(master,65536)\n            except OSError as e:\n                if e.errno!=errno.EIO: raise\n                return\n            output.extend(chunk)\n            assert len(output)<=2*1048576\n    try:\n        while time.monotonic()-started<10:\n            drain(.02); view=screen(output)\n            if historical is None and ('Historical/partial' in view or '历史/不完整' in view): historical=time.monotonic()-started\n            if complete is None and ('Complete' if locale=='en-US' else '完成') in view.splitlines()[1] and 'rust.target' in view:\n                complete=time.monotonic()-started; break\n            if time.monotonic()-started>=8 and sampler is None and proc.poll() is None:\n                marker=re.search(rb'SX_TUI_PID:(\\d+)',output)\n                pid=int(marker[1]) if marker else None\n                if pid is not None and pid in children(proc.pid):\n                    sampler=subprocess.Popen(['/usr/bin/sample',str(pid),'1','1','-mayDie','-file',str(base/'sample.txt')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n            if proc.poll() is not None: break\n        record.update(historicalSeconds=historical,completeSeconds=complete,originalTenSecondCompletion=complete is not None,stackSampleRequested=sampler is not None,ownedWrapperPid=proc.pid)\n        (base/'screen.txt').write_text(view)\n        marker=re.search(rb'SX_TUI_PID:(\\d+)',output)\n        pid=int(marker[1]) if marker else None\n        record['ownedTuiPid']=pid\n        if proc.poll() is None:\n            if mode=='sigterm':\n                assert pid is not None and pid in children(proc.pid)\n                os.kill(pid,signal.SIGTERM)\n            else: os.write(master,b'\\x03' if mode=='ctrl-c' else b'q')\n        exit_deadline=time.monotonic()+3\n        while b'SX_TUI_EXIT:' not in output and proc.poll() is None and time.monotonic()<exit_deadline: drain(.02)\n        marker=re.search(rb'SX_TUI_EXIT:(\\d+)',output)\n        if marker: record['exitCode']=int(marker[1])\n        else: record['exitTimedOut']=True\n        record['terminalAttributesRestored']=before==termios.tcgetattr(slave)\n        record['alternateScreenRestored']=b'\\x1b[?1049l' in output\n        record['capturedBytes']=len(output); (base/'pty.bin').write_bytes(output)\n        record['namesAndSHA256Unchanged']=originals==hashes(root)\n        record['targetFileCountUnchanged']=len(list(target.iterdir()))==8193\n        record['logicalBytesUnchanged']=sum(p.stat().st_size for p in target.iterdir())==expected_bytes\n        record['expectedExitCode']={'quit':0,'ctrl-c':130,'sigterm':143}[mode]\n        os.write(master,b'\\n')\n        exit_deadline=time.monotonic()+3\n        while proc.poll() is None and time.monotonic()<exit_deadline: drain(.02)\n        if proc.poll() is None:\n            os.killpg(proc.pid,signal.SIGKILL); proc.wait(timeout=3); record['wrapperExitTimedOut']=True\n        else: record['wrapperExitCode']=proc.returncode\n        record['allChecksPassed']=all((record['originalTenSecondCompletion'],historical is not None,record.get('exitCode')==record['expectedExitCode'],record.get('wrapperExitCode')==record['expectedExitCode'],record['terminalAttributesRestored'],record['alternateScreenRestored'],record['namesAndSHA256Unchanged'],record['targetFileCountUnchanged'],record['logicalBytesUnchanged']))\n        return record\n    finally:\n        if proc.poll() is None: os.killpg(proc.pid,signal.SIGKILL); proc.wait(timeout=3)\n        if sampler is not None:\n            try: sampler.wait(timeout=3)\n            except subprocess.TimeoutExpired: sampler.kill(); sampler.wait(timeout=3)\n            record['sampleExitCode']=sampler.returncode\n            if (base/'sample.txt').exists(): record['sampleReport']=(base/'sample.txt').read_bytes()[:256*1024].decode(errors='replace')\n        os.close(master); os.close(slave)\n\ncases=[('quit','en-US')]*3+[('ctrl-c','en-US'),('sigterm','en-US'),('quit','zh-CN')]\nfor i,(mode,locale) in enumerate(cases):\n    record=check(i,mode,locale); records.append(record); print(json.dumps({k:v for k,v in record.items() if k not in ('seedFacts','seedTimings','sampleReport')}),flush=True)\nartifact={'schema':'sweepx.warm-pty-audit/v1','date':'2026-10-02','host':platform.platform(),'binarySha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'buildReceipt':json.loads(pathlib.Path('/private/tmp/sweepx-stability-build-receipt.json').read_text()),'osCache':'uncontrolled','sweepxCache':'each isolated fixture seeded by complete ordinary junk report; Historical observed in TUI; ordinary root-cache hit counts recorded, not asserted for TUI','diagnosticAttempts':[{'phase':'PTY ownership','error':'First direct-child session leader exited before parent checked terminal attributes; tcgetattr returned ENOTTY. The experiment now keeps an owned shell session leader alive through restoration checks, verifies tool PID is its direct child before signals/sample, and releases it only afterward. This harness failure did not demonstrate a product hang.'},{'phase':'admission','error':'Existing executable checksum differed from previous default-feature oracle because it had subsequently been rebuilt by all-feature workspace tests; stopped before creating fixtures or launching scans. Rebuilt current source explicitly and bound the final experiment to the new checksum.'}],'fixedCases':6,'records':records,'harnessSource':pathlib.Path(__file__).read_text(),'decoderSource':parser,'scope':'Only owned fixtures/PTY processes; no deletion keys/Trash; diagnostic checks original 10s threshold, not performance comparison or old failure root-cause proof; no concurrent builds or other task diagnostics'}\n(artifact_root/'receipt.json').write_text(json.dumps(artifact,ensure_ascii=False,indent=2)+'\\n')\nprint('RECEIPT',artifact_root/'receipt.json',flush=True)\n",
+  "decoderSource": "import os, pty, termios, fcntl, struct, subprocess, select, time, tempfile, pathlib, json, re, unicodedata, signal\nrepo = pathlib.Path.cwd()\ndef screen(data):\n    cells = [[' '] * 140 for _ in range(30)]\n    x = y = 0\n    for token in re.finditer(r'\\x1b\\[([0-?]*)([ -/]*)([@-~])|([^\\x1b])', data.decode('utf-8', 'replace')):\n        if token[3]:\n            params = token[1].lstrip('?')\n            values = [int(part or '0') for part in params.split(';')] if params else [0]\n            n = values[0] or 1; command = token[3]\n            if command in ('H','f'):\n                y = max(0,n-1); x = max(0,(values[1] if len(values)>1 and values[1] else 1)-1)\n            elif command == 'G': x = max(0,n-1)\n            elif command == 'd': y = max(0,n-1)\n            elif command == 'A': y = max(0,y-n)\n            elif command == 'B': y += n\n            elif command == 'C': x += n\n            elif command == 'D': x = max(0,x-n)\n            elif command == 'J' and values[0] in (2,3): cells = [[' ']*140 for _ in range(30)]\n            elif command == 'K' and 0<=y<30:\n                left,right = (0,140) if values[0]==2 else ((0,min(x+1,140)) if values[0]==1 else (min(x,140),140))\n                for column in range(left,right): cells[y][column]=' '\n        elif token[4] == '\\r': x=0\n        elif token[4] == '\\n': y+=1\n        elif token[4].isprintable():\n            width=2 if unicodedata.east_asian_width(token[4]) in ('W','F') else 1\n            if 0<=x<140 and 0<=y<30:\n                old=cells[y][x]\n                cells[y][x]=token[4]\n                if width==2 and x+1<140: cells[y][x+1]=''\n                elif old and unicodedata.east_asian_width(old) in ('W','F') and x+1<140: cells[y][x+1]=' '\n            x+=width\n    return '\\n'.join(''.join(row) for row in cells)\n\nassert screen('\\x1b[1;1H检验内容\\x1b[1;1H候选 3\\x1b[K'.encode()).splitlines()[0].strip() == '候选 3'\n\n",
+  "scope": "Only owned fixtures/PTY processes; no deletion keys/Trash; diagnostic checks original 10s threshold, not performance comparison or old failure root-cause proof; no concurrent builds or other task diagnostics",
+  "deliveryDate": "2026-10-03",
+  "validationReference": "scan-stability-validation-2026-10-03.json",
+  "interpretation": "The fixed six cases completed within the original ten-second threshold. No stack sampling threshold was reached, and no old slow failure was captured. Historical cache was displayed; validated whole-root hits or complete file-index reuse in TUI are not inferred. OS cache uncontrolled; no baseline comparison, speedup, tail percentile or real Trash success claim."
+}
