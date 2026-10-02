@@ -1939,61 +1939,29 @@ fn config_failure_reason(
         .unwrap_or(CargoEvidenceReason::ConfigReadFailed)
 }
 
-/// Projects declaration presence for junk context with the existing bounded decoder.
-/// A parsed relative path is redacted and never resolved into effective scope or ownership.
-pub(crate) fn inspect_cargo_target_dir_declaration(bytes: &[u8]) -> Result<bool, &'static str> {
-    match decode_workspace_target_dir_declaration(CargoTargetDirSource::Config, bytes) {
-        CargoWorkspaceTargetDirDeclaration::Known { .. } => Ok(true),
-        CargoWorkspaceTargetDirDeclaration::VerifiedAbsent => Ok(false),
-        CargoWorkspaceTargetDirDeclaration::NotChecked { reason_code }
-        | CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } => Err(reason_code.code()),
-    }
+/// Shares TOML/shape parsing with the execution decoder while returning only this file's
+/// declaration. Callers must bound and redact the value; this is not a resolved/native path.
+pub(crate) fn inspect_cargo_target_dir_value(bytes: &[u8]) -> Result<Option<String>, &'static str> {
+    parse_cargo_target_dir_value(bytes).map_err(CargoEvidenceReason::code)
 }
 
 fn decode_workspace_target_dir_declaration(
     source: CargoTargetDirSource,
     bytes: &[u8],
 ) -> CargoWorkspaceTargetDirDeclaration {
-    if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
-        return CargoWorkspaceTargetDirDeclaration::Unknown {
-            reason_code: CargoEvidenceReason::ResourceLimit,
-        };
-    }
-    let table = match parse_toml(bytes) {
-        Ok(table) => table,
-        Err(reason) => {
-            return CargoWorkspaceTargetDirDeclaration::Unknown {
-                reason_code: reason,
-            };
+    let value = match parse_cargo_target_dir_value(bytes) {
+        Ok(Some(value)) => value,
+        Ok(None) => return CargoWorkspaceTargetDirDeclaration::VerifiedAbsent,
+        Err(reason_code) => {
+            return CargoWorkspaceTargetDirDeclaration::Unknown { reason_code };
         }
     };
-    if table.contains_key("include") {
-        return CargoWorkspaceTargetDirDeclaration::Unknown {
-            reason_code: CargoEvidenceReason::UnsupportedConfigInclude,
-        };
-    }
-    let Some(build) = table.get("build") else {
-        return CargoWorkspaceTargetDirDeclaration::VerifiedAbsent;
-    };
-    let Some(build) = build.as_table() else {
-        return CargoWorkspaceTargetDirDeclaration::Unknown {
-            reason_code: CargoEvidenceReason::UnsupportedManifestShape,
-        };
-    };
-    let Some(value) = build.get("target-dir") else {
-        return CargoWorkspaceTargetDirDeclaration::VerifiedAbsent;
-    };
-    let Some(value) = value.as_str() else {
-        return CargoWorkspaceTargetDirDeclaration::Unknown {
-            reason_code: CargoEvidenceReason::UnsupportedManifestShape,
-        };
-    };
-    let relative_components = match validate_relative_target_dir(value) {
+    // Execution evidence retains its deliberately narrow relative-path contract. The reporting
+    // observer can describe valid absolute/parent paths without admitting them into this decoder.
+    let relative_components = match validate_relative_target_dir(&value) {
         Ok(components) => components,
-        Err(reason) => {
-            return CargoWorkspaceTargetDirDeclaration::Unknown {
-                reason_code: reason,
-            };
+        Err(reason_code) => {
+            return CargoWorkspaceTargetDirDeclaration::Unknown { reason_code };
         }
     };
     CargoWorkspaceTargetDirDeclaration::Known {
@@ -2005,6 +1973,31 @@ fn decode_workspace_target_dir_declaration(
             source,
         },
     }
+}
+
+/// Parse once, moving the decoded string out of the bounded TOML table instead of copying it.
+/// Presence/type and include handling are common to reporting and the narrower execution model.
+fn parse_cargo_target_dir_value(bytes: &[u8]) -> Result<Option<String>, CargoEvidenceReason> {
+    if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
+        return Err(CargoEvidenceReason::ResourceLimit);
+    }
+    let mut table = parse_toml(bytes)?;
+    if table.contains_key("include") {
+        return Err(CargoEvidenceReason::UnsupportedConfigInclude);
+    }
+    let Some(build) = table.remove("build") else {
+        return Ok(None);
+    };
+    let toml::Value::Table(mut build) = build else {
+        return Err(CargoEvidenceReason::UnsupportedManifestShape);
+    };
+    let Some(value) = build.remove("target-dir") else {
+        return Ok(None);
+    };
+    let toml::Value::String(value) = value else {
+        return Err(CargoEvidenceReason::UnsupportedManifestShape);
+    };
+    Ok(Some(value))
 }
 
 fn cargo_config_failure_precedence(reason: CargoEvidenceReason) -> u8 {
@@ -3624,6 +3617,24 @@ mod tests {
             decode_workspace_manifest(&entry_id_for(1), &entry_id_for(2), b"[package]\nname='   '"),
             CargoEvidenceReason::UnsupportedManifestShape,
         );
+    }
+
+    #[test]
+    fn reporting_path_support_does_not_widen_execution_target_bindings() {
+        for body in [
+            &b"[build]\ntarget-dir='../shared'"[..],
+            &b"[build]\ntarget-dir='/private/absolute'"[..],
+            &b"[build]\ntarget-dir='.'"[..],
+        ] {
+            let report = crate::junk::manifest::inspect_cargo_target_dir_declaration(body);
+            assert_eq!(report.declared, Some(true));
+            assert!(matches!(
+                decode_workspace_target_dir_declaration(CargoTargetDirSource::Config, body),
+                CargoWorkspaceTargetDirDeclaration::Unknown {
+                    reason_code: CargoEvidenceReason::InvalidRelativeTargetDir
+                }
+            ));
+        }
     }
 
     #[test]

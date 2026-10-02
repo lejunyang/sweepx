@@ -93,6 +93,54 @@ pub fn inspect_cargo_manifest_context(bytes: &[u8]) -> ProjectContextEvidence {
     }
 }
 
+/// Lexical kind of a target-dir declaration on the host platform. No tilde/environment
+/// expansion, normalization, filesystem access or relationship to the candidate is inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoTargetDirPathKind {
+    /// Host-absolute path; it may refer to shared or unrelated data.
+    Absolute,
+    /// Relative spelling containing a parent component; confinement is not inferred.
+    ParentRelative,
+    /// Host-relative spelling, including literal `~`/`$` and `.` components.
+    Relative,
+    /// Windows drive prefix without an absolute root, such as `C:output`.
+    DriveRelative,
+    /// Windows root without an absolute drive, such as `\\output`.
+    RootRelative,
+}
+impl CargoTargetDirPathKind {
+    /// Locale-independent report code, with host-specific interpretation of path syntax.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Absolute => "absolute",
+            Self::ParentRelative => "parent_relative",
+            Self::Relative => "relative",
+            Self::DriveRelative => "drive_relative",
+            Self::RootRelative => "root_relative",
+        }
+    }
+
+    fn from_value(value: &str) -> Self {
+        use std::path::{Component, Path};
+        let path = Path::new(value);
+        if path.is_absolute() {
+            Self::Absolute
+        } else if path.has_root() {
+            Self::RootRelative
+        } else if matches!(path.components().next(), Some(Component::Prefix(_))) {
+            Self::DriveRelative
+        } else if path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            Self::ParentRelative
+        } else {
+            Self::Relative
+        }
+    }
+}
+
 /// Declaration from one observed config file; no raw target path is retained or opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +151,9 @@ pub struct CargoTargetDirDeclaration {
     pub reason: &'static str,
     /// True/false only for a supported, completely read config; `None` means unknown.
     pub declared: Option<bool>,
+    /// Host lexical path kind for a supported declaration, independent of precedence/ownership.
+    /// `None` distinguishes no declaration or an unknown input from a known relative path.
+    pub path_kind: Option<CargoTargetDirPathKind>,
 }
 
 /// Fixed-size local configuration observations. No resolved output directory or selection claim.
@@ -127,18 +178,28 @@ pub enum CargoConfigConsistency {
     NonAtomic,
 }
 
-/// Inspects only one file's supported target-dir declaration with the existing Cargo decoder.
-/// Pure parsing makes no native provenance, path resolution or exclusive ownership claim.
+/// Inspects one file's target-dir declaration with the shared Cargo TOML/shape decoder.
+/// Accepts bounded, nonempty host path spellings, including absolute and parent-relative values;
+/// these reporting facts do not enter the cleaner's narrower execution-path contract.
 pub fn inspect_cargo_target_dir_declaration(bytes: &[u8]) -> CargoTargetDirDeclaration {
-    match crate::cargo_cleaner_evidence::inspect_cargo_target_dir_declaration(bytes) {
-        Ok(declared) => CargoTargetDirDeclaration {
+    match crate::cargo_cleaner_evidence::inspect_cargo_target_dir_value(bytes) {
+        Ok(Some(value)) if value.len() > 4096 => {
+            CargoTargetDirDeclaration::unknown("resource_limit")
+        }
+        Ok(Some(value)) if value.is_empty() || value.contains('\0') => {
+            CargoTargetDirDeclaration::unknown("invalid_target_dir_declaration")
+        }
+        Ok(Some(value)) => CargoTargetDirDeclaration {
             status: ProjectContextStatus::Observed,
-            reason: if declared {
-                "target_dir_declared"
-            } else {
-                "target_dir_not_declared_in_file"
-            },
-            declared: Some(declared),
+            reason: "target_dir_declared",
+            declared: Some(true),
+            path_kind: Some(CargoTargetDirPathKind::from_value(&value)),
+        },
+        Ok(None) => CargoTargetDirDeclaration {
+            status: ProjectContextStatus::Observed,
+            reason: "target_dir_not_declared_in_file",
+            declared: Some(false),
+            path_kind: None,
         },
         Err(reason) => CargoTargetDirDeclaration::unknown(reason),
     }
@@ -153,6 +214,7 @@ impl CargoTargetDirDeclaration {
             },
             reason,
             declared: None,
+            path_kind: None,
         }
     }
 }

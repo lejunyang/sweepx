@@ -1,0 +1,1605 @@
+{
+  "schema": "sweepx.cargo-precedence-oracle/v1",
+  "date": "2026-10-02",
+  "host": "macOS-26.5.2-arm64-arm-64bit",
+  "cargoVersion": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "cargoSha256": "1de2e84c15443b70444eecfa959ff9099dd8c1a5606b6d9ef5bc0ea9c25bc7f9",
+  "fixture": "/private/tmp/sweepx-cargo-precedence-5fx6sq68",
+  "records": [
+    {
+      "name": "default",
+      "local": null,
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "default",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/0/project/target",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/0/project/target",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "relative",
+      "local": "private/output",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/1/project/private/output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/1/project/private/output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "parent_relative",
+      "local": "../shared",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/2/project/../shared",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/2/project/../shared",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "parent_relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "parent_relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "absolute",
+      "local": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/absolute-output",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/absolute-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/absolute-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "absolute"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "absolute"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "dot",
+      "local": ".",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/4/project/.",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/4/project/.",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "empty",
+      "local": "",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 101,
+      "targetDirectory": null,
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/5/project/",
+      "stderr": "error: the target directory is set to an empty string in /private/tmp/sweepx-cargo-precedence-5fx6sq68/5/project/.cargo/config.toml\n",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "invalid_target_dir_declaration",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "invalid_target_dir_declaration",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "tilde_literal",
+      "local": "~/literal",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/6/project/~/literal",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/6/project/~/literal",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "env_literal",
+      "local": "$OUTPUT/literal",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/7/project/$OUTPUT/literal",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/7/project/$OUTPUT/literal",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "home",
+      "local": null,
+      "ancestor": null,
+      "home": "home-output",
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "home",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/8/home-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/8/home-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "ancestor",
+      "local": null,
+      "ancestor": "ancestor-output",
+      "home": "home-output",
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "ancestor",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/9/ancestor-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/9/ancestor-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "nearest",
+      "local": "local-output",
+      "ancestor": "ancestor-output",
+      "home": "home-output",
+      "envTarget": null,
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "local",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/10/project/local-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/10/project/local-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "env_target",
+      "local": "local-output",
+      "ancestor": "ancestor-output",
+      "home": "home-output",
+      "envTarget": "env-output",
+      "envBuild": null,
+      "overrides": [],
+      "expectedSource": "env_target",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/11/project/env-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/11/project/env-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "env_build",
+      "local": "local-output",
+      "ancestor": "ancestor-output",
+      "home": "home-output",
+      "envTarget": null,
+      "envBuild": "env-build-output",
+      "overrides": [],
+      "expectedSource": "env_build",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/12/project/env-build-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/12/project/env-build-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "both_env",
+      "local": "local-output",
+      "ancestor": null,
+      "home": null,
+      "envTarget": "env-output",
+      "envBuild": "env-build-output",
+      "overrides": [],
+      "expectedSource": "env_target",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/13/project/env-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/13/project/env-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "config_cli",
+      "local": "local-output",
+      "ancestor": null,
+      "home": null,
+      "envTarget": "env-output",
+      "envBuild": null,
+      "overrides": [
+        "--config",
+        "build.target-dir=\"config-cli-output\""
+      ],
+      "expectedSource": "env_target",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/14/project/env-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/14/project/env-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    },
+    {
+      "name": "config_cli_no_special_env",
+      "local": "local-output",
+      "ancestor": null,
+      "home": null,
+      "envTarget": null,
+      "envBuild": "env-build-output",
+      "overrides": [
+        "--config",
+        "build.target-dir=\"config-cli-output\""
+      ],
+      "expectedSource": "cli_config",
+      "status": 0,
+      "targetDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/15/project/config-cli-output",
+      "expectedDirectory": "/private/tmp/sweepx-cargo-precedence-5fx6sq68/15/project/config-cli-output",
+      "stderr": "",
+      "sourceUnchanged": true,
+      "sweepxReports": [
+        {
+          "locale": "en-US",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        },
+        {
+          "locale": "zh-CN",
+          "status": 0,
+          "projectContext": {
+            "profile": "cargo_manifest",
+            "status": "observed",
+            "reason": "manifest_declarations_observed",
+            "cargoManifest": {
+              "kind": "package",
+              "memberPatterns": null,
+              "excludePatterns": null,
+              "defaultMemberPatterns": null,
+              "explicitWorkspace": false,
+              "pathDependenciesDeclared": false
+            },
+            "cargoConfig": {
+              "consistency": "non_atomic",
+              "config": {
+                "status": "unknown",
+                "reason": "config_not_observed_non_atomic",
+                "declared": null,
+                "pathKind": null
+              },
+              "configToml": {
+                "status": "observed",
+                "reason": "target_dir_declared",
+                "declared": true,
+                "pathKind": "relative"
+              },
+              "precedenceComplete": false
+            }
+          },
+          "executionPolicy": "require_project_ownership_and_activity",
+          "blockers": [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_repository_boundary"
+          ]
+        }
+      ],
+      "sourceAndPayloadUnchanged": true
+    }
+  ],
+  "scope": "Read-only Cargo metadata, offline and no dependencies. Cargo may create Cargo.lock inside isolated fixtures; no production project is queried. No deletion/performance/atomicity claim.",
+  "sweepx": {
+    "binarySha256": "92308cd8c84db0c3b716c5430d054f4f06af79657ed1a51fbfacdf621220d95e",
+    "build": "cargo build -p sweepx-cli --locked, debug, default features",
+    "sourceSha256": {
+      "crates/sweepx-core/src/cargo_cleaner_evidence.rs": "b29c95eefe2d9b21fd69a17590f75190a0cd175e8402c9a183afdf9baebfb94a",
+      "crates/sweepx-core/src/junk/manifest.rs": "b91252a28ddc27688a3464c6ab8579cbec01b0b39a5e7d819a0dc3aaa6781666",
+      "crates/sweepx-cli/src/main.rs": "3bc1be57a8702970a1f63754dcf23e05e048eadb8a2cc561921c7ccd470b0844"
+    },
+    "contract": "Only host lexical declarations are reported. All cases retain incomplete precedence, ownership/activity blockers; no production Cargo execution or Trash operation.",
+    "validationSourceSha256": {
+      "crates/sweepx-core/src/cargo_cleaner_evidence.rs": "b29c95eefe2d9b21fd69a17590f75190a0cd175e8402c9a183afdf9baebfb94a",
+      "crates/sweepx-core/src/junk/manifest.rs": "e1d0bc86a917ce1d774e4ab8fa888d9f410c387d732ef051c70ae8f117386cb1",
+      "crates/sweepx-cli/src/main.rs": "3bc1be57a8702970a1f63754dcf23e05e048eadb8a2cc561921c7ccd470b0844"
+    },
+    "sourceNote": "Only a Rustdoc sentence changed after the report oracle; measured build source fingerprints and current validation source fingerprints are separate."
+  },
+  "harnesses": {
+    "sweepx-cargo-precedence-oracle.py": "import pathlib, tempfile, subprocess, json, os, hashlib, platform\ncargo='/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo'\nowner=pathlib.Path(tempfile.mkdtemp(prefix='sweepx-cargo-precedence-',dir='/private/tmp'))\nrecords=[]\nfor i,(name,local,ancestor,home,env_target,env_build,overrides,expected_source) in enumerate([\n ('default',None,None,None,None,None,[],'default'),\n ('relative','private/output',None,None,None,None,[],'local'),\n ('parent_relative','../shared',None,None,None,None,[],'local'),\n ('absolute',str(owner/'absolute-output'),None,None,None,None,[],'local'),\n ('dot','.',None,None,None,None,[],'local'),\n ('empty','',None,None,None,None,[],'local'),\n ('tilde_literal','~/literal',None,None,None,None,[],'local'),\n ('env_literal','$OUTPUT/literal',None,None,None,None,[],'local'),\n ('home',None,None,'home-output',None,None,[],'home'),\n ('ancestor',None,'ancestor-output','home-output',None,None,[],'ancestor'),\n ('nearest','local-output','ancestor-output','home-output',None,None,[],'local'),\n ('env_target','local-output','ancestor-output','home-output','env-output',None,[],'env_target'),\n ('env_build','local-output','ancestor-output','home-output',None,'env-build-output',[],'env_build'),\n ('both_env','local-output',None,None,'env-output','env-build-output',[],'env_target'),\n ('config_cli','local-output',None,None,'env-output',None,['--config','build.target-dir=\"config-cli-output\"'],'env_target'),\n ('config_cli_no_special_env','local-output',None,None,None,'env-build-output',['--config','build.target-dir=\"config-cli-output\"'],'cli_config'),\n]):\n root=owner/str(i); project=root/'project'; h=root/'home'\n (project/'src').mkdir(parents=True);h.mkdir()\n manifest=b'[package]\\nname=\"fixture\"\\nversion=\"0.0.0\"\\nedition=\"2021\"\\n'\n (project/'Cargo.toml').write_bytes(manifest);(project/'src/lib.rs').write_bytes(b'')\n files=[project/'Cargo.toml',project/'src/lib.rs']\n def config(base,value,local):\n  if value is None:return\n  p=base/'.cargo/config.toml' if local else base/'config.toml'\n  p.parent.mkdir(exist_ok=True);p.write_text('[build]\\ntarget-dir='+json.dumps(value,ensure_ascii=False)+'\\n');files.append(p)\n config(project,local,True);config(root,ancestor,True);config(h,home,False)\n before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}\n env={'HOME':str(h),'CARGO_HOME':str(h),'PATH':'/usr/bin:/bin','RUSTUP_TOOLCHAIN':'1.98.0'}\n if env_target is not None:env['CARGO_TARGET_DIR']=env_target\n if env_build is not None:env['CARGO_BUILD_TARGET_DIR']=env_build\n args=[cargo,'metadata','--no-deps','--offline','--format-version','1',*overrides]\n r=subprocess.run(args,cwd=project,env=env,capture_output=True,timeout=15)\n out=json.loads(r.stdout) if r.returncode==0 else None\n expected={'default':project/'target','local':os.path.join(str(project),local) if local is not None else None,'home':str(root/'home-output'),'ancestor':root/'ancestor-output','env_target':project/'env-output','env_build':project/'env-build-output','cli_config':project/'config-cli-output','cli_target':project/'target-cli-output'}[expected_source]\n assert r.returncode == (101 if name == 'empty' else 0), (name,r.returncode,r.stderr.decode())\n if out:assert out['target_directory']==str(expected), (name,out['target_directory'],expected)\n assert before=={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}\n records.append({'name':name,'local':local,'ancestor':ancestor,'home':home,'envTarget':env_target,'envBuild':env_build,'overrides':overrides,'expectedSource':expected_source,'status':r.returncode,'targetDirectory':out['target_directory'] if out else None,'expectedDirectory':str(expected),'stderr':r.stderr.decode(),'sourceUnchanged':True})\n print(name,r.returncode,out['target_directory'] if out else r.stderr.decode(),flush=True)\nreceipt={'schema':'sweepx.cargo-precedence-oracle/v1','date':'2026-10-02','host':platform.platform(),'cargoVersion':subprocess.check_output([cargo,'--version']).decode().strip(),'cargoSha256':hashlib.sha256(pathlib.Path(cargo).read_bytes()).hexdigest(),'fixture':str(owner),'records':records,'earlierHarnessErrors':['Initial path oracle normalized parent components, but Cargo preserves their lexical spelling. A subsequent pathlib oracle collapsed dot components. Both incomplete runs stopped at the independent path comparison.', 'Initial CLI-config expectation incorrectly treated CARGO_TARGET_DIR like the generic config environment value. The observed special-variable priority was then checked separately against CARGO_BUILD_TARGET_DIR in the fixed final matrix.'], 'scope':'Read-only Cargo metadata, offline and no dependencies. Cargo may create Cargo.lock inside isolated fixtures; no production project is queried. No deletion/performance/atomicity claim.'}\npathlib.Path('/private/tmp/sweepx-cargo-precedence-oracle.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\\n')\n",
+    "sweepx-cargo-path-report-oracle.py": "import pathlib, subprocess, json, hashlib, os\nreceipt=json.loads(pathlib.Path('/private/tmp/sweepx-cargo-precedence-oracle.json').read_text())\nbinary=pathlib.Path('target/debug/sweepx').resolve()\nowner=pathlib.Path(receipt['fixture'])\nfor i,record in enumerate(receipt['records']):\n root=owner/str(i);project=root/'project';home=root/'home'\n target=project/'target';target.mkdir(exist_ok=True);payload=target/'personal';payload.write_bytes(b'preserved')\n source_files=[project/'Cargo.toml',project/'src/lib.rs',payload]\n for p in [project/'.cargo/config.toml',root/'.cargo/config.toml',home/'config.toml']:\n  if p.exists():source_files.append(p)\n before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files}\n env={'HOME':str(home),'CARGO_HOME':str(home),'PATH':'/usr/bin:/bin'}\n if record['envTarget'] is not None:env['CARGO_TARGET_DIR']=record['envTarget']\n if record['envBuild'] is not None:env['CARGO_BUILD_TARGET_DIR']=record['envBuild']\n reports=[]\n for locale in ['en-US','zh-CN']:\n  r=subprocess.run([str(binary),'--locale',locale,'--format','json','--state-dir',str(root/'sweepx-state'),'junk',str(root)],cwd=project,env=env,capture_output=True,timeout=15)\n  assert r.returncode==0,(record['name'],locale,r.stderr.decode())\n  rows=json.loads(r.stdout)['candidates'];assert len(rows)==1,(record['name'],rows)\n  row=rows[0];assert row['ruleId']=='rust.target'\n  config=row['projectContext']['cargoConfig'];assert config['precedenceComplete'] is False\n  declaration=config['configToml']\n  local=record['local']\n  if local is None or local=='':\n   assert declaration['declared'] is None\n   assert declaration['pathKind'] is None\n  else:\n   assert declaration['declared'] is True\n   expected_kind={'absolute':'absolute','parent_relative':'parent_relative'}.get(record['name'],'relative')\n   assert declaration['pathKind']==expected_kind,(record['name'],declaration)\n  assert 'project_ownership_not_verified' in row['blockers']\n  assert 'project_activity_not_verified' in row['blockers']\n  assert row['executionPolicy']=='require_project_ownership_and_activity'\n  for key in ['local','ancestor','home','envTarget','envBuild']:\n   value=record[key]\n   if value and value not in ['.']:\n    assert value not in json.dumps(row['projectContext']), (record['name'],key)\n  reports.append({'locale':locale,'status':r.returncode,'projectContext':row['projectContext'],'executionPolicy':row['executionPolicy'],'blockers':row['blockers']})\n assert reports[0]['projectContext']==reports[1]['projectContext']\n assert before=={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files}\n record['sweepxReports']=reports;record['sourceAndPayloadUnchanged']=True\n print(record['name'],'both locales passed',flush=True)\nreceipt['sweepx']={'binarySha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'build':'cargo build -p sweepx-cli --locked, debug, default features','sourceSha256':{p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in ['crates/sweepx-core/src/cargo_cleaner_evidence.rs','crates/sweepx-core/src/junk/manifest.rs','crates/sweepx-cli/src/main.rs']},'contract':'Only host lexical declarations are reported. All cases retain incomplete precedence, ownership/activity blockers; no production Cargo execution or Trash operation.'}\nreceipt['harnesses']={name:pathlib.Path('/private/tmp/'+name).read_text() for name in ['sweepx-cargo-precedence-oracle.py','sweepx-cargo-path-report-oracle.py']}\npathlib.Path('docs/architecture/cargo-target-path-oracle-2026-10-02.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\\n')\n"
+  },
+  "earlierHarnessErrors": [
+    "Initial oracle normalized parent components, but Cargo preserves the raw spelling. A subsequent pathlib oracle collapsed dot components. Both incomplete runs stopped at the independent comparison and did not count toward the final 16-case matrix.",
+    "Initial CLI-config expectation incorrectly treated CARGO_TARGET_DIR like generic config environment overrides. The fixed matrix independently checks it against CARGO_BUILD_TARGET_DIR; the special variable wins while the generic variable is overridden by --config."
+  ],
+  "validation": {
+    "affectedCratesCommand": "cargo test -p sweepx-core -p sweepx-cli --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+    "passed": 391,
+    "failed": 0,
+    "ignored": 1,
+    "filtered": 1,
+    "details": {
+      "core": 266,
+      "cliUnits": 58,
+      "cliContracts": 66,
+      "cliRelay": 1
+    },
+    "priorWorkspace": "Reuse unchanged-package test results from cc16a80, where the complete workspace ran 996 passed, 2 existing benchmarks ignored and 1 known system Trash test filtered. This turn did not rerun the complete workspace matrix.",
+    "lint": [
+      "affected core/cli all targets/all features",
+      "host workspace all targets/all features",
+      "Linux GNU workspace cross lint including tests",
+      "Windows GNU workspace cross lint including tests"
+    ],
+    "gaps": [
+      "Effective Cargo scope still unresolved in production",
+      "Actual --target-dir build invocation not exercised by the no-build metadata oracle",
+      "Native Linux/Windows and MSVC runtime",
+      "Real cloud providers and successful system Trash",
+      "Earlier intermittent probe/PTY/FSEvents root causes and final pathname-to-Trash race"
+    ]
+  },
+  "baseCommit": "cc16a80"
+}

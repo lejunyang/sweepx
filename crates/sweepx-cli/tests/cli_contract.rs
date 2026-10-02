@@ -80,6 +80,8 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
             assert_eq!(config["precedenceComplete"], false);
             assert_eq!(config["config"]["declared"], Value::Null);
             assert_eq!(config["configToml"]["declared"], true);
+            assert_eq!(config["configToml"]["pathKind"], "relative");
+            assert_eq!(config["config"]["pathKind"], Value::Null);
             assert!(!config.to_string().contains("private/output"));
             assert_eq!(
                 row["projectContext"]["cargoManifest"]["memberPatterns"],
@@ -116,6 +118,7 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
             assert!(text.contains(status));
             assert!(text.contains("target_dir_declared"));
             assert!(text.contains("precedenceComplete=false"));
+            assert!(text.contains("configTomlPathKind=relative"));
             assert!(!text.contains("private/output"));
         }
         assert_eq!(

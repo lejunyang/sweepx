@@ -272,8 +272,11 @@ fn config_declarations_share_the_cleaner_decoder_without_retaining_paths() {
     for (bytes, declared) in [
         (&b"[build]\ntarget-dir='secret/location'\n"[..], Some(true)),
         (&b"[build]\njobs=2\n"[..], Some(false)),
-        (&b"[build]\ntarget-dir='../shared'\n"[..], None),
-        (&b"[build]\ntarget-dir='/private/absolute'\n"[..], None),
+        (&b"[build]\ntarget-dir='../shared'\n"[..], Some(true)),
+        (
+            &b"[build]\ntarget-dir='/private/absolute'\n"[..],
+            Some(true),
+        ),
         (&b"include=['private.toml']\n"[..], None),
         (&b"[build]\ntarget-dir=7\n"[..], None),
         (&b"[build]\ntarget-dir='x'\ntarget-dir='y'\n"[..], None),
@@ -364,5 +367,116 @@ fn native_config_observations_refresh_and_preserve_ambiguity_and_execution_guard
         assert_eq!(current.status, ProjectContextStatus::Observed);
         assert_eq!(current.cargo_config.unwrap().config.declared, None);
         assert!(candidate.project_execution_blocker().is_some());
+    }
+}
+
+#[test]
+fn target_path_kinds_are_host_lexical_and_never_expand_or_normalize_values() {
+    let mut cases = vec![
+        ("../shared", CargoTargetDirPathKind::ParentRelative),
+        ("output/../shared", CargoTargetDirPathKind::ParentRelative),
+        (".", CargoTargetDirPathKind::Relative),
+        ("./output", CargoTargetDirPathKind::Relative),
+        ("~/literal", CargoTargetDirPathKind::Relative),
+        ("$OUTPUT/literal", CargoTargetDirPathKind::Relative),
+        ("目录/缓存", CargoTargetDirPathKind::Relative),
+    ];
+    #[cfg(unix)]
+    cases.extend([
+        ("/private/absolute", CargoTargetDirPathKind::Absolute),
+        (r"C:\output", CargoTargetDirPathKind::Relative),
+        (r"..\shared", CargoTargetDirPathKind::Relative),
+    ]);
+    #[cfg(windows)]
+    cases.extend([
+        (r"C:\output", CargoTargetDirPathKind::Absolute),
+        (r"\\server\share\output", CargoTargetDirPathKind::Absolute),
+        (r"C:output", CargoTargetDirPathKind::DriveRelative),
+        (r"\output", CargoTargetDirPathKind::RootRelative),
+        (r"..\shared", CargoTargetDirPathKind::ParentRelative),
+    ]);
+    for (value, kind) in cases {
+        let body = format!(
+            "[build]\ntarget-dir={}\n",
+            serde_json::to_string(value).unwrap()
+        );
+        let evidence = inspect_cargo_target_dir_declaration(body.as_bytes());
+        assert_eq!(evidence.status, ProjectContextStatus::Observed, "{value}");
+        assert_eq!(evidence.declared, Some(true));
+        assert_eq!(evidence.path_kind, Some(kind), "{value}");
+        let json = serde_json::to_value(evidence).unwrap();
+        assert_eq!(json["pathKind"], kind.code());
+        assert!(json.get("value").is_none());
+    }
+    let absent = inspect_cargo_target_dir_declaration(b"[build]\njobs=2\n");
+    assert_eq!(absent.declared, Some(false));
+    assert_eq!(absent.path_kind, None);
+    for (body, reason) in [
+        (
+            "[build]\ntarget-dir=''".to_string(),
+            "invalid_target_dir_declaration",
+        ),
+        (
+            r#"[build]
+target-dir="\u0000"
+"#
+            .to_string(),
+            "invalid_target_dir_declaration",
+        ),
+        (
+            format!("[build]\ntarget-dir='{}'", "x".repeat(4097)),
+            "resource_limit",
+        ),
+    ] {
+        let evidence = inspect_cargo_target_dir_declaration(body.as_bytes());
+        assert_eq!(evidence.status, ProjectContextStatus::Unknown);
+        assert_eq!(evidence.reason, reason);
+        assert_eq!(evidence.declared, None);
+        assert_eq!(evidence.path_kind, None);
+    }
+}
+
+#[test]
+fn native_target_path_declarations_are_reobserved_without_opening_declared_outputs() {
+    let (owner, project, mut candidate) = fixture();
+    let cargo = project.join(".cargo");
+    std::fs::create_dir(&cargo).unwrap();
+    let never_created = owner.path().join("no-output-directory");
+    let absolute = never_created.to_str().unwrap();
+    for (value, kind) in [
+        ("../shared", CargoTargetDirPathKind::ParentRelative),
+        (absolute, CargoTargetDirPathKind::Absolute),
+        (".", CargoTargetDirPathKind::Relative),
+        ("~/literal", CargoTargetDirPathKind::Relative),
+    ] {
+        let body = format!(
+            "[build]\ntarget-dir={}\n",
+            serde_json::to_string(value).unwrap()
+        );
+        std::fs::write(cargo.join("config.toml"), &body).unwrap();
+        ProjectFormatSession::new(Default::default(), CancellationToken::new())
+            .refresh(&mut candidate);
+        let evidence = candidate.project_context.unwrap().cargo_config.unwrap();
+        assert_eq!(evidence.config_toml.declared, Some(true));
+        assert_eq!(evidence.config_toml.path_kind, Some(kind));
+        assert!(!evidence.precedence_complete);
+        assert!(candidate.project_execution_blocker().is_some());
+        // Ordinary reads independently verify the config and user payload remain intact.
+        assert_eq!(
+            std::fs::read(cargo.join("config.toml")).unwrap(),
+            body.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(project.join("target/personal")).unwrap(),
+            b"preserved"
+        );
+        assert!(!never_created.exists());
+        let report = serde_json::to_string(&evidence).unwrap();
+        if value.len() > 1 {
+            assert!(
+                !report.contains(value),
+                "raw target declaration leaked: {value}"
+            );
+        }
     }
 }

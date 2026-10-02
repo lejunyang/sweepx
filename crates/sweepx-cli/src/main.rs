@@ -2611,11 +2611,21 @@ fn junk_project_context_label(
         use std::fmt::Write;
         let _ = write!(
             label,
-            "; config={}/{}; configToml={}/{}; precedenceComplete={}",
+            "; config={}/{}; configPathKind={}; configToml={}/{}; configTomlPathKind={}; precedenceComplete={}",
             config.config.status.code(),
             config.config.reason,
+            config
+                .config
+                .path_kind
+                .map(|kind| kind.code())
+                .unwrap_or("unknown"),
             config.config_toml.status.code(),
             config.config_toml.reason,
+            config
+                .config_toml
+                .path_kind
+                .map(|kind| kind.code())
+                .unwrap_or("unknown"),
             config.precedence_complete
         );
     }

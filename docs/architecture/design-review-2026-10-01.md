@@ -868,3 +868,17 @@ CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和�
 最终在这项微负载下完整阶段中位数减少约 23%，不推断端到端倍数或 p95/p99，也不据此解决启动前的旧超时。新增原生低层回归用受控匿名管道验证数据/EOF 唤醒且不消费答案，以已输出 ready、阻塞在本次 stdin 的子进程验证退出唤醒不代替 Child::wait 回收；等待由 barrier/有界通道同步，不使用生产 5 ms 常量制造时间预期。既有 EOF 与子进程独立完成、继承 stdout、超量、取消、期限和整批准入回归均保留。初次测试试图访问队列私有字段的编译错误已修正，没有扩大字段可见性或 cfg；初次脚本传错二进制 checksum 在启动测试之前拒绝，未计入样本。
 
 最终工具专项 26 项通过；完整工作区串行 996 项通过、0 失败、2 项原有基准 ignored，既有系统 Trash 成功挂起用例仍显式排除。受影响 core 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 与 core 包清单通过。计时之后只新增 Rustdoc，最终矩阵重新编译当前源码；测量及验收二进制/源码 checksum 分别保留。最终矩阵与 lint/交叉构建有重叠，不充作计时样本。旧 probe/debug 热缓存 PTY/FSEvents 间歇根因、有效配置/独占所有权/活动、跨平台缓存及原生/MSVC/provider/Trash 验收和最终 pathname 竞态继续开放。
+
+
+## Cargo 输出路径声明与实际优先级对照（2026-10-02）
+
+原项目配置观察复用了 cleaner 的窄执行路径 decoder，因此将 Cargo 支持的绝对路径、父级相对路径及 `.` 声明报告为 unknown。这将“执行路径不受支持”混同于“当前配置声明不可观察”，也会妨碍后续有效输出位置求解。本轮把已有 TOML/字段/include 解码与执行路径准入分开：共用一个 parser，移动解析后的字符串而不另作副本；cleaner 的原窄相对路径和原生绑定契约不变。
+
+- 当前配置报告可观察最多 4096 字节、非空且不含 NUL 的路径拼写，新增固定大小 `pathKind`：宿主 absolute / parent_relative / relative；Windows 另有 drive_relative / root_relative。这是词法声明，不验证任意 Cargo/文件系统语义，不规范化、不展开 `~`/环境引用、不打开声明路径、不保留原文。空值、NUL、超限、未知 include、错误类型和坏 TOML 保持独立缺口。JSON 字段和枚举值跨语言稳定；human/TUI 共用原展示入口。缺失配置仍是非原子 unknown，`precedenceComplete=false`，当前 invocation/revision 重观察、缓存不保存解释以及项目所有权/活动阻碍均保持。
+- [独立 Cargo/SweepX 对照](cargo-target-path-oracle-2026-10-02.json)来自本机 arm64 macOS、固定 Cargo/Rust 1.98.0 与 debug 默认 feature CLI。预定 16 个隔离 fixture，使用 offline/no-deps metadata：15 项成功，一项空 target-dir 按预期被 Cargo 拒绝；核对默认、相对/父级/绝对/`.`/字面量 `~` 与 `$`、Cargo home、祖先与近端配置、两个环境变量和 CLI config。相对路径的基点因来源而异；Cargo 原始结果保留 `../` 和 `.`，不能提前 lexical normalize 再当作原生关系。`CARGO_TARGET_DIR` 是特殊输入，实测优先于 `--config build.target-dir`；`CARGO_BUILD_TARGET_DIR` 属于通用配置环境输入，可以被 `--config` 覆盖。不能只用通用“CLI > env > file”说明求解全部 target-dir 优先级。依据还包括 [Cargo 配置文档](https://doc.rust-lang.org/cargo/reference/config.html)及 [环境变量文档](https://doc.rust-lang.org/cargo/reference/environment-variables.html)；实际 CLI `--target-dir` 构建尚未由这个不编译的 oracle 验收。
+- 同一 16 个 fixture 再各运行中英文 SweepX，32 份报告核对宿主声明类型、原文不外泄、缺失/空声明不补零、所有权/活动 blockers 和 incomplete precedence。普通读取/SHA-256 核对配置、manifest、源码及个人 payload 未变；Cargo 自身仅在隔离 fixture 可能创建锁文件，不查询生产项目。两份 oracle 源码、版本、二进制及源码摘要保留，没有执行 Trash，也不作速度或原子快照声明。
+- 回归覆盖合法路径声明、宿主差异、字面量不展开、空/NUL/超限、不同 invocation 的原生重观察、未创建输出目录仍可报告、原文字节保留，以及报告支持不能将绝对/父级/`.` 路径提升到旧 cleaner 执行证据。此前仅支持相对路径的报告断言随真实 Cargo 对照修正；执行 decoder 的拒绝断言仍保留。初始 oracle 对 `../`、`.` 的归一化预期错误以及特殊环境变量优先级预期错误分别记录，未把中断的尝试混入最终固定矩阵。
+
+交付检查：受影响 core/CLI 原生测试 391 项通过、0 失败（core 266、CLI 单元/契约/relay 58/66/1），1 项 core 原有基准 ignored，已诊断系统 Trash 成功挂起用例仍显式排除。未改包复用 cc16a80 的完整工作区 996 项通过结果，不称为本轮又跑一次完整矩阵。最终 affected/host 工作区以及 Linux GNU、Windows GNU 工作区 all-targets/all-features clippy（含目标测试代码）、fmt/diff、54 份 Markdown 检查及 core/CLI 包清单通过。最后只改一条 Rustdoc，报告 oracle 构建与当前源码摘要分别保留。交叉 lint 不证明原生运行，MSVC、真实 provider、系统 Trash 成功及最终 pathname 竞态缺口保留。
+
+本轮修正的是有效配置求解所需的路径声明输入。cwd/祖先/Cargo home 的完整原生内容范围、特殊环境与 CLI 输入优先级的生产组合、输出目录原生匹配、独占归属及活动观察仍未完成；规则扩展验收不打勾。旧 probe/debug 热缓存 PTY/FSEvents 间歇根因、跨平台缓存及其他发现路径资源审计继续开放。
