@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；完整语言语义、真实工具版本采集、独占所有权/活动观察仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 已补实际 SDK 生成文件、冻结依赖锁与字节记录；完整语言语义、Dart 与更广版本/配置采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -705,3 +705,18 @@ Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang
 交付验证（arm64 macOS，Rust 1.98.0）：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 941 项通过、0 失败、2 项原有基准 ignored，其中 catalog/core/CLI unit/contracts 为 28/233/49/63 项通过。受影响 catalog/core/CLI 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、53 份 Markdown 检查和三个受影响包清单通过。Windows 初次检查发现新增测试误用 Unix-only 路径助手，改为正确平台夹具后 Windows 全工作区复验通过；宿主新增契约实际运行 1 项通过，其余未变代码复用完整矩阵，不称为再跑一次全矩阵。一次 exact 过滤拼写只选中零项，未计作验证，随后完整测试名真实执行。
 
 早期失败均记录并核对：core 的 2 项 Git 测试、CLI 的 2 项缓存单元及 2 项 Git 契约原来精确断言没有项目执行阻碍，已更新为完整的所有权/活动加原 Git blocker 列表，保留独立的 confidence/tracked/ignore/原生字节断言。新增 CLI 正例的最初无仓库夹具观察到实际祖先 Git 边界，改为隔离夹具内创建真实仓库，保持生产边界拒绝和精确断言不变。没有放宽期限、反复重试偶发失败直到通过、删除测试或隐藏后续未运行步骤。既有系统 Trash 成功挂起仍显式排除；Linux/Windows 原生宿主、MSVC、真实 provider 未验证，旧 300 ms、共享缓存 ProbeUnavailable 与 debug PTY 停顿根因仍未解决。下一步继续独立项目上下文/所有权/活动观察和版本采集，验收清单不因这次阻止错误准入而勾选完成。
+
+
+## 实际 SvelteKit SDK 生成样本（2026-10-02）
+
+此前 SvelteKit 正例仅按 tagged source 独立编写，不能证明识别器兼容实际 SDK 输出。本轮在隔离项目/home/store 与受控环境运行固定的 @sveltejs/kit 1.0.0、2.0.0 sync，保存未经改写的生成配置和 ambient 声明、原始项目输入、冻结依赖锁、上游 MIT license 与逐文件 SHA-256/长度 receipt。实际宿主为 arm64 macOS、Node v24.19.0、pnpm 11.25.0；没有更改 SweepX 依赖、运行用户配置或生成删除授权。采集入口和复验命令见[项目规则执行样本](../development/project-rule-corpus.md)。
+
+普通 Rust 回归离线使用真实记录，独立校验所有保留文件的 bytes/hash；生产 profile 直接接受两份原始输出，不清理注释/换行来迎合 parser。原生 core 回归通过内置垃圾扫描取得候选，目录混入个人笔记仍 recognized 且拒绝回收，普通 fs::read 核对输入/生成文件未改动；macOS 缓存不保留格式答案，之后修改配置重新观察为 unknown。自定义 rootDirs 的受控反例仍 unknown，未冒充实际 SDK 自定义配置采集。
+
+采集工具拒绝覆盖已有或部分输出，每文件最多 256 KiB，每子进程最多 1 MiB 输出及 180 秒，退出/失败/取消停止自己启动的 POSIX 进程组并等待直接子进程。六项采集回归覆盖失败、无限输出、已退出 leader 留下子进程、保留已有采集、256 KiB 精确字节边界与链接/FIFO 拒绝；不把这些工作限额宣称为全局磁盘/网络配额。normal scan 不运行 SDK，未新增 crate、生产观察阶段或性能结论。
+
+本单元补上两个真实 SvelteKit 版本的正例证据，没有完成 Dart SDK 采集、更广 SvelteKit 版本/配置、完整语言语义、项目独占归属或活动观察；规则扩展仍未勾选。当前 Cargo substrate 与 junk 普通 marker 的 native-row 接缝仍需处理，不能从省略的 manifest 行伪造完整扫描身份。平台运行、云 provider、MSVC、Trash 成功及旧间歇失败/竞态继续保留。
+
+交付验证：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 944 项通过、0 失败、2 项原有基准 ignored，既有系统 Trash 成功挂起继续显式排除。之后仅加强 cache JSON 无格式字段断言，实际目标回归再执行 1 项通过，其余未改行为复用完整结果。受影响 core/fixtures、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查通过；fixtures/core 包清单通过，fixtures 包含全部 18 份原始录制文件。采集工具六项测试通过；超时子进程测试用实际 child-ready 标记确认已启动后再检查迟到写入不存在，避免启动失败冒充取消成功。本轮没有重现或宣称修复旧 300 ms probe、共享缓存 ProbeUnavailable 或 debug 热缓存 PTY 问题；跨编译不作为 Linux/Windows 运行证据，MSVC、实际 cloud provider 与 Trash 成功未验收。
+
+最后按仓库冻结依赖重新运行两版真实 SDK，逐文件与原记录比较，两版各八份输入/输出/许可文件全部字节相同；新 receipt 仅采集时刻不同，不用后来的时间覆盖原始记录。采集读取使用限长读和前后元数据核对，拒绝 final link、特殊文件及超出生成项目的路径，不靠 stat 后的无界 read_bytes 声称字节有界。

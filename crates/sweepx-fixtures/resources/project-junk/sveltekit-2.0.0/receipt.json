@@ -1,0 +1,58 @@
+{
+  "schema": "sweepx.generated-format-recording/v1",
+  "tool": "@sveltejs/kit",
+  "version": "2.0.0",
+  "recordedAt": "2026-10-02T08:08:19.515368+00:00",
+  "host": {
+    "os": "Darwin",
+    "arch": "arm64"
+  },
+  "node": "v24.19.0",
+  "pnpm": "11.25.0",
+  "requestedEnvironmentKeys": [
+    "CI",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "NO_COLOR",
+    "PATH",
+    "TMPDIR"
+  ],
+  "installScripts": false,
+  "generator": "node @sveltejs/kit/svelte-kit.js sync",
+  "scope": "default empty config; generated signatures only; report-only",
+  "files": {
+    "package.json": {
+      "bytes": 216,
+      "sha256": "b7c23ba85fac4e36c4867595566bc53d5bbba844bd8ba8cea929e330217351a6"
+    },
+    "svelte.config.js": {
+      "bytes": 19,
+      "sha256": "450f0af4f4c1ecc4c7180f2e364c8a59bfed69dd350fb6b47bce8641c2a37786"
+    },
+    "src/routes/+page.svelte": {
+      "bytes": 39,
+      "sha256": "986340235f9d6c790a1a922a078aef0036fc1560c925816b3105ba994a6d0b12"
+    },
+    "tsconfig.json": {
+      "bytes": 42,
+      "sha256": "daac96d2683f2a1213331407ef5b5c0efcbad28ad61ca35d79f02952b1f1177c"
+    },
+    "pnpm-lock.yaml": {
+      "bytes": 30023,
+      "sha256": "c67f8910050ec260cdfe5e06dca286e3e882af5f23b6c59a5bd988e267531266"
+    },
+    "generated-tsconfig.json": {
+      "bytes": 694,
+      "sha256": "79b90d42e8b9a558ce72c158cfc49a4cf1ef4c173f6c3a3fef1f8044058c3e28"
+    },
+    "ambient.d.ts": {
+      "bytes": 4191,
+      "sha256": "80f12e3087b932357358b7aee7adcb78cbe3c467f2ca68b4a13cf7a0ffd85ba8"
+    },
+    "UPSTREAM-LICENSE": {
+      "bytes": 1110,
+      "sha256": "ac6ecdc526c9e6aec1db76f0e8dfe344d792380e974686476e7c512152ae2636"
+    }
+  }
+}

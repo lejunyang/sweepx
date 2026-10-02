@@ -1,12 +1,15 @@
-//! Controlled structural fixtures, not recordings of executed tool versions.
+//! Controlled structural fixtures and separately attributed SDK execution recordings.
 //!
 //! Dart package-config layouts: https://dart.dev/tools/pub/cmd/pub-get and
 //! https://dart.dev/tools/pub/workspaces (workspaces introduced in 3.6).
 //! SvelteKit 1.0/2.0 sync writes: tagged `packages/kit/src/core/sync` sources at
 //! https://github.com/sveltejs/kit. Version 3 moved configuration and generated type files;
 //! https://svelte.dev/docs/kit/project-structure documents the current project layout.
-//! Dart and SvelteKit payloads include independently authored generated signatures. None are
-//! recordings of executed SDKs or complete TypeScript grammar fixtures.
+//! The authored Dart/SvelteKit cases below are not SDK execution recordings or complete
+//! TypeScript grammar fixtures. Actual recordings live in the separately attributed module.
+
+/// Actual version-pinned SDK recordings, kept separate from authored structural cases below.
+pub mod recordings;
 
 use std::path::{Path, PathBuf};
 

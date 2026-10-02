@@ -497,6 +497,173 @@ fn json_depth_admission_ignores_brackets_and_escapes_inside_strings() {
 
 use sweepx_fixtures::project_junk::{SVELTEKIT_AMBIENT, SVELTEKIT1_CONFIG, SVELTEKIT2_CONFIG};
 
+fn recorded_file<'a>(
+    recording: &'a sweepx_fixtures::project_junk::recordings::SvelteKitRecording,
+    name: &str,
+) -> &'a [u8] {
+    recording
+        .files
+        .iter()
+        .find(|file| file.recording_name == name)
+        .unwrap()
+        .bytes
+}
+
+#[test]
+fn executed_legacy_sdk_outputs_match_without_rewriting_generated_bytes() {
+    for recording in sweepx_fixtures::project_junk::recordings::SVELTEKIT {
+        let config = recorded_file(recording, "generated-tsconfig.json");
+        let ambient = recorded_file(recording, "ambient.d.ts");
+        let evidence = inspect_sveltekit_sync(config, ambient);
+        assert_eq!(evidence.status, ProjectFormatStatus::Recognized);
+        assert_eq!(
+            evidence.reason,
+            match recording.version {
+                "1.0.0" => "sveltekit_legacy_node_non_atomic_signatures",
+                "2.0.0" => "sveltekit_legacy_bundler_non_atomic_signatures",
+                _ => panic!("add an independently verified expectation for this recorded version"),
+            }
+        );
+        // A valid JSON document/real generator header alone cannot admit custom output. Keep
+        // these explicit counterexamples alongside, rather than normalizing them into positives.
+        let mut custom: serde_json::Value = serde_json::from_slice(config).unwrap();
+        custom["compilerOptions"]["rootDirs"] = serde_json::json!(["../../personal", "./types"]);
+        assert_eq!(
+            inspect_sveltekit_sync(&serde_json::to_vec(&custom).unwrap(), ambient).reason,
+            "unsupported_sync_config_shape"
+        );
+    }
+}
+
+#[test]
+fn recorded_sdk_project_with_personal_payload_remains_report_only_and_reobserves_cache() {
+    for recording in sweepx_fixtures::project_junk::recordings::SVELTEKIT {
+        #[cfg(target_os = "linux")]
+        let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        for file in recording.files {
+            let path = root.join(file.project_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, file.bytes).unwrap();
+        }
+        std::fs::write(
+            root.join(".svelte-kit/personal-notes"),
+            b"keep these user notes",
+        )
+        .unwrap();
+        let service = JunkService::built_in().unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+            &context,
+            &crate::ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: None,
+            },
+            None,
+            &service,
+            None,
+        )
+        .unwrap();
+        let aggregates = scan
+            .scan
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect();
+        let mut candidates = scan
+            .scan
+            .summary
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let identity = entry.identity.as_ref()?;
+                service.interpret(
+                    scan.decisions.get(&identity.entry_id)?,
+                    entry,
+                    &aggregates,
+                    &[],
+                    &PlatformJunkEvidence::default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 1);
+        let candidate = &mut candidates[0];
+        assert_eq!(candidate.rule_id, "node.sveltekit-output");
+        ProjectFormatSession::new(ProjectFormatLimits::default(), CancellationToken::new())
+            .refresh(candidate);
+        assert_eq!(
+            candidate.project_format.as_ref().unwrap().status,
+            ProjectFormatStatus::Recognized
+        );
+        assert_eq!(
+            candidate.project_execution_blocker(),
+            Some("project_ownership_not_verified")
+        );
+        // Verify all real generated/source bytes through ordinary filesystem reads. Adding user
+        // data does not invalidate generated signatures and therefore cannot establish ownership.
+        for file in recording.files {
+            assert_eq!(
+                std::fs::read(root.join(file.project_path)).unwrap(),
+                file.bytes
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.join(".svelte-kit/personal-notes")).unwrap(),
+            b"keep these user notes"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let stored = crate::junk::cache::StoredJunkCandidate::from_candidate(candidate);
+            let serialized = serde_json::to_value(&stored).unwrap();
+            assert!(serialized.get("projectFormat").is_none());
+            assert!(serialized.get("project_format").is_none());
+            let mut restored = refresh_candidate_interpretation(
+                stored.into_candidate(),
+                service.project_rules(),
+                &[],
+                &PlatformJunkEvidence::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                restored.project_format.as_ref().unwrap().status,
+                ProjectFormatStatus::NotChecked
+            );
+            let mut edited: serde_json::Value =
+                serde_json::from_slice(recorded_file(recording, "generated-tsconfig.json"))
+                    .unwrap();
+            edited["compilerOptions"]["moduleResolution"] = serde_json::json!("custom");
+            std::fs::write(
+                root.join(".svelte-kit/tsconfig.json"),
+                serde_json::to_vec(&edited).unwrap(),
+            )
+            .unwrap();
+            ProjectFormatSession::new(ProjectFormatLimits::default(), CancellationToken::new())
+                .refresh(&mut restored);
+            assert_eq!(
+                restored.project_format.as_ref().unwrap().status,
+                ProjectFormatStatus::Unknown
+            );
+            assert_eq!(
+                restored.project_execution_blocker(),
+                Some("project_ownership_not_verified")
+            );
+            assert_eq!(
+                std::fs::read(root.join(".svelte-kit/personal-notes")).unwrap(),
+                b"keep these user notes"
+            );
+        }
+    }
+}
+
 #[test]
 fn legacy_sync_profiles_distinguish_real_signatures_from_user_and_changed_shapes() {
     for config in [SVELTEKIT1_CONFIG, SVELTEKIT2_CONFIG] {

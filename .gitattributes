@@ -42,3 +42,6 @@ SIGNATURE text eol=lf
 *.gz      binary
 *.woff    binary
 *.woff2   binary
+
+# Keep actual SDK-generated ambient files verbatim, including upstream comment indentation.
+crates/sweepx-fixtures/resources/project-junk/sveltekit-*/ambient.d.ts whitespace=-blank-at-eol
