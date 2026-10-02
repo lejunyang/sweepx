@@ -1,0 +1,1056 @@
+{
+  "schema": "sweepx.probe-diagnostic/v1",
+  "independentLaunchExperiment": {
+    "date": "2026-10-02",
+    "host": {
+      "system": "Darwin",
+      "release": "25.5.0",
+      "machine": "arm64"
+    },
+    "workload": "10 independent pairs of new identical executable shell scripts; fixed ready bytes; each direct/repeated/interpreter/inline answer independently checked; no SweepX or OS cache reset",
+    "samples": [
+      {
+        "repetition": 1,
+        "case": "direct-fresh",
+        "launchMs": 1.885749981738627,
+        "completeMs": 996.7476669989992
+      },
+      {
+        "repetition": 1,
+        "case": "direct-repeat",
+        "launchMs": 3.6427919985726476,
+        "completeMs": 9.854875010205433
+      },
+      {
+        "repetition": 1,
+        "case": "interpreter-fresh",
+        "launchMs": 1.616209017811343,
+        "completeMs": 10.660667001502588
+      },
+      {
+        "repetition": 1,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.6144579858519137,
+        "completeMs": 285.10120799182914
+      },
+      {
+        "repetition": 1,
+        "case": "inline",
+        "launchMs": 1.9785409967880696,
+        "completeMs": 7.59733299491927
+      },
+      {
+        "repetition": 2,
+        "case": "direct-fresh",
+        "launchMs": 1.6707500035408884,
+        "completeMs": 268.11408301000483
+      },
+      {
+        "repetition": 2,
+        "case": "direct-repeat",
+        "launchMs": 1.7770839913282543,
+        "completeMs": 7.295374991372228
+      },
+      {
+        "repetition": 2,
+        "case": "interpreter-fresh",
+        "launchMs": 1.4147080073598772,
+        "completeMs": 8.046541013754904
+      },
+      {
+        "repetition": 2,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.2497080024331808,
+        "completeMs": 330.1697920251172
+      },
+      {
+        "repetition": 2,
+        "case": "inline",
+        "launchMs": 1.6081249923445284,
+        "completeMs": 8.416750002652407
+      },
+      {
+        "repetition": 3,
+        "case": "direct-fresh",
+        "launchMs": 1.5309580194298178,
+        "completeMs": 319.52266601729207
+      },
+      {
+        "repetition": 3,
+        "case": "direct-repeat",
+        "launchMs": 1.4949580072425306,
+        "completeMs": 7.093541003996506
+      },
+      {
+        "repetition": 3,
+        "case": "interpreter-fresh",
+        "launchMs": 1.3875000004190952,
+        "completeMs": 9.22750000609085
+      },
+      {
+        "repetition": 3,
+        "case": "direct-after-interpreter",
+        "launchMs": 2.7565829805098474,
+        "completeMs": 267.7099169814028
+      },
+      {
+        "repetition": 3,
+        "case": "inline",
+        "launchMs": 1.9006250076927245,
+        "completeMs": 8.00708300084807
+      },
+      {
+        "repetition": 4,
+        "case": "direct-fresh",
+        "launchMs": 2.035000012256205,
+        "completeMs": 336.3737080071587
+      },
+      {
+        "repetition": 4,
+        "case": "direct-repeat",
+        "launchMs": 2.1278340136632323,
+        "completeMs": 9.58000001264736
+      },
+      {
+        "repetition": 4,
+        "case": "interpreter-fresh",
+        "launchMs": 1.8482499872334301,
+        "completeMs": 8.385124994674698
+      },
+      {
+        "repetition": 4,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.8370829930063337,
+        "completeMs": 257.23925000056624
+      },
+      {
+        "repetition": 4,
+        "case": "inline",
+        "launchMs": 1.765332999639213,
+        "completeMs": 170.03833298804238
+      },
+      {
+        "repetition": 5,
+        "case": "direct-fresh",
+        "launchMs": 1.900999981444329,
+        "completeMs": 325.8649159979541
+      },
+      {
+        "repetition": 5,
+        "case": "direct-repeat",
+        "launchMs": 1.8855410162359476,
+        "completeMs": 9.388166014105082
+      },
+      {
+        "repetition": 5,
+        "case": "interpreter-fresh",
+        "launchMs": 2.0795000018551946,
+        "completeMs": 8.295749983517453
+      },
+      {
+        "repetition": 5,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.4223329781088978,
+        "completeMs": 345.08654099772684
+      },
+      {
+        "repetition": 5,
+        "case": "inline",
+        "launchMs": 2.0409999997355044,
+        "completeMs": 6.4290830050595105
+      },
+      {
+        "repetition": 6,
+        "case": "direct-fresh",
+        "launchMs": 1.4171249931678176,
+        "completeMs": 517.9537079820875
+      },
+      {
+        "repetition": 6,
+        "case": "direct-repeat",
+        "launchMs": 1.8461660074535757,
+        "completeMs": 9.14508302230388
+      },
+      {
+        "repetition": 6,
+        "case": "interpreter-fresh",
+        "launchMs": 1.7740409821271896,
+        "completeMs": 10.488083004020154
+      },
+      {
+        "repetition": 6,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.820624980609864,
+        "completeMs": 333.5937089868821
+      },
+      {
+        "repetition": 6,
+        "case": "inline",
+        "launchMs": 1.928458019392565,
+        "completeMs": 9.257041005184874
+      },
+      {
+        "repetition": 7,
+        "case": "direct-fresh",
+        "launchMs": 1.4690000098198652,
+        "completeMs": 388.99841700913385
+      },
+      {
+        "repetition": 7,
+        "case": "direct-repeat",
+        "launchMs": 3.1756660027895123,
+        "completeMs": 10.629875003360212
+      },
+      {
+        "repetition": 7,
+        "case": "interpreter-fresh",
+        "launchMs": 1.6405420028604567,
+        "completeMs": 11.13704199087806
+      },
+      {
+        "repetition": 7,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.9572080054786056,
+        "completeMs": 642.7987909992225
+      },
+      {
+        "repetition": 7,
+        "case": "inline",
+        "launchMs": 1.8602089839987457,
+        "completeMs": 7.554208976216614
+      },
+      {
+        "repetition": 8,
+        "case": "direct-fresh",
+        "launchMs": 1.4784999948460609,
+        "completeMs": 1029.8173329792917
+      },
+      {
+        "repetition": 8,
+        "case": "direct-repeat",
+        "launchMs": 1.4415420009754598,
+        "completeMs": 7.304708007723093
+      },
+      {
+        "repetition": 8,
+        "case": "interpreter-fresh",
+        "launchMs": 1.39854199369438,
+        "completeMs": 7.621625001775101
+      },
+      {
+        "repetition": 8,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.7762089846655726,
+        "completeMs": 1038.0882089957595
+      },
+      {
+        "repetition": 8,
+        "case": "inline",
+        "launchMs": 2.161374985007569,
+        "completeMs": 9.206416987581179
+      },
+      {
+        "repetition": 9,
+        "case": "direct-fresh",
+        "launchMs": 1.344375021290034,
+        "completeMs": 293.1875000067521
+      },
+      {
+        "repetition": 9,
+        "case": "direct-repeat",
+        "launchMs": 1.4432079915422946,
+        "completeMs": 7.155625004088506
+      },
+      {
+        "repetition": 9,
+        "case": "interpreter-fresh",
+        "launchMs": 1.407667004968971,
+        "completeMs": 7.9192919947672635
+      },
+      {
+        "repetition": 9,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.2445409956853837,
+        "completeMs": 366.634999983944
+      },
+      {
+        "repetition": 9,
+        "case": "inline",
+        "launchMs": 1.3946669932920486,
+        "completeMs": 6.734082999173552
+      },
+      {
+        "repetition": 10,
+        "case": "direct-fresh",
+        "launchMs": 1.2246659898664802,
+        "completeMs": 318.3616659953259
+      },
+      {
+        "repetition": 10,
+        "case": "direct-repeat",
+        "launchMs": 1.5755000058561563,
+        "completeMs": 8.18970802356489
+      },
+      {
+        "repetition": 10,
+        "case": "interpreter-fresh",
+        "launchMs": 1.3283329899422824,
+        "completeMs": 8.201624994399026
+      },
+      {
+        "repetition": 10,
+        "case": "direct-after-interpreter",
+        "launchMs": 1.4114170044194907,
+        "completeMs": 333.13329200609587
+      },
+      {
+        "repetition": 10,
+        "case": "inline",
+        "launchMs": 2.267750009195879,
+        "completeMs": 7.781958003761247
+      }
+    ]
+  },
+  "observedProbeRepetitions": {
+    "date": "2026-10-02",
+    "host": {
+      "system": "Darwin",
+      "release": "25.5.0",
+      "machine": "arm64"
+    },
+    "binary": {
+      "build": "Rust 1.98.0 debug sweepx-core unit-test executable",
+      "sha256": "143aab7c3c9de3da5bf417986b07d4e8ab9f8a9e713b1d11663ff87f96ab840f",
+      "baseCommit": "0d6c1f8",
+      "sourceState": "probe stage diagnostics uncommitted",
+      "toolsSourceSha256": "6db4736e2ae3b468fd7c8693f489b8494e32a5e614c3feb82767ef97061690b5"
+    },
+    "workload": "60 fixed same-binary answer/exit tests then 10 independent shared-cache fixtures; sequential; original 300 ms individual and 2 s discovery timeouts unchanged",
+    "cache": "test executable reused; each shared-cache fixture creates new scripts; no OS cache reset; no persistent SweepX cache",
+    "measurement": "parent wrapper wall time including test-executable launch; per-probe admission-to-launch/first-output/return separately retained in stderr",
+    "samples": [
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 1,
+        "elapsedMs": 361.964,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.642334ms, launched_after: Some(1.080542ms), ready_after: Some(1.133375ms), first_stdout_after: Some(7.482ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.824125ms, launched_after: Some(546.958µs), ready_after: Some(547.791µs), first_stdout_after: Some(6.81375ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 2,
+        "elapsedMs": 25.663,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.733833ms, launched_after: Some(449.208µs), ready_after: Some(452.416µs), first_stdout_after: Some(6.715708ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.832584ms, launched_after: Some(564.459µs), ready_after: Some(565.834µs), first_stdout_after: Some(6.826792ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 3,
+        "elapsedMs": 27.175,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.753292ms, launched_after: Some(467.875µs), ready_after: Some(471.375µs), first_stdout_after: Some(6.735084ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.184417ms, launched_after: Some(466.083µs), ready_after: Some(466.958µs), first_stdout_after: Some(5.904292ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 4,
+        "elapsedMs": 35.523,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.376625ms, launched_after: Some(603.792µs), ready_after: Some(608.333µs), first_stdout_after: Some(12.347667ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.592041ms, launched_after: Some(646.166µs), ready_after: Some(647.291µs), first_stdout_after: Some(12.58325ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 5,
+        "elapsedMs": 35.222,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.531917ms, launched_after: Some(557.584µs), ready_after: Some(561.917µs), first_stdout_after: Some(12.495584ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.257959ms, launched_after: Some(731.292µs), ready_after: Some(732.584µs), first_stdout_after: Some(6.992334ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 6,
+        "elapsedMs": 27.79,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.846958ms, launched_after: Some(552.917µs), ready_after: Some(556.708µs), first_stdout_after: Some(6.824417ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.012583ms, launched_after: Some(511.166µs), ready_after: Some(511.958µs), first_stdout_after: Some(12.004833ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 7,
+        "elapsedMs": 34.511,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.093083ms, launched_after: Some(540.625µs), ready_after: Some(543.958µs), first_stdout_after: Some(13.072041ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.116375ms, launched_after: Some(584.5µs), ready_after: Some(585.541µs), first_stdout_after: Some(6.844458ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 8,
+        "elapsedMs": 37.167,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.31225ms, launched_after: Some(749.416µs), ready_after: Some(761.75µs), first_stdout_after: Some(13.29025ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.02075ms, launched_after: Some(490.083µs), ready_after: Some(490.917µs), first_stdout_after: Some(6.755125ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 9,
+        "elapsedMs": 40.783,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.186375ms, launched_after: Some(609.625µs), ready_after: Some(614.167µs), first_stdout_after: Some(13.15275ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.624583ms, launched_after: Some(1.086625ms), ready_after: Some(1.08775ms), first_stdout_after: Some(13.615875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 10,
+        "elapsedMs": 36.268,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.233333ms, launched_after: Some(808.792µs), ready_after: Some(812.833µs), first_stdout_after: Some(12.202458ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.132125ms, launched_after: Some(570.708µs), ready_after: Some(571.875µs), first_stdout_after: Some(13.114375ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 11,
+        "elapsedMs": 37.016,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.151458ms, launched_after: Some(591.083µs), ready_after: Some(595.625µs), first_stdout_after: Some(13.127875ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.16225ms, launched_after: Some(633.75µs), ready_after: Some(634.791µs), first_stdout_after: Some(13.154708ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 12,
+        "elapsedMs": 37.535,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.0675ms, launched_after: Some(495.375µs), ready_after: Some(499.208µs), first_stdout_after: Some(13.036417ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.168584ms, launched_after: Some(635.542µs), ready_after: Some(637µs), first_stdout_after: Some(13.160584ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 13,
+        "elapsedMs": 36.188,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.344875ms, launched_after: Some(780.709µs), ready_after: Some(784.667µs), first_stdout_after: Some(13.317459ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.736167ms, launched_after: Some(777.75µs), ready_after: Some(778.958µs), first_stdout_after: Some(12.728167ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 14,
+        "elapsedMs": 36.529,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.136208ms, launched_after: Some(574.375µs), ready_after: Some(578.5µs), first_stdout_after: Some(13.106625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.123417ms, launched_after: Some(586.75µs), ready_after: Some(587.625µs), first_stdout_after: Some(13.1155ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 15,
+        "elapsedMs": 36.44,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.089709ms, launched_after: Some(526.417µs), ready_after: Some(530.25µs), first_stdout_after: Some(13.063375ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.127416ms, launched_after: Some(594.708µs), ready_after: Some(595.708µs), first_stdout_after: Some(13.120083ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 16,
+        "elapsedMs": 43.296,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.376042ms, launched_after: Some(814.917µs), ready_after: Some(819.625µs), first_stdout_after: Some(13.351ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.080542ms, launched_after: Some(543.667µs), ready_after: Some(544.875µs), first_stdout_after: Some(13.070417ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 17,
+        "elapsedMs": 37.977,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.038916ms, launched_after: Some(591.041µs), ready_after: Some(594.875µs), first_stdout_after: Some(13.014625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.119375ms, launched_after: Some(581.333µs), ready_after: Some(582.292µs), first_stdout_after: Some(13.110875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 18,
+        "elapsedMs": 37.673,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.1315ms, launched_after: Some(569.542µs), ready_after: Some(573.834µs), first_stdout_after: Some(13.108959ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.096625ms, launched_after: Some(538.333µs), ready_after: Some(539.166µs), first_stdout_after: Some(13.077833ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 19,
+        "elapsedMs": 37.677,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.187625ms, launched_after: Some(759.041µs), ready_after: Some(763.666µs), first_stdout_after: Some(13.136416ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.6035ms, launched_after: Some(799.167µs), ready_after: Some(801.083µs), first_stdout_after: Some(12.589167ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 20,
+        "elapsedMs": 37.881,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.283542ms, launched_after: Some(2.081042ms), ready_after: Some(2.085917ms), first_stdout_after: Some(13.251542ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.402333ms, launched_after: Some(754.833µs), ready_after: Some(756.083µs), first_stdout_after: Some(12.368708ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 21,
+        "elapsedMs": 40.851,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.213791ms, launched_after: Some(633.666µs), ready_after: Some(639.041µs), first_stdout_after: Some(13.177041ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 15.486542ms, launched_after: Some(3.961125ms), ready_after: Some(3.965375ms), first_stdout_after: Some(15.468042ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 22,
+        "elapsedMs": 36.266,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.76025ms, launched_after: Some(845.375µs), ready_after: Some(850.375µs), first_stdout_after: Some(11.734875ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.3085ms, launched_after: Some(686.75µs), ready_after: Some(687.917µs), first_stdout_after: Some(6.950625ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 23,
+        "elapsedMs": 37.978,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.722375ms, launched_after: Some(748.083µs), ready_after: Some(755.333µs), first_stdout_after: Some(12.693625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.103875ms, launched_after: Some(562.375µs), ready_after: Some(563.542µs), first_stdout_after: Some(6.830834ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 24,
+        "elapsedMs": 35.578,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.435458ms, launched_after: Some(560.792µs), ready_after: Some(568.917µs), first_stdout_after: Some(12.412333ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.582083ms, launched_after: Some(625.666µs), ready_after: Some(626.625µs), first_stdout_after: Some(12.574875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 25,
+        "elapsedMs": 27.934,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.514708ms, launched_after: Some(636.666µs), ready_after: Some(639.791µs), first_stdout_after: Some(12.47825ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.72225ms, launched_after: Some(452.25µs), ready_after: Some(453.042µs), first_stdout_after: Some(6.716708ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 26,
+        "elapsedMs": 33.398,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.839834ms, launched_after: Some(563.25µs), ready_after: Some(566.792µs), first_stdout_after: Some(12.819792ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.062625ms, launched_after: Some(465.5µs), ready_after: Some(466.333µs), first_stdout_after: Some(12.055458ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 27,
+        "elapsedMs": 33.733,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.067833ms, launched_after: Some(468.042µs), ready_after: Some(471.583µs), first_stdout_after: Some(12.048042ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.484083ms, launched_after: Some(497.083µs), ready_after: Some(497.917µs), first_stdout_after: Some(12.476375ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 28,
+        "elapsedMs": 32.336,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.565417ms, launched_after: Some(510.959µs), ready_after: Some(514.834µs), first_stdout_after: Some(11.538792ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.349875ms, launched_after: Some(506.25µs), ready_after: Some(507.375µs), first_stdout_after: Some(11.342875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 29,
+        "elapsedMs": 34.138,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.286458ms, launched_after: Some(507.375µs), ready_after: Some(511.25µs), first_stdout_after: Some(12.263292ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.119209ms, launched_after: Some(567.917µs), ready_after: Some(568.959µs), first_stdout_after: Some(12.106167ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 30,
+        "elapsedMs": 37.679,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.239291ms, launched_after: Some(682.958µs), ready_after: Some(687.125µs), first_stdout_after: Some(13.213416ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.71675ms, launched_after: Some(588.125µs), ready_after: Some(589.166µs), first_stdout_after: Some(12.709125ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 31,
+        "elapsedMs": 37.541,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.729792ms, launched_after: Some(1.161833ms), ready_after: Some(1.165833ms), first_stdout_after: Some(13.702875ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.160833ms, launched_after: Some(622.75µs), ready_after: Some(624.083µs), first_stdout_after: Some(13.1515ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 32,
+        "elapsedMs": 37.326,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.12275ms, launched_after: Some(566.291µs), ready_after: Some(569.958µs), first_stdout_after: Some(13.1ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.737292ms, launched_after: Some(579.584µs), ready_after: Some(580.625µs), first_stdout_after: Some(12.731042ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 33,
+        "elapsedMs": 36.823,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.17325ms, launched_after: Some(620.75µs), ready_after: Some(624.875µs), first_stdout_after: Some(13.149333ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.072667ms, launched_after: Some(537.125µs), ready_after: Some(538.125µs), first_stdout_after: Some(13.065583ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 34,
+        "elapsedMs": 33.626,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.996458ms, launched_after: Some(513.042µs), ready_after: Some(516.708µs), first_stdout_after: Some(11.972917ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.871709ms, launched_after: Some(819.625µs), ready_after: Some(820.959µs), first_stdout_after: Some(11.862625ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 35,
+        "elapsedMs": 37.959,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.225167ms, launched_after: Some(648.584µs), ready_after: Some(653.25µs), first_stdout_after: Some(13.190125ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.075125ms, launched_after: Some(483.792µs), ready_after: Some(484.834µs), first_stdout_after: Some(13.065625ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 36,
+        "elapsedMs": 36.554,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.242708ms, launched_after: Some(783.125µs), ready_after: Some(787.041µs), first_stdout_after: Some(13.214083ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.473125ms, launched_after: Some(631µs), ready_after: Some(632.125µs), first_stdout_after: Some(12.466541ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 37,
+        "elapsedMs": 37.704,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.249167ms, launched_after: Some(680.584µs), ready_after: Some(684.334µs), first_stdout_after: Some(13.219792ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.225291ms, launched_after: Some(682.375µs), ready_after: Some(683.375µs), first_stdout_after: Some(13.217291ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 38,
+        "elapsedMs": 37.433,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.109041ms, launched_after: Some(550µs), ready_after: Some(553.875µs), first_stdout_after: Some(13.085291ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.208375ms, launched_after: Some(675.917µs), ready_after: Some(676.958µs), first_stdout_after: Some(13.200542ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 39,
+        "elapsedMs": 37.632,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.32625ms, launched_after: Some(768.667µs), ready_after: Some(772.25µs), first_stdout_after: Some(13.303542ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.229583ms, launched_after: Some(686.125µs), ready_after: Some(687µs), first_stdout_after: Some(13.218458ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 40,
+        "elapsedMs": 41.54,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.595291ms, launched_after: Some(986.958µs), ready_after: Some(993.875µs), first_stdout_after: Some(13.55ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.629166ms, launched_after: Some(952.125µs), ready_after: Some(953.166µs), first_stdout_after: Some(12.618833ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 41,
+        "elapsedMs": 38.148,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.285084ms, launched_after: Some(718.25µs), ready_after: Some(722.625µs), first_stdout_after: Some(13.253292ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.140083ms, launched_after: Some(599.75µs), ready_after: Some(600.708µs), first_stdout_after: Some(13.12625ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 42,
+        "elapsedMs": 39.047,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.15875ms, launched_after: Some(562.917µs), ready_after: Some(569.917µs), first_stdout_after: Some(13.11025ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.251167ms, launched_after: Some(710.292µs), ready_after: Some(711.667µs), first_stdout_after: Some(13.240292ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 43,
+        "elapsedMs": 39.15,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.378625ms, launched_after: Some(797.25µs), ready_after: Some(802.167µs), first_stdout_after: Some(13.336917ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.295584ms, launched_after: Some(749.542µs), ready_after: Some(750.792µs), first_stdout_after: Some(13.281959ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 44,
+        "elapsedMs": 40.845,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.548666ms, launched_after: Some(976.791µs), ready_after: Some(983.291µs), first_stdout_after: Some(13.515666ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.505792ms, launched_after: Some(927.958µs), ready_after: Some(929.208µs), first_stdout_after: Some(12.492333ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 45,
+        "elapsedMs": 39.364,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.27175ms, launched_after: Some(691.042µs), ready_after: Some(695.917µs), first_stdout_after: Some(13.23775ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.293459ms, launched_after: Some(724.042µs), ready_after: Some(725.334µs), first_stdout_after: Some(13.276875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 46,
+        "elapsedMs": 38.628,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.53925ms, launched_after: Some(885.375µs), ready_after: Some(890.25µs), first_stdout_after: Some(12.505625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.443334ms, launched_after: Some(802.334µs), ready_after: Some(803.709µs), first_stdout_after: Some(13.433417ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 47,
+        "elapsedMs": 38.27,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.546917ms, launched_after: Some(975.875µs), ready_after: Some(980.458µs), first_stdout_after: Some(13.516958ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.761833ms, launched_after: Some(1.243166ms), ready_after: Some(1.2445ms), first_stdout_after: Some(12.750958ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 48,
+        "elapsedMs": 41.454,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.4345ms, launched_after: Some(689.458µs), ready_after: Some(693.542µs), first_stdout_after: Some(12.401625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.2525ms, launched_after: Some(797.916µs), ready_after: Some(800.208µs), first_stdout_after: Some(13.238875ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 49,
+        "elapsedMs": 38.147,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.749708ms, launched_after: Some(1.06875ms), ready_after: Some(1.074125ms), first_stdout_after: Some(12.715083ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.20725ms, launched_after: Some(830.334µs), ready_after: Some(831.959µs), first_stdout_after: Some(12.190334ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 50,
+        "elapsedMs": 38.367,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.235334ms, launched_after: Some(657.917µs), ready_after: Some(664.959µs), first_stdout_after: Some(13.206292ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.2025ms, launched_after: Some(662.042µs), ready_after: Some(663.292µs), first_stdout_after: Some(13.192ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 51,
+        "elapsedMs": 45.118,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.268792ms, launched_after: Some(696.917µs), ready_after: Some(701.25µs), first_stdout_after: Some(13.234417ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.591959ms, launched_after: Some(885.667µs), ready_after: Some(887.375µs), first_stdout_after: Some(12.583167ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 52,
+        "elapsedMs": 35.554,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.601583ms, launched_after: Some(633.5µs), ready_after: Some(637.583µs), first_stdout_after: Some(12.570708ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.971208ms, launched_after: Some(772.791µs), ready_after: Some(774.833µs), first_stdout_after: Some(12.96125ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 53,
+        "elapsedMs": 36.476,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.521333ms, launched_after: Some(545.667µs), ready_after: Some(550.667µs), first_stdout_after: Some(12.493083ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.147333ms, launched_after: Some(518.875µs), ready_after: Some(519.875µs), first_stdout_after: Some(12.137416ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 54,
+        "elapsedMs": 30.554,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.184ms, launched_after: Some(622.583µs), ready_after: Some(630.666µs), first_stdout_after: Some(13.1525ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.82075ms, launched_after: Some(557.375µs), ready_after: Some(558.5µs), first_stdout_after: Some(6.815417ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 55,
+        "elapsedMs": 35.202,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.273209ms, launched_after: Some(719.5µs), ready_after: Some(723.125µs), first_stdout_after: Some(6.988667ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.996042ms, launched_after: Some(463.209µs), ready_after: Some(464.375µs), first_stdout_after: Some(12.986292ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 56,
+        "elapsedMs": 35.715,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.459667ms, launched_after: Some(899.583µs), ready_after: Some(903.458µs), first_stdout_after: Some(7.166792ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.27975ms, launched_after: Some(756.542µs), ready_after: Some(757.667µs), first_stdout_after: Some(7.017917ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 57,
+        "elapsedMs": 36.792,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.166833ms, launched_after: Some(598.958µs), ready_after: Some(602.875µs), first_stdout_after: Some(13.138958ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.355125ms, launched_after: Some(798.542µs), ready_after: Some(799.958µs), first_stdout_after: Some(7.063292ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 58,
+        "elapsedMs": 35.899,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.444833ms, launched_after: Some(871.75µs), ready_after: Some(876.125µs), first_stdout_after: Some(13.414625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.344292ms, launched_after: Some(792.208µs), ready_after: Some(793.917µs), first_stdout_after: Some(13.331417ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 59,
+        "elapsedMs": 36.66,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.170375ms, launched_after: Some(578.958µs), ready_after: Some(583.167µs), first_stdout_after: Some(13.143167ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.172917ms, launched_after: Some(618.417µs), ready_after: Some(619.959µs), first_stdout_after: Some(13.160125ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::tests::captures_complete_answer_and_exit_status",
+        "repetition": 60,
+        "elapsedMs": 34.868,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.689375ms, launched_after: Some(596.458µs), ready_after: Some(600.917µs), first_stdout_after: Some(12.657625ms), stdout_bytes: 22, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.158ms, launched_after: Some(608.125µs), ready_after: Some(611.375µs), first_stdout_after: Some(13.144459ms), stdout_bytes: 16, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(1792))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 1,
+        "elapsedMs": 1635.731,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 967.795917ms, launched_after: Some(557.792µs), ready_after: Some(561.959µs), first_stdout_after: Some(967.766709ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 316.101167ms, launched_after: Some(566.75µs), ready_after: Some(568.125µs), first_stdout_after: Some(316.083709ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.372042ms, launched_after: Some(814.458µs), ready_after: Some(817.125µs), first_stdout_after: Some(13.360208ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.411791ms, launched_after: Some(838.666µs), ready_after: Some(841.291µs), first_stdout_after: Some(13.392375ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 2,
+        "elapsedMs": 1225.414,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 465.36225ms, launched_after: Some(770.834µs), ready_after: Some(775.625µs), first_stdout_after: Some(465.329292ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 591.727708ms, launched_after: Some(939.25µs), ready_after: Some(941.125µs), first_stdout_after: Some(591.7165ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.687958ms, launched_after: Some(413.708µs), ready_after: Some(415.125µs), first_stdout_after: Some(6.680375ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.626125ms, launched_after: Some(354.291µs), ready_after: Some(355.75µs), first_stdout_after: Some(6.619583ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 3,
+        "elapsedMs": 1197.817,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 560.379709ms, launched_after: Some(591.417µs), ready_after: Some(595.209µs), first_stdout_after: Some(560.334417ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 399.302ms, launched_after: Some(861.416µs), ready_after: Some(863.916µs), first_stdout_after: Some(393.986208ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.625041ms, launched_after: Some(1.064125ms), ready_after: Some(1.070291ms), first_stdout_after: Some(13.615333ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.284625ms, launched_after: Some(755.625µs), ready_after: Some(757.541µs), first_stdout_after: Some(13.2765ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 4,
+        "elapsedMs": 1408.598,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 693.417ms, launched_after: Some(724.625µs), ready_after: Some(729.25µs), first_stdout_after: Some(693.34075ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 422.112459ms, launched_after: Some(1.558625ms), ready_after: Some(1.563542ms), first_stdout_after: Some(422.083667ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.077791ms, launched_after: Some(1.098125ms), ready_after: Some(1.103291ms), first_stdout_after: Some(13.0635ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.284916ms, launched_after: Some(734.708µs), ready_after: Some(736.541µs), first_stdout_after: Some(13.268125ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 5,
+        "elapsedMs": 1096.581,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 548.337334ms, launched_after: Some(619.875µs), ready_after: Some(624.792µs), first_stdout_after: Some(548.319875ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 317.571417ms, launched_after: Some(531.75µs), ready_after: Some(533.292µs), first_stdout_after: Some(317.546625ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.125959ms, launched_after: Some(592.834µs), ready_after: Some(594.667µs), first_stdout_after: Some(13.118542ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.0765ms, launched_after: Some(549.417µs), ready_after: Some(550.5µs), first_stdout_after: Some(13.070167ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 6,
+        "elapsedMs": 1326.569,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 508.6915ms, launched_after: Some(720.584µs), ready_after: Some(728.459µs), first_stdout_after: Some(508.660459ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 545.142958ms, launched_after: Some(637.5µs), ready_after: Some(639µs), first_stdout_after: Some(545.094ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.368084ms, launched_after: Some(1.582834ms), ready_after: Some(1.614667ms), first_stdout_after: Some(13.349ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.3185ms, launched_after: Some(778.417µs), ready_after: Some(781.417µs), first_stdout_after: Some(13.308667ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 7,
+        "elapsedMs": 1174.971,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 527.220083ms, launched_after: Some(585.5µs), ready_after: Some(590.166µs), first_stdout_after: Some(527.181583ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 325.178584ms, launched_after: Some(878.917µs), ready_after: Some(882.25µs), first_stdout_after: Some(325.1315ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.768375ms, launched_after: Some(1.095166ms), ready_after: Some(1.099833ms), first_stdout_after: Some(11.752375ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.266875ms, launched_after: Some(709.542µs), ready_after: Some(712.375µs), first_stdout_after: Some(13.254667ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 8,
+        "elapsedMs": 2360.334,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 732.035667ms, launched_after: Some(633.583µs), ready_after: Some(638µs), first_stdout_after: Some(732.008667ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 1.210837958s, launched_after: Some(1.029667ms), ready_after: Some(1.034875ms), first_stdout_after: Some(1.210822833s), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.340542ms, launched_after: Some(802.709µs), ready_after: Some(804.792µs), first_stdout_after: Some(13.330417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.160792ms, launched_after: Some(625.125µs), ready_after: Some(626.959µs), first_stdout_after: Some(6.892625ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 9,
+        "elapsedMs": 1258.563,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 421.783667ms, launched_after: Some(1.675917ms), ready_after: Some(1.681709ms), first_stdout_after: Some(421.761417ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 631.202458ms, launched_after: Some(580.375µs), ready_after: Some(581.958µs), first_stdout_after: Some(631.190291ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.718334ms, launched_after: Some(442.084µs), ready_after: Some(443.625µs), first_stdout_after: Some(6.709875ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.91625ms, launched_after: Some(341.416µs), ready_after: Some(342.541µs), first_stdout_after: Some(5.648833ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      },
+      {
+        "case": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "repetition": 10,
+        "elapsedMs": 1014.836,
+        "exitCode": 0,
+        "probeDiagnostics": [
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 463.129916ms, launched_after: Some(467.333µs), ready_after: Some(471.583µs), first_stdout_after: Some(463.108ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 340.02225ms, launched_after: Some(520.875µs), ready_after: Some(522.75µs), first_stdout_after: Some(339.994042ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 30.210167ms, launched_after: Some(862.459µs), ready_after: Some(864.542µs), first_stdout_after: Some(30.196209ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+          "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 11.97475ms, launched_after: Some(677.167µs), ready_after: Some(679.792µs), first_stdout_after: Some(11.961709ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+        ]
+      }
+    ],
+    "scheduling": "Host clippy was started before the wrapper was polled complete; any overlap was not instrumented. Do not interpret these diagnostic samples as a controlled performance comparison."
+  },
+  "interpretation": "Fresh direct script execution has a reproducible delay absent from immediate repetition and explicit-interpreter controls on this host. Successful probe records localize delays after launch returned and before first stdout. The original 300 ms test failure and 2 s ProbeUnavailable did not recur; no causal stack was captured. This does not close those failures or the warm TUI timeout, demonstrate a production speedup, or justify changing deadlines/command semantics."
+}

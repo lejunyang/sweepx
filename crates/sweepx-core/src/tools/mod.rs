@@ -69,12 +69,54 @@ pub struct ProbeOutput {
     pub stdout: Vec<u8>,
 }
 
+/// Last stage reached by a probe. This describes timing, never answer validity or cleanup safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeStage {
+    /// Checking shared cancellation, launch count and deadline before launching a child.
+    Admission,
+    /// Launching the child through the host process API.
+    Launch,
+    /// Establishing process containment and preparing the output pipe.
+    Setup,
+    /// Draining output and polling the direct child's exit status.
+    Drain,
+    /// Observed both complete stdout and the direct child's exit status.
+    Complete,
+}
+
+/// Bounded diagnostic facts from the most recent attempt, including failed attempts.
+///
+/// No command, environment, path or output bytes are retained. Timings are cumulative from
+/// admission, include host scheduling, and do not prove the cause of a slow call. In particular,
+/// launch/reaping can block in the host API despite the cooperative deadline. These facts are
+/// independent of whether the answer is usable and must never establish inactivity or ownership.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeDiagnostics {
+    /// Last stage reached before returning a result.
+    pub stage: ProbeStage,
+    /// Time to return, including process cleanup on success or failure.
+    pub elapsed: Duration,
+    /// Time when the host returned a child; absent when admission or launch failed.
+    pub launched_after: Option<Duration>,
+    /// Time when containment and pipe setup completed.
+    pub ready_after: Option<Duration>,
+    /// Time when the first stdout bytes arrived; absent for empty output or no observed output.
+    pub first_stdout_after: Option<Duration>,
+    /// Bytes read, including a chunk refused by the output limit; no bytes themselves are retained.
+    pub stdout_bytes: usize,
+    /// Whether EOF was observed, independently of the direct child's exit.
+    pub stdout_eof: bool,
+    /// Direct child's status observed before cleanup, independently of inherited pipe writers.
+    pub exit_status: Option<ExitStatus>,
+}
+
 /// Shared probe budget and cancellation state for an invocation; use on a worker, not a UI thread.
 pub struct ProbeRunner {
     limits: ProbeLimits,
     deadline: Instant,
     remaining: usize,
     cancel: CancellationToken,
+    last_diagnostics: Option<ProbeDiagnostics>,
 }
 
 impl ProbeRunner {
@@ -87,7 +129,14 @@ impl ProbeRunner {
             remaining: limits.max_processes,
             limits,
             cancel,
+            last_diagnostics: None,
         }
+    }
+
+    /// Returns fixed-size facts from the last attempt, or `None` before any attempt.
+    /// Each attempt replaces the previous facts, including refusal before launch.
+    pub fn last_diagnostics(&self) -> Option<ProbeDiagnostics> {
+        self.last_diagnostics
     }
 
     /// Whether the next probe can still be admitted. No child is launched after cancellation.
@@ -113,6 +162,36 @@ impl ProbeRunner {
     /// stdio and process containment; do not use it for interactive tools or filesystem mutation.
     /// Ordinary process launch and OS process reaping remain subject to the host scheduler.
     pub fn run(&mut self, command: &mut Command) -> Result<ProbeOutput, ProbeError> {
+        let started = Instant::now();
+        let mut diagnostics = ProbeDiagnostics {
+            stage: ProbeStage::Admission,
+            elapsed: Duration::ZERO,
+            launched_after: None,
+            ready_after: None,
+            first_stdout_after: None,
+            stdout_bytes: 0,
+            stdout_eof: false,
+            exit_status: None,
+        };
+        let result = self.run_observed(command, started, &mut diagnostics);
+        // run_observed has released its process guard before this measurement. Keeping only the
+        // most recent fixed-size record avoids an unbounded transcript or retained failed output.
+        diagnostics.elapsed = started.elapsed();
+        self.last_diagnostics = Some(diagnostics);
+        #[cfg(test)]
+        eprintln!(
+            "probe result={:?}, diagnostics={diagnostics:?}",
+            result.as_ref().err()
+        );
+        result
+    }
+
+    fn run_observed(
+        &mut self,
+        command: &mut Command,
+        started: Instant,
+        diagnostics: &mut ProbeDiagnostics,
+    ) -> Result<ProbeOutput, ProbeError> {
         self.check_budget()?;
         self.remaining -= 1;
         let deadline = self.deadline.min(
@@ -130,10 +209,15 @@ impl ProbeRunner {
             // A private process group lets timeout cleanup include ordinary tool descendants.
             command.process_group(0);
         }
+        diagnostics.stage = ProbeStage::Launch;
         let child = command.spawn()?;
+        diagnostics.launched_after = Some(started.elapsed());
+        diagnostics.stage = ProbeStage::Setup;
         let mut process = ProbeProcess::new(child)?;
         let mut pipe = process.child.stdout.take().expect("piped stdout");
         prepare_pipe(&pipe)?;
+        diagnostics.ready_after = Some(started.elapsed());
+        diagnostics.stage = ProbeStage::Drain;
         let mut stdout = Vec::new();
         let mut status = None;
         let mut eof = false;
@@ -150,20 +234,29 @@ impl ProbeRunner {
             if !eof {
                 match read_available(&mut pipe, &mut buffer)? {
                     PipeRead::Bytes(count) => {
+                        if diagnostics.first_stdout_after.is_none() {
+                            diagnostics.first_stdout_after = Some(started.elapsed());
+                        }
+                        diagnostics.stdout_bytes = diagnostics.stdout_bytes.saturating_add(count);
                         if count > self.limits.max_stdout_bytes.saturating_sub(stdout.len()) {
                             return Err(ProbeError::OutputLimit);
                         }
                         stdout.extend_from_slice(&buffer[..count]);
                         continue;
                     }
-                    PipeRead::Eof => eof = true,
+                    PipeRead::Eof => {
+                        eof = true;
+                        diagnostics.stdout_eof = true;
+                    }
                     PipeRead::Pending => {}
                 }
             }
             if status.is_none() {
                 status = process.child.try_wait()?;
+                diagnostics.exit_status = status;
             }
             if eof && let Some(status) = status {
+                diagnostics.stage = ProbeStage::Complete;
                 return Ok(ProbeOutput { status, stdout });
             }
             std::thread::sleep(
@@ -413,6 +506,77 @@ mod tests {
             runner().run(&mut child("failure")).unwrap().status.code(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn diagnostics_replace_success_with_admission_and_launch_failures() {
+        let mut runner = ProbeRunner::new(
+            ProbeLimits {
+                max_processes: 2,
+                ..ProbeLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        assert!(runner.last_diagnostics().is_none());
+        let output = runner.run(&mut child("answer")).unwrap();
+        let complete = runner.last_diagnostics().unwrap();
+        assert_eq!(complete.stage, ProbeStage::Complete);
+        assert!(complete.stdout_eof);
+        assert_eq!(complete.stdout_bytes, output.stdout.len());
+        assert_eq!(complete.exit_status, Some(output.status));
+        assert!(complete.launched_after.unwrap() <= complete.ready_after.unwrap());
+        assert!(complete.ready_after.unwrap() <= complete.first_stdout_after.unwrap());
+        assert!(complete.first_stdout_after.unwrap() <= complete.elapsed);
+
+        assert!(matches!(
+            runner.run(&mut Command::new("sweepx-absent-probe-diagnostic-fixture")),
+            Err(ProbeError::Io(_))
+        ));
+        let launch = runner.last_diagnostics().unwrap();
+        assert_eq!(launch.stage, ProbeStage::Launch);
+        assert!(launch.launched_after.is_none());
+        assert!(launch.ready_after.is_none());
+        assert!(launch.first_stdout_after.is_none());
+        assert!(launch.exit_status.is_none());
+        assert_eq!(launch.stdout_bytes, 0);
+        assert!(!launch.stdout_eof);
+
+        assert!(matches!(
+            runner.run(&mut child("answer")),
+            Err(ProbeError::BudgetExhausted)
+        ));
+        let admission = runner.last_diagnostics().unwrap();
+        assert_eq!(admission.stage, ProbeStage::Admission);
+        assert!(admission.launched_after.is_none());
+        assert!(admission.exit_status.is_none());
+        assert_eq!(admission.stdout_bytes, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_distinguish_child_exit_from_stdout_completion() {
+        // The shells independently control exit and pipe ownership. A direct child exiting is
+        // insufficient to accept an answer when a descendant still holds stdout open; EOF alone
+        // is insufficient while the direct child continues running. No answer is accepted here.
+        for (script, expected_eof, expected_exit) in [
+            ("printf ready; sleep 30 & exit 0", false, true),
+            ("printf ready; exec 1>&-; sleep 30", true, false),
+        ] {
+            let mut runner = ProbeRunner::new(ProbeLimits::default(), CancellationToken::new());
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            assert!(matches!(
+                runner.run(&mut command),
+                Err(ProbeError::TimedOut)
+            ));
+            let diagnostics = runner.last_diagnostics().unwrap();
+            assert_eq!(diagnostics.stage, ProbeStage::Drain);
+            assert_eq!(diagnostics.stdout_bytes, b"ready".len());
+            assert_eq!(diagnostics.stdout_eof, expected_eof);
+            assert_eq!(diagnostics.exit_status.is_some(), expected_exit);
+            assert!(diagnostics.first_stdout_after.is_some());
+            assert!(diagnostics.ready_after.unwrap() <= diagnostics.elapsed);
+        }
     }
 
     #[test]

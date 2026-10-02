@@ -456,6 +456,8 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 
 crate 已从 22 收敛到 17，core 与终端依赖已分离；第二轮未发现进一步合并的明确收益。继续合并不作为独立待办，只有具体契约、所有权或依赖收益成立时再评估。
 
+工具探测现已补固定大小的最近一次阶段诊断，独立实验定位出本机新建脚本首次直接执行的额外等待；原间歇超时未复现，不能认定根因已解决。详见文末“工具探测阶段证据”。
+
 ## 系统根发现与临时对象实时视图（2026-10-01）
 
 `junk --system --tui` 现在可进入后台会话，不接受显式根；`JunkSessionRequest::system()` 本身不执行工具或文件系统发现。每次全量 revision 复用 PlatformJunkSetup 的本次工具/布局快照，选择保守系统根，并在去重前检查 256 根、单路径 64 KiB 的上限。取消与失败保留可靠终态，不把布局发现缺口当作空范围。选中目录刷新仍复验 captured binding、遍历其原始根并过滤选中子树；全量刷新才重新发现系统范围。
@@ -733,3 +735,15 @@ Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang
 再次采集四种实际场景后，所有非 map 输入/输出字节一致，map 除 generated 时间和受控 pubCache 临时路径外的全部字段一致；不改写原录制的动态字段或宣称原始字节完全一样。采集工具复用既有有界子进程/文件读，仅增加 SDK 版本拒绝与已有采集保护的独立失败回归。更广 SDK/配置/依赖、完整 YAML/URI/语言语义、独占归属、活动观察与目标宿主/真实 provider/Trash 成功仍未完成；规则扩展不勾选，旧性能/间歇失败/最终路径竞态也不由这些样本关闭。
 
 交付验证（arm64 macOS、Rust 1.98.0）：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 949 项通过、0 失败、2 项原有基准 ignored；既有系统 Trash 成功挂起仍显式排除。受影响 core/CLI/fixtures、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查通过；三个受影响包清单通过，fixtures 包含全部 52 份原始 SDK 录制文件（本轮新增 Dart 34 份）。两种采集工具共八项实际进程/文件边界/失败回归通过。初次实际 Unicode map 专项为 0 通过、1 失败，修正生产识别器后全部内容专项 17 项通过，未改写 SDK 正例来迎合旧实现；Linux/Windows 首轮交叉 lint 因抽取后的测试局部变量只在 macOS 缓存分支使用而失败，窄化该绑定后两个完整目标复验通过。该测试绑定修正后宿主内容专项 17 项与受影响 clippy 再通过，其余未变实现复用完整结果，不称为又跑一次全工作区。没有放宽生产 cfg、忽略断言或重试偶发失败直到通过；实际 Linux/Windows/MSVC、云 provider、系统 Trash 成功仍未验收，旧 probe/cache/PTY 间歇原因和最终 pathname 竞态继续开放。
+
+## 工具探测阶段证据（2026-10-02）
+
+旧 `TimedOut` 与 `ProbeUnavailable` 只保留总耗时，不能区分启动、输出或退出等待。`ProbeRunner::last_diagnostics` 现保留最近一次尝试的固定大小记录：admission/launch/setup/drain/complete 阶段、启动返回/管道就绪/首次输出的累计时间、读取字节数、独立的 EOF 和已观察退出状态，以及包含清理的返回耗时。启动失败和预算拒绝也替换旧记录，不回放上次成功；不保留命令、环境、路径或输出内容，不累积历史。完整阶段也不代表成功退出或有效答案，更不能建立所有权、无活动或删除权限。生产默认不打印诊断；测试只打印这些有界事实，期限、取消和原答案准入不变。
+
+[原始阶段记录与独立执行实验](probe-phase-diagnostic-2026-10-02.json)来自本机 arm64 macOS 25.5.0、Rust 1.98.0 debug。先对修改前同一个测试二进制固定运行 60 次答案/退出用例，全部通过，wrapper wall 为 21.0–61.8 ms，没有获得原失败。新增诊断后，同二进制再固定运行 60 次答案用例和 10 次独立共享缓存夹具，也全部通过；artifact 记录二进制/source hash、逐次耗时和阶段事实。host clippy 在 wrapper 被确认完成之前启动，未记录是否重叠，故这些重复只用于诊断，不作为受控性能比较或尾延迟估计。
+
+独立路径用普通 Python 子进程执行 10 对新建、字节相同的 shell 脚本，每次核对 `ready` 的完整字节和成功退出：首次直接执行为 268.1–1029.8 ms，紧接的重复执行为 7.1–10.6 ms；显式 `/bin/sh script` 为 7.6–11.1 ms，但随后首次直接执行该文件仍为 257.2–1038.1 ms。内联 shell 对照为 6.4–170.0 ms。未重置 OS cache，没有 SweepX cache；这些是特定脚本微实验，不能推断真实工具或全盘扫描加速。实际共享缓存探测阶段记录同样表明慢等待主要在 launch 返回之后、首次输出之前，不是 `Command::spawn` 调用本身占用了全部等待。
+
+这定位出一个可重复的宿主首次直接执行效应，尚未取得慢子进程堆栈，不能在进程加载、宿主策略和调度之间归因，也不能将其认定为旧 300 ms 答案测试或 2 秒共享缓存失败的唯一原因。没有改用显式解释器启动生产工具、延长期限或忽略失败；debug 热缓存 TUI 停顿与事件历史 settle 问题也未由本轮实验关闭。两个独立回归用 shell 控制“直接子进程已退出但后代仍持有 stdout”和“stdout 已关闭但直接子进程仍运行”，核对两种失败均拒绝答案且诊断区分 EOF/退出；另外验证成功、启动失败、预算拒绝之间不会残留旧事实。
+
+交付验证：工具专项 24 项通过；完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 951 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的真实系统 Trash 成功用例。受影响 core 与 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查及 core 包清单通过；诊断 artifact 的 50 个独立执行记录、70 个探测重复记录和成功状态已核验。Linux/Windows 原生运行、MSVC、真实云 provider 与系统 Trash 成功未验收；交叉 lint 不是运行时证据，没有端到端提速结论，原间歇失败仍保留。
