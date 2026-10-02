@@ -395,6 +395,108 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
 
 #[cfg(target_os = "macos")]
 #[test]
+fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    let a = project(&root, "a", b"before");
+    let b = project(&root, "b", b"unchanged-sibling");
+    let cache = base.join("cache");
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.cache_dir = Some(cache.clone());
+    let session = JunkSession::start(request).unwrap();
+    let first = current(&drain(&session, JunkSessionRevision(1)));
+    assert_eq!(first.len(), 2);
+    let key = *first
+        .iter()
+        .find(|(_, row)| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap()
+        .0;
+    // Compare actual published bytes, including the original cursor. LRU atime changes
+    // are permitted; no partial listing or candidate report may replace this generation.
+    let published = || {
+        fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .map(|path| {
+                (
+                    path.file_name().unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let before = published();
+    assert!(!before.is_empty());
+    let old_index = crate::junk::cache::CacheReader::new(&cache)
+        .index(&root)
+        .unwrap();
+    let old_index = serde_json::to_value(old_index).unwrap();
+    assert_eq!(
+        old_index["listings"][b.to_str().unwrap()]["files"]["payload"],
+        serde_json::json!(fs::symlink_metadata(b.join("payload")).unwrap().len())
+    );
+    fs::write(a.join("payload"), b"larger-current-payload").unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    assert_eq!(current(&events).len(), 1);
+    assert_eq!(published(), before);
+
+    // Full refresh still validates the old cursor and restores both current subtrees.
+    // This asserts current facts, not an immediate FSEvents hit or enumeration order.
+    let revision = session.refresh_all().unwrap();
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    let fresh = current(&events);
+    assert_eq!(fresh.len(), 2);
+    let index = crate::junk::cache::CacheReader::new(&cache)
+        .index(&root)
+        .unwrap();
+    let index = serde_json::to_value(index).unwrap();
+    for path in [&a, &b] {
+        let row = fresh
+            .values()
+            .find(|row| row.observed_native_path().as_ref() == Some(path))
+            .unwrap();
+        let expected: u128 = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+            .sum();
+        assert_eq!(row.logical_bytes(), &sweepx_platform::known_u128(expected));
+        let payload = path.join("payload");
+        assert_eq!(
+            index["listings"][path.to_str().unwrap()]["files"]["payload"],
+            serde_json::json!(fs::symlink_metadata(payload).unwrap().len())
+        );
+    }
+    shutdown(&session);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn preview_cancellation_preserves_history_until_complete_full_refresh() {
     let _serial = SESSION_TESTS
         .lock()
@@ -786,6 +888,11 @@ fn fresh_sessions_and_selected_refresh_keep_stable_keys_current_git_and_native_a
             .any(|event| matches!(event.kind, JunkSessionEventKind::Removed { .. }))
     );
     assert!(!fresh.contains_key(b_key));
+    assert!(refreshed.iter().all(|event| !matches!(&event.kind, JunkSessionEventKind::Progress { path, .. } if path.starts_with(b.parent().unwrap()))));
+    assert_eq!(
+        native_root_path(fresh[a_key].candidate.source_entry.as_ref().unwrap()),
+        Some(root.clone())
+    );
 
     fs::remove_file(a.parent().unwrap().join("Cargo.toml")).unwrap();
     let revision = session.refresh_selected(&[*a_key]).unwrap();
@@ -815,6 +922,79 @@ fn fresh_sessions_and_selected_refresh_keep_stable_keys_current_git_and_native_a
             .collect::<Vec<_>>(),
         vec![*b_key]
     );
+    shutdown(&session);
+}
+
+#[test]
+fn selected_refresh_keeps_ancestor_history_and_repeated_native_lineage_without_sibling_work() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let ancestor = root.join("target");
+    fs::create_dir(&ancestor).unwrap();
+    fs::write(ancestor.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let selected = ancestor.join("target");
+    fs::create_dir(&selected).unwrap();
+    fs::write(selected.join("payload"), b"before").unwrap();
+    let sibling = project(&root, "sibling", b"untouched");
+    for index in 0..128 {
+        fs::write(sibling.join(format!("noise-{index}")), b"outside scope").unwrap();
+    }
+    let session = JunkSession::start(JunkSessionRequest::new(vec![root.clone()])).unwrap();
+    let initial = drain(&session, JunkSessionRevision(1));
+    let rows = current(&initial);
+    let key_for = |path: &Path| {
+        *rows
+            .iter()
+            .find(|(_, row)| row.observed_native_path().as_deref() == Some(path))
+            .unwrap()
+            .0
+    };
+    let selected_key = key_for(&selected);
+    let ancestor_key = key_for(&ancestor);
+    let sibling_key = key_for(&sibling);
+    for payload in [
+        b"after local refresh".as_slice(),
+        b"second independent refresh".as_slice(),
+    ] {
+        fs::write(selected.join("payload"), payload).unwrap();
+        let revision = session.refresh_selected(&[selected_key]).unwrap();
+        let events = drain(&session, revision);
+        assert!(matches!(
+            events.last().unwrap().kind,
+            JunkSessionEventKind::Completed {
+                outcome: JunkSessionOutcome::Complete,
+                replaced: true,
+                ..
+            }
+        ));
+        assert!(events.iter().any(|event| matches!(event.kind, JunkSessionEventKind::Invalidated { key } if key == ancestor_key)));
+        assert!(events.iter().all(|event| !matches!(event.kind, JunkSessionEventKind::Invalidated { key } | JunkSessionEventKind::Removed { key } if key == sibling_key)));
+        let fresh = current(&events);
+        assert_eq!(
+            fresh.keys().copied().collect::<Vec<_>>(),
+            vec![selected_key]
+        );
+        let entry = fresh[&selected_key]
+            .candidate
+            .source_entry
+            .as_ref()
+            .unwrap();
+        assert_eq!(native_root_path(entry), Some(root.clone()));
+        assert!(entry.executable_native_locator().unwrap().is_some());
+        let length = fs::read_dir(&selected)
+            .unwrap()
+            .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+            .sum();
+        assert_eq!(
+            fresh[&selected_key].logical_bytes(),
+            &sweepx_platform::known_u128(length)
+        );
+        assert!(events.iter().all(|event| !matches!(&event.kind, JunkSessionEventKind::Progress { path, .. } if path.starts_with(sibling.parent().unwrap()))));
+    }
     shutdown(&session);
 }
 
@@ -897,9 +1077,10 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
     ));
     let key = *current(&initial).keys().next().unwrap();
     fs::remove_file(target.parent().unwrap().join("Cargo.toml")).unwrap();
-    // This is genuine metadata pressure, independent of callback queue/log capacities.
+    // Pressure must be inside the selected subtree. Unrelated siblings are deliberately
+    // omitted by local refresh and no longer consume its required classification metadata.
     for index in 0..256 {
-        fs::create_dir(root.join(format!("extra-{index}"))).unwrap();
+        fs::create_dir(target.join(format!("extra-{index}"))).unwrap();
     }
     let revision = session.refresh_selected(&[key]).unwrap();
     let events = drain(&session, revision);
@@ -919,7 +1100,7 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
     );
     assert_eq!(fs::read(target.join("payload")).unwrap(), b"retained");
     for index in 0..256 {
-        fs::remove_dir(root.join(format!("extra-{index}"))).unwrap();
+        fs::remove_dir(target.join(format!("extra-{index}"))).unwrap();
     }
     // The old binding was preserved, so a complete retry can now establish actual disappearance.
     let revision = session.refresh_selected(&[key]).unwrap();

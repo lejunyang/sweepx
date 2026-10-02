@@ -122,6 +122,46 @@ fn early_complete_base_is_visible_during_scan_and_selection_survives_current_rep
 }
 
 #[test]
+fn local_refresh_invalidates_only_ancestors_and_preserves_them_after_scope_completion() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    for event in initial() {
+        model.apply(event);
+    }
+    model.marked.insert("a".into());
+    model.apply(JunkEvent::Started {
+        revision: 2,
+        keys: Some(vec!["b".into()]),
+    });
+    model.apply(JunkEvent::Invalidated {
+        revision: 2,
+        key: "a".into(),
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 2,
+        current: true,
+        historical: false,
+        row: row("b", "/b"),
+    });
+    model.apply(JunkEvent::Completed {
+        revision: 2,
+        outcome: JunkOutcome::Complete,
+        replaced: true,
+    });
+    assert!(model.rows["a"].historical);
+    assert!(!model.eligible("a"));
+    assert!(model.eligible("b"));
+    assert!(model.marked.contains("a"));
+    model.apply(JunkEvent::Invalidated {
+        revision: 1,
+        key: "b".into(),
+    });
+    assert!(
+        model.eligible("b"),
+        "stale invalidation cannot overwrite a newer row"
+    );
+}
+
+#[test]
 fn cached_preview_stays_historical_and_preserves_selection_when_current_replaces_it() {
     let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
     model.apply(JunkEvent::Started {

@@ -221,6 +221,10 @@ impl JunkService {
 }
 
 impl crate::JunkClassifier for JunkService {
+    fn needs_file_marker(&self, name: &NativeName) -> bool {
+        self.needs_project_marker(name)
+    }
+
     fn uses_only_local_markers(&self) -> bool {
         true
     }

@@ -179,6 +179,74 @@ fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without
 }
 
 #[test]
+fn local_refresh_keeps_ancestor_bindings_but_requires_refresh_before_trash() {
+    let fixture = tempfile::TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    let ancestor = root.join("target");
+    let selected = ancestor.join("target");
+    fs::create_dir_all(&selected).unwrap();
+    for parent in [&root, &ancestor] {
+        fs::write(parent.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    }
+    fs::write(selected.join("payload"), b"before").unwrap();
+    let mut provider =
+        Provider::new(JunkSession::start(JunkSessionRequest::new(vec![root])).unwrap());
+    complete(&mut provider);
+    let key_for = |path: &std::path::Path| {
+        provider
+            .rows
+            .iter()
+            .find(|(_, row)| row.row.observed_native_path().as_deref() == Some(path))
+            .unwrap()
+            .0
+            .clone()
+    };
+    let ancestor_key = key_for(&ancestor);
+    let selected_key = key_for(&selected);
+    fs::write(selected.join("payload"), b"after local refresh").unwrap();
+    provider
+        .refresh(std::slice::from_ref(&selected_key))
+        .unwrap();
+    let events = complete(&mut provider);
+    assert!(
+        events.iter().any(
+            |event| matches!(event, JunkEvent::Invalidated { key, .. } if key == &ancestor_key)
+        )
+    );
+    assert!(provider.historical.contains(&ancestor_key));
+    assert!(
+        !provider.rows[&ancestor_key].preview,
+        "retained bindings differ from unvalidated cache previews"
+    );
+    assert!(provider.trash(std::slice::from_ref(&ancestor_key)).is_err());
+    provider
+        .refresh(std::slice::from_ref(&ancestor_key))
+        .unwrap();
+    let events = complete(&mut provider);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, JunkEvent::Started { keys: Some(_), .. })),
+        "refresh the retained ancestor scope, not every original root"
+    );
+    assert!(!provider.historical.contains(&ancestor_key));
+    assert_eq!(
+        fs::read(selected.join("payload")).unwrap(),
+        b"after local refresh"
+    );
+    provider.close();
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
+}
+
+#[test]
 fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_trash() {
     let fixture = tempfile::tempdir().unwrap();
     #[cfg(unix)]

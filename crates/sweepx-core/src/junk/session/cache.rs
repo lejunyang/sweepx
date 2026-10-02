@@ -107,6 +107,12 @@ impl Worker {
         let context = service
             .with_platform(&platform.rules, &platform.evidence)
             .classification_context_digest();
+        // A local traversal deliberately omits unrelated listings. Keep the old generation
+        // unchanged: publishing this fragment would make validated outside-scope file facts
+        // disappear on the next scan. Its original cursor still requires current history.
+        if job.selected.is_some() {
+            return Ok(());
+        }
         for root in &self.scan_roots {
             if job.cancel.is_cancelled() {
                 break;
@@ -118,10 +124,7 @@ impl Worker {
             else {
                 continue;
             };
-            // Selected refresh does not carry every candidate in an original root; it may
-            // refresh file facts but must never publish a truncated whole-root report.
-            if job.selected.is_none()
-                && !partial
+            if !partial
                 && root
                     .to_str()
                     .is_some_and(|path| scanned.covered_paths.get(path) == Some(&true))

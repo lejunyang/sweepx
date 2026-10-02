@@ -76,6 +76,9 @@ pub enum JunkEvent {
     },
     /// Confirmed disappearance after complete observation.
     Removed { revision: u64, key: String },
+    /// Keep an existing row historical when local refresh cannot recompute ancestor accounting.
+    /// Its provider may retain a native binding for a later independent refresh.
+    Invalidated { revision: u64, key: String },
     /// Bounded diagnostic; never treated as an empty successful result.
     Error { revision: u64, message: String },
     /// Commit a scope or retain its rows as historical after incomplete work.
@@ -243,6 +246,7 @@ impl JunkModel {
             | JunkEvent::Progress { revision, .. }
             | JunkEvent::Candidate { revision, .. }
             | JunkEvent::Removed { revision, .. }
+            | JunkEvent::Invalidated { revision, .. }
             | JunkEvent::Error { revision, .. }
             | JunkEvent::Completed { revision, .. } => *revision,
             JunkEvent::TrashResult { .. } => unreachable!(),
@@ -315,6 +319,11 @@ impl JunkModel {
                 self.dirty = true;
             }
             JunkEvent::Removed { key, .. } => self.remove(&key),
+            JunkEvent::Invalidated { key, .. } => {
+                if let Some(row) = self.rows.get_mut(&key) {
+                    row.historical = true;
+                }
+            }
             JunkEvent::Error { message, .. } => self.diagnostic(message),
             JunkEvent::Completed {
                 outcome, replaced, ..

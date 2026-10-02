@@ -357,6 +357,11 @@ impl JunkProvider for Provider {
                     self.historical.remove(&key);
                     return Some(JunkEvent::Removed { revision, key });
                 }
+                JunkSessionEventKind::Invalidated { key } => {
+                    let key = key.to_string();
+                    self.historical.insert(key.clone());
+                    return Some(JunkEvent::Invalidated { revision, key });
+                }
                 JunkSessionEventKind::Boundary(boundary) => {
                     return Some(JunkEvent::Error {
                         revision,

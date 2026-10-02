@@ -277,6 +277,9 @@ pub enum JunkSessionEventKind {
     },
     /// Remove an old scoped key only after fresh observations proved complete replacement.
     Removed { key: JunkCandidateKey },
+    /// Retain a prior row as historical. Its binding remains available for selected refresh,
+    /// but ancestor accounting or interpretation has not been recomputed in this revision.
+    Invalidated { key: JunkCandidateKey },
     /// A filesystem boundary, including resource/permission failures; never silently dropped.
     Boundary(Box<sweepx_platform::BoundaryRecord>),
     /// A reliable diagnostic; completion follows with an explicit outcome.
@@ -534,7 +537,8 @@ impl JunkSession {
 
     /// Refreshes selected native subtrees, preserving their parent rule context.
     /// Unknown keys or changed native bindings fail asynchronously without erasing old rows.
-    /// Fresh traversal currently covers their original roots, then filters to the selected ranges.
+    /// Only selected subtrees recurse; shallow native ancestors preserve marker/Git context.
+    /// Ancestor rows become historical until refreshed. Partial scopes publish no whole-root cache.
     pub fn refresh_selected(
         &self,
         keys: &[JunkCandidateKey],
@@ -741,6 +745,17 @@ impl Worker {
             })
             .transpose()?;
         let roots = if let Some(rows) = &selected {
+            for (key, row) in &self.current {
+                if row.observed_native_path().is_some_and(|parent| {
+                    paths.as_ref().is_some_and(|paths| {
+                        paths
+                            .iter()
+                            .any(|path| path != &parent && path.starts_with(&parent))
+                    })
+                }) {
+                    writer.send(JunkSessionEventKind::Invalidated { key: *key })?;
+                }
+            }
             validate_selected(rows, &job.cancel, self.request.limits.scan)?;
             let roots = rows
                 .iter()
@@ -803,31 +818,48 @@ impl Worker {
             rules_digest,
             observed: 0,
         };
-        let scanned = Scanner::new(
+        let scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
                 scan_id: ScanId::new(format!("{}:{}", self.session_id, job.revision.0)),
                 resource_limits: self.request.limits.scan,
                 ..ScannerOptions::default()
             },
-        )
-        .scan_classified_with_observer(
-            &roots,
-            &job.cancel,
-            &service.with_platform(&platform.rules, &platform.evidence),
-            reuse,
-            &mut observer,
-        )
+        );
+        let classifier = service.with_platform(&platform.rules, &platform.evidence);
+        let scanned = if let Some(paths) = &paths {
+            scanner.scan_classified_subtrees_with_observer(
+                &roots,
+                &job.cancel,
+                &classifier,
+                reuse,
+                paths,
+                &mut observer,
+            )
+        } else {
+            scanner.scan_classified_with_observer(
+                &roots,
+                &job.cancel,
+                &classifier,
+                reuse,
+                &mut observer,
+            )
+        }
         .map_err(|error| JunkSessionFailure::new("scan_failed", error.to_string()))?;
         partial |= !scanned.summary.boundaries.iter().all(|boundary| {
             matches!(
                 boundary.kind,
                 sweepx_platform::BoundaryKind::Symlink | sweepx_platform::BoundaryKind::RootSymlink
             )
-        }) || scanned
-            .coverages
-            .values()
-            .any(|coverage| !coverage.complete || coverage.details_lost);
+        }) || scanned.subtree_coverage_complete.map_or_else(
+            || {
+                scanned
+                    .coverages
+                    .values()
+                    .any(|coverage| !coverage.complete || coverage.details_lost)
+            },
+            |complete| !complete,
+        );
         // A retained boundary/coverage log may be empty precisely because its budget was lost.
         // The observer sees failures before those caps and remains the conservative oracle.
         partial |= writer.coverage_incomplete;

@@ -188,6 +188,9 @@ struct ParentMarker {
     local: bool,
 }
 impl JunkClassifier for ParentMarker {
+    fn needs_file_marker(&self, name: &NativeName) -> bool {
+        native_basename_marker(name).as_deref() == Some("Cargo.toml")
+    }
     fn uses_only_local_markers(&self) -> bool {
         self.local
     }
@@ -353,5 +356,248 @@ fn exhausted_marker_budget_never_grants_local_absence_classification() {
             .boundaries
             .iter()
             .any(|boundary| boundary.kind == BoundaryKind::ResourceLimit)
+    );
+}
+
+#[test]
+fn scoped_walk_preserves_parent_markers_and_native_lineage_without_inspecting_siblings() {
+    let (platform, root, target) = marker_fixture(true);
+    let calls = Arc::clone(&platform.inspect_calls);
+    let scanner = Scanner::new(
+        platform,
+        ScannerOptions {
+            max_workers: 1,
+            ..Default::default()
+        },
+    );
+    let classifier = ParentMarker {
+        negative: false,
+        local: true,
+    };
+    let mut log = EarlyLog {
+        preference: Some(target.clone()),
+        ..Default::default()
+    };
+    let result = scanner
+        .scan_classified_subtrees_with_observer(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &classifier,
+            None,
+            std::slice::from_ref(&target),
+            &mut log,
+        )
+        .unwrap();
+    // One selected directory, its payload, and the late parent marker; no other directory/file.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(result.subtree_coverage_complete, Some(true));
+    assert_eq!(log.observations.candidates.len(), 1);
+    let (entry, _, aggregate) = &log.observations.candidates[0];
+    assert_eq!(aggregate.apparent_logical_bytes, known_u128(17));
+    assert!(aggregate.coverage.complete);
+    assert_eq!(
+        entry
+            .validated_native_locator()
+            .unwrap()
+            .unwrap()
+            .scan_root_absolute_path
+            .as_ref()
+            .unwrap()
+            .equals_path(&root),
+        Ok(true)
+    );
+    assert!(result.coverages.values().any(|coverage| !coverage.complete));
+    assert!(!log.seen.contains(&root.join("other")));
+    assert!(!log.seen.contains(&root.join("other/payload")));
+}
+
+#[test]
+fn scoped_marker_directories_are_observed_shallowly_for_git_lineage() {
+    let (mut platform, root, target) = marker_fixture(true);
+    let git = root.join(".git");
+    platform
+        .entries_by_capability
+        .get_mut(&1)
+        .unwrap()
+        .push(DirectoryEntryRecord {
+            path: git.clone(),
+            file_name: test_native_name(".git"),
+        });
+    let mut metadata = test_metadata(git.clone(), ".git", EntryKind::Directory, Some(1));
+    metadata.identity = Some(EntryIdentity::from_unix(1, 4));
+    platform.walk_entries.insert(
+        git.clone(),
+        WalkEntry::Directory(sweepx_platform::OpenedDirectory {
+            metadata,
+            handle: FakeDirectoryHandle {
+                path: git.clone(),
+                capability_id: 4,
+                cursor: 0,
+            },
+        }),
+    );
+    // Descending this deliberately unmapped child would fail. The scoped walk must only
+    // preserve the native .git directory marker, without enumerating its contents.
+    platform.entries_by_capability.insert(
+        4,
+        vec![DirectoryEntryRecord {
+            path: git.join("unexpected"),
+            file_name: test_native_name("unexpected"),
+        }],
+    );
+    let mut log = EarlyLog::default();
+    let result = Scanner::new(
+        platform,
+        ScannerOptions {
+            max_workers: 1,
+            ..Default::default()
+        },
+    )
+    .scan_classified_subtrees_with_observer(
+        &[ScanRoot::new(root).unwrap()],
+        &CancellationToken::new(),
+        &ParentMarker {
+            negative: false,
+            local: true,
+        },
+        None,
+        &[target],
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(result.subtree_coverage_complete, Some(true));
+    assert!(
+        result
+            .directory_markers
+            .values()
+            .any(|children| children.contains_key(".git"))
+    );
+    assert!(log.seen.contains(&git));
+    assert!(!log.seen.contains(&git.join("unexpected")));
+}
+
+#[test]
+fn scoped_negative_predicate_refuses_truncated_parent_markers() {
+    let (platform, root, target) = marker_fixture(true);
+    let mut log = EarlyLog {
+        preference: Some(target.clone()),
+        ..Default::default()
+    };
+    let result = Scanner::new(
+        platform,
+        ScannerOptions {
+            max_workers: 1,
+            resource_limits: ScanResourceLimits {
+                max_directory_entries: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .scan_classified_subtrees_with_observer(
+        &[ScanRoot::new(root).unwrap()],
+        &CancellationToken::new(),
+        &ParentMarker {
+            negative: true,
+            local: true,
+        },
+        None,
+        &[target],
+        &mut log,
+    )
+    .unwrap();
+    assert!(result.decisions.is_empty());
+    assert!(log.observations.candidates.is_empty());
+    assert!(
+        log.observations
+            .boundaries
+            .iter()
+            .any(|boundary| boundary.kind == BoundaryKind::ResourceLimit)
+    );
+}
+
+#[test]
+fn unvisited_scoped_path_never_reports_complete_coverage() {
+    let (platform, root, _) = marker_fixture(true);
+    let result = Scanner::new(platform, ScannerOptions::default())
+        .scan_classified_subtrees_with_observer(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &ParentMarker {
+                negative: false,
+                local: true,
+            },
+            None,
+            &[root.join("missing")],
+            &mut EarlyLog::default(),
+        )
+        .unwrap();
+    assert_eq!(result.subtree_coverage_complete, Some(false));
+}
+
+#[test]
+fn scoped_walk_rejects_global_evaluators_and_outside_paths_before_observation() {
+    let (platform, root, target) = marker_fixture(true);
+    let calls = Arc::clone(&platform.inspect_calls);
+    let scanner = Scanner::new(platform, ScannerOptions::default());
+    let roots = [ScanRoot::new(root).unwrap()];
+    assert!(
+        scanner
+            .scan_classified_subtrees_with_observer(
+                &roots,
+                &CancellationToken::new(),
+                &ParentMarker {
+                    negative: false,
+                    local: false
+                },
+                None,
+                &[target],
+                &mut EarlyLog::default()
+            )
+            .is_err()
+    );
+    assert!(
+        scanner
+            .scan_classified_subtrees_with_observer(
+                &roots,
+                &CancellationToken::new(),
+                &ParentMarker {
+                    negative: false,
+                    local: true
+                },
+                None,
+                &[test_path("outside")],
+                &mut EarlyLog::default()
+            )
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn scoped_omission_cannot_hide_malformed_backend_paths() {
+    let (mut platform, root, target) = marker_fixture(true);
+    platform
+        .entries_by_capability
+        .get_mut(&1)
+        .unwrap()
+        .push(DirectoryEntryRecord {
+            path: test_path("escaped/ignored"),
+            file_name: test_native_name("ignored"),
+        });
+    assert!(
+        Scanner::new(platform, ScannerOptions::default())
+            .scan_classified_subtrees_with_observer(
+                &[ScanRoot::new(root).unwrap()],
+                &CancellationToken::new(),
+                &ParentMarker {
+                    negative: false,
+                    local: true
+                },
+                None,
+                &[target],
+                &mut EarlyLog::default()
+            )
+            .is_err()
     );
 }

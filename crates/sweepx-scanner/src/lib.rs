@@ -240,6 +240,11 @@ pub trait ScanSink {
     /// This is a provisional observation, never a replacement for the final aggregate.
     fn note_directory_progress(&mut self, _path: &Path, _aggregate: &DirectoryAggregate) {}
 
+    /// Notes complete enumeration of the rule-relevant names under this current directory ID.
+    /// Separate from recursive coverage: scoped ancestors enumerate markers without walking
+    /// unrelated subtrees. Failure, truncation and cancellation never call this hook.
+    fn note_directory_enumerated(&mut self, _id: &ScanEntryId) {}
+
     /// Optional scheduling preference, sampled at the next directory round.
     /// This path changes ordering only; it cannot admit or reopen an object.
     fn preferred_directory(&self) -> Option<PathBuf> {
@@ -409,6 +414,10 @@ pub trait ClassifiedScanObserver {
 
 /// Result of a classified scan: the pruned summary plus the rule id chosen per entry.
 pub struct ClassifiedScan {
+    /// Present only for selected-subtree scans. True requires every requested directory to
+    /// reach coverage reporting and all observations below it to be complete. Shallow
+    /// ancestors are excluded; classification/resource diagnostics remain separate.
+    pub subtree_coverage_complete: Option<bool>,
     /// Optional native root observations for cache publication, including non-candidate roots.
     /// Charged to the shared metadata budget and evictable; absent evidence forbids publication.
     /// These rows do not enter the candidate summary or machine output.
@@ -491,6 +500,11 @@ struct CollectingScanSink<'a> {
     root_reuse_bytes: usize,
     active_root: PathBuf,
     metadata_lost: bool,
+    scoped: bool,
+    enumerated_directories: BTreeSet<ScanEntryId>,
+    selected_paths: Option<&'a [PathBuf]>,
+    selected_seen: Vec<bool>,
+    selected_coverage_complete: bool,
 }
 
 impl<'a> CollectingScanSink<'a> {
@@ -527,6 +541,11 @@ impl<'a> CollectingScanSink<'a> {
             root_reuse_bytes: 0,
             active_root: PathBuf::new(),
             metadata_lost: false,
+            scoped: false,
+            enumerated_directories: BTreeSet::new(),
+            selected_paths: None,
+            selected_seen: Vec::new(),
+            selected_coverage_complete: true,
         }
     }
 
@@ -548,6 +567,9 @@ impl<'a> CollectingScanSink<'a> {
     /// subtree not having been traversed.
     fn finish_classified(self) -> ClassifiedScan {
         ClassifiedScan {
+            subtree_coverage_complete: self.selected_paths.map(|_| {
+                self.selected_coverage_complete && self.selected_seen.iter().all(|seen| *seen)
+            }),
             observed_roots: self.observed_roots,
             summary: self.summary,
             decisions: self.decisions,
@@ -672,7 +694,14 @@ impl<'a> CollectingScanSink<'a> {
         let entry = self.pending_directories.remove(id)?;
         let is_root = self.pending_root_ids.remove(id);
         let cost = Self::row_cost(&entry);
-        let decision = if self.metadata_lost {
+        let complete_markers = !self.scoped
+            || (self.enumerated_directories.contains(id)
+                && entry
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.parent_id.as_ref())
+                    .is_none_or(|parent| self.enumerated_directories.contains(parent)));
+        let decision = if self.metadata_lost || !complete_markers {
             None
         } else {
             self.classifier
@@ -1008,6 +1037,12 @@ impl ScanSink for CollectingScanSink<'_> {
             .is_some_and(JunkClassifier::uses_only_local_markers)
     }
 
+    fn note_directory_enumerated(&mut self, id: &ScanEntryId) {
+        if self.scoped && self.admit_metadata(128usize.saturating_add(id.as_str().len()), true) {
+            self.enumerated_directories.insert(id.clone());
+        }
+    }
+
     fn note_directory_progress(&mut self, path: &Path, aggregate: &DirectoryAggregate) {
         if let Some(observer) = self.observer.as_deref_mut() {
             observer.on_directory_progress(path, aggregate);
@@ -1021,6 +1056,16 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+        if let Some(paths) = self.selected_paths {
+            for (index, selected) in paths.iter().enumerate() {
+                if path == selected {
+                    self.selected_seen[index] = true;
+                }
+                if path.starts_with(selected) {
+                    self.selected_coverage_complete &= coverage.complete && !coverage.details_lost;
+                }
+            }
+        }
         if self.classifier.is_some()
             && !self.metadata_lost
             && let Some(path) = path.to_str()
@@ -1164,6 +1209,28 @@ struct PreparedDirectoryBatch<D> {
     terminal: Option<InspectionTerminal>,
 }
 
+// Scope controls observation work, never filesystem authority. Ancestors enumerate fully for
+// needed marker absence, but only selected subtrees recurse. Borrowing this bounded selection
+// avoids duplicating native paths into a depth-sized route index on every scan.
+#[derive(Clone, Copy)]
+struct SubtreeScope<'a> {
+    paths: &'a [PathBuf],
+    classifier: &'a (dyn JunkClassifier + Sync),
+}
+impl SubtreeScope<'_> {
+    fn selected(&self, path: &Path) -> bool {
+        self.paths.iter().any(|selected| path.starts_with(selected))
+    }
+    fn related(&self, path: &Path) -> bool {
+        self.selected(path) || self.paths.iter().any(|selected| selected.starts_with(path))
+    }
+    fn inspect(&self, child: &sweepx_platform::DirectoryEntryRecord) -> bool {
+        self.related(&child.path)
+            || self.classifier.needs_file_marker(&child.file_name)
+            || native_basename_marker(&child.file_name).as_deref() == Some(".git")
+    }
+}
+
 enum InspectionTerminal {
     Cancelled { path: PathBuf },
     Fatal(PlatformError),
@@ -1183,6 +1250,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     cancel: &CancellationToken,
     limits: ScanResourceLimits,
     reuse: Option<&dyn SubtreeReuse>,
+    subtree_scope: Option<SubtreeScope<'_>>,
 ) -> DirectoryTaskResult<P::DirectoryHandle> {
     let DirectoryTask {
         ticket,
@@ -1338,6 +1406,22 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             });
             break;
         }
+        // Validate even omitted records against the retained parent capability. Skipping an
+        // unrelated name must not conceal a backend path substitution or escape the root.
+        if let Err(error) = directory_entry.validate_for_parent(&path) {
+            terminal = Some(InspectionTerminal::Fatal(
+                PlatformError::InvalidDirectoryEntry {
+                    parent: path.clone(),
+                    detail: error.to_string(),
+                },
+            ));
+            break;
+        }
+        if subtree_scope
+            .is_some_and(|scope| !scope.selected(&path) && !scope.inspect(&directory_entry))
+        {
+            continue;
+        }
         let permit_available = opened_child_permits < child_directory_permits;
         // Once the permits are spent, keep the rest for a later pass instead of refusing them.
         // A record cannot be classified as file-or-directory without inspecting it, so
@@ -1483,6 +1567,54 @@ where
         Ok(sink.finish_classified())
     }
 
+    /// Observes selected subtrees and the shallow ancestor context required by local rules.
+    ///
+    /// Selections must be bounded absolute paths inside the admitted roots. They filter work,
+    /// not identity or execution authority: native roots, lineage, no-follow and mount checks
+    /// stay unchanged. Ancestor totals/coverage are incomplete; selected subtree facts may be
+    /// complete. All required ancestor file markers and `.git` facts are freshly observed.
+    /// Root-wide custom evaluators are refused rather than given a silently incomplete index.
+    /// The classifier is shared by bounded workers for its read-only marker-name predicate.
+    pub fn scan_classified_subtrees_with_observer(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+        classifier: &(dyn JunkClassifier + Sync),
+        reuse: Option<&dyn SubtreeReuse>,
+        subtrees: &[PathBuf],
+        observer: &mut dyn ClassifiedScanObserver,
+    ) -> Result<ClassifiedScan, ScanError> {
+        if !classifier.uses_only_local_markers()
+            || subtrees.is_empty()
+            || subtrees.len() > 256
+            || subtrees.iter().any(|path| {
+                !path.is_absolute()
+                    || path.as_os_str().len() > 64 * 1024
+                    || !roots.iter().any(|root| path.starts_with(root.path()))
+            })
+        {
+            return Err(ScanError::RootValidation(
+                "invalid local classification scope".into(),
+            ));
+        }
+        let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        sink.scoped = true;
+        sink.selected_paths = Some(subtrees);
+        sink.selected_seen = vec![false; subtrees.len()];
+        sink.observer = Some(observer);
+        self.scan_with_sink_scoped(
+            roots,
+            cancel,
+            reuse,
+            Some(SubtreeScope {
+                paths: subtrees,
+                classifier,
+            }),
+            &mut sink,
+        )?;
+        Ok(sink.finish_classified())
+    }
+
     /// Admits only the requested roots. This is the fast first frame for progressive TUI mode;
     /// no child directory is traversed until the browser requests a bounded detail rescan.
     pub fn scan_roots_only(
@@ -1576,6 +1708,17 @@ where
         reuse: Option<&dyn SubtreeReuse>,
         sink: &mut S,
     ) -> Result<(), ScanError> {
+        self.scan_with_sink_scoped(roots, cancel, reuse, None, sink)
+    }
+
+    fn scan_with_sink_scoped<S: ScanSink>(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+        reuse: Option<&dyn SubtreeReuse>,
+        subtree_scope: Option<SubtreeScope<'_>>,
+        sink: &mut S,
+    ) -> Result<(), ScanError> {
         if self.options.max_workers == 0 {
             return Err(ScanError::RootValidation(
                 "max_workers must be greater than zero".to_string(),
@@ -1589,6 +1732,9 @@ where
         let mut next_entry_ordinal = Some(1u128);
 
         for root in roots {
+            if subtree_scope.is_some_and(|scope| !scope.related(root.path())) {
+                continue;
+            }
             if cancel.is_cancelled() {
                 let root_entry_id =
                     allocate_scan_entry_id(&self.options.scan_id, &mut next_entry_ordinal)?;
@@ -1720,6 +1866,7 @@ where
                 cancel,
                 overflow_count_before,
                 reuse,
+                subtree_scope,
                 sink,
             )?;
             if cancel.is_cancelled() {
@@ -1740,6 +1887,7 @@ where
         cancel: &CancellationToken,
         overflow_count_before: usize,
         reuse: Option<&dyn SubtreeReuse>,
+        subtree_scope: Option<SubtreeScope<'_>>,
         sink: &mut S,
     ) -> Result<(), ScanError> {
         let RootAdmission {
@@ -1813,6 +1961,13 @@ where
             root_metadata.path.clone(),
             DirectoryState::new(root_identity.entry_id.clone()),
         );
+        if subtree_scope.is_some_and(|scope| !scope.selected(&root_metadata.path)) {
+            directory_states
+                .get_mut(&root_metadata.path)
+                .expect("root state retained")
+                .incomplete_reasons
+                .insert(ReasonCode::IncompleteStreamCoverage);
+        }
 
         let worker_count = self.options.max_workers.min(MAX_SCANNER_WORKERS);
         // A worker owns one retained handle for the whole enumerate-and-inspect batch. It cannot
@@ -1846,7 +2001,14 @@ where
                         let path = task.current.path.clone();
                         let child_directory_permits = task.child_directory_permits;
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            prepare_directory_task(platform, task, cancel, limits, reuse)
+                            prepare_directory_task(
+                                platform,
+                                task,
+                                cancel,
+                                limits,
+                                reuse,
+                                subtree_scope,
+                            )
                         }))
                         .unwrap_or(DirectoryTaskResult {
                             ticket,
@@ -2204,13 +2366,19 @@ where
                                     }
                                 }
 
-                                if sink
-                                    .retained_aggregate_count()
-                                    .checked_add(directory_states.len())
-                                    .is_none_or(|count| {
-                                        count
-                                            >= self.options.resource_limits.max_retained_aggregates
-                                    })
+                                let descend =
+                                    subtree_scope.is_none_or(|scope| scope.related(&metadata.path));
+                                if descend
+                                    && sink
+                                        .retained_aggregate_count()
+                                        .checked_add(directory_states.len())
+                                        .is_none_or(|count| {
+                                            count
+                                                >= self
+                                                    .options
+                                                    .resource_limits
+                                                    .max_retained_aggregates
+                                        })
                                 {
                                     let boundary = BoundaryRecord {
                                         path: metadata.path.clone(),
@@ -2261,16 +2429,28 @@ where
                                     },
                                 )?;
                                 propagate_directory_entry(&mut directory_states, &metadata.path);
+                                sink.push_entry(&root_path, scanned)?;
+                                if !descend {
+                                    continue;
+                                }
                                 directory_states
                                     .entry(metadata.path.clone())
                                     .or_insert_with(|| DirectoryState::new(entry_id.clone()));
+                                if subtree_scope
+                                    .is_some_and(|scope| !scope.selected(&metadata.path))
+                                {
+                                    directory_states
+                                        .get_mut(&metadata.path)
+                                        .expect("child state retained")
+                                        .incomplete_reasons
+                                        .insert(ReasonCode::IncompleteStreamCoverage);
+                                }
                                 if sink.accepts_closed_subtrees() {
                                     directory_states
                                         .get_mut(&path)
                                         .expect("parent state retained")
                                         .open_subtrees += 1;
                                 }
-                                sink.push_entry(&root_path, scanned)?;
                                 frontier.push_back(FrontierDirectory {
                                     path: metadata.path.clone(),
                                     handle: opened.handle,
@@ -2514,6 +2694,12 @@ where
                         && !directory_limit_blocks_continuation
                         && !cancel.is_cancelled()
                     {
+                        sink.note_directory_enumerated(
+                            &directory_states
+                                .get(&path)
+                                .expect("enumerated state retained")
+                                .entry_id,
+                        );
                         finish_subtree_batch(
                             &root_path,
                             &path,
