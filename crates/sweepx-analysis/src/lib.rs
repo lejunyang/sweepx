@@ -1,6 +1,12 @@
 mod candidate;
 mod digest;
 mod explain;
+mod large_files;
+
+pub use large_files::{
+    LargeFileCollector, LargeFileIncompleteReason, LargeFileOptions, LargeFileOptionsError,
+    LargeFileReport,
+};
 
 pub use candidate::{
     Candidate, CandidateBuilder, CandidateDigestInput, CandidateEligibility, CandidateLocator,

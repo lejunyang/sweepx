@@ -38,6 +38,19 @@ The protocol can now express one exact capability/platform tuple and its evidenc
 
 These records remain a fail-closed qualification-registry substrate; a `degraded` preview is not `qualified`. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. There is still no general plan/approval UI; the Permanent adapter covers only bounded regular-file/real-directory trees on Linux.
 
+## Independent large-file ranking
+
+```bash
+sweepx scan --no-state --large-files --min-file-bytes 104857600 --top-files 100 /absolute/root
+sweepx --format json scan --no-state --large-files --min-file-bytes 0 --top-files 20 /absolute/root
+```
+
+`--large-files` independently collects ordinary files during the existing metadata walk. Defaults include logical lengths of at least 100 MiB and retain the largest 100 paths across all roots in one invocation. `--min-file-bytes` accepts an inclusive nonnegative integer logical-byte threshold; `--top-files` allows 1..=10000. Both require `--large-files`, which currently conflicts with `--tui`. Ranking always follows descending logical size; equal lengths follow observation order, without a tie-order guarantee across volumes or scans.
+
+Human output adds a separate logical/allocated table, displaying at most 40 rows. JSON adds `data.largeFiles` with `options`, `files`, `observedFiles`, `qualifyingFiles`, `unknownLogicalFiles`, `topKLimited`, `complete` and `incompleteReasons`. Machine fields, states and decimal byte strings stay identical across locales. Plain scan output has no additional field when the analysis is disabled. Observations reach the collector before ordinary row retention, so later large files can replace smaller top-K rows. A truncated ordinary listing can make the scan partial while this independent ranking has complete coverage.
+
+The collector admits at most a 64 MiB owned-data estimate, including native lineage; this is not exact RSS. Intentional top-K truncation is distinct from unknown logical lengths, retention pressure, cancellation, permission/mount boundaries or incomplete traversal. Those gaps remain explicit; an incomplete empty ranking does not prove absence. This performs no-follow metadata observation without reading contents. Hard-link paths remain separate aliases. Unknown allocation stays unknown (currently the macOS contract), and no sum is presented as reclaimable space. Large files are not junk candidates; this mode provides no cleanup operation.
+
 ## Install
 
 A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.

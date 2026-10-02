@@ -223,6 +223,13 @@ pub trait ScanSink {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError>;
 
+    /// Requires full current file observations instead of optional cached logical lengths.
+    /// Consumers needing allocation or native file facts must opt in; cache lengths alone
+    /// cannot supply those fields. Directory traversal and its boundaries stay unchanged.
+    fn wants_file_observations(&self) -> bool {
+        false
+    }
+
     /// Whether the consumer needs lower-bound directory statistics between committed batches.
     /// Disabled by default so ordinary scans do not build transient aggregate snapshots.
     fn wants_directory_progress(&self) -> bool {
@@ -385,11 +392,31 @@ pub trait JunkClassifier {
 /// and rule decision have been admitted. This interface does not provide Git enrichment, a UI
 /// queue or execution authority. Cancellation uses the scan's existing token.
 pub trait ClassifiedScanObserver {
+    /// Observes each current entry before optional row retention or directory classification.
+    /// A borrowed fact is not execution authorization; expensive work belongs off the UI thread.
+    fn on_entry(&mut self, _entry: &ScannedEntry) {}
+
+    /// Requests current file metadata rather than logical-length-only cache reuse.
+    /// Required for analyses consuming `on_entry` for every regular file.
+    fn wants_file_observations(&self) -> bool {
+        false
+    }
+
+    /// Whether provisional directory aggregates are useful to this observer.
+    /// Defaults to true for existing interactive consumers; file-only analyses can avoid them.
+    fn wants_directory_progress(&self) -> bool {
+        true
+    }
+
     /// Reports progress even when the retained progress log is full.
     fn on_progress(&mut self, _root: &Path, _event: &ProgressEvent) {}
 
     /// Reports a boundary even when the retained boundary log is full.
     fn on_boundary(&mut self, _boundary: &BoundaryRecord) {}
+
+    /// Receives recursive coverage before optional aggregate/index retention, for every directory.
+    /// A truncated result listing is distinct from an unobserved filesystem subtree.
+    fn on_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
     /// Reports a committed directory batch as lower-bound statistics.
     /// Final statistics for classified directories arrive with `on_candidate`.
@@ -832,6 +859,9 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn push_entry(&mut self, root: &Path, entry: ScannedEntry) -> Result<(), ScanError> {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_entry(&entry);
+        }
         if self.classifier.is_some() {
             match entry.object_type {
                 ObjectType::Directory => {
@@ -1029,7 +1059,15 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn wants_directory_progress(&self) -> bool {
-        self.observer.is_some()
+        self.observer
+            .as_ref()
+            .is_some_and(|observer| observer.wants_directory_progress())
+    }
+
+    fn wants_file_observations(&self) -> bool {
+        self.observer
+            .as_ref()
+            .is_some_and(|observer| observer.wants_file_observations())
     }
 
     fn accepts_closed_subtrees(&self) -> bool {
@@ -1056,6 +1094,9 @@ impl ScanSink for CollectingScanSink<'_> {
     }
 
     fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.on_directory_coverage(path, coverage);
+        }
         if let Some(paths) = self.selected_paths {
             for (index, selected) in paths.iter().enumerate() {
                 if path == selected {
@@ -1530,6 +1571,21 @@ where
         Ok(sink.finish())
     }
 
+    /// Runs the ordinary metadata walk with borrowed observations before row retention.
+    /// Independent analyses can consume every current file without buffering the full listing.
+    /// Cancellation and filesystem/resource boundaries use the same traversal as `scan`.
+    pub fn scan_with_observer(
+        &self,
+        roots: &[ScanRoot],
+        cancel: &CancellationToken,
+        observer: &mut dyn ClassifiedScanObserver,
+    ) -> Result<ScanSummary, ScanError> {
+        let mut sink = CollectingScanSink::new(self.options.resource_limits);
+        sink.observer = Some(observer);
+        self.scan_with_sink(roots, cancel, None, &mut sink)?;
+        Ok(sink.summary)
+    }
+
     /// Runs the walk in junk classification mode.
     ///
     /// Only directories the `classifier` returns a rule id for are retained as rows, so the
@@ -1897,6 +1953,15 @@ where
             directory,
         } = admission;
         let root_path = root.path().to_path_buf();
+
+        // Logical-length reuse has no current allocation or file identity observation to
+        // deliver. File analyses request the ordinary backend inspection, never fabricated
+        // entry facts. Existing junk-only/cache paths keep their original fast behavior.
+        let reuse = if sink.wants_file_observations() {
+            None
+        } else {
+            reuse
+        };
 
         // Qualify the accelerated path before traversing.
         //

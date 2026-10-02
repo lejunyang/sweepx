@@ -2,6 +2,77 @@
 
 use super::*;
 
+#[test]
+fn current_file_observer_bypasses_length_only_reuse_and_sees_unretained_files() {
+    struct RefusedPlan;
+    impl SubtreeReuse for RefusedPlan {
+        fn plan_entries(
+            &self,
+            _dir: &Path,
+            _children: &[sweepx_platform::DirectoryEntryRecord],
+        ) -> Option<Vec<PlannedEntry>> {
+            panic!("file observer requires native observations, not a logical-length-only plan")
+        }
+    }
+    #[derive(Default)]
+    struct Files {
+        entries: Vec<ScannedEntry>,
+        coverage: Vec<(PathBuf, bool)>,
+    }
+    impl ClassifiedScanObserver for Files {
+        fn wants_file_observations(&self) -> bool {
+            true
+        }
+        fn wants_directory_progress(&self) -> bool {
+            false
+        }
+        fn on_entry(&mut self, entry: &ScannedEntry) {
+            if entry.object_type == ObjectType::File {
+                self.entries.push(entry.clone());
+            }
+        }
+        fn on_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+            self.coverage.push((path.into(), coverage.complete));
+        }
+    }
+    let (platform, root, _) = marker_fixture(false);
+    let mut files = Files::default();
+    let result = Scanner::new(platform, ScannerOptions::default())
+        .scan_classified_with_observer(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &ParentMarker {
+                negative: false,
+                local: true,
+            },
+            Some(&RefusedPlan),
+            &mut files,
+        )
+        .unwrap();
+    assert!(
+        result.summary.entries.is_empty(),
+        "no Cargo marker, hence no retained candidates"
+    );
+    let observed: BTreeSet<_> = files
+        .entries
+        .iter()
+        .map(|entry| PathBuf::from(&entry.display_path))
+        .collect();
+    assert_eq!(
+        observed,
+        BTreeSet::from([root.join("target/payload"), root.join("other/payload")])
+    );
+    assert!(
+        files
+            .entries
+            .iter()
+            .all(|entry| entry.logical_bytes == known_u128(17)
+                && entry.identity.is_some()
+                && entry.native_locator.is_some())
+    );
+    assert!(files.coverage.contains(&(root, true)));
+}
+
 struct LocalBranches;
 impl JunkClassifier for LocalBranches {
     fn uses_only_local_markers(&self) -> bool {

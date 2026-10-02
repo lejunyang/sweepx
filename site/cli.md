@@ -38,6 +38,20 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 这些记录仍是失败关闭的 qualification registry substrate；`degraded` preview 不等于 `qualified`。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能使 mutation 合格。未来只有 current `real_os_qualification` evidence 完整匹配精确 tuple 时，对应单元才可能被标为 `qualified`。当前没有通用 `plan`/approval UI；Permanent adapter 仅覆盖 Linux 有界普通文件/真实目录树。
 
+
+## 独立大文件榜单
+
+```bash
+sweepx scan --no-state --large-files --min-file-bytes 104857600 --top-files 100 /absolute/root
+sweepx --format json scan --no-state --large-files --min-file-bytes 0 --top-files 20 /absolute/root
+```
+
+`--large-files` 在现有元数据遍历中独立收集普通文件，默认包含逻辑大小至少 100 MiB 的文件，保留整个调用所有根中最大的 100 个路径。`--min-file-bytes` 接收包含等于的非负整数逻辑字节阈值，`--top-files` 范围为 1..=10000，两者都要求 `--large-files`；这个模式目前不能与 `--tui` 同用。榜单始终按逻辑大小降序，等大文件按本次原生观察顺序取舍，不保证不同卷或扫描之间的 tie 顺序。
+
+human 显示独立的逻辑大小/分配大小表，最多 40 行；JSON 新增 `data.largeFiles`，包含 `options`、`files`、`observedFiles`、`qualifyingFiles`、`unknownLogicalFiles`、`topKLimited`、`complete` 和 `incompleteReasons`。机器字段、状态和十进制字节字符串不随 locale 改变。没有启用时，普通 scan 输出不增加此字段。文件观察在普通列表保留之前到达收集器，后半段的大文件仍可替换 top-K 中较小的行；普通列表截断可能使 scan 总状态为 partial，但独立榜单可保持完整覆盖。
+
+收集器最多保留 64 MiB 的 owned-data 准入估算，包括 native lineage；这不是精确 RSS。正常 top-K 截断不表示遍历失败；未知逻辑大小、保留预算不足、取消、权限/挂载或真实遍历截断则留下明确的不完整原因，不能把空列表说成没有大文件。只做 no-follow 元数据观察，不读取内容。硬链接路径仍分别展示，分配证据未知时原样保留（macOS 当前为 unknown），也不求和冒充可回收空间。大文件不是垃圾候选，本模式没有清理操作。
+
 ## 安装
 
 正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。

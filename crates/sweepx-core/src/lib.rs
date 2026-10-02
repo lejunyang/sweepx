@@ -3,7 +3,9 @@ mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;
 pub mod junk;
+mod large_files;
 pub mod tools;
+pub use large_files::scan_large_files_with_store;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -12,6 +14,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use sweepx_analysis::{LargeFileOptions, LargeFileReport};
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -442,6 +445,9 @@ pub enum CoreError {
     State(#[from] StateError),
     #[error("analysis input must be a positive bounded byte limit")]
     InvalidAnalysisInputLimit,
+    /// Invalid top-K or retained-data bounds, rejected before traversal.
+    #[error(transparent)]
+    InvalidLargeFileOptions(#[from] sweepx_analysis::LargeFileOptionsError),
     #[error("analysis input path must be absolute: {0}")]
     NonAbsoluteAnalysisInput(PathBuf),
     #[error("analysis input exceeds byte limit: limit={limit}, observed={observed}")]
@@ -843,6 +849,7 @@ pub fn scan_with_store<S: SnapshotStore>(
         None,
         None,
         None,
+        None,
     )
     .map(|result| result.scan)
 }
@@ -867,6 +874,7 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         ScannerOptions::default(),
         Some(classifier),
         reuse,
+        None,
         None,
     )
     .map(Into::into)
@@ -897,6 +905,7 @@ pub fn scan_junk_with_observer<S: SnapshotStore>(
         Some(classifier),
         reuse,
         Some(JunkScanObservation { cancel, observer }),
+        None,
     )
     .map(Into::into)
 }
@@ -1063,6 +1072,7 @@ struct JunkScanObservation<'a> {
     observer: &'a mut dyn sweepx_scanner::ClassifiedScanObserver,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_with_store_options<S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
@@ -1071,6 +1081,7 @@ fn scan_with_store_options<S: SnapshotStore>(
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
     live: Option<JunkScanObservation<'_>>,
+    large_files: Option<large_files::LargeFileObservation<'_>>,
 ) -> Result<ScanWorkResult, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
@@ -1149,7 +1160,21 @@ fn scan_with_store_options<S: SnapshotStore>(
             },
         );
         let default_cancel = CancellationToken::new();
-        let cancel = live.as_ref().map_or(&default_cancel, |live| live.cancel);
+        let large_cancel = large_files.as_ref().map(|request| request.cancel);
+        let mut large_observer = large_files
+            .map(|request| {
+                large_files::LargeFileObserver::new(request.options.clone(), roots.len())
+            })
+            .transpose()?;
+        let mut live = live;
+        let cancel = large_cancel
+            .unwrap_or_else(|| live.as_ref().map_or(&default_cancel, |live| live.cancel));
+        let observer: Option<&mut dyn sweepx_scanner::ClassifiedScanObserver> =
+            if let Some(observer) = large_observer.as_mut() {
+                Some(observer)
+            } else {
+                live.as_mut().map(|live| &mut *live.observer)
+            };
         // In junk mode classify during the walk; otherwise retain every row as before.
         let (
             summary,
@@ -1161,13 +1186,9 @@ fn scan_with_store_options<S: SnapshotStore>(
             observed_roots,
         ) = match classifier {
             Some(classifier) => {
-                let classified = match live {
-                    Some(live) => scanner.scan_classified_with_observer(
-                        &roots,
-                        cancel,
-                        classifier,
-                        reuse,
-                        live.observer,
+                let classified = match observer {
+                    Some(observer) => scanner.scan_classified_with_observer(
+                        &roots, cancel, classifier, reuse, observer,
                     )?,
                     None => scanner.scan_classified(&roots, cancel, classifier, reuse)?,
                 };
@@ -1182,7 +1203,10 @@ fn scan_with_store_options<S: SnapshotStore>(
                 )
             }
             None => (
-                scanner.scan(&roots, cancel)?,
+                match observer {
+                    Some(observer) => scanner.scan_with_observer(&roots, cancel, observer)?,
+                    None => scanner.scan(&roots, cancel)?,
+                },
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
@@ -1196,11 +1220,17 @@ fn scan_with_store_options<S: SnapshotStore>(
         let finished_at = timestamp_now();
         // A bounded progress log is not a reliable cancellation flag: its final marker can
         // replace earlier observations. Caller-owned cancellation is the authoritative signal.
-        let status = if cancel.is_cancelled() {
+        let mut status = if cancel.is_cancelled() {
             OutputStatus::Cancelled
         } else {
             scan_status(&summary)
         };
+        let large_report = large_observer.map(|observer| observer.finish(cancel.is_cancelled()));
+        if status == OutputStatus::Ok
+            && large_report.as_ref().is_some_and(|report| !report.complete)
+        {
+            status = OutputStatus::Partial;
+        }
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
 
         let mut output = OutputEnvelope::new(
@@ -1236,6 +1266,11 @@ fn scan_with_store_options<S: SnapshotStore>(
                 "detail": boundary.detail
             })).collect::<Vec<_>>()
         }));
+        if let Some(report) = large_report {
+            output.data["largeFiles"] = camelize_json_keys(
+                serde_json::to_value(report).expect("large-file report serializable"),
+            );
+        }
 
         if status == OutputStatus::Partial {
             output.warnings.push(protocol_error(
@@ -2981,6 +3016,13 @@ fn render_human_scan_output(
         Locale::EnUs => ">= marks a lower bound from an incomplete scan. Reclaimable estimates exclusive allocated disk bytes that removal may release; it is not logical file size or a guarantee.".to_string(),
     });
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
+    large_files::append_human_ranking(
+        context.locale(),
+        &output.data,
+        &mut lines,
+        max_rows,
+        size_unit,
+    );
     lines.join("\n")
 }
 
@@ -5352,6 +5394,7 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         | CoreError::InvalidOperationId(_)
         | CoreError::InvalidReplayCursor(_)
         | CoreError::InvalidAnalysisInputLimit
+        | CoreError::InvalidLargeFileOptions(_)
         | CoreError::NonAbsoluteAnalysisInput(_)
         | CoreError::AnalysisInputTooLarge { .. }
         | CoreError::AnalysisInputJson(_)

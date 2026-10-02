@@ -175,6 +175,15 @@ enum Commands {
         /// Browse directories interactively and scan details on demand.
         #[arg(long)]
         tui: bool,
+        /// Rank ordinary files by logical size during the same metadata walk; report-only.
+        #[arg(long, conflicts_with = "tui")]
+        large_files: bool,
+        /// Inclusive exact logical-byte threshold for --large-files (default 100 MiB).
+        #[arg(long, requires = "large_files", default_value_t = 100 * 1024 * 1024)]
+        min_file_bytes: u128,
+        /// Retain the largest K file paths; ties follow native observation order.
+        #[arg(long, requires = "large_files", default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=10000))]
+        top_files: u32,
         #[arg(long)]
         no_state: bool,
         /// Root paths; accepts absolute paths, paths relative to the current directory, and `~`.
@@ -374,6 +383,9 @@ fn main() -> ProcessExitCode {
     let result = match cli.command {
         Commands::Scan {
             tui,
+            large_files,
+            min_file_bytes,
+            top_files,
             no_state,
             roots,
         } => {
@@ -425,39 +437,57 @@ fn main() -> ProcessExitCode {
                 tui,
                 format == OutputFormat::Human,
             );
-            let scan = match store.as_ref() {
-                Some(store) if tui => scan_for_tui_with_store(
+            let scan = if large_files {
+                let request = ScanRequest {
+                    roots,
+                    state_dir: state_dir.clone(),
+                };
+                sweepx_core::scan_large_files_with_store(
                     &context,
-                    &ScanRequest {
-                        roots,
-                        state_dir: state_dir.clone(),
+                    &request,
+                    store.as_ref(),
+                    &sweepx_core::LargeFileOptions {
+                        minimum_logical_bytes: sweepx_model::DecimalU128::new(min_file_bytes),
+                        max_files: top_files as usize,
+                        ..Default::default()
                     },
-                    Some(store),
-                ),
-                Some(store) => scan_with_store(
-                    &context,
-                    &ScanRequest {
-                        roots,
-                        state_dir: state_dir.clone(),
-                    },
-                    Some(store),
-                ),
-                None if tui => scan_for_tui_with_store(
-                    &context,
-                    &ScanRequest {
-                        roots,
-                        state_dir: None,
-                    },
-                    Option::<&sweepx_core::MemorySnapshotStore>::None,
-                ),
-                None => scan_with_store(
-                    &context,
-                    &ScanRequest {
-                        roots,
-                        state_dir: None,
-                    },
-                    Option::<&sweepx_core::MemorySnapshotStore>::None,
-                ),
+                    &CancellationToken::new(),
+                )
+            } else {
+                match store.as_ref() {
+                    Some(store) if tui => scan_for_tui_with_store(
+                        &context,
+                        &ScanRequest {
+                            roots,
+                            state_dir: state_dir.clone(),
+                        },
+                        Some(store),
+                    ),
+                    Some(store) => scan_with_store(
+                        &context,
+                        &ScanRequest {
+                            roots,
+                            state_dir: state_dir.clone(),
+                        },
+                        Some(store),
+                    ),
+                    None if tui => scan_for_tui_with_store(
+                        &context,
+                        &ScanRequest {
+                            roots,
+                            state_dir: None,
+                        },
+                        Option::<&sweepx_core::MemorySnapshotStore>::None,
+                    ),
+                    None => scan_with_store(
+                        &context,
+                        &ScanRequest {
+                            roots,
+                            state_dir: None,
+                        },
+                        Option::<&sweepx_core::MemorySnapshotStore>::None,
+                    ),
+                }
             };
             progress.finish();
             if tui {

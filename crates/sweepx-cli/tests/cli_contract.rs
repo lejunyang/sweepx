@@ -13,6 +13,134 @@ use sweepx_protocol::{
 };
 use tempfile::TempDir;
 
+#[test]
+fn large_file_scan_reports_independent_ranked_metadata_in_both_locales() {
+    let fixture = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = fixture.path().canonicalize().unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    for (name, bytes) in [("small", 3), ("medium", 11), ("largest", 37)] {
+        fs::write(root.join(name), vec![b'x'; bytes]).unwrap();
+    }
+    let mut expected: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| fs::symlink_metadata(path).unwrap().is_file())
+        .map(|path| {
+            (
+                path.to_string_lossy().into_owned(),
+                fs::symlink_metadata(path).unwrap().len(),
+            )
+        })
+        .filter(|(_, length)| *length >= 11)
+        .collect();
+    expected.sort_unstable_by_key(|item| std::cmp::Reverse(item.1));
+    expected.truncate(2);
+    let mut previous = None;
+    for locale in ["en-US", "zh-CN"] {
+        let output = cli_command()
+            .args([
+                "--locale",
+                locale,
+                "--format",
+                "json",
+                "scan",
+                "--no-state",
+                "--large-files",
+                "--min-file-bytes",
+                "11",
+                "--top-files",
+                "2",
+            ])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let report = &value["data"]["largeFiles"];
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["options"]["minimumLogicalBytes"], "11");
+        let ranked: Vec<_> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry["objectType"], "file");
+                assert!(
+                    entry.get("allocatedBytes").is_some() && entry.get("nativeLocator").is_some()
+                );
+                assert!(entry.get("logicalBytes").unwrap().get("state").is_some());
+                (
+                    entry["displayPath"].as_str().unwrap().to_owned(),
+                    entry["logicalBytes"]["value"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(ranked, expected);
+        if let Some(previous) = &previous {
+            assert_eq!(&ranked, previous);
+        }
+        previous = Some(ranked);
+    }
+    let output = cli_command()
+        .args([
+            "--locale",
+            "en-US",
+            "scan",
+            "--no-state",
+            "--large-files",
+            "--min-file-bytes",
+            "11",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("Large files (report-only")
+            && text.contains("Logical")
+            && text.contains("Allocated")
+            && text.contains("Large files are not junk")
+    );
+    assert_eq!(fs::read(root.join("largest")).unwrap(), vec![b'x'; 37]);
+}
+
+#[test]
+fn large_file_options_refuse_conflicts_and_keep_plain_scan_output_unchanged() {
+    for args in [
+        vec!["scan", "--min-file-bytes", "1"],
+        vec!["scan", "--top-files", "2"],
+        vec!["scan", "--large-files", "--top-files", "0"],
+        vec!["scan", "--large-files", "--top-files", "10001"],
+        vec!["scan", "--large-files", "--tui"],
+    ] {
+        cli_command().args(args).assert().code(2);
+    }
+    let fixture = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = fixture.path().canonicalize().unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    let output = cli_command()
+        .args(["--format", "json", "scan", "--no-state"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["data"].get("largeFiles").is_none());
+}
+
 fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
