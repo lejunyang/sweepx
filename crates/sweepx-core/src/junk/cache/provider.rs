@@ -30,6 +30,8 @@ struct RootState {
     index: StoredSubtreeIndex,
     /// The drain asked for a full rescan (dropped/lost history) or failed; reuse is disabled.
     unusable: bool,
+    /// Optional original candidate snapshot; local merges publish this only as historical.
+    preview: Option<StoredJunkRoot>,
 }
 
 /// Reads subtree indexes and FSEvents evidence for the roots being scanned.
@@ -113,6 +115,45 @@ impl SubtreeCacheProvider {
             MAX_CHANGE_BYTES,
         )
         .0
+    }
+
+    /// Loads original-scope historical candidates and file indexes under the same shared read
+    /// budget before one history query. Used only for local fragment publication, never replay.
+    pub(crate) fn prepare_fragments(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        scope: &[PathBuf],
+        reader: junk_cache::CacheReader,
+    ) -> Self {
+        Self::prepare_fragments_with_query(cache_dir, roots, scope, reader, |paths, since| {
+            events_since(paths, since, DRAIN_TIMEOUT)
+        })
+    }
+
+    fn prepare_fragments_with_query(
+        cache_dir: &Path,
+        roots: &[PathBuf],
+        scope: &[PathBuf],
+        mut reader: junk_cache::CacheReader,
+        query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
+    ) -> Self {
+        let previews = reader.historical_roots_scoped(roots, scope);
+        let mut provider = Self::prepare_loaded(
+            cache_dir,
+            roots,
+            reader,
+            vec![None; roots.len()],
+            query,
+            MAX_CHANGE_PATHS,
+            MAX_CHANGE_BYTES,
+        )
+        .0;
+        for (root, preview) in roots.iter().zip(previews) {
+            if let Some(state) = provider.roots.get_mut(root) {
+                state.preview = preview;
+            }
+        }
+        provider
     }
 
     fn prepare_loaded(
@@ -218,6 +259,7 @@ impl SubtreeCacheProvider {
                         RootState {
                             index,
                             unusable: !unchanged || untracked_overlap,
+                            preview: None,
                         },
                     )
                 })
@@ -269,6 +311,135 @@ impl SubtreeCacheProvider {
         }
         junk_cache::write_subtree_index(&self.cache_dir, &index)
     }
+
+    /// Consumes one validated generation after traversal. Current selected listings take
+    /// priority; only unaffected, independently covered siblings carry forward. Strict
+    /// ancestors are omitted rather than granting recursive coverage to shallow observations.
+    /// A missing/unusable history retains the old generation and returns false. The cursor
+    /// must have been captured before this provider's history query and the new traversal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_observed_fragment(
+        &mut self,
+        source: &sweepx_model::ScannedEntry,
+        all_roots: &[PathBuf],
+        cursor: FsEventId,
+        selected: &[PathBuf],
+        covered: &BTreeMap<String, bool>,
+        listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+        candidates: Vec<junk_cache::StoredJunkCandidate>,
+    ) -> std::io::Result<bool> {
+        let root = crate::junk::git::native_path(source)
+            .ok_or_else(|| std::io::Error::other("observed fragment root unavailable"))?;
+        let paths: Vec<_> = selected
+            .iter()
+            .filter(|path| {
+                path.starts_with(&root) && owner(path, all_roots) == Some(root.as_path())
+            })
+            .cloned()
+            .collect();
+        if paths.is_empty()
+            || paths.iter().any(|path| {
+                path.to_str()
+                    .is_none_or(|path| covered.get(path) != Some(&true))
+            })
+        {
+            return Err(std::io::Error::other(
+                "selected fragment coverage unavailable",
+            ));
+        }
+        let Some(changes) = &self.changes else {
+            return Ok(false);
+        };
+        let Some(state) = self.roots.remove(&root) else {
+            return Ok(false);
+        };
+        if state.unusable {
+            return Ok(false);
+        }
+        if !state.index.matches_observed_root(source) {
+            return Err(std::io::Error::other(
+                "fragment original root binding changed",
+            ));
+        }
+        let mut merged = StoredSubtreeIndex::capture(&root, all_roots, cursor, covered, listings)?;
+        if !merged.matches_observed_root(source) {
+            return Err(std::io::Error::other(
+                "fragment root changed after traversal",
+            ));
+        }
+        merged.listings.retain(|path, _| {
+            paths
+                .iter()
+                .any(|selected| Path::new(path).starts_with(selected))
+        });
+        merged
+            .covered
+            .retain(|path, _| merged.listings.contains_key(path));
+        // Same conservative JSON allowances as capture, charged before copies. Fresh facts
+        // win optional retention; index omission never permits skipping directories or files.
+        let used = merged.listings.iter().fold(
+            1024usize.saturating_add(root.as_os_str().len().saturating_mul(6)),
+            |used, (path, listing)| {
+                listing.files.keys().fold(
+                    used.saturating_add(path.len().saturating_mul(12).saturating_add(128)),
+                    |used, name| {
+                        used.saturating_add(name.len().saturating_mul(6).saturating_add(64))
+                    },
+                )
+            },
+        );
+        let mut remaining = junk_cache::Limits::default()
+            .entry_bytes
+            .saturating_sub(used);
+        let since = state.index.since_event_id;
+        for (path, listing) in state.index.listings {
+            let native = Path::new(&path);
+            if state.index.covered.get(&path) != Some(&true)
+                || owner(native, all_roots) != Some(root.as_path())
+                || paths
+                    .iter()
+                    .any(|selected| native.starts_with(selected) || selected.starts_with(native))
+                || changes.overlaps(native, since)
+            {
+                continue;
+            }
+            let cost = path.len().saturating_mul(12).saturating_add(128);
+            if cost > remaining {
+                break;
+            }
+            remaining -= cost;
+            let mut saved = junk_cache::StoredDirListing::default();
+            for (name, bytes) in listing.files {
+                let cost = name.len().saturating_mul(6).saturating_add(64);
+                if cost > remaining {
+                    break;
+                }
+                remaining -= cost;
+                saved.files.insert(name, bytes);
+            }
+            merged.covered.insert(path.clone(), true);
+            merged.listings.insert(path, saved);
+        }
+        junk_cache::write_subtree_index(&self.cache_dir, &merged)?;
+        if let Some(preview) = state.preview {
+            let preview = preview.merge_preview(&paths, candidates, cursor);
+            if !preview.matches_observed_root(source) {
+                return Err(std::io::Error::other(
+                    "fragment preview root binding changed",
+                ));
+            }
+            junk_cache::write(&self.cache_dir, &preview)?;
+        }
+        Ok(true)
+    }
+}
+
+fn owner<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
+    roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .map(PathBuf::as_path)
 }
 
 impl SubtreeReuse for SubtreeCacheProvider {
@@ -448,6 +619,346 @@ fn name_marker(name: &sweepx_model::NativeName) -> Option<&str> {
 mod tests {
     use super::super::StoredDirListing;
     use super::*;
+
+    fn scan_root(root: &Path) -> sweepx_scanner::ClassifiedScan {
+        sweepx_scanner::Scanner::new(
+            sweepx_scanner::HostPlatformScanner::new(),
+            sweepx_scanner::ScannerOptions::default(),
+        )
+        .scan_classified(
+            &[sweepx_platform::ScanRoot::new(root.to_path_buf()).unwrap()],
+            &sweepx_platform::CancellationToken::new(),
+            &crate::junk::JunkService::built_in().unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn fragment_provider(
+        cache: &Path,
+        roots: &[PathBuf],
+        log: std::io::Result<ChangeLog>,
+    ) -> SubtreeCacheProvider {
+        SubtreeCacheProvider::prepare_fragments_with_query(
+            cache,
+            roots,
+            roots,
+            junk_cache::CacheReader::new(cache),
+            |_, _| log,
+        )
+    }
+
+    fn empty_history() -> ChangeLog {
+        ChangeLog {
+            events: vec![],
+            must_rescan: false,
+        }
+    }
+
+    #[test]
+    fn fragment_merges_fresh_files_and_only_validated_siblings_across_generations() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let root = &roots[0];
+        let selected = root.join("selected");
+        let sibling = root.join("sibling");
+        let changed = root.join("changed");
+        for path in [&selected, &sibling, &changed] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("payload"), b"original").unwrap();
+        }
+        let removed = selected.join("removed");
+        fs::create_dir(&removed).unwrap();
+        let old = scan_root(root);
+        SubtreeCacheProvider::prepare_files(&cache, &[], junk_cache::CacheReader::new(&cache))
+            .store_observed_index(
+                &old.observed_roots[0],
+                &roots,
+                40,
+                &old.covered_paths,
+                &old.dir_listings,
+            )
+            .unwrap();
+        let other_index = fs::read(cache.join(junk_cache::index_file_name(&roots[1]))).unwrap();
+        fs::write(selected.join("payload"), b"larger new selected bytes").unwrap();
+        fs::write(changed.join("payload"), b"outside mutation").unwrap();
+        fs::remove_dir(&removed).unwrap();
+        let mut provider = fragment_provider(
+            &cache,
+            &roots,
+            Ok(ChangeLog {
+                events: [&selected, &changed]
+                    .iter()
+                    .map(|path| sweepx_scanner::ChangeEvent {
+                        path: path.join("payload").to_str().unwrap().into(),
+                        id: 60,
+                        flags: 0,
+                    })
+                    .collect(),
+                must_rescan: false,
+            }),
+        );
+        let fresh = scan_root(root);
+        assert!(
+            provider
+                .store_observed_fragment(
+                    &fresh.observed_roots[0],
+                    &roots,
+                    100,
+                    std::slice::from_ref(&selected),
+                    &fresh.covered_paths,
+                    &fresh.dir_listings,
+                    vec![]
+                )
+                .unwrap()
+        );
+        let index = junk_cache::CacheReader::new(&cache).index(root).unwrap();
+        assert_eq!(index.since_event_id(), 100);
+        assert!(
+            !index.is_covered(root.to_str().unwrap()),
+            "shallow ancestors cannot become recursively covered"
+        );
+        assert!(index.listing(removed.to_str().unwrap()).is_none());
+        assert!(
+            index.listing(changed.to_str().unwrap()).is_none(),
+            "changed outside facts cannot advance their cursor"
+        );
+        for path in [&selected, &sibling] {
+            assert!(index.is_covered(path.to_str().unwrap()));
+            assert_eq!(
+                index.listing(path.to_str().unwrap()).unwrap().files["payload"],
+                u128::from(fs::symlink_metadata(path.join("payload")).unwrap().len())
+            );
+        }
+        assert_eq!(
+            fs::read(cache.join(junk_cache::index_file_name(&roots[1]))).unwrap(),
+            other_index
+        );
+        assert!(junk_cache::CacheReader::new(&cache).historical_roots(&roots)[0].is_some());
+        let (next, reports) = SubtreeCacheProvider::prepare_with_query(
+            &cache,
+            &roots[..1],
+            Some(&[0; 32]),
+            |_, since| {
+                assert_eq!(since, 100);
+                Ok(empty_history())
+            },
+        );
+        assert!(
+            reports[0].is_none(),
+            "mixed candidate namespaces remain historical even with empty history"
+        );
+        let child = sweepx_platform::DirectoryEntryRecord {
+            path: sibling.join("payload"),
+            file_name: sweepx_model::NativeName::UnixBytes(b"payload".to_vec()),
+        };
+        assert!(
+            matches!(&next.plan_entries(&sibling, std::slice::from_ref(&child)).unwrap()[0],
+            PlannedEntry::ReuseFile(file) if file.logical_bytes == u128::from(fs::metadata(&child.path).unwrap().len()))
+        );
+        // A second local generation must retain the first generation's fresh selected facts.
+        let mut next = fragment_provider(&cache, &roots[..1], Ok(empty_history()));
+        fs::write(sibling.join("payload"), b"second local generation").unwrap();
+        let fresh = scan_root(root);
+        assert!(
+            next.store_observed_fragment(
+                &fresh.observed_roots[0],
+                &roots,
+                200,
+                std::slice::from_ref(&sibling),
+                &fresh.covered_paths,
+                &fresh.dir_listings,
+                vec![]
+            )
+            .unwrap()
+        );
+        let index = junk_cache::CacheReader::new(&cache).index(root).unwrap();
+        for path in [&selected, &sibling] {
+            assert_eq!(
+                index.listing(path.to_str().unwrap()).unwrap().files["payload"],
+                u128::from(fs::metadata(path.join("payload")).unwrap().len())
+            );
+        }
+        let (racing, _) = SubtreeCacheProvider::prepare_with_query(
+            &cache,
+            &roots[..1],
+            Some(&[0; 32]),
+            |_, since| {
+                assert_eq!(since, 200);
+                Ok(ChangeLog {
+                    events: vec![sweepx_scanner::ChangeEvent {
+                        path: child.path.to_str().unwrap().into(),
+                        id: 210,
+                        flags: 0,
+                    }],
+                    must_rescan: false,
+                })
+            },
+        );
+        assert!(matches!(
+            &racing.plan_entries(&sibling, &[child]).unwrap()[0],
+            PlannedEntry::Inspect(_)
+        ));
+    }
+
+    #[test]
+    fn fragment_history_failure_never_advances_published_facts() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let fresh = scan_root(&roots[0]);
+        let before_index = fs::read(cache.join(junk_cache::index_file_name(&roots[0]))).unwrap();
+        let before_report = fs::read(cache.join(junk_cache::record_file_name(&roots[0]))).unwrap();
+        for log in [
+            Err(std::io::Error::other("missing history")),
+            Ok(ChangeLog {
+                events: vec![],
+                must_rescan: true,
+            }),
+            Ok(ChangeLog {
+                events: vec![sweepx_scanner::ChangeEvent {
+                    path: "relative".into(),
+                    id: 50,
+                    flags: 0,
+                }],
+                must_rescan: false,
+            }),
+        ] {
+            let mut provider = fragment_provider(&cache, &roots, log);
+            assert!(
+                !provider
+                    .store_observed_fragment(
+                        &fresh.observed_roots[0],
+                        &roots,
+                        100,
+                        &roots[..1],
+                        &fresh.covered_paths,
+                        &fresh.dir_listings,
+                        vec![]
+                    )
+                    .unwrap()
+            );
+            assert_eq!(
+                fs::read(cache.join(junk_cache::index_file_name(&roots[0]))).unwrap(),
+                before_index
+            );
+            assert_eq!(
+                fs::read(cache.join(junk_cache::record_file_name(&roots[0]))).unwrap(),
+                before_report
+            );
+        }
+    }
+
+    #[test]
+    fn fragment_incomplete_coverage_and_replaced_native_root_refuse_publication() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let mut provider = fragment_provider(&cache, &roots, Ok(empty_history()));
+        let fresh = scan_root(&roots[0]);
+        let before = fs::read(cache.join(junk_cache::index_file_name(&roots[0]))).unwrap();
+        let mut covered = fresh.covered_paths.clone();
+        covered.insert(roots[0].to_str().unwrap().into(), false);
+        assert!(
+            provider
+                .store_observed_fragment(
+                    &fresh.observed_roots[0],
+                    &roots,
+                    100,
+                    &roots[..1],
+                    &covered,
+                    &fresh.dir_listings,
+                    vec![]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(cache.join(junk_cache::index_file_name(&roots[0]))).unwrap(),
+            before
+        );
+        fs::rename(&roots[0], roots[0].with_extension("old")).unwrap();
+        fs::create_dir(&roots[0]).unwrap();
+        assert!(
+            provider
+                .store_observed_fragment(
+                    &fresh.observed_roots[0],
+                    &roots,
+                    100,
+                    &roots[..1],
+                    &fresh.covered_paths,
+                    &fresh.dir_listings,
+                    vec![]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(cache.join(junk_cache::index_file_name(&roots[0]))).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn fragment_merge_drops_newly_nested_root_facts_from_ancestor_index() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let root = &roots[0];
+        let selected = root.join("selected");
+        let nested = root.join("nested");
+        for path in [&selected, &nested] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("payload"), b"independent owner").unwrap();
+        }
+        let old = scan_root(root);
+        let old_index =
+            StoredSubtreeIndex::capture(root, &roots, 40, &old.covered_paths, &old.dir_listings)
+                .unwrap();
+        junk_cache::write_subtree_index(&cache, &old_index).unwrap();
+        assert!(old_index.listing(nested.to_str().unwrap()).is_some());
+        let scope = [root.clone(), nested.clone()];
+        let mut provider = SubtreeCacheProvider::prepare_fragments_with_query(
+            &cache,
+            &roots[..1],
+            &scope,
+            junk_cache::CacheReader::new(&cache),
+            |_, _| Ok(empty_history()),
+        );
+        // The old candidate report has a different attribution scope and cannot be merged.
+        assert!(provider.roots[root].preview.is_none());
+        assert!(
+            provider
+                .store_observed_fragment(
+                    &old.observed_roots[0],
+                    &scope,
+                    100,
+                    &[selected],
+                    &old.covered_paths,
+                    &old.dir_listings,
+                    vec![]
+                )
+                .unwrap()
+        );
+        let merged = junk_cache::CacheReader::new(&cache).index(root).unwrap();
+        assert!(merged.listing(nested.to_str().unwrap()).is_none());
+        assert!(!merged.is_covered(nested.to_str().unwrap()));
+    }
+
+    #[test]
+    fn fragment_preview_and_index_reads_share_the_invocation_budget() {
+        let (_fixture, cache, roots) = seeded_cache();
+        let roots = &roots[..1];
+        let limits = junk_cache::Limits {
+            input_bytes: fs::metadata(cache.join(junk_cache::record_file_name(&roots[0])))
+                .unwrap()
+                .len() as usize,
+            ..junk_cache::Limits::default()
+        };
+        let mut reader = junk_cache::CacheReader::new(&cache);
+        reader.limits = limits;
+        reader.budget = junk_cache::ReadBudget::new(limits);
+        let provider = SubtreeCacheProvider::prepare_fragments_with_query(
+            &cache,
+            roots,
+            roots,
+            reader,
+            |_, _| panic!("the preview consumed the input allowance; index not admitted"),
+        );
+        assert!(provider.roots.is_empty());
+        assert!(provider.changes.is_none());
+    }
 
     #[test]
     fn historical_preview_and_file_index_share_the_encoded_input_allowance() {

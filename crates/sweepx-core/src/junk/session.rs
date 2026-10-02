@@ -792,11 +792,20 @@ impl Worker {
             writer.phase(JunkSessionPhase::Cache)?;
         }
         #[cfg(target_os = "macos")]
-        let cache = cache.map(|(directory, cursor, reader)| {
+        let mut cache = cache.map(|(directory, cursor, reader)| {
             let paths: Vec<_> = roots.iter().map(|root| root.path().to_path_buf()).collect();
-            let provider = super::cache::provider::SubtreeCacheProvider::prepare_files(
-                &directory, &paths, reader,
-            );
+            let provider = if job.selected.is_some() {
+                super::cache::provider::SubtreeCacheProvider::prepare_fragments(
+                    &directory,
+                    &paths,
+                    &self.scan_roots,
+                    reader,
+                )
+            } else {
+                super::cache::provider::SubtreeCacheProvider::prepare_files(
+                    &directory, &paths, reader,
+                )
+            };
             (directory, cursor, provider)
         });
         #[cfg(target_os = "macos")]
@@ -944,7 +953,7 @@ impl Worker {
             return Ok(());
         }
         #[cfg(target_os = "macos")]
-        if let Some((directory, cursor, provider)) = &cache {
+        if let Some((directory, cursor, provider)) = &mut cache {
             writer.phase(JunkSessionPhase::CacheWrite)?;
             self.store_cache(
                 directory,

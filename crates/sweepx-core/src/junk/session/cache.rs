@@ -102,7 +102,7 @@ impl Worker {
         &self,
         directory: &Path,
         cursor: crate::FsEventId,
-        provider: &SubtreeCacheProvider,
+        provider: &mut SubtreeCacheProvider,
         scanned: &sweepx_scanner::ClassifiedScan,
         pending: &Rows,
         service: &JunkService,
@@ -114,10 +114,29 @@ impl Worker {
         let context = service
             .with_platform(&platform.rules, &platform.evidence)
             .classification_context_digest();
-        // A local traversal deliberately omits unrelated listings. Keep the old generation
-        // unchanged: publishing this fragment would make validated outside-scope file facts
-        // disappear on the next scan. Its original cursor still requires current history.
-        if job.selected.is_some() {
+        // Complete local observations replace only selected subtrees. The provider retains
+        // siblings only with complete history and the original root binding; candidate rows
+        // become historical previews because shallow ancestor totals are not recomputed.
+        let selected = job
+            .selected
+            .as_ref()
+            .map(|keys| {
+                keys.iter()
+                    .map(|key| {
+                        self.current
+                            .get(key)
+                            .and_then(|row| row.observed_native_path())
+                            .ok_or_else(|| {
+                                JunkSessionFailure::new(
+                                    "refresh_binding_unavailable",
+                                    "selected cache path unavailable",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        if selected.is_some() && partial {
             return Ok(());
         }
         for root in &self.scan_roots {
@@ -131,13 +150,9 @@ impl Worker {
             else {
                 continue;
             };
-            if !partial
-                && root
-                    .to_str()
-                    .is_some_and(|path| scanned.covered_paths.get(path) == Some(&true))
-                && let Some(context) = context
-            {
-                let rows = pending
+            // Both publication modes use the same native attribution and fact projection.
+            let stored_rows = || {
+                pending
                     .values()
                     .filter(|row| {
                         row.observed_native_path().is_some_and(|path| {
@@ -146,6 +161,9 @@ impl Worker {
                                 .filter(|root| path.starts_with(root))
                                 .max_by_key(|root| root.components().count())
                                 == Some(root)
+                                && selected.as_ref().is_none_or(|paths| {
+                                    paths.iter().any(|selected| path.starts_with(selected))
+                                })
                         })
                     })
                     .map(|row| {
@@ -153,10 +171,34 @@ impl Worker {
                         stored.aggregate = row.directory_aggregate().cloned();
                         stored
                     })
-                    .collect();
+                    .collect::<Vec<_>>()
+            };
+            if let Some(paths) = &selected {
+                if let Err(error) = provider.store_observed_fragment(
+                    source_root,
+                    &self.scan_roots,
+                    cursor,
+                    paths,
+                    &scanned.covered_paths,
+                    &scanned.dir_listings,
+                    stored_rows(),
+                ) {
+                    writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
+                        "cache_fragment_write_failed",
+                        error.to_string(),
+                    )))?;
+                }
+                continue;
+            }
+            if !partial
+                && root
+                    .to_str()
+                    .is_some_and(|path| scanned.covered_paths.get(path) == Some(&true))
+                && let Some(context) = context
+            {
                 let result = StoredJunkRoot::capture_with_rule_bytes(
                     root,
-                    rows,
+                    stored_rows(),
                     cursor,
                     context,
                     &self.request.project_rule_bytes,

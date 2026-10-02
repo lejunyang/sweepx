@@ -395,7 +395,7 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
 
 #[cfg(target_os = "macos")]
 #[test]
-fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
+fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts() {
     let _serial = SESSION_TESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -416,26 +416,6 @@ fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
         .find(|(_, row)| row.observed_native_path().as_ref() == Some(&a))
         .unwrap()
         .0;
-    // Compare actual published bytes, including the original cursor. LRU atime changes
-    // are permitted; no partial listing or candidate report may replace this generation.
-    let published = || {
-        fs::read_dir(&cache)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .map(|path| {
-                (
-                    path.file_name().unwrap().to_owned(),
-                    fs::read(path).unwrap(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let before = published();
-    assert!(!before.is_empty());
     let old_index = crate::junk::cache::CacheReader::new(&cache)
         .index(&root)
         .unwrap();
@@ -456,12 +436,85 @@ fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
         }
     ));
     assert_eq!(current(&events).len(), 1);
-    assert_eq!(published(), before);
+    let merged = crate::junk::cache::CacheReader::new(&cache)
+        .index(&root)
+        .unwrap();
+    let merged = serde_json::to_value(merged).unwrap();
+    assert!(
+        merged["since_event_id"].as_u64().unwrap() >= old_index["since_event_id"].as_u64().unwrap()
+    );
+    assert_eq!(
+        merged["listings"][a.to_str().unwrap()]["files"]["payload"],
+        serde_json::json!(fs::symlink_metadata(a.join("payload")).unwrap().len()),
+        "independent history diagnosis: {:?}",
+        crate::events_since(
+            &[root.as_path()],
+            old_index["since_event_id"].as_u64().unwrap(),
+            Duration::from_secs(2)
+        )
+    );
+    assert!(merged["covered"].get(root.to_str().unwrap()).is_none());
+    // Delayed fixture events may correctly invalidate a sibling. If retained, its file
+    // facts must still agree with the ordinary metadata oracle, never the selected payload.
+    if let Some(listing) = merged["listings"].get(b.to_str().unwrap()) {
+        assert_eq!(
+            listing["files"]["payload"],
+            serde_json::json!(fs::metadata(b.join("payload")).unwrap().len())
+        );
+    }
+    let preview = crate::junk::cache::CacheReader::new(&cache)
+        .historical_roots(std::slice::from_ref(&root))[0]
+        .take()
+        .unwrap();
+    let preview = serde_json::to_value(preview).unwrap();
+    assert_eq!(preview["preview_only"], true);
+    assert_eq!(preview["candidates"].as_array().unwrap().len(), 2);
+    assert!(
+        crate::junk::cache::CacheReader::new(&cache)
+            .roots(std::slice::from_ref(&root), Some(&[0; 32]))[0]
+            .is_none()
+    );
+    shutdown(&session);
 
-    // Full refresh still validates the old cursor and restores both current subtrees.
-    // This asserts current facts, not an immediate FSEvents hit or enumeration order.
-    let revision = session.refresh_all().unwrap();
-    let events = drain(&session, revision);
+    // A new process/session first displays the mixed generation strictly as history, then
+    // reobserves both roots. This does not assert an immediate native event cache hit.
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.cache_dir = Some(cache.clone());
+    let session = JunkSession::start(request).unwrap();
+    let events = drain(&session, JunkSessionRevision(1));
+    let history: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            JunkSessionEventKind::Candidate {
+                state: JunkSessionCandidateState::Historical,
+                row,
+                ..
+            } => Some(row),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(history.len(), 2);
+    assert!(
+        history.iter().all(|row| matches!(
+            row.directory_aggregate().unwrap().coverage.provenance,
+            sweepx_model::FieldProvenance::StalePreview { .. }
+        ) && row.candidate.execution_policy
+            == crate::junk::candidate::JunkExecutionPolicy::NotChecked
+            && row
+                .candidate
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "historical_cache")),
+        "old coverage stays historical and cannot restore execution interpretation"
+    );
+    let historical_a = history
+        .iter()
+        .find(|row| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap();
+    assert_eq!(
+        historical_a.logical_bytes(),
+        &sweepx_platform::known_u128(u128::from(fs::metadata(a.join("payload")).unwrap().len()))
+    );
     assert!(matches!(
         events.last().unwrap().kind,
         JunkSessionEventKind::Completed {
@@ -472,10 +525,23 @@ fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
     ));
     let fresh = current(&events);
     assert_eq!(fresh.len(), 2);
+    assert!(
+        fresh
+            .values()
+            .all(|row| row.candidate.project_execution_blocker().is_some())
+    );
     let index = crate::junk::cache::CacheReader::new(&cache)
         .index(&root)
         .unwrap();
     let index = serde_json::to_value(index).unwrap();
+    let complete = crate::junk::cache::CacheReader::new(&cache)
+        .historical_roots(std::slice::from_ref(&root))[0]
+        .take()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(complete).unwrap()["preview_only"],
+        false
+    );
     for path in [&a, &b] {
         let row = fresh
             .values()
@@ -492,6 +558,71 @@ fn selected_refresh_preserves_full_cache_generation_and_outside_scope_facts() {
             serde_json::json!(fs::symlink_metadata(payload).unwrap().len())
         );
     }
+    shutdown(&session);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cancelled_selected_refresh_keeps_the_published_generation() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    let target = project(&root, "a", b"old generation");
+    let cache = base.join("cache");
+    let mut request = JunkSessionRequest::new(vec![root]);
+    request.cache_dir = Some(cache.clone());
+    request.limits.max_events = 1;
+    let session = JunkSession::start(request).unwrap();
+    let first = drain(&session, JunkSessionRevision(1));
+    let key = *current(&first).keys().next().unwrap();
+    let before = published_cache(&cache);
+    assert_eq!(before.len(), 2);
+    fs::write(target.join("payload"), b"fresh longer generation").unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "selected traversal never started"
+        );
+        let Some(event) = session
+            .next_event_timeout(Duration::from_millis(100))
+            .unwrap()
+        else {
+            continue;
+        };
+        if matches!(
+            event.kind,
+            JunkSessionEventKind::Phase(JunkSessionPhase::Traversal)
+        ) {
+            // The one-slot reliable queue forces later phases to await consumption; cancel
+            // while traversal is admitted, rather than depending on timing or fixture size.
+            session.cancel();
+            break;
+        }
+        assert!(!matches!(
+            event.kind,
+            JunkSessionEventKind::Completed { .. }
+        ));
+    }
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Cancelled,
+            replaced: false,
+            ..
+        }
+    ));
+    assert_eq!(published_cache(&cache), before);
+    assert_eq!(
+        fs::read(target.join("payload")).unwrap(),
+        b"fresh longer generation"
+    );
     shutdown(&session);
 }
 
@@ -708,6 +839,24 @@ fn fixture_root(fixture: &tempfile::TempDir) -> PathBuf {
     {
         fixture.path().to_path_buf()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn published_cache(cache: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
+    fs::read_dir(cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_owned(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect()
 }
 fn project(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let project = root.join(name);
@@ -1146,6 +1295,14 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
     let root = fixture_root(&fixture);
     let target = project(&root, "project", b"retained");
     let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    #[cfg(target_os = "macos")]
+    let cache_fixture = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "macos")]
+    let cache = fixture_root(&cache_fixture).join("cache");
+    #[cfg(target_os = "macos")]
+    {
+        request.cache_dir = Some(cache.clone());
+    }
     request.limits.scan.max_classified_metadata_bytes = 128 * 1024;
     request.limits.scan.max_classified_root_metadata_bytes = 128 * 1024;
     request.limits.scan.max_retained_boundaries = 0;
@@ -1162,6 +1319,10 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
         }
     ));
     let key = *current(&initial).keys().next().unwrap();
+    #[cfg(target_os = "macos")]
+    let published_before = published_cache(&cache);
+    #[cfg(target_os = "macos")]
+    assert_eq!(published_before.len(), 2);
     fs::remove_file(target.parent().unwrap().join("Cargo.toml")).unwrap();
     // Pressure must be inside the selected subtree. Unrelated siblings are deliberately
     // omitted by local refresh and no longer consume its required classification metadata.
@@ -1185,6 +1346,8 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
             .any(|event| matches!(event.kind, JunkSessionEventKind::Removed { .. }))
     );
     assert_eq!(fs::read(target.join("payload")).unwrap(), b"retained");
+    #[cfg(target_os = "macos")]
+    assert_eq!(published_cache(&cache), published_before);
     for index in 0..256 {
         fs::remove_dir(target.join(format!("extra-{index}"))).unwrap();
     }

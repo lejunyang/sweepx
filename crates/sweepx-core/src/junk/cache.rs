@@ -47,9 +47,10 @@ use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-// v8 invalidates aggregates and native lineage captured with Darwin's old OBJID-as-inode
-// observation. File-length indexes are independent and retain their existing schema.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v8";
+// v9 adds preview-only fragment records. Older readers must reject this schema rather than
+// silently ignoring the flag and accepting mixed historical/current subtrees as a full report.
+// Independent file-length indexes retain their existing schema and validity contract.
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v9";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 #[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,6 +70,8 @@ pub struct StoredJunkRoot {
     root_inode: String,
     /// FSEvents id captured before the root was scanned.
     since_event_id: FsEventId,
+    /// Mixed fragment records are historical presentation only, regardless of event history.
+    preview_only: bool,
     candidates: Vec<StoredJunkCandidate>,
     /// Nested requested roots own their candidates; a different request scope must rescan.
     excluded_root_keys: Vec<String>,
@@ -208,6 +211,7 @@ impl StoredJunkRoot {
             root_inode: metadata.ino().to_string(),
             // A pre-scan cursor preserves writes racing with the walk for the next validation.
             since_event_id,
+            preview_only: false,
             candidates,
             excluded_root_keys: Vec::new(),
         })
@@ -232,6 +236,27 @@ impl StoredJunkRoot {
     /// Consumes the record, returning its owned candidates.
     pub fn into_candidates(self) -> Vec<StoredJunkCandidate> {
         self.candidates
+    }
+
+    /// Replaces only native-bound selected subtrees for historical presentation. Ancestor
+    /// aggregates remain historical; no whole-root cursor or fresh coverage is synthesized.
+    pub(crate) fn merge_preview(
+        mut self,
+        paths: &[PathBuf],
+        candidates: Vec<StoredJunkCandidate>,
+        cursor: FsEventId,
+    ) -> Self {
+        self.candidates.retain(|candidate| {
+            candidate
+                .source_entry
+                .as_ref()
+                .and_then(crate::junk::git::native_path)
+                .is_some_and(|path| !paths.iter().any(|selected| path.starts_with(selected)))
+        });
+        self.candidates.extend(candidates);
+        self.since_event_id = self.since_event_id.min(cursor);
+        self.preview_only = true;
+        self
     }
 
     /// Checks the root binding independently of event history.
@@ -336,7 +361,8 @@ impl CacheReader {
                     self.limits,
                     root_retained_bytes,
                 )?;
-                (record.classification_context == *context
+                (!record.preview_only
+                    && record.classification_context == *context
                     && record.matches_root_with_rules(root, &self.expected_rules)
                     && record.excluded_root_keys == excluded_root_keys(root, roots))
                 .then_some(record)
@@ -348,6 +374,15 @@ impl CacheReader {
     /// digest, native root binding and request scope do not establish current classification.
     /// The caller must mark all returned rows historical and reobserve before any mutation.
     pub fn historical_roots(&mut self, roots: &[PathBuf]) -> Vec<Option<StoredJunkRoot>> {
+        self.historical_roots_scoped(roots, roots)
+    }
+
+    /// Loads a selected set without changing the original nested-root attribution scope.
+    pub(crate) fn historical_roots_scoped(
+        &mut self,
+        roots: &[PathBuf],
+        scope: &[PathBuf],
+    ) -> Vec<Option<StoredJunkRoot>> {
         roots
             .iter()
             .enumerate()
@@ -362,7 +397,7 @@ impl CacheReader {
                     root_retained_bytes,
                 )?;
                 (record.matches_root_with_rules(root, &self.expected_rules)
-                    && record.excluded_root_keys == excluded_root_keys(root, roots))
+                    && record.excluded_root_keys == excluded_root_keys(root, scope))
                 .then_some(record)
             })
             .collect()
@@ -391,7 +426,8 @@ pub fn validate_records_with_log(
     for (root, record) in roots.iter().zip(&mut records) {
         let valid = match (log, record.as_ref()) {
             (Some(log), Some(stored))
-                if !log.must_rescan
+                if !stored.preview_only
+                    && !log.must_rescan
                     && stored.matches_root_with_rules(root, &stored.rules_digest) =>
             {
                 !log.events.iter().any(|event| {
@@ -923,11 +959,94 @@ mod tests {
             "sweepx.junk-cache/v5",
             "sweepx.junk-cache/v6",
             "sweepx.junk-cache/v7",
+            "sweepx.junk-cache/v8",
         ] {
             stored.schema = old_schema.into();
             assert!(!stored.matches_root(&cache));
         }
         fs::remove_dir_all(cache).unwrap();
+    }
+
+    #[test]
+    fn fragment_preview_replaces_native_subtrees_and_never_becomes_a_current_report() {
+        let (_fixture, base) = temp_cache();
+        let root = base.join("root");
+        let selected = root.join("selected");
+        let sibling = root.join("sibling");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir(&sibling).unwrap();
+        let summary = sweepx_scanner::Scanner::new(
+            sweepx_scanner::HostPlatformScanner::new(),
+            sweepx_scanner::ScannerOptions::default(),
+        )
+        .scan(
+            &[sweepx_platform::ScanRoot::new(root.clone()).unwrap()],
+            &sweepx_platform::CancellationToken::new(),
+        )
+        .unwrap();
+        let native_candidate = |path: &Path, label: &str| {
+            let mut stored = sample_candidate(label);
+            stored.source_entry = Some(
+                summary
+                    .entries
+                    .iter()
+                    .find(|entry| crate::junk::git::native_path(entry).as_deref() == Some(path))
+                    .unwrap()
+                    .clone(),
+            );
+            stored
+        };
+        let old = StoredJunkRoot::capture(
+            &root,
+            vec![
+                native_candidate(&selected, "old-selected"),
+                native_candidate(&sibling, "sibling"),
+                sample_candidate("display-only"),
+            ],
+            40,
+            [0; 32],
+        )
+        .unwrap();
+        let fragment = old.merge_preview(
+            std::slice::from_ref(&selected),
+            vec![native_candidate(&selected, "fresh-selected")],
+            100,
+        );
+        assert_eq!(
+            fragment
+                .candidates
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<BTreeSet<_>>(),
+            ["fresh-selected", "sibling"].into_iter().collect()
+        );
+        assert_eq!(
+            fragment.since_event_id, 40,
+            "historical facts do not get a synthetic fresh cursor"
+        );
+        let cache = base.join("cache");
+        write(&cache, &fragment).unwrap();
+        let roots = [root.clone()];
+        assert!(CacheReader::new(&cache).historical_roots(&roots)[0].is_some());
+        assert!(CacheReader::new(&cache).roots(&roots, Some(&[0; 32]))[0].is_none());
+        assert!(
+            validate_records_with_log(
+                &roots,
+                vec![Some(fragment)],
+                Some(&ChangeLog {
+                    events: vec![],
+                    must_rescan: false,
+                })
+            )[0]
+            .is_none()
+        );
+        // A later complete scan replaces the fragment, restoring whole-root eligibility.
+        write(
+            &cache,
+            &StoredJunkRoot::capture(&root, vec![], 200, [0; 32]).unwrap(),
+        )
+        .unwrap();
+        assert!(CacheReader::new(&cache).roots(&roots, Some(&[0; 32]))[0].is_some());
     }
 
     #[test]
@@ -1177,6 +1296,8 @@ mod tests {
         record.bind_scope(&roots);
         write(&cache, &record).unwrap();
         assert!(CacheReader::new(&cache).roots(&roots, Some(&[0; 32]))[0].is_some());
+        assert!(CacheReader::new(&cache).historical_roots_scoped(&roots[..1], &roots)[0].is_some());
+        assert!(CacheReader::new(&cache).historical_roots(&roots[..1])[0].is_none());
         assert!(
             CacheReader::new(&cache).roots(&[parent], Some(&[0; 32]))[0].is_none(),
             "child-owned candidates are missing from the parent-only report"

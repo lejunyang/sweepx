@@ -1,0 +1,124 @@
+{
+  "date": "2026-10-02",
+  "host": {
+    "architecture": "arm64",
+    "os": "macOS 26.5.2",
+    "build": "25F84",
+    "rust": "1.98.0",
+    "buildProfile": "debug",
+    "features": "workspace all-features"
+  },
+  "sourceSha256": {
+    "crates/sweepx-core/src/junk/cache.rs": "d9cf123d655d927585c2c291cd7f67e70e0173a340a6a50b227bd99ceda44738",
+    "crates/sweepx-core/src/junk/cache/provider.rs": "89d6aaea978d6b1851046ecbe686ceb4ce77591d90cdc6a0f4e724391b13a864",
+    "crates/sweepx-core/src/junk/session.rs": "c775de8f02fb776dc4259a3111bdd36c937a08b6b5da2bf2b5fd2cc2aed1b273",
+    "crates/sweepx-core/src/junk/session/cache.rs": "7bede14f3b997af37a7eef5b1c29c2431607103e09ff117d871a09384e32f001",
+    "crates/sweepx-core/src/junk/session/tests.rs": "500368fc9d1415e6aeb7090ba72ec48db7a587346bc3e16eed4e573629bbdc78"
+  },
+  "workspaceCoreTestBinary": {
+    "path": "target/debug/deps/sweepx_core-0e181ed6702be558",
+    "sha256": "9269ab2b903a74340402460d444c619a0ddd2667168bbaa89424ac14b3c4c006"
+  },
+  "performanceMeasurement": null,
+  "contracts": [
+    "fresh selected indexes replace old selected descendants",
+    "only history-validated unchanged siblings advance",
+    "shallow ancestors and changed outside directories are omitted",
+    "successive local generations retain previous fresh facts",
+    "future event invalidates the new index cursor",
+    "nested-root attribution is preserved",
+    "preview and index share encoded-input allowance",
+    "missing/gapped/malformed history leaves generation unchanged",
+    "incomplete coverage and replaced root refuse publication",
+    "mixed candidate namespaces are historical only, even with empty history",
+    "native session restart previews fresh selected size then reobserves whole scope",
+    "synchronized traversal cancellation and resource-pressure partial leave published bytes unchanged"
+  ],
+  "finalValidation": {
+    "workspaceTests": {
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "exitCode": 0,
+      "suites": 39,
+      "passed": 994,
+      "failed": 0,
+      "ignored": 2,
+      "filtered": 1
+    },
+    "lint": {
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "host": "passed",
+      "x86_64-unknown-linux-gnu": "cross lint passed",
+      "x86_64-pc-windows-gnu": "cross lint passed"
+    },
+    "format": "passed",
+    "diffCheck": "passed",
+    "corePackageList": "passed; registry build/publish not attempted",
+    "concurrentChecks": "Final lint/cross compilation overlapped workspace tests; no timing or controlled-load claim."
+  },
+  "earlierAttempts": [
+    {
+      "scope": "sandbox fragment tests",
+      "result": "six controlled tests passed; native session publication assertion failed",
+      "diagnosis": "Independent events_since returned FSEventStreamStart failed. Old index length remained 6 instead of fresh 22; complete native history unavailable, so generation remained unchanged. Native host session test passed."
+    },
+    {
+      "scope": "host core full suite",
+      "passed": 260,
+      "failed": 1,
+      "ignored": 1,
+      "failingTest": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+      "result": "Some(ProbeUnavailable)",
+      "fixtureRetained": true,
+      "binaryChecksum": "not captured before later rebuild",
+      "probeDiagnostics": {
+        "toolA": {
+          "stage": "Complete",
+          "elapsedSeconds": 1.766263292,
+          "launchedAfterSeconds": 0.000553667,
+          "readyAfterSeconds": 0.000555667,
+          "firstStdoutAfterSeconds": 1.766232459,
+          "stdoutBytes": 74,
+          "stdoutEof": true,
+          "exitCode": 0
+        },
+        "toolB": {
+          "result": "TimedOut",
+          "stage": "Drain",
+          "elapsedSeconds": 2.083705125,
+          "launchedAfterSeconds": 0.000580375,
+          "readyAfterSeconds": 0.000582541,
+          "firstStdoutAfterSeconds": null,
+          "stdoutBytes": 0,
+          "stdoutEof": false,
+          "exitStatus": null
+        }
+      },
+      "status": "Root cause remains open; later passing tests are not a fix. No probe exclusion or deadline relaxation."
+    },
+    {
+      "scope": "initial workspace matrix",
+      "corePassed": 260,
+      "coreFailed": 1,
+      "coreIgnored": 1,
+      "laterCratesUntestedAtThatAttempt": true,
+      "failure": "New test incorrectly required historical complete coverage to become incomplete. Existing contract preserves historical coverage facts with StalePreview provenance. Corrected oracle checks historical provenance, not_checked execution policy and historical_cache blocker; production semantics unchanged."
+    },
+    {
+      "scope": "early compile checks",
+      "failure": "preview_only initialized in call argument instead of record; test assumed JunkSessionRequest implements Clone",
+      "resolution": "Correct record initialization and independent new request; no API or test exclusion workaround."
+    }
+  ],
+  "remainingGaps": [
+    "existing 300 ms/2 second probe intermittent failures",
+    "8192-file debug warm-cache PTY timeout",
+    "native FSEvents settle intermittent failures",
+    "effective project configuration and exclusive ownership/activity evidence",
+    "other system discovery resource audit",
+    "Linux/Windows historical cache and file-index parity",
+    "native Linux/Windows and MSVC runtime",
+    "real cloud provider runtime",
+    "successful system Trash; known hanging integration test excluded",
+    "final pathname check to Trash-call race"
+  ]
+}
