@@ -1,0 +1,137 @@
+{
+  "schema": "sweepx.scan-stability-validation/v1",
+  "deliveryDate": "2026-10-03",
+  "baseCommit": "52c1fcf",
+  "rust": "1.98.0",
+  "host": "arm64 macOS 26.5.2 / Darwin 25.5.0",
+  "sourceSha256": {
+    "crates/sweepx-core/src/tools/mod.rs": "65929ae5d2830d9e0aebea738559be4bc3ece0e1c1094f21f2091acd60c6dcd7",
+    "crates/sweepx-tui/src/junk.rs": "eb3f5e689558ff0763f93a7d9eb7e042731c3e4c3111f6999eb3318148573b4e",
+    "crates/sweepx-tui/src/junk/tests.rs": "e5eeb9d495fc32a2d100a95fb526b624c7f391b168bfc2fc34aa0a2bb6859b79"
+  },
+  "workspaceAttempt": {
+    "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+    "exitStatus": 101,
+    "passed": 532,
+    "failed": 1,
+    "ignored": 1,
+    "filtered": 1,
+    "failure": "---- tools::tests::captures_complete_answer_and_exit_status stdout ----\nprobe result=Some(TimedOut), diagnostics=ProbeDiagnostics { stage: Drain, elapsed: 302.361875ms, launched_after: Some(1.48175ms), ready_after: Some(1.4945ms), first_stdout_after: None, stdout_bytes: 0, stdout_eof: false, exit_status: None }\n\nthread 'tools::tests::captures_complete_answer_and_exit_status' (22259268) panicked at crates/sweepx-core/src/tools/mod.rs:877:57:\ncalled `Result::unwrap()` on an `Err` value: TimedOut\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tools::tests::captures_complete_answer_and_exit_status\n\ntest result: FAILED. 269 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 61.35s\n\nerror: test failed, to rerun pass `-p sweepx-core --lib`\n",
+    "scope": "Stopped at core; later test steps were not run in this attempt. New completion gate was not reached in the failed probe: stdout=0, EOF=false, exit=None. Existing 300ms startup problem remains unresolved."
+  },
+  "focusedCompletion": {
+    "command": "cargo test -p sweepx-core tools::tests::final_completion --all-features --locked -- --test-threads=1",
+    "exitStatus": 0,
+    "passed": 2,
+    "log": "    Blocking waiting for file lock on build directory\n   Compiling sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n   Compiling sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n   Compiling sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.17s\n     Running unittests src/lib.rs (target/debug/deps/sweepx_core-9dd151ea5439482c)\n\nrunning 2 tests\ntest tools::tests::final_completion_preserves_fresh_answers_and_prioritizes_cancellation ... ok\ntest tools::tests::final_completion_rejects_a_deadline_crossed_after_the_loop_check ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 269 filtered out; finished in 0.00s\n\n"
+  },
+  "tuiTests": {
+    "command": "cargo test -p sweepx-tui --all-features --locked -- --test-threads=1",
+    "exitStatus": 0,
+    "passed": 95,
+    "log": "   Compiling sweepx-tui v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-tui)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.95s\n     Running unittests src/lib.rs (target/debug/deps/sweepx_tui-5cd15c1d22e1e698)\n\nrunning 95 tests\ntest junk::tests::active_batches_do_not_wait_for_input_and_preserve_result_selection ... ok\ntest junk::tests::budget_loss_and_partial_rows_never_reach_trash ... ok\ntest junk::tests::cached_preview_stays_historical_and_preserves_selection_when_current_replaces_it ... ok\ntest junk::tests::cancelling_execution_keeps_view_until_confirmed_and_uncertain_outcomes_arrive ... ok\ntest junk::tests::complete_report_only_project_rows_remain_visible_without_offering_trash ... ok\ntest junk::tests::duplicate_keeper_key_updates_the_row_and_prevents_its_trash_selection ... ok\ntest junk::tests::early_complete_base_is_visible_during_scan_and_selection_survives_current_replacement ... ok\ntest junk::tests::empty_view_and_uppercase_refresh_request_all_roots ... ok\ntest junk::tests::failed_trash_retains_historical_row_and_requires_refresh ... ok\ntest junk::tests::file_views_require_complete_scope_and_preserve_group_adjacency ... ok\ntest junk::tests::initially_empty_view_keeps_idle_wait_and_can_exit_before_completion ... ok\ntest junk::tests::local_refresh_invalidates_only_ancestors_and_preserves_them_after_scope_completion ... ok\ntest junk::tests::long_file_paths_keep_distinct_filenames_visible_with_safe_cell_width ... ok\ntest junk::tests::loop_selects_refreshes_and_consumes_trash_without_leaving_the_view ... ok\ntest junk::tests::prefix_confirmation_and_dismissal_do_not_submit_or_remove_rows ... ok\ntest junk::tests::quarantine_loop_requires_full_typed_digest_and_shows_recovery_result ... ok\ntest junk::tests::quarantine_rejects_stale_oversized_and_uppercase_digest_events ... ok\ntest junk::tests::quarantine_typing_is_bounded_and_does_not_trigger_scan_or_trash_keys ... ok\ntest junk::tests::renderer_preserves_lower_bounds_unknowns_and_locale ... ok\ntest junk::tests::selection_and_cursor_survive_reordering_and_incomplete_replacement ... ok\ntest junk::tests::short_active_batch_returns_to_idle_input_wait_when_provider_is_empty ... ok\ntest junk::tests::size_sort_keeps_unknown_last_and_path_sort_preserves_focus ... ok\ntest live::tests::a_lone_root_keeps_its_full_path ... ok\ntest live::tests::a_scrolling_window_is_always_exactly_the_column_width ... ok\ntest live::tests::a_split_wide_character_never_reaches_the_terminal ... ok\ntest live::tests::aggregates_are_joined_by_scan_entry_id ... ok\ntest live::tests::aggregates_are_joined_without_creating_rows ... ok\ntest live::tests::an_already_set_termination_flag_exits_before_polling ... ok\ntest live::tests::an_unselected_overflowing_row_is_marked_as_elided ... ok\ntest live::tests::bounded_poll_observes_injected_termination_and_exits_normally ... ok\ntest live::tests::caller_limits_can_only_tighten_architectural_caps ... ok\ntest live::tests::complete_directory_enters_without_rescan_even_when_scan_is_partial ... ok\ntest live::tests::completed_result_is_discarded_after_selection_binding_changes ... ok\ntest live::tests::constructor_rejects_duplicate_aggregate_targets ... ok\ntest live::tests::constructor_rejects_entry_limit_before_building ... ok\ntest live::tests::constructor_rejects_explicit_scan_id_mismatch ... ok\ntest live::tests::constructor_rejects_index_byte_limit_before_building ... ok\ntest live::tests::constructor_rejects_legacy_entries_without_identity ... ok\ntest live::tests::constructor_rejects_mixed_scan_payloads ... ok\ntest live::tests::default_key_mapping_includes_explicit_trash_and_ignores_release ... ok\ntest live::tests::delete_key_returns_the_selected_live_scan_entry ... ok\ntest live::tests::detail_rescan_deadline_is_visible_and_late_result_is_discarded ... ok\ntest live::tests::detail_rescan_is_single_flight_and_does_not_block_quit ... ok\ntest live::tests::dropping_reducer_cancels_and_joins_the_only_worker ... ok\ntest live::tests::event_loop_accepts_quit_keys_while_detail_rescan_is_running ... ok\ntest live::tests::event_loop_termination_cancels_an_inflight_detail_rescan ... ok\ntest live::tests::evicted_directory_requests_rescan_but_failure_keeps_old_rows_stale ... ok\ntest live::tests::file_and_symlink_rows_never_request_detail_rescan ... ok\ntest live::tests::identity_mismatch_and_reparse_target_fail_closed ... ok\ntest live::tests::incomplete_directory_requests_bound_identity_and_applies_refreshed_rows ... ok\ntest live::tests::inconsistent_aggregate_and_unknown_row_identity_are_rejected_atomically ... ok\ntest live::tests::inconsistent_coverage_does_not_trigger_a_detail_request ... ok\ntest live::tests::inflight_rescan_allows_back_and_discards_the_completion ... ok\ntest live::tests::inflight_rescan_allows_navigation_but_rejects_a_second_enter ... ok\ntest live::tests::injected_event_loop_renders_entered_directory_with_test_backend ... ok\ntest live::tests::interrupted_poll_after_termination_is_a_graceful_exit ... ok\ntest live::tests::large_directory_keeps_only_a_bounded_page_loaded ... ok\ntest live::tests::mismatched_binding_is_rejected_and_failed_attempts_increment_revision ... ok\ntest live::tests::missing_executable_identity_fails_closed_without_calling_provider ... ok\ntest live::tests::mount_change_and_oversized_result_fail_closed_without_replacing_rows ... ok\ntest live::tests::native_fixture_helpers_match_the_host_platform ... ok\ntest live::tests::non_cooperative_worker_is_quarantined_after_the_deadline ... ok\ntest live::tests::pinning_the_path_shows_it_in_full_and_can_be_switched_off ... ok\ntest live::tests::progressive_aggregate_applies_lower_bound_updates_before_completion ... ok\ntest live::tests::progressive_aggregate_keeps_partial_rows_visible ... ok\ntest live::tests::progressive_navigation_paints_direct_rows_then_replaces_them_with_aggregates ... ok\ntest live::tests::reducer_enters_directories_and_restores_parent_selection ... ok\ntest live::tests::render_shows_current_page_window_for_large_levels ... ok\ntest live::tests::repeated_non_cooperative_workers_exhaust_a_strict_shared_limit ... ok\ntest live::tests::returned_directory_requires_an_executable_locator ... ok\ntest live::tests::returning_to_parent_restores_selection_across_root_pages ... ok\ntest live::tests::revision_exhaustion_does_not_issue_an_unbound_request ... ok\ntest live::tests::root_labels_grow_until_no_two_roots_read_alike ... ok\ntest live::tests::scrolling_advances_every_step_and_returns_to_the_start ... ok\ntest live::tests::shortened_root_labels_stay_distinct_and_name_the_browser ... ok\ntest live::tests::showing_a_path_is_not_a_destructive_action ... ok\ntest live::tests::starts_at_synthetic_roots_and_shows_only_direct_children ... ok\ntest live::tests::symlink_and_reparse_rows_cannot_be_entered ... ok\ntest live::tests::terminal_control_characters_are_sanitized_in_labels_and_breadcrumbs ... ok\ntest live::tests::the_computed_name_width_matches_what_the_table_really_renders ... ok\ntest live::tests::the_selected_row_scrolls_in_the_real_render ... ok\ntest live::tests::unix_sigterm_handler_sets_the_graceful_termination_flag ... ok\ntest tests::cursor_is_clamped_when_page_is_out_of_bounds ... ok\ntest tests::cursor_resets_when_revision_changes ... ok\ntest tests::far_requested_page_does_not_scale_retention_with_page_index ... ok\ntest tests::huge_requested_page_is_clamped_to_last_nonempty_page ... ok\ntest tests::huge_requested_page_on_empty_input_stays_on_page_zero ... ok\ntest tests::localized_labels_render_for_both_locales ... ok\ntest tests::oversized_input_is_rejected_with_resource_limit ... ok\ntest tests::paging_is_limited_to_five_hundred_rows_and_retains_only_one_page ... ok\ntest tests::read_only_action_enum_has_no_destructive_variant ... ok\ntest tests::recursively_camel_case_cli_payload_is_accepted ... ok\ntest tests::snake_case_payload_remains_accepted ... ok\ntest tests::state_transitions_are_deterministic_and_read_only ... ok\ntest tests::total_row_cap_is_rejected_with_resource_limit ... ok\n\ntest result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.15s\n\n   Doc-tests sweepx_tui\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+  },
+  "earlyDoctests": {
+    "exitStatus": 0,
+    "log": "    Blocking waiting for file lock on build directory\n   Compiling sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.76s\n   Doc-tests sweepx_analysis\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests sweepx_audit\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests sweepx_cache\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests sweepx_canonical\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests sweepx_catalog\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests sweepx_core\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+  },
+  "lints": {
+    "affected-lint": {
+      "exitStatus": 0,
+      "log": "    Checking sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n    Checking sweepx-tui v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-tui)\n    Checking sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.67s\n"
+    },
+    "host-lint": {
+      "exitStatus": 0,
+      "log": "    Blocking waiting for file lock on build directory\n    Checking sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n    Checking sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)\n    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 44.11s\n"
+    },
+    "linux-lint": {
+      "exitStatus": 0,
+      "log": "    Blocking waiting for file lock on build directory\n   Compiling libsqlite3-sys v0.38.2\n    Checking sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n    Checking sweepx-tui v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-tui)\n    Checking sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n    Checking rusqlite v0.40.2\n    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)\n    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)\n    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.72s\n"
+    },
+    "windows-lint": {
+      "exitStatus": 0,
+      "log": "    Blocking waiting for file lock on build directory\n   Compiling libsqlite3-sys v0.38.2\n    Checking sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n    Checking sweepx-tui v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-tui)\n    Checking sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n    Checking rusqlite v0.40.2\n    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)\n    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)\n    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 36.86s\n"
+    }
+  },
+  "reuse": {
+    "reference": "cargo-output-scope-oracle-2026-10-02.json validation.laterPackages",
+    "unchangedPackages": "executor,fixtures,i18n,model,platform,protocol,safety,scanner including their integrations/doctests",
+    "passed": 378,
+    "ignored": 1,
+    "reason": "Sources and dependency contracts unchanged by these private core completion/TUI-loop edits. Changed TUI is separately rerun (95 tests); core and CLI compiled and ran in current failed workspace attempt. No claim of a second green workspace run."
+  },
+  "coverage": "532 current early-workspace + 95 current TUI + 378 reused unchanged later-package tests = 1005 distinct passing tests. One current old 300ms probe failed, two original benchmarks ignored across current/reused groups, one old hanging system Trash success test explicitly filtered. Two focused completion tests overlap core and are not added again.",
+  "packageLists": {
+    "core": [
+      ".cargo_vcs_info.json",
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "README.md",
+      "src/cache_validity.rs",
+      "src/cargo_cleaner_detect.rs",
+      "src/cargo_cleaner_evidence.rs",
+      "src/duplicates/tests.rs",
+      "src/duplicates.rs",
+      "src/junk/cache/provider.rs",
+      "src/junk/cache/storage.rs",
+      "src/junk/cache.rs",
+      "src/junk/candidate.rs",
+      "src/junk/context.rs",
+      "src/junk/format/sveltekit.rs",
+      "src/junk/format/tests.rs",
+      "src/junk/format.rs",
+      "src/junk/git.rs",
+      "src/junk/layout.rs",
+      "src/junk/linux_temp/observation.rs",
+      "src/junk/linux_temp.rs",
+      "src/junk/manifest/scope.rs",
+      "src/junk/manifest/tests.rs",
+      "src/junk/manifest.rs",
+      "src/junk/platform.rs",
+      "src/junk/quarantine/operation.rs",
+      "src/junk/quarantine.rs",
+      "src/junk/session/cache.rs",
+      "src/junk/session/linux_temp.rs",
+      "src/junk/session/mailbox/tests.rs",
+      "src/junk/session/mailbox.rs",
+      "src/junk/session/tests.rs",
+      "src/junk/session.rs",
+      "src/junk.rs",
+      "src/large_files.rs",
+      "src/lib.rs",
+      "src/tools/installations/tests.rs",
+      "src/tools/installations.rs",
+      "src/tools/mod.rs",
+      "src/windows_state_security.rs"
+    ],
+    "tui": [
+      ".cargo_vcs_info.json",
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "README.md",
+      "src/junk/quarantine.rs",
+      "src/junk/tests.rs",
+      "src/junk.rs",
+      "src/lib.rs",
+      "src/live.rs"
+    ]
+  },
+  "phaseEndTimesAsiaShanghai": {
+    "sweepx-stability-cli-build.log": "2026-10-02T23:43:01.543934+08:00",
+    "sweepx-warm-pty-audit-2026-10-02-qualified.log": "2026-10-02T23:49:23.843826+08:00",
+    "sweepx-scan-stability-workspace-tests.log": "2026-10-02T23:53:54.556135+08:00",
+    "sweepx-scan-stability-host-lint.log": "2026-10-03T00:00:26.830035+08:00"
+  },
+  "remainingGaps": [
+    "Old 300ms/2s tool startup, 8192-file intermittent warm PTY, FSEvents settle root causes",
+    "Cancelled Base row tracking/provider retention (confirmed separately, not patched here)",
+    "Native Linux/Windows, MSVC, real providers and system Trash success; final pathname-to-Trash race"
+  ],
+  "notes": [
+    "First fmt check showed one test formatting change; a newline command sequence had masked its exit status. Output was inspected and the formatting fixed; subsequent checks use set -e.",
+    "No concurrent build/tests/sampling during fixed native warm PTY matrix. Later functional matrix/lints are not timing samples.",
+    "Core completion and TUI event-drain changes are separate commits; this shared delivery receipt covers their final combined working-tree sources."
+  ]
+}

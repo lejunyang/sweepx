@@ -902,3 +902,11 @@ CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和�
 对同一已核验失败二进制预先固定执行 10 次孤立 exact probe 测试，交替允许/不允许 sample，并每 100 ms 观察本次测试仍存活的直接子进程；只有存活超过 1.20 秒的首个子进程才请求 sample。10 次通过，没有子进程达到取样阈值，实际取得零份调用栈，没有捕获超时当次，不能关闭根因。复制的诊断脚本在 receipt 文字中误留上一实验的“24 次/200 ms”描述；实际 loop/阈值、10 条记录和零 sample 调用独立核对，artifact 同时保留原描述、纠正说明及原始脚本，不将其当作 24 次或取得慢堆栈的证据。
 
 新增 manifest 专项 11 项及完整 scanner 83 项通过；受影响 crate 与 host/Linux GNU 工作区 all-targets/all-features clippy 通过。Windows GNU 首次发现新 UTF-16 转换的集合类型无法推断，明确指定 Vec<u16> 后最终工作区交叉 lint 通过；这处仅 Windows cfg 修复不改变已测 Unix 行为，artifact 保留 oracle 时与最终源码摘要。fmt/diff、54 份 Markdown、scanner/core/CLI 包清单通过。记录与完整范围见本轮 artifact；原生 Linux/Windows、MSVC、真实云 provider、系统 Trash 成功未验收。上述 probe、debug 热缓存 PTY、FSEvents 间歇根因和最终 pathname 竞态继续开放，规则扩展和完整路线图均不打勾。
+
+## 工具完整答复的最终期限检查（2026-10-03）
+
+原 `ProbeRunner` 只在读取循环开始检查取消和期限；非阻塞 read/try_wait 或调用之间的调度暂停可能越过期限，随后 EOF 与退出状态已齐便直接接受答案。现在轮首和最终接受共用同一私有检查，最终再次观察当前时间与取消；超期/取消的完整字节和已观察退出只保留 Drain 诊断，不成为有效答案。取消仍优先于期限，原启动、2 秒单次/10 秒整批预算、输出与进程上限、清理策略均未改变，没有新增后台线程或公开接口。
+
+两项确定性回归直接驱动实际最终接受路径，以受控 Instant 观察点核对期限前一纳秒保留完整答案及退出码 0/7、期限相等/之后拒绝、轮首检查后取消和取消/期限同时发生的优先级；不依赖 sleeps、新脚本首次执行或放宽生产常量。专项两项通过，工作区随后覆盖了它们。
+
+共享交付的[验证记录](scan-stability-validation-2026-10-03.json)保留源码摘要和完整范围：本轮 workspace 在 core 停止，532 项通过、1 个旧 300 ms 答案用例失败、1 个原有基准 ignored；launch/setup 约 1.5 ms，302 ms 内没有 stdout/EOF/退出，新最终接受分支未被走到。因此这项检查修复不解释或关闭旧启动根因。受影响 crate 和 host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 与 core/TUI 包清单通过；早期六库 doctest 单独补验（无用例）。本轮另一个独立 TUI 改动全量 95 项通过，其余未变后续包复用上一交付 378 项通过/1 项基准 ignored，合计覆盖 1005 个不同通过用例、1 个失败、2 个基准 ignored；系统 Trash 成功挂起用例仍显式排除。这不是全绿工作区，原生 Linux/Windows、MSVC、真实 provider、实际 Trash 成功及上述间歇根因继续开放。

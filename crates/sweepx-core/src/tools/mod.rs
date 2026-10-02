@@ -223,12 +223,7 @@ impl ProbeRunner {
         let mut eof = false;
         let mut buffer = [0; 4096];
         loop {
-            if self.cancel.is_cancelled() {
-                return Err(ProbeError::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                return Err(ProbeError::TimedOut);
-            }
+            self.check_active_at(deadline, Instant::now())?;
             // Drain one bounded chunk per turn so a continuously noisy child cannot starve
             // cancellation or deadline checks. Capacity cannot grow from an unbounded answer.
             if !eof {
@@ -256,8 +251,16 @@ impl ProbeRunner {
                 diagnostics.exit_status = status;
             }
             if eof && let Some(status) = status {
-                diagnostics.stage = ProbeStage::Complete;
-                return Ok(ProbeOutput { status, stdout });
+                // A nonblocking host call or scheduling pause can still cross the deadline
+                // after the loop's admission check. Complete bytes/status do not authorize
+                // accepting an answer once this invocation is cancelled or expired.
+                return self.complete_observed(
+                    deadline,
+                    Instant::now(),
+                    diagnostics,
+                    status,
+                    stdout,
+                );
             }
             let pause = deadline
                 .saturating_duration_since(Instant::now())
@@ -275,6 +278,35 @@ impl ProbeRunner {
             #[cfg(not(target_os = "macos"))]
             std::thread::sleep(pause);
         }
+    }
+
+    /// Checks the execution budget at one observation point, separately from launch admission.
+    /// An explicit observation time also allows deterministic final-stage boundary regressions
+    /// without relying on host scheduling or changing the production execution deadline.
+    fn check_active_at(&self, deadline: Instant, observed_at: Instant) -> Result<(), ProbeError> {
+        if self.cancel.is_cancelled() {
+            Err(ProbeError::Cancelled)
+        } else if observed_at >= deadline {
+            Err(ProbeError::TimedOut)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Accepts the already complete pipe and child observations only while execution is active.
+    /// Rejection retains Drain diagnostics: cleanup still owns the child, and the observed
+    /// status/bytes are diagnostic facts rather than a usable answer.
+    fn complete_observed(
+        &self,
+        deadline: Instant,
+        observed_at: Instant,
+        diagnostics: &mut ProbeDiagnostics,
+        status: ExitStatus,
+        stdout: Vec<u8>,
+    ) -> Result<ProbeOutput, ProbeError> {
+        self.check_active_at(deadline, observed_at)?;
+        diagnostics.stage = ProbeStage::Complete;
+        Ok(ProbeOutput { status, stdout })
     }
 }
 
@@ -693,6 +725,104 @@ mod tests {
             },
             CancellationToken::new(),
         )
+    }
+
+    fn completion_fixture(code: u32, stdout: &[u8]) -> (ExitStatus, ProbeDiagnostics) {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            ExitStatus::from_raw((code as i32) << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            ExitStatus::from_raw(code)
+        };
+        (
+            status,
+            ProbeDiagnostics {
+                stage: ProbeStage::Drain,
+                elapsed: Duration::ZERO,
+                launched_after: Some(Duration::ZERO),
+                ready_after: Some(Duration::ZERO),
+                first_stdout_after: Some(Duration::ZERO),
+                stdout_bytes: stdout.len(),
+                stdout_eof: true,
+                exit_status: Some(status),
+            },
+        )
+    }
+
+    #[test]
+    fn final_completion_rejects_a_deadline_crossed_after_the_loop_check() {
+        let runner = runner();
+        let before = Instant::now();
+        // These controlled observation points represent a pause between the loop check and
+        // the final host observation. They do not depend on the production timeout or sleeps.
+        let deadline = before + Duration::from_secs(1);
+        runner.check_active_at(deadline, before).unwrap();
+        for completed_at in [deadline, deadline + Duration::from_nanos(1)] {
+            let stdout = b"complete answer\n";
+            let (status, mut diagnostics) = completion_fixture(0, stdout);
+            assert!(matches!(
+                runner.complete_observed(
+                    deadline,
+                    completed_at,
+                    &mut diagnostics,
+                    status,
+                    stdout.to_vec(),
+                ),
+                Err(ProbeError::TimedOut)
+            ));
+            assert_eq!(diagnostics.stage, ProbeStage::Drain);
+            assert!(diagnostics.stdout_eof);
+            assert_eq!(diagnostics.stdout_bytes, stdout.len());
+            assert_eq!(diagnostics.exit_status, Some(status));
+        }
+    }
+
+    #[test]
+    fn final_completion_preserves_fresh_answers_and_prioritizes_cancellation() {
+        let cancel = CancellationToken::new();
+        let runner = ProbeRunner::new(ProbeLimits::default(), cancel.clone());
+        let before = Instant::now();
+        let deadline = before + Duration::from_secs(1);
+        let stdout = b"complete answer\n";
+        for code in [0, 7] {
+            let (status, mut diagnostics) = completion_fixture(code, stdout);
+            let answer = runner
+                .complete_observed(
+                    deadline,
+                    deadline - Duration::from_nanos(1),
+                    &mut diagnostics,
+                    status,
+                    stdout.to_vec(),
+                )
+                .unwrap();
+            assert_eq!(answer.stdout.as_slice(), stdout);
+            assert_eq!(answer.status.code(), Some(code as i32));
+            assert_eq!(diagnostics.stage, ProbeStage::Complete);
+        }
+        // Cancellation occurs after the original loop check, and must outrank timeout when
+        // both are true at acceptance. Complete native observations remain diagnostic only.
+        runner.check_active_at(deadline, before).unwrap();
+        cancel.cancel();
+        for completed_at in [before, deadline] {
+            let (status, mut diagnostics) = completion_fixture(0, stdout);
+            assert!(matches!(
+                runner.complete_observed(
+                    deadline,
+                    completed_at,
+                    &mut diagnostics,
+                    status,
+                    stdout.to_vec(),
+                ),
+                Err(ProbeError::Cancelled)
+            ));
+            assert_eq!(diagnostics.stage, ProbeStage::Drain);
+            assert!(diagnostics.stdout_eof);
+            assert_eq!(diagnostics.exit_status, Some(status));
+        }
     }
 
     #[test]
