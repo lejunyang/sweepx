@@ -254,11 +254,11 @@ enum Commands {
         /// must be typed back exactly. This never falls back to permanent deletion.
         #[arg(long, requires = "system", conflicts_with = "roots")]
         clean_temp: bool,
-        /// Move classified junk candidates to the operating-system Trash.
+        /// Move eligible junk candidates to the operating-system Trash.
         ///
-        /// One explicit confirmation covers the exact plan. Each target is revalidated by
-        /// native identity immediately before it is moved. This never falls back to permanent
-        /// deletion. Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
+        /// Each target is revalidated by native identity immediately before it is moved.
+        /// This never falls back to permanent deletion. Current project rules remain report-only
+        /// because exclusive ownership and inactivity are unverified; generic outputs are always report-only.
         #[arg(long, conflicts_with = "clean_temp")]
         trash: bool,
         /// Absolute quarantine base on a filesystem different from `/tmp`.
@@ -1695,11 +1695,18 @@ fn run_junk_scan(
                 (_, false, true) => String::new(),
             };
             println!(
-                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}",
+                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}{execution_note}",
                 junk_size_label(&candidate.reclaimable, size_unit),
                 risk = candidate.risk,
                 rule = candidate.rule_id,
                 path = candidate.path,
+                execution_note = match (context.locale(), candidate.project_execution_blocker()) {
+                    (sweepx_i18n::Locale::ZhCn, Some(_)) =>
+                        " [回收受限：规则仅报告或所有权/活动未核验]",
+                    (sweepx_i18n::Locale::EnUs, Some(_)) =>
+                        " [Trash blocked: report-only rule or unverified ownership/activity]",
+                    (_, None) => "",
+                },
                 format_note = candidate
                     .project_format
                     .as_ref()
@@ -1832,6 +1839,7 @@ fn run_junk_scan(
                     "confidence": candidate.confidence,
                     "blockers": candidate.blockers,
                     "projectFormat": candidate.project_format,
+                    "executionPolicy": candidate.execution_policy,
                     // Names the quantity in `reclaimable`. True means apparent logical size,
                     // because this platform declined to claim filesystem allocation; the two
                     // differ on compressed, sparse and multi-stream files, so a consumer that
@@ -3091,7 +3099,14 @@ mod tests {
         assert!(restored.git.is_none());
         assert_eq!(restored.classification.as_deref(), Some("known_generated"));
         assert_eq!(restored.confidence.as_deref(), Some("medium"));
-        assert_eq!(restored.blockers, ["git_evidence_not_revalidated"]);
+        assert_eq!(
+            restored.blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "git_evidence_not_revalidated"
+            ]
+        );
         assert_eq!(restored.reclaimable, prior.reclaimable);
         assert_eq!(restored.source_entry, prior.source_entry);
     }
@@ -3207,13 +3222,25 @@ mod tests {
         assert!(warm[0].git.is_none(), "Git answers were not persisted");
         GitEvidenceSession::new(Default::default(), CancellationToken::new()).refresh(&mut warm);
         assert_eq!(warm[0].confidence.as_deref(), Some("high"));
-        assert!(warm[0].blockers.is_empty());
+        assert_eq!(
+            warm[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified"
+            ]
+        );
         std::fs::write(&excludes, b"").unwrap();
         let mut changed = restore();
         GitEvidenceSession::new(Default::default(), CancellationToken::new()).refresh(&mut changed);
         assert_eq!(changed[0].confidence.as_deref(), Some("medium"));
         assert!(changed[0].git.is_none());
-        assert!(changed[0].blockers.is_empty());
+        assert_eq!(
+            changed[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified"
+            ]
+        );
         assert_eq!(std::fs::read(root.join("target/file")).unwrap(), b"payload");
         let names = std::fs::read_dir(&root)
             .unwrap()

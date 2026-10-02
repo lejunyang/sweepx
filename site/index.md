@@ -73,3 +73,6 @@ CLI 与 TUI 自动检测 `zh-CN` / `en-US`，也接受显式 `--locale` 覆盖�
 ## 一句话结论
 
 SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI、单对象 Trash、Linux 陈旧临时对象隔离与有界文件/目录 Permanent preview 可体验；通用 `plan`、`approve`、`execute` 和更广的 Permanent 仍是未来工作。
+
+
+项目垃圾候选仍可展示、选择和刷新，但当前尚无独占所有权和活动证明，不能由 `junk --trash` 或 TUI 回收。名称、风险等级、格式和 Git ignore 都不能替代这些证明；通用 build-output 规则明确仅报告。

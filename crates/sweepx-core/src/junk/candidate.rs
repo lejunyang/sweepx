@@ -62,12 +62,41 @@ pub struct JunkCandidate {
     /// Current required content observation; never persisted as a filesystem fact. A recognized
     /// self-declared format still does not prove exclusive ownership or inactivity.
     pub project_format: Option<super::format::ProjectFormatEvidence>,
+    /// Current admitted rule constraint; cache restoration starts as NotChecked. This enum is
+    /// never native execution authority and cannot be waived by confidence or Git ignore status.
+    pub execution_policy: JunkExecutionPolicy,
     /// Traversal facts only; reused solely with validated filesystem coverage/history.
     pub git_scan_facts: Option<super::git::GitScanFacts>,
     /// The scanned source row, retained for the bulk Trash path's identity revalidation. Present
     /// for freshly scanned candidates and for candidates restored from cache; `None` for the Linux
     /// temporary-object candidates, which use a different cleanup flow.
     pub source_entry: Option<sweepx_model::ScannedEntry>,
+}
+
+/// Current rule interpretation required before any junk-candidate Trash attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JunkExecutionPolicy {
+    /// Historical/cache facts have not been interpreted with current admitted rules.
+    NotChecked,
+    /// The matched project rule explicitly permits reporting only.
+    ReportOnly,
+    /// Project layout may be reported, but exclusive ownership and inactivity remain unverified.
+    RequireProjectOwnershipAndActivity,
+    /// Platform candidate continues through its existing current native and coverage guards;
+    /// this label does not itself authorize a move or waive any platform-specific blocker.
+    NativeRevalidationRequired,
+}
+
+impl From<sweepx_catalog::junk::ProjectExecutionPolicy> for JunkExecutionPolicy {
+    fn from(policy: sweepx_catalog::junk::ProjectExecutionPolicy) -> Self {
+        match policy {
+            sweepx_catalog::junk::ProjectExecutionPolicy::ReportOnly => Self::ReportOnly,
+            sweepx_catalog::junk::ProjectExecutionPolicy::RequireOwnershipAndActivity => {
+                Self::RequireProjectOwnershipAndActivity
+            }
+        }
+    }
 }
 
 /// Git interpretation associated with a project artifact; never mutation authority.
@@ -83,17 +112,52 @@ pub struct GitIgnoreEvidence {
 }
 
 impl JunkCandidate {
-    /// Required content profiles remain report-only until independent ownership/activity and
-    /// mutation-time evidence exist. A recognized format or Git ignore cannot waive this guard.
+    /// Current project execution requirements cannot be established by a name, marker, content
+    /// signature, risk tier or Git ignore. Historical facts also need current rule interpretation.
     pub fn project_execution_blocker(&self) -> Option<&'static str> {
-        self.project_format
-            .as_ref()
-            .map(|_| "project_ownership_not_verified")
+        if self.execution_policy == JunkExecutionPolicy::NotChecked {
+            return Some("rule_evidence_not_revalidated");
+        }
+        // Preserve the established content-profile reason across both locales and API consumers.
+        if self.project_format.is_some() {
+            return Some("project_ownership_not_verified");
+        }
+        match self.execution_policy {
+            JunkExecutionPolicy::ReportOnly => Some("project_report_only"),
+            JunkExecutionPolicy::RequireProjectOwnershipAndActivity => {
+                Some("project_ownership_not_verified")
+            }
+            JunkExecutionPolicy::NativeRevalidationRequired => None,
+            JunkExecutionPolicy::NotChecked => unreachable!("handled historical interpretation"),
+        }
+    }
+
+    fn restore_execution_blocker(&mut self) {
+        self.blockers.retain(|blocker| {
+            !matches!(
+                blocker.as_str(),
+                "project_report_only"
+                    | "project_ownership_not_verified"
+                    | "project_activity_not_verified"
+                    | "rule_evidence_not_revalidated"
+            )
+        });
+        if let Some(blocker) = self.project_execution_blocker() {
+            self.blockers.push(blocker.into());
+        }
+        if matches!(
+            self.execution_policy,
+            JunkExecutionPolicy::RequireProjectOwnershipAndActivity
+                | JunkExecutionPolicy::ReportOnly
+        ) {
+            self.blockers.push("project_activity_not_verified".into());
+        }
     }
 
     /// Restores base project interpretation without letting Git or cached fields promote missing
     /// content evidence. Only the bounded content stage sets the current format outcome.
     pub(crate) fn reset_project_format_interpretation(&mut self) {
+        self.restore_execution_blocker();
         let Some(format) = &self.project_format else {
             return;
         };
@@ -101,10 +165,7 @@ impl JunkCandidate {
         self.blockers.retain(|b| {
             !matches!(
                 b.as_str(),
-                "project_format_not_checked"
-                    | "project_format_invalid"
-                    | "project_format_unknown"
-                    | "project_ownership_not_verified"
+                "project_format_not_checked" | "project_format_invalid" | "project_format_unknown"
             )
         });
         self.classification = Some(
@@ -132,7 +193,6 @@ impl JunkCandidate {
         if let Some(blocker) = blocker {
             self.blockers.push(blocker.into());
         }
-        self.blockers.push("project_ownership_not_verified".into());
     }
 
     /// Conservative owned-data estimate for session retention, not allocator RSS or file size.
@@ -226,6 +286,7 @@ pub fn assemble_project_candidate(
         project_format: rule
             .content_format
             .map(super::format::ProjectFormatEvidence::not_checked),
+        execution_policy: rule.execution_policy.into(),
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
     };
@@ -289,6 +350,7 @@ pub fn assemble_platform_candidate(
         confidence: None,
         blockers: Vec::new(),
         project_format: None,
+        execution_policy: JunkExecutionPolicy::NativeRevalidationRequired,
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
     })
@@ -336,6 +398,11 @@ pub fn refresh_candidate_interpretation(
     candidate.activity = None;
     candidate.stale_formats.clear();
     candidate.blockers.clear();
+    candidate.execution_policy = project_rules
+        .iter()
+        .find(|rule| rule.id == candidate.rule_id)
+        .map(|rule| rule.execution_policy.into())
+        .unwrap_or(JunkExecutionPolicy::NativeRevalidationRequired);
     candidate.project_format = project_rules
         .iter()
         .find(|rule| rule.id == candidate.rule_id)
@@ -430,5 +497,161 @@ pub fn junk_size_for(aggregate: Option<&sweepx_model::DirectoryAggregate>) -> Ju
             value: aggregate.potentially_reclaimable_bytes.clone(),
             is_logical_fallback: false,
         },
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    use crate::junk::{JunkService, platform::PlatformJunkEvidence};
+    use crate::{CancellationToken, CoreContext, MemorySnapshotStore, ScanRequest};
+
+    #[test]
+    fn native_layout_and_git_ignore_do_not_satisfy_project_execution_requirements() {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::write(root.join("package.json"), b"{}\n").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            b"target/\ndist/\nnode_modules/\n__pycache__/\n",
+        )
+        .unwrap();
+        for name in ["target", "dist", "node_modules", "__pycache__"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(
+                root.join(name).join("personal-data"),
+                b"preserve this payload",
+            )
+            .unwrap();
+        }
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let service = JunkService::built_in().unwrap();
+        let context = CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = crate::scan_junk_with_store::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: None,
+            },
+            None,
+            &service,
+            None,
+        )
+        .unwrap();
+        let aggregates = scan
+            .scan
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect::<BTreeMap<_, _>>();
+        let mut rows = scan
+            .scan
+            .summary
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let id = &entry.identity.as_ref()?.entry_id;
+                service.interpret(
+                    scan.decisions.get(id)?,
+                    entry,
+                    &aggregates,
+                    &[],
+                    &PlatformJunkEvidence::default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        let mut git =
+            crate::junk::git::GitEvidenceSession::new(Default::default(), CancellationToken::new());
+        git.capture_scan_facts(
+            &scan.scan.summary,
+            &scan.coverages,
+            &scan.directory_markers,
+            &mut rows,
+        );
+        git.refresh(&mut rows);
+        for row in &rows {
+            let name = match &row.source_entry.as_ref().unwrap().native_basename {
+                sweepx_model::NativeName::UnixBytes(bytes) => {
+                    String::from_utf8(bytes.clone()).unwrap()
+                }
+                sweepx_model::NativeName::WindowsUtf16(units) => String::from_utf16(units).unwrap(),
+            };
+            let probe = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["check-ignore", "--quiet", "--"])
+                .arg(&name)
+                .status()
+                .unwrap();
+            assert!(
+                probe.success(),
+                "ordinary Git is the independent ignore oracle"
+            );
+            assert_eq!(row.git.as_ref().unwrap().status, "ignored");
+            assert_eq!(
+                row.confidence.as_deref(),
+                Some("high"),
+                "Git confidence still describes ignore evidence, never disposability"
+            );
+            assert_eq!(
+                row.project_execution_blocker(),
+                Some(if name == "dist" {
+                    "project_report_only"
+                } else {
+                    "project_ownership_not_verified"
+                })
+            );
+            assert!(
+                row.blockers
+                    .iter()
+                    .any(|blocker| blocker == "project_activity_not_verified")
+            );
+            assert_eq!(
+                std::fs::read(root.join(name).join("personal-data")).unwrap(),
+                b"preserve this payload"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        for row in rows {
+            let restored =
+                crate::junk::cache::StoredJunkCandidate::from_candidate(&row).into_candidate();
+            assert_eq!(restored.execution_policy, JunkExecutionPolicy::NotChecked);
+            assert_eq!(
+                restored.project_execution_blocker(),
+                Some("rule_evidence_not_revalidated")
+            );
+            let mut changed_rules = service.project_rules().to_vec();
+            let rule = changed_rules
+                .iter_mut()
+                .find(|rule| rule.id == row.rule_id)
+                .unwrap();
+            rule.execution_policy = sweepx_catalog::junk::ProjectExecutionPolicy::ReportOnly;
+            let refreshed = refresh_candidate_interpretation(
+                restored,
+                &changed_rules,
+                &[],
+                &PlatformJunkEvidence::default(),
+            )
+            .unwrap();
+            assert_eq!(refreshed.execution_policy, JunkExecutionPolicy::ReportOnly);
+            assert_eq!(
+                refreshed.project_execution_blocker(),
+                Some("project_report_only")
+            );
+        }
     }
 }

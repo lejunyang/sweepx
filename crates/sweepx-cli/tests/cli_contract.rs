@@ -1524,7 +1524,68 @@ fn junk_git_observes_current_global_configuration_selected_by_environment() {
             report["candidates"][0]["confidence"],
             if ignored { "high" } else { "medium" }
         );
-        assert_eq!(report["candidates"][0]["blockers"], json!([]));
+        assert_eq!(
+            report["candidates"][0]["blockers"],
+            json!([
+                "project_ownership_not_verified",
+                "project_activity_not_verified"
+            ])
+        );
+    }
+}
+
+#[test]
+fn project_execution_policy_is_locale_stable_and_generic_outputs_stay_visible() {
+    let fixture = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = resolved_fixture_root(&fixture);
+    #[cfg(windows)]
+    let root = fixture.path().to_path_buf();
+    fs::write(root.join("package.json"), b"{}\n").unwrap();
+    fs::create_dir(root.join("dist")).unwrap();
+    fs::write(root.join("dist/personal-data"), b"preserve personal data").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for locale in ["en-US", "zh-CN"] {
+        let output = cli_command()
+            .args(["--locale", locale, "--format", "json", "junk"])
+            .arg(&root)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["candidateCount"], 1);
+        let row = &report["candidates"][0];
+        assert_eq!(row["ruleId"], "project.build-output");
+        assert_eq!(row["executionPolicy"], "report_only");
+        assert_eq!(
+            row["blockers"],
+            json!(["project_report_only", "project_activity_not_verified"])
+        );
+        let human = cli_command()
+            .args(["--locale", locale, "junk"])
+            .arg(&root)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let text = String::from_utf8(human.stdout).unwrap();
+        assert!(text.contains(if locale == "en-US" {
+            "Trash blocked: report-only rule or unverified ownership/activity"
+        } else {
+            "回收受限：规则仅报告或所有权/活动未核验"
+        }));
+        assert_eq!(
+            fs::read(root.join("dist/personal-data")).unwrap(),
+            b"preserve personal data"
+        );
     }
 }
 
@@ -1569,7 +1630,13 @@ fn junk_git_queries_do_not_inherit_a_foreign_repository_authority() {
     assert_eq!(report["candidateCount"], 1);
     assert_eq!(report["candidates"][0]["confidence"], "high");
     assert_eq!(report["candidates"][0]["git"]["status"], "ignored");
-    assert_eq!(report["candidates"][0]["blockers"], json!([]));
+    assert_eq!(
+        report["candidates"][0]["blockers"],
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified"
+        ])
+    );
 }
 
 #[test]
@@ -1594,7 +1661,11 @@ fn junk_gitfile_boundaries_are_retained_in_classified_scans() {
     assert_eq!(report["candidates"][0]["git"], Value::Null);
     assert_eq!(
         report["candidates"][0]["blockers"],
-        json!(["gitfile_repository_boundary"])
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "gitfile_repository_boundary"
+        ])
     );
 }
 
@@ -1629,7 +1700,13 @@ fn junk_scan_strengthens_known_candidates_with_git_ignore_evidence() {
     assert_eq!(target["git"]["status"], "ignored");
     assert_eq!(target["git"]["check"], "git.check-ignore.v1");
     assert!(target["git"]["repositoryEntryId"].is_string());
-    assert_eq!(target["blockers"], Value::Array(Vec::new()));
+    assert_eq!(
+        target["blockers"],
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified"
+        ])
+    );
 }
 
 #[test]
@@ -1671,7 +1748,14 @@ fn junk_scan_does_not_promote_a_pattern_matching_tracked_directory() {
     assert_eq!(target["classification"], "known_generated");
     assert_eq!(target["confidence"], "medium");
     assert_eq!(target["git"], Value::Null);
-    assert_eq!(target["blockers"], json!(["tracked_descendant"]));
+    assert_eq!(
+        target["blockers"],
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "tracked_descendant"
+        ])
+    );
 }
 
 #[test]
@@ -1709,7 +1793,14 @@ fn junk_scan_keeps_known_candidate_when_git_is_unavailable() {
     assert_eq!(target["classification"], "known_generated");
     assert_eq!(target["confidence"], "medium");
     assert_eq!(target["git"], Value::Null);
-    assert_eq!(target["blockers"], json!(["git_query_failed"]));
+    assert_eq!(
+        target["blockers"],
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "git_query_failed"
+        ])
+    );
 }
 
 #[test]
@@ -1741,7 +1832,14 @@ fn junk_scan_does_not_promote_a_known_directory_containing_a_nested_repository()
     assert_eq!(target["classification"], "known_generated");
     assert_eq!(target["confidence"], "medium");
     assert_eq!(target["git"], Value::Null);
-    assert_eq!(target["blockers"], json!(["nested_repository"]));
+    assert_eq!(
+        target["blockers"],
+        json!([
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+            "nested_repository"
+        ])
+    );
 }
 
 #[cfg(target_os = "linux")]

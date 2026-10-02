@@ -280,3 +280,6 @@ npm 安装发现还共享 4,096 次文件系统观察、64 个安装、4 MiB 累
 macOS 垃圾缓存的根记录和逐文件索引现在按根独立保存，不再按设备互相覆盖，也不因本次只请求其他根就删除旧缓存。受限缓存按最近读取的根整体淘汰：单文件最多 4 MiB、单根最多 8 MiB、受管文件合计最多 64 MiB、最多 256 个根；每次调用读取的编码数据最多 16 MiB，保留数据采用 128 MiB 估算预算，均不代表进程 RSS 上限。可选文件长度索引会截断，缺失条目现场检查；完整候选记录超限则不写入。缓存超限、旧 schema、身份/请求范围不匹配、链接或非私有存储均回到现场观察；写锁竞争仅放弃本次持久化，不阻塞报告。
 
 macOS 变更历史查询最多接受 256 个绝对 UTF-8 根和 1 MiB 路径字节；应用保留的历史最多 65,536 条事件、16 MiB 估算字节（包括路径及 Vec 容量）。缺口、ID 回绕、挂载变化、无法无损解释的路径或预算耗尽会清空历史并拒绝两层复用。各根现在共享一份按路径去重的变更索引，保留最大事件游标；该索引占用磁盘缓存读取后剩余的 128 MiB 估算额度，自身最多 16 MiB，不再按根复制完整变更集合。这些额度均不是进程 RSS 上限。
+
+
+项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。

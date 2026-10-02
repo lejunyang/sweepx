@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；完整语言语义、真实工具版本采集、独占所有权/活动依据仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；完整语言语义、真实工具版本采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -689,3 +689,19 @@ Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang
 交付验证（arm64 macOS，Rust 1.98.0）：最终完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 937 项通过、0 失败、2 项原有基准 ignored；core 232 项通过，CLI 单元/契约/relay 为 48/62/1 项通过。受影响 core 及最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy（含目标测试代码）、fmt/diff、53 份 Markdown 检查及 core 包清单通过。真实系统 Trash 成功用例仍因已诊断挂起显式排除；Linux/Windows 原生、MSVC 和真实 provider 仍未验收。
 
 保留本轮失败记录：最初 sandbox 中 junk 专项为 118 项通过、1 项失败、1 项 ignored，未改动的 `an_untouched_root_round_trips_as_current` 在 10 秒 fixture 历史 settle 限额内失败；采样请求到达时进程已自然结束，未取得阻塞堆栈。随后可访问宿主事件服务的 core 全量运行中，该缓存测试通过，但旧 `captures_complete_answer_and_exit_status` 在 300 ms 内 `TimedOut`，结果为 231 项通过、1 项失败、1 项 ignored，当时没有交叉编译运行。最后工作区全量通过，不证明前述间歇原因已修复；没有放宽期限、移除断言或排除这两个测试，不将整体路线图描述为全绿。下一步继续规则所有权/活动及尚未定位的性能、平台收尾。
+
+
+## 项目规则的执行约束与未核验所有权（2026-10-02）
+
+审计发现，原有 `project_execution_blocker` 只拦截带内容 profile 的 Dart/SvelteKit；通用 `project.build-output` 在证据文案中声明 report-only，却能与旧 Rust/Node/Python/Maven 规则一样仅凭名称/父 marker/完整覆盖进入批量或 TUI Trash。Git ignore/high 不是所有权或可丢弃性证明，独立 Cargo cleaner 的 typed evidence 也明确将 sharing/activity 保持 not_checked，不能借作授权。
+
+- catalog 新增严格 `ProjectExecutionPolicy`：`report_only` 与 `require_ownership_and_activity`，省略时采用后者。JSON 不能配置为 allow/native 权限。内置泛化输出及 Dart/SvelteKit 显式仅报告；旧工具项目规则要求独立独占所有权和活动证据。目前这些观察尚未实现，因此所有项目行继续展示但不能回收，不将此安全修复作为规则扩展完成。
+- core 的 `JunkExecutionPolicy` 随当前候选解释传递，cache restore 初始为 not_checked；只在当前已加载规则解释时重建。缓存不保存授权或拥有者/活动结论，原尺寸/native lineage/覆盖事实独立保留。bulk、TUI 显示准入、provider 启动与后台 worker 均复用同一检查，不通过 confidence、risk 或可编辑 blockers 字符串授权。已有平台原生准入及独立临时对象隔离协议保留。
+- JSON 新增 locale-independent `executionPolicy`；project_report_only、project_ownership_not_verified、project_activity_not_verified 与 rule_evidence_not_revalidated 明确标记不同缺口。Git 仍按原有语义解释 ignore/tracked 证据，但 high 不消除执行要求。human 两种语言明确展示回收受限；CLI help、README 和两个 site 语言版本同步。没有新增 crate、探测线程、SDK 执行或扫描开销阶段。
+- 回归用普通 Git check-ignore 及完整文件字节独立核对实际命中的用户数据；覆盖通用输出与 R1/R2 旧规则、content profile、风险/高置信度/展示 blocker 清空不能绕过、bulk 与 worker 均在 Trash 前拒绝、TUI 刷新后依旧拒绝、缓存 not_checked 与本次不同规则重解释、严格 policy admission 及双语机器/人类报告。原 native worker 替换/链接回归改用受控平台式下层行，继续验证身份变化必须在真实 Trash 调用之前拒绝；没有放宽断言或把项目 layout 作为有效删除证明。
+
+本单元只修复执行约束缺口，没有实现所有权/活动证明、扩大生成格式语义或采集真实 SDK 版本，也没有端到端性能结论。规则扩展、系统会话/TUI 目标宿主、跨平台缓存体验、旧间歇超时、真实 provider、MSVC、Trash 成功和最终 pathname 竞态继续保留。
+
+交付验证（arm64 macOS，Rust 1.98.0）：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 941 项通过、0 失败、2 项原有基准 ignored，其中 catalog/core/CLI unit/contracts 为 28/233/49/63 项通过。受影响 catalog/core/CLI 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、53 份 Markdown 检查和三个受影响包清单通过。Windows 初次检查发现新增测试误用 Unix-only 路径助手，改为正确平台夹具后 Windows 全工作区复验通过；宿主新增契约实际运行 1 项通过，其余未变代码复用完整矩阵，不称为再跑一次全矩阵。一次 exact 过滤拼写只选中零项，未计作验证，随后完整测试名真实执行。
+
+早期失败均记录并核对：core 的 2 项 Git 测试、CLI 的 2 项缓存单元及 2 项 Git 契约原来精确断言没有项目执行阻碍，已更新为完整的所有权/活动加原 Git blocker 列表，保留独立的 confidence/tracked/ignore/原生字节断言。新增 CLI 正例的最初无仓库夹具观察到实际祖先 Git 边界，改为隔离夹具内创建真实仓库，保持生产边界拒绝和精确断言不变。没有放宽期限、反复重试偶发失败直到通过、删除测试或隐藏后续未运行步骤。既有系统 Trash 成功挂起仍显式排除；Linux/Windows 原生宿主、MSVC、真实 provider 未验证，旧 300 ms、共享缓存 ProbeUnavailable 与 debug PTY 停顿根因仍未解决。下一步继续独立项目上下文/所有权/活动观察和版本采集，验收清单不因这次阻止错误准入而勾选完成。

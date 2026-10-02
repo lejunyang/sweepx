@@ -162,8 +162,9 @@ pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> P
         eprintln!(
             "{}",
             match locale {
-                Locale::ZhCn => "没有覆盖完整、可以移到回收站的候选。",
-                Locale::EnUs => "No candidate with complete coverage is eligible for Trash.",
+                Locale::ZhCn => "没有满足当前规则约束且覆盖完整的回收候选。",
+                Locale::EnUs =>
+                    "No candidate meets current rule and complete-coverage requirements for Trash.",
             }
         );
         return ProcessExitCode::from(8);
@@ -1010,6 +1011,98 @@ mod project_format_tests {
     };
     use sweepx_platform::{CancellationToken, ScanRoot};
     use sweepx_scanner::{HostPlatformScanner, Scanner, ScannerOptions};
+
+    #[test]
+    fn legacy_and_generic_project_candidates_are_refused_before_bulk_and_worker_trash() {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::write(root.join("package.json"), b"{}\n").unwrap();
+        for name in ["target", "dist", "__pycache__"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(
+                root.join(name).join("personal-data"),
+                b"preserve personal data",
+            )
+            .unwrap();
+        }
+        let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+            .scan(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let aggregates = summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect::<BTreeMap<_, _>>();
+        let service = JunkService::built_in().unwrap();
+        for (name, rule, blocker) in [
+            ("target", "rust.target", "project_ownership_not_verified"),
+            ("dist", "project.build-output", "project_report_only"),
+            (
+                "__pycache__",
+                "python.cache",
+                "project_ownership_not_verified",
+            ),
+        ] {
+            let entry = summary
+                .entries
+                .iter()
+                .find(|entry| entry.display_path == root.join(name).display().to_string())
+                .unwrap();
+            let mut candidate = service
+                .interpret(
+                    &format!("project:{rule}"),
+                    entry,
+                    &aggregates,
+                    &[],
+                    &PlatformJunkEvidence::default(),
+                )
+                .unwrap();
+            // A higher-level consumer's confidence/coverage claims cannot override rule constraints.
+            candidate.confidence = Some("high".into());
+            candidate.blockers.clear();
+            assert!(entry.coverage.complete);
+            assert_eq!(candidate.project_execution_blocker(), Some(blocker));
+            for locale in [Locale::EnUs, Locale::ZhCn] {
+                let code = run_bulk_trash(
+                    locale,
+                    vec![BulkTrashItem {
+                        path: candidate.path.clone(),
+                        rule_id: candidate.rule_id.clone(),
+                        size: 21,
+                        entry,
+                        eligible: true,
+                        project_blocker: candidate.project_execution_blocker(),
+                    }],
+                );
+                assert_eq!(code, ProcessExitCode::from(8));
+            }
+            let aggregate = summary
+                .aggregates
+                .iter()
+                .find(|aggregate| aggregate.directory_identity == candidate.entry_id.as_str())
+                .unwrap()
+                .clone();
+            let row = sweepx_core::junk::session::JunkSessionCandidate {
+                candidate,
+                facts: sweepx_core::junk::session::JunkSessionFacts::Directory(Box::new(aggregate)),
+            };
+            assert_eq!(
+                trash_session_candidate(&row, &CancellationToken::new()).unwrap_err(),
+                blocker
+            );
+            assert_eq!(
+                std::fs::read(root.join(name).join("personal-data")).unwrap(),
+                b"preserve personal data"
+            );
+        }
+    }
 
     #[test]
     fn recognized_project_format_is_refused_before_any_bulk_or_worker_trash() {

@@ -465,7 +465,7 @@ impl JunkProvider for Provider {
             .any(|row| row.row.candidate.project_execution_blocker().is_some())
         {
             return Err(
-                "project content evidence is report-only; exclusive ownership is unverified".into(),
+                "project rule is report-only or exclusive ownership/activity is unverified".into(),
             );
         }
         if rows

@@ -293,7 +293,20 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
             fs::symlink_metadata(target.join("payload")).unwrap().len()
         ))
     );
-    let old = provider.rows[&key].row.clone();
+    let project_row = provider.rows[&key].row.clone();
+    assert!(!provider.rows[&key].report_allows_trash());
+    assert_eq!(
+        crate::trash_command::trash_session_candidate(&project_row, &CancellationToken::new())
+            .unwrap_err(),
+        "project_ownership_not_verified"
+    );
+    // A controlled platform-like row isolates the native preflight contract below the project
+    // guard. Both following cases change identity and must reject before a real Trash call.
+    let mut old = (*project_row).clone();
+    old.candidate.rule_id = "test.native-cache".into();
+    old.candidate.execution_policy =
+        sweepx_core::junk::candidate::JunkExecutionPolicy::NativeRevalidationRequired;
+    let old = Arc::new(old);
     fs::rename(&target, root.join("retained-old-target")).unwrap();
     fs::create_dir(&target).unwrap();
     fs::write(target.join("payload"), b"replacement").unwrap();

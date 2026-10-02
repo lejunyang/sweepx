@@ -827,22 +827,49 @@ mod tests {
         session().refresh(&mut candidates);
         assert_eq!(candidates[0].confidence.as_deref(), Some("medium"));
         assert!(candidates[0].git.is_none());
-        assert!(candidates[0].blockers.is_empty());
+        assert_eq!(
+            candidates[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified"
+            ]
+        );
         std::fs::write(base.join("excludes"), b"project/target/\n").unwrap();
         git(&base, &["add", "--force", "project/target/file"]);
         session().refresh(&mut candidates);
-        assert_eq!(candidates[0].blockers, ["tracked_descendant"]);
+        assert_eq!(
+            candidates[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "tracked_descendant"
+            ]
+        );
         assert_eq!(candidates[0].confidence.as_deref(), Some("medium"));
         std::fs::rename(base.join(".git"), base.join("retained-git")).unwrap();
         std::fs::write(base.join(".git"), b"gitdir: retained-git\n").unwrap();
         session().refresh(&mut candidates);
-        assert_eq!(candidates[0].blockers, ["gitfile_repository_boundary"]);
+        assert_eq!(
+            candidates[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "gitfile_repository_boundary"
+            ]
+        );
         #[cfg(unix)]
         {
             std::fs::remove_file(base.join(".git")).unwrap();
             std::os::unix::fs::symlink(base.join("retained-git"), base.join(".git")).unwrap();
             session().refresh(&mut candidates);
-            assert_eq!(candidates[0].blockers, ["git_repository_boundary"]);
+            assert_eq!(
+                candidates[0].blockers,
+                [
+                    "project_ownership_not_verified",
+                    "project_activity_not_verified",
+                    "git_repository_boundary"
+                ]
+            );
         }
         let names = std::fs::read_dir(project.join("target"))
             .unwrap()
@@ -907,7 +934,14 @@ mod tests {
         std::fs::write(project.join("target/embedded/.git"), b"gitdir: elsewhere\n").unwrap();
         let mut nested = scan(&project);
         session().refresh(&mut nested);
-        assert_eq!(nested[0].blockers, ["nested_repository"]);
+        assert_eq!(
+            nested[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "nested_repository"
+            ]
+        );
         std::fs::remove_file(project.join("target/embedded/.git")).unwrap();
         let original = scan(&project);
         for limits in [
@@ -923,7 +957,14 @@ mod tests {
             let mut unavailable = scan_with_limits(&project, limits);
             assert!(unavailable[0].git_scan_facts.is_none());
             session().refresh(&mut unavailable);
-            assert_eq!(unavailable[0].blockers, ["git_scan_evidence_incomplete"]);
+            assert_eq!(
+                unavailable[0].blockers,
+                [
+                    "project_ownership_not_verified",
+                    "project_activity_not_verified",
+                    "git_scan_evidence_incomplete"
+                ]
+            );
         }
         let mut non_project = original.clone();
         non_project[0].classification = Some("stale_inactive_temp".into());
@@ -935,7 +976,14 @@ mod tests {
         let mut unknown = original.clone();
         unknown[0].git_scan_facts = None;
         session().refresh(&mut unknown);
-        assert_eq!(unknown[0].blockers, ["git_scan_evidence_incomplete"]);
+        assert_eq!(
+            unknown[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "git_scan_evidence_incomplete"
+            ]
+        );
         for limits in [
             GitEvidenceLimits {
                 max_observations: 0,
@@ -960,12 +1008,26 @@ mod tests {
         cancel.cancel();
         let mut cancelled = original.clone();
         GitEvidenceSession::new(GitEvidenceLimits::default(), cancel).refresh(&mut cancelled);
-        assert_eq!(cancelled[0].blockers, ["git_query_budget_exhausted"]);
+        assert_eq!(
+            cancelled[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "git_query_budget_exhausted"
+            ]
+        );
         // Keep the old inode allocated so replacement cannot accidentally reuse it.
         std::fs::rename(project.join("target"), base.join("retained-target")).unwrap();
         std::fs::create_dir(project.join("target")).unwrap();
         let mut replaced = original;
         session().refresh(&mut replaced);
-        assert_eq!(replaced[0].blockers, ["git_identity_changed"]);
+        assert_eq!(
+            replaced[0].blockers,
+            [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+                "git_identity_changed"
+            ]
+        );
     }
 }

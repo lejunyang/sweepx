@@ -30,12 +30,28 @@ pub struct ProjectJunkRule {
     /// exclusive ownership and inactivity are independent, unverified conditions.
     #[serde(default)]
     pub content_format: Option<ProjectContentFormat>,
+    /// Intent declared by the rule, never proof of ownership or inactivity. Omitted policies
+    /// require independent ownership/activity evidence and cannot inherit legacy deletion access.
+    #[serde(default)]
+    pub execution_policy: ProjectExecutionPolicy,
     /// Human-readable explanation of the rebuild/disposability evidence.
     pub evidence: String,
     /// Source review date in YYYY-MM-DD notation.
     pub source_reviewed_at: String,
     /// HTTPS primary-source references supporting the rule.
     pub references: Vec<String>,
+}
+
+/// Project-rule execution constraint. No admitted value turns a layout match into deletion authority.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectExecutionPolicy {
+    /// Always display only, even if future independent evidence becomes available.
+    ReportOnly,
+    /// Future execution requires current, independently established exclusive ownership and
+    /// inactivity. Neither condition is implemented by the current layout/content/Git stages.
+    #[default]
+    RequireOwnershipAndActivity,
 }
 
 /// Supported project content profiles; unknown profile names fail catalog admission.
@@ -168,6 +184,30 @@ mod tests {
             load_project_rule_bytes(&vec![b' '; 32769]),
             Err(ProjectRuleError::ResourceLimit)
         ));
+    }
+
+    #[test]
+    fn execution_policy_cannot_enable_layout_only_mutation() {
+        let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        assert_eq!(
+            load_project_rules().unwrap()[3].execution_policy,
+            ProjectExecutionPolicy::ReportOnly
+        );
+        rules[0].as_object_mut().unwrap().remove("executionPolicy");
+        assert_eq!(
+            load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap()[0]
+                .execution_policy,
+            ProjectExecutionPolicy::RequireOwnershipAndActivity
+        );
+        for value in [
+            serde_json::json!("allow"),
+            serde_json::json!("native_revalidation_required"),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            rules[0]["executionPolicy"] = value;
+            assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+        }
     }
 
     #[test]

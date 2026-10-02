@@ -73,3 +73,6 @@ Candidate-cache hits also rebuild current Git interpretation. Changes to ignore 
 ## One-sentence status
 
 SweepX is now a **runnable development preview**: scanning, TUI browsing, single-item Trash, Linux stale-temp quarantine, and Linux bounded file/directory Permanent can be exercised. General `plan`, `approve`, `execute`, and broader Permanent remain future work.
+
+
+Project junk candidates remain visible, selectable and refreshable. Exclusive ownership and inactivity are still unverified, so `junk --trash` and TUI Trash refuse them. Names, risk tiers, formats and Git ignore do not substitute for that proof; generic build-output rules explicitly allow reporting only.
