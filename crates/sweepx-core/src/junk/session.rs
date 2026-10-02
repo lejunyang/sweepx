@@ -78,6 +78,8 @@ pub enum JunkSessionPhase {
     /// Best-effort publication of freshly observed filesystem facts.
     CacheWrite,
     Traversal,
+    /// Current bounded content observations, including validated filesystem-cache rows.
+    Formats,
     /// Native Linux temporary-object measurement and current-user reference observations.
     #[cfg(target_os = "linux")]
     TemporaryObjects,
@@ -319,6 +321,8 @@ pub struct JunkSessionLimits {
     pub scan: ScanResourceLimits,
     /// Current Git observation and subprocess limits, renewed for each revision.
     pub git: GitEvidenceLimits,
+    /// Current project content observations, renewed for every revision.
+    pub formats: super::format::ProjectFormatLimits,
     /// Shared native temporary-object budgets for one full Linux system revision.
     #[cfg(target_os = "linux")]
     pub linux_temp: super::linux_temp::LinuxTempObservationLimits,
@@ -332,6 +336,7 @@ impl Default for JunkSessionLimits {
             max_candidate_bytes: 64 * 1024 * 1024,
             scan: ScanResourceLimits::default(),
             git: GitEvidenceLimits::default(),
+            formats: super::format::ProjectFormatLimits::default(),
             #[cfg(target_os = "linux")]
             linux_temp: super::linux_temp::LinuxTempObservationLimits::default(),
         }
@@ -872,6 +877,18 @@ impl Worker {
         }
         if let Some(rows) = &selected {
             validate_selected(rows, &job.cancel, self.request.limits.scan)?;
+        }
+        writer.phase(JunkSessionPhase::Formats)?;
+        let mut formats = super::format::ProjectFormatSession::new(
+            self.request.limits.formats,
+            job.cancel.clone(),
+        );
+        for row in pending.values_mut() {
+            formats.refresh(&mut Arc::make_mut(row).candidate);
+            if job.cancel.is_cancelled() {
+                writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
+                return Ok(());
+            }
         }
         writer.phase(JunkSessionPhase::Git)?;
         let mut git = GitEvidenceSession::new(self.request.limits.git, job.cancel.clone());

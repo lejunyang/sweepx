@@ -68,6 +68,9 @@ pub(crate) fn trash_session_candidate(
     if cancel.is_cancelled() {
         return Err("cancelled".into());
     }
+    if let Some(blocker) = row.candidate.project_execution_blocker() {
+        return Err(blocker.into());
+    }
     let aggregate = row
         .directory_aggregate()
         .ok_or_else(|| "temporary objects require independent quarantine preview".to_string())?;
@@ -129,6 +132,8 @@ pub(crate) struct BulkTrashItem<'a> {
     /// True when the directory aggregate reports complete coverage. Ineligible items are
     /// surfaced as skipped rather than moved.
     pub(crate) eligible: bool,
+    /// Current rule's independent project execution restriction, even with complete traversal.
+    pub(crate) project_blocker: Option<&'static str>,
 }
 
 /// Moves a classified junk set to the operating-system Trash without a confirmation round-trip.
@@ -145,8 +150,14 @@ pub(crate) struct BulkTrashItem<'a> {
 /// guards plus identity revalidation are the safety boundary. Requiring an exact digest for every
 /// routine cache cleanup made the command effectively unusable.
 pub(crate) fn run_bulk_trash(locale: Locale, items: Vec<BulkTrashItem<'_>>) -> ProcessExitCode {
-    let eligible: Vec<_> = items.iter().filter(|item| item.eligible).collect();
-    let skipped: Vec<_> = items.iter().filter(|item| !item.eligible).collect();
+    let eligible: Vec<_> = items
+        .iter()
+        .filter(|item| item.eligible && item.project_blocker.is_none())
+        .collect();
+    let skipped: Vec<_> = items
+        .iter()
+        .filter(|item| !item.eligible || item.project_blocker.is_some())
+        .collect();
     if eligible.is_empty() {
         eprintln!(
             "{}",
@@ -214,7 +225,7 @@ fn print_bulk_intent(
     match locale {
         Locale::ZhCn => {
             println!("移到系统回收站");
-            println!("  候选：{count} 个；跳过（覆盖不完整）：{skipped} 个");
+            println!("  候选：{count} 个；跳过（覆盖或项目执行证据不足）：{skipped} 个");
             println!("  已统计逻辑大小：{total} 字节");
             println!("  模式：系统回收站；可恢复；不永久删除；无需再确认");
             for item in items {
@@ -223,7 +234,9 @@ fn print_bulk_intent(
         }
         Locale::EnUs => {
             println!("Moving to the operating-system Trash");
-            println!("  candidates: {count}; skipped (incomplete coverage): {skipped}");
+            println!(
+                "  candidates: {count}; skipped (incomplete coverage or project execution evidence): {skipped}"
+            );
             println!("  accounted logical size: {total} bytes");
             println!(
                 "  mode: operating-system Trash; recoverable; never permanent; no further prompt"
@@ -247,7 +260,7 @@ fn print_bulk_result(
         Locale::ZhCn => {
             println!("已移到回收站：{moved} 个，{moved_bytes} 字节。");
             if skipped > 0 {
-                println!("跳过（覆盖不完整）：{skipped} 个。");
+                println!("跳过（覆盖或项目执行证据不足）：{skipped} 个。");
             }
             if guarded > 0 {
                 println!("未自动删除重要目录：{guarded} 个（如需删除请单独使用 trash 命令）。");
@@ -259,7 +272,7 @@ fn print_bulk_result(
         Locale::EnUs => {
             println!("Moved to Trash: {moved} items ({moved_bytes} bytes).");
             if skipped > 0 {
-                println!("Skipped (incomplete coverage): {skipped}.");
+                println!("Skipped (incomplete coverage or project execution evidence): {skipped}.");
             }
             if guarded > 0 {
                 println!(
@@ -983,5 +996,93 @@ mod tests {
         .to_string();
         assert!(error.contains("different filesystem"));
         assert!(error.contains("/.Trash-UID"));
+    }
+}
+
+#[cfg(test)]
+mod project_format_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use sweepx_core::junk::{
+        JunkService,
+        format::{ProjectFormatLimits, ProjectFormatSession, ProjectFormatStatus},
+        platform::PlatformJunkEvidence,
+    };
+    use sweepx_platform::{CancellationToken, ScanRoot};
+    use sweepx_scanner::{HostPlatformScanner, Scanner, ScannerOptions};
+
+    #[test]
+    fn recognized_project_format_is_refused_before_any_bulk_or_worker_trash() {
+        #[cfg(target_os = "linux")]
+        let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        std::fs::create_dir(root.join(".dart_tool")).unwrap();
+        std::fs::write(root.join("pubspec.yaml"), b"name: example\n").unwrap();
+        let file = root.join(".dart_tool/package_config.json");
+        let bytes = br#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/"}],"generator":"pub","generatorVersion":"3.6.0"}"#;
+        std::fs::write(&file, bytes).unwrap();
+        let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+            .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
+            .unwrap();
+        let entry = summary
+            .entries
+            .iter()
+            .find(|e| e.display_path.ends_with(".dart_tool"))
+            .unwrap();
+        let aggregates: BTreeMap<_, _> = summary
+            .aggregates
+            .iter()
+            .map(|a| (a.directory_identity.as_str(), a))
+            .collect();
+        let service = JunkService::built_in().unwrap();
+        let mut candidate = service
+            .interpret(
+                "project:dart.tool-state",
+                entry,
+                &aggregates,
+                &[],
+                &PlatformJunkEvidence::default(),
+            )
+            .unwrap();
+        ProjectFormatSession::new(ProjectFormatLimits::default(), CancellationToken::new())
+            .refresh(&mut candidate);
+        assert_eq!(
+            candidate.project_format.as_ref().unwrap().status,
+            ProjectFormatStatus::Recognized
+        );
+        assert!(entry.coverage.complete);
+        // This deliberately marks traversal eligible; the independent project guard must prevail.
+        let code = run_bulk_trash(
+            Locale::EnUs,
+            vec![BulkTrashItem {
+                path: candidate.path.clone(),
+                rule_id: candidate.rule_id.clone(),
+                size: bytes.len() as u128,
+                entry,
+                eligible: true,
+                project_blocker: candidate.project_execution_blocker(),
+            }],
+        );
+        assert_eq!(code, ProcessExitCode::from(8));
+        let aggregate = summary
+            .aggregates
+            .iter()
+            .find(|a| a.directory_identity == candidate.entry_id.as_str())
+            .unwrap()
+            .clone();
+        let row = sweepx_core::junk::session::JunkSessionCandidate {
+            candidate,
+            facts: sweepx_core::junk::session::JunkSessionFacts::Directory(Box::new(aggregate)),
+        };
+        assert_eq!(
+            trash_session_candidate(&row, &CancellationToken::new()).unwrap_err(),
+            "project_ownership_not_verified"
+        );
+        assert_eq!(std::fs::read(file).unwrap(), bytes);
     }
 }

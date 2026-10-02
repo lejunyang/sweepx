@@ -85,11 +85,16 @@ impl JunkRow for Row {
     fn context(&self) -> String {
         let candidate = &self.row.candidate;
         format!(
-            "risk={} · classification={} · confidence={} · activity={} · blockers={}",
+            "risk={} · classification={} · confidence={} · activity={} · format={} · blockers={}",
             candidate.risk,
             candidate.classification.as_deref().unwrap_or("not_checked"),
             candidate.confidence.as_deref().unwrap_or("not_checked"),
             candidate.activity.as_deref().unwrap_or("not_checked"),
+            candidate
+                .project_format
+                .as_ref()
+                .map(|e| format!("{}/{}", e.status.code(), e.reason))
+                .unwrap_or_else(|| "not_required".into()),
             candidate.blockers.join(",")
         )
     }
@@ -98,6 +103,9 @@ impl JunkRow for Row {
     }
     fn complete(&self) -> bool {
         self.row.complete()
+    }
+    fn report_allows_trash(&self) -> bool {
+        self.row.candidate.project_execution_blocker().is_none()
     }
     fn retained_bytes(&self) -> usize {
         self.row.estimated_retained_bytes().saturating_add(2048)
@@ -312,6 +320,7 @@ impl JunkProvider for Provider {
                             #[cfg(target_os = "linux")]
                             JunkSessionPhase::TemporaryObjects => "temporary_objects",
                             JunkSessionPhase::Git => "git",
+                            JunkSessionPhase::Formats => "formats",
                             JunkSessionPhase::Replacement => "replacement",
                         },
                     });
@@ -451,6 +460,14 @@ impl JunkProvider for Provider {
             return Err("complete the scan or refresh first".into());
         }
         let rows = self.selected(keys)?;
+        if rows
+            .iter()
+            .any(|row| row.row.candidate.project_execution_blocker().is_some())
+        {
+            return Err(
+                "project content evidence is report-only; exclusive ownership is unverified".into(),
+            );
+        }
         if rows
             .iter()
             .any(|row| row.row.directory_aggregate().is_none())

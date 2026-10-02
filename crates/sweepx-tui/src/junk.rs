@@ -38,6 +38,11 @@ pub trait JunkRow: Send + Sync {
     fn logical_bytes(&self) -> &ByteValue;
     /// Whether native source and aggregate coverage are complete; never mutation authority.
     fn complete(&self) -> bool;
+    /// Whether current report restrictions permit offering Trash. This is only a presentation
+    /// filter: the provider and native worker must independently enforce execution guards.
+    fn report_allows_trash(&self) -> bool {
+        true
+    }
     /// Conservative retained-data estimate, including shared data; not RSS.
     fn retained_bytes(&self) -> usize;
 }
@@ -403,10 +408,30 @@ impl JunkModel {
 
     fn eligible(&self, key: &str) -> bool {
         !self.busy
-            && self
-                .rows
+            && self.rows.get(key).is_some_and(|row| {
+                !row.historical
+                    && row.current
+                    && row.row.complete()
+                    && row.row.report_allows_trash()
+            })
+    }
+
+    fn trash_unavailable_message(&self, keys: &[String]) -> &str {
+        if keys.iter().any(|key| {
+            self.rows
                 .get(key)
-                .is_some_and(|row| !row.historical && row.current && row.row.complete())
+                .is_some_and(|row| !row.row.report_allows_trash())
+        }) {
+            self.text(
+                "所选项证据仅供报告，尚不满足回收条件",
+                "Selected evidence is report-only and does not meet Trash requirements",
+            )
+        } else {
+            self.text(
+                "先完整刷新选中项，再移到回收站",
+                "Complete a refresh of selected rows before moving to Trash",
+            )
+        }
     }
 
     fn phase_label(&self) -> &str {
@@ -416,6 +441,7 @@ impl JunkModel {
             "cache_write" => self.text("保存扫描事实", "Saving scan facts"),
             "discovery" => self.text("发现上下文", "Discovering context"),
             "traversal" => self.text("扫描", "Scanning"),
+            "formats" => self.text("核验项目文件格式", "Checking project file formats"),
             "temporary_objects" => self.text(
                 "核验临时对象与进程引用",
                 "Checking temporary objects and process references",
@@ -670,14 +696,7 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                         Err(error) => model.diagnostic(error),
                     }
                 } else {
-                    model.diagnostic(
-                        model
-                            .text(
-                                "先完整刷新选中项，再移到回收站",
-                                "Complete a refresh of selected rows before moving to Trash",
-                            )
-                            .into(),
-                    );
+                    model.diagnostic(model.trash_unavailable_message(&keys).into());
                 }
             }
             KeyCode::Char('x') if !model.busy && model.trash_pending.is_empty() => {

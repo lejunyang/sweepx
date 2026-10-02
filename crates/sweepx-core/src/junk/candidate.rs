@@ -59,6 +59,9 @@ pub struct JunkCandidate {
     pub confidence: Option<String>,
     /// Conditions that prevent this report-only candidate from being promoted.
     pub blockers: Vec<String>,
+    /// Current required content observation; never persisted as a filesystem fact. A recognized
+    /// self-declared format still does not prove exclusive ownership or inactivity.
+    pub project_format: Option<super::format::ProjectFormatEvidence>,
     /// Traversal facts only; reused solely with validated filesystem coverage/history.
     pub git_scan_facts: Option<super::git::GitScanFacts>,
     /// The scanned source row, retained for the bulk Trash path's identity revalidation. Present
@@ -80,6 +83,58 @@ pub struct GitIgnoreEvidence {
 }
 
 impl JunkCandidate {
+    /// Required content profiles remain report-only until independent ownership/activity and
+    /// mutation-time evidence exist. A recognized format or Git ignore cannot waive this guard.
+    pub fn project_execution_blocker(&self) -> Option<&'static str> {
+        self.project_format
+            .as_ref()
+            .map(|_| "project_ownership_not_verified")
+    }
+
+    /// Restores base project interpretation without letting Git or cached fields promote missing
+    /// content evidence. Only the bounded content stage sets the current format outcome.
+    pub(crate) fn reset_project_format_interpretation(&mut self) {
+        let Some(format) = &self.project_format else {
+            return;
+        };
+        use super::format::ProjectFormatStatus;
+        self.blockers.retain(|b| {
+            !matches!(
+                b.as_str(),
+                "project_format_not_checked"
+                    | "project_format_invalid"
+                    | "project_format_unknown"
+                    | "project_ownership_not_verified"
+            )
+        });
+        self.classification = Some(
+            if format.status == ProjectFormatStatus::Recognized {
+                "recognized_generated_format"
+            } else {
+                "project_layout"
+            }
+            .into(),
+        );
+        self.confidence = Some(
+            if format.status == ProjectFormatStatus::Recognized {
+                "medium"
+            } else {
+                "low"
+            }
+            .into(),
+        );
+        let blocker = match format.status {
+            ProjectFormatStatus::NotChecked => Some("project_format_not_checked"),
+            ProjectFormatStatus::Invalid => Some("project_format_invalid"),
+            ProjectFormatStatus::Unknown => Some("project_format_unknown"),
+            ProjectFormatStatus::Recognized => None,
+        };
+        if let Some(blocker) = blocker {
+            self.blockers.push(blocker.into());
+        }
+        self.blockers.push("project_ownership_not_verified".into());
+    }
+
     /// Conservative owned-data estimate for session retention, not allocator RSS or file size.
     pub fn estimated_retained_bytes(&self) -> usize {
         let strings = [
@@ -143,7 +198,7 @@ pub fn assemble_project_candidate(
     let locator = entry.validated_native_locator().ok()??;
     let identity = entry.identity.as_ref()?;
     let size = junk_size_for(aggregates.get(identity.entry_id.as_str()).copied());
-    Some(JunkCandidate {
+    let mut candidate = JunkCandidate {
         path: entry.display_path.clone(),
         #[cfg(target_os = "linux")]
         native_path: None,
@@ -168,9 +223,14 @@ pub fn assemble_project_candidate(
         classification: Some("known_generated".to_string()),
         confidence: Some("medium".to_string()),
         blockers: Vec::new(),
+        project_format: rule
+            .content_format
+            .map(super::format::ProjectFormatEvidence::not_checked),
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
-    })
+    };
+    candidate.reset_project_format_interpretation();
+    Some(candidate)
 }
 
 /// Assembles one platform junk candidate for an entry the classifier already matched.
@@ -228,6 +288,7 @@ pub fn assemble_platform_candidate(
         classification: None,
         confidence: None,
         blockers: Vec::new(),
+        project_format: None,
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
     })
@@ -275,6 +336,12 @@ pub fn refresh_candidate_interpretation(
     candidate.activity = None;
     candidate.stale_formats.clear();
     candidate.blockers.clear();
+    candidate.project_format = project_rules
+        .iter()
+        .find(|rule| rule.id == candidate.rule_id)
+        .and_then(|rule| rule.content_format)
+        .map(super::format::ProjectFormatEvidence::not_checked);
+    candidate.reset_project_format_interpretation();
     if let Some(rule) = platform_rule
         && tool_reported_root_for(&rule.root_kind).is_some()
     {

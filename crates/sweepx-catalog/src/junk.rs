@@ -26,12 +26,24 @@ pub struct ProjectJunkRule {
     /// Empty preserves catalogs that only use parent context.
     #[serde(default)]
     pub required_own_markers: Vec<String>,
+    /// Optional bounded content observation. A recognized format is report evidence only;
+    /// exclusive ownership and inactivity are independent, unverified conditions.
+    #[serde(default)]
+    pub content_format: Option<ProjectContentFormat>,
     /// Human-readable explanation of the rebuild/disposability evidence.
     pub evidence: String,
     /// Source review date in YYYY-MM-DD notation.
     pub source_reviewed_at: String,
     /// HTTPS primary-source references supporting the rule.
     pub references: Vec<String>,
+}
+
+/// Supported project content profiles; unknown profile names fail catalog admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectContentFormat {
+    /// Pub's v2 package map and self-declared generator, without following package URIs.
+    DartPubPackageConfigV2,
 }
 
 /// Admission failure for the project-artifact catalog.
@@ -83,6 +95,11 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
                 }
             });
         if rule.id.trim().is_empty()
+            || (rule.content_format == Some(ProjectContentFormat::DartPubPackageConfigV2)
+                && !rule
+                    .required_own_markers
+                    .iter()
+                    .any(|name| name == "package_config.json"))
             || !ids.insert(&rule.id)
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
             || rule.names.is_empty()
@@ -176,5 +193,21 @@ mod tests {
             load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()),
             Err(ProjectRuleError::ResourceLimit)
         ));
+    }
+
+    #[test]
+    fn content_profiles_require_their_declared_input_and_reject_unknown_profiles() {
+        let original: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        let mut edited = original.clone();
+        edited[5]["contentFormat"] = serde_json::json!("future_profile");
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).is_err());
+        edited = original;
+        edited[5]["requiredOwnMarkers"] = serde_json::json!(["other.json"]);
+        assert!(matches!(
+            load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()),
+            Err(ProjectRuleError::InvalidRule(_))
+        ));
+        edited[5]["contentFormat"] = serde_json::Value::Null;
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).is_ok());
     }
 }

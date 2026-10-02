@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；结构不等于内容格式证明，仍需有界原生内容验证及更多所有权/活动依据。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；SvelteKit 内容验证、更多独占所有权/活动依据仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计；8,192 文件 debug 热缓存 PTY 超时的根因定位；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -622,3 +622,18 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 验证（arm64 macOS，Rust 1.98.0）：scanner 全量 76 项通过，最后增加最终文件名的分量计费后两个新增原生回归再次通过；此前 896 项工作区结果中未变测试复用，合计覆盖 898 项，不称为再次完整矩阵。最终 host 与 Linux GNU/Windows GNU 工作区 all-targets/all-features clippy（含目标测试）通过；无 backend 的 scanner 合约检查、格式/diff、53 份 Markdown 与 scanner package list 通过。新目标测试只进行了交叉编译，Linux/Windows 原生运行、MSVC、真实云占位及实际系统 Trash 成功仍未验收；工作区仍保留原两项基准 ignored 和已诊断系统 Trash 成功用例的显式排除。没有新计时或提速结论，没有发布。
 
 垃圾规则扩展验收继续未勾选。本单元闭合有界、provider-safe 整文件读取接缝，尚未解析 Dart/SvelteKit 的内容，也未连接 CLI/会话/缓存动态解释或新的格式回收准入。后续应将内容格式、未知/无效/未检查状态与所有权/活动分开，缓存命中重新观察；格式缺口不能仅靠旧 classification、Git ignore/high 或 native identity 回收资格消失。
+
+
+## Dart 当前格式证据与回收边界（2026-10-02）
+
+- 已接入可独立调用的 `junk::format::ProjectFormatSession`：使用前一阶段捕获目录完整读取，不以显示路径重开，不读取 URI 指向的包内容，也不调用 SDK。识别 pub v2 包映射、自声明 generator/version 和父根 `../` + `lib/` 引用；这是有限 profile，不是 Dart URI、YAML、workspace 所有权的完整实现。未知扩展字段允许；已知字段重复/缺失或不一致为 invalid；未来版本、非支持 URI、缺失 pub/父根签名保持 unknown。用户可以仿造所有这些字段，所以 recognized 不等于生成者身份或可丢弃证明。
+- 规则增加严格可选 `contentFormat`，profile 必须声明其固定输入；实际加载字节仍决定缓存/会话摘要。新/历史/Base 候选是 not_checked，每个调用/revision 有界观察当前内容，JSON/Human/TUI 均展示结果。配置字节与格式答案不写入文件系统缓存，正常目录结构事实仍可缓存，unknown 候选不被作为“没有垃圾”永久丢弃。
+- 默认每项最多 256 KiB、每次调用最多 128 项、累计最坏内容预留 32 MiB；失败不返还请求预算。每项祖先最多 32 个组件、目录枚举沿用单次有界 reader，累计工作受尝试数约束；scan ID 去重键最多 1024 字节。解析前还限制整个 JSON 的嵌套深度，包括被 serde 跳过的扩展字段；字符串内括号不计深度。序列处理只保留小型状态，不保存包 URI 或配置原文。默认 5 秒合作期限与取消覆盖读取/解析阶段，不能中断阻塞内核调用。没有扫描加速或真实云 provider 性能声明。
+- Git 忽略仍可作为独立报告事实，但不能将内容 unknown/invalid/not_checked 提升到 high。recognized 行也保留 `project_ownership_not_verified`：CLI 批量回收、TUI 展示准入及后台 worker 均拒绝此 profile，不从内容签名获得删除权。不声称解决既有 pathname 到系统 Trash 的竞态。
+- 独立夹具加强 Dart 2.18/3.6 的 package-map 内容；它们是按文档/源码编写的例子，不是运行对应 SDK 的录制。回归覆盖格式状态、重复字段/包名、深度和内容预算、provider 拒绝、取消、链接、同名同长度内容变化、缓存不保存格式答案、Base/Current/选中及完整刷新、Git 不提升及两层回收拒绝。SvelteKit 仍使用结构夹具；更完整版本采集、内容解析、所有权/活动、目标宿主运行验证继续未完成，规则扩展验收不打勾。
+
+主要依据：[pub package-config 源码](https://github.com/dart-lang/pub/blob/master/lib/src/package_config.dart)、[Dart workspace 文档](https://dart.dev/tools/pub/workspaces)。
+
+本阶段验证：初始工作区矩阵 907 项通过、2 项基准 ignored，继续显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 宿主 Trash 挂起用例。后续修改复验中，深层扩展字段回归暴露 serde 跳过未知字段时没有递归限额，已加入完整 payload 的词法深度资源准入；最终格式 9 项、catalog 27 项、CLI 单元 48 项与契约 60 项/relay 1 项、TUI 89 项通过，Core 最终整体运行 209 项通过、1 项失败、1 项基准 ignored。失败为未修改的工具成功探测用例在 300 ms 内返回 `TimedOut`，发生在并行交叉编译期间；同一二进制受控子进程的三次单独观察为 34.87/11.03/11.46 ms，7 项工具契约隔离串行运行通过。这只定位到成功用例的时间预算，未证明并行失败根因或稳定性，因此保留验证缺口，不能将此最终矩阵写成全绿。由于 Core 失败，随后 TUI 步骤未执行，已单独补跑并通过。
+
+最终 host 工作区 all-targets/all-features clippy、Linux GNU 与 Windows GNU 工作区交叉 clippy（含测试代码）、后续 TUI 文案的两个目标复验、fmt/diff 与 53 份 Markdown 检查通过；core 包清单包含新模块和测试。未执行 Linux/Windows 原生运行、MSVC、实际云 provider 或系统 Trash 成功验证。旧性能/平台/执行竞态与规则所有权、活动收尾继续未完成，不据此关闭整体路线图。

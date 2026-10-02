@@ -5,7 +5,8 @@
 //! SvelteKit 1.0/2.0 sync writes: tagged `packages/kit/src/core/sync` sources at
 //! https://github.com/sveltejs/kit. Version 3 moved configuration and generated type files;
 //! https://svelte.dev/docs/kit/project-structure documents the current project layout.
-//! Payloads are intentionally minimal: these fixtures test file type/location, not format parsing.
+//! Dart payloads include independently authored pub v2 fields for content recognition. SvelteKit
+//! payloads remain minimal structural examples; none are recordings of executed SDKs.
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,7 @@ pub const CASES: &[ProjectJunkLayoutCase] = &[
             ("pubspec.lock", "packages: {}\n"),
             (
                 ".dart_tool/package_config.json",
-                "{\"configVersion\":2,\"packages\":[]}",
+                r#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/","languageVersion":"2.18"}],"generator":"pub","generatorVersion":"2.18.0"}"#,
             ),
             ("lib/example.dart", "void main() {}"),
         ],
@@ -48,7 +49,7 @@ pub const CASES: &[ProjectJunkLayoutCase] = &[
             ("pubspec.yaml", "name: workspace\nworkspace: [packages/a]\n"),
             (
                 ".dart_tool/package_config.json",
-                "{\"configVersion\":2,\"packages\":[]}",
+                r#"{"configVersion":2,"packages":[{"name":"workspace","rootUri":"../","packageUri":"lib/","languageVersion":"3.6"},{"name":"a","rootUri":"../packages/a","packageUri":"lib/","languageVersion":"3.6"}],"generator":"pub","generatorVersion":"3.6.0"}"#,
             ),
             (
                 "packages/a/pubspec.yaml",

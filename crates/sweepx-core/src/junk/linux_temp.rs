@@ -175,6 +175,7 @@ pub fn report_candidates(
                 classification: Some(CLASSIFICATION.to_string()),
                 confidence: Some("medium".to_string()),
                 blockers,
+                project_format: None,
                 source_entry: None,
                 git_scan_facts: None,
             })

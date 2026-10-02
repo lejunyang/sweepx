@@ -59,6 +59,13 @@ impl Worker {
                 // spelling that disagrees with it. No native action is authorized here.
                 stored.path = path.to_string_lossy().into_owned();
                 let mut candidate = stored.into_candidate();
+                candidate.project_format = service
+                    .project_rules()
+                    .iter()
+                    .find(|rule| rule.id == candidate.rule_id)
+                    .and_then(|rule| rule.content_format)
+                    .map(super::super::format::ProjectFormatEvidence::not_checked);
+                candidate.reset_project_format_interpretation();
                 candidate.blockers.push("historical_cache".into());
                 let Some(key) = candidate_key(&candidate, &path) else {
                     continue;

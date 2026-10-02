@@ -9,6 +9,8 @@ pub mod cache;
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;
 mod context;
+/// Current bounded project-content observations, independent of filesystem cache and execution.
+pub mod format;
 /// Current Git interpretation shared by fresh scans and validated candidate-cache hits.
 pub mod git;
 mod layout;
@@ -452,6 +454,9 @@ mod tests {
         assert!(!service.needs_project_marker(&name("Cargo.toml")));
         assert!(service.needs_project_marker(&name("package_config.json")));
         rules[5]["requiredOwnMarkers"] = serde_json::json!(["replacement.json"]);
+        // Exercise an editable structural rule, without claiming the fixed content profile still
+        // has its required package_config.json input.
+        rules[5]["contentFormat"] = serde_json::Value::Null;
         let edited = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
         assert!(edited.needs_project_marker(&name("replacement.json")));
         assert!(!edited.needs_project_marker(&name("package_config.json")));

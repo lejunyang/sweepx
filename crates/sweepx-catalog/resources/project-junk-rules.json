@@ -50,7 +50,8 @@
     "risk": "R3",
     "requiredParentMarkers": ["pubspec.yaml"],
     "requiredOwnMarkers": ["package_config.json"],
-    "evidence": "Dart documents .dart_tool as regenerable project tool state. A sibling pubspec.yaml and an ordinary package_config.json inside the captured directory establish layout only; contents and activity remain unverified. Review before selecting for Trash; source and lockfiles remain outside this candidate.",
+    "contentFormat": "dart_pub_package_config_v2",
+    "evidence": "Dart documents .dart_tool as regenerable project tool state. A sibling pubspec.yaml and an ordinary package_config.json inside the captured directory establish layout only; current content-profile status is reported separately. Self-declared format does not establish exclusive ownership or inactivity, so this profile remains report-only and cannot enter Trash; source and lockfiles remain outside this candidate.",
     "sourceReviewedAt": "2026-10-02",
     "references": ["https://dart.dev/tools/pub/package-layout", "https://dart.dev/tools/pub/cmd/pub-get", "https://dart.dev/tools/pub/workspaces"]
   },

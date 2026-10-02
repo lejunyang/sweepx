@@ -235,6 +235,7 @@ enum Commands {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
         /// macOS shows historical caches first; only freshly verified rows can be moved.
+        /// Dart content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
         #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
         tui: bool,
@@ -256,7 +257,7 @@ enum Commands {
         ///
         /// One explicit confirmation covers the exact plan. Each target is revalidated by
         /// native identity immediately before it is moved. This never falls back to permanent
-        /// deletion.
+        /// deletion. Dart content-profile candidates remain report-only while ownership is unverified.
         #[arg(long, conflicts_with = "clean_temp")]
         trash: bool,
         /// Absolute quarantine base on a filesystem different from `/tmp`.
@@ -1454,6 +1455,14 @@ fn run_junk_scan(
         fresh_candidates.extend(linux_temp::report_candidates(rule, discovery));
     }
 
+    let mut formats = sweepx_core::junk::format::ProjectFormatSession::new(
+        sweepx_core::junk::format::ProjectFormatLimits::default(),
+        CancellationToken::new(),
+    );
+    for candidate in fresh_candidates.iter_mut().chain(&mut cached_candidates) {
+        formats.refresh(candidate);
+    }
+    timings.phase("projectFormats");
     git_session.refresh(&mut fresh_candidates);
     git_session.refresh(&mut cached_candidates);
     timings.phase("gitEvidence");
@@ -1592,6 +1601,7 @@ fn run_junk_scan(
                 rule_id: candidate.rule_id.clone(),
                 entry,
                 eligible,
+                project_blocker: candidate.project_execution_blocker(),
             });
         }
         return trash_command::run_bulk_trash(context.locale(), items);
@@ -1638,10 +1648,10 @@ fn run_junk_scan(
                     "Junk scan report and recoverable temporary-object cleanup preview"
                 }
                 (sweepx_i18n::Locale::ZhCn, false) => {
-                    "垃圾扫描报告（已核验可重建/可丢弃位置；仅报告）"
+                    "垃圾扫描报告（候选依据与缺口见各行；仅报告）"
                 }
                 (sweepx_i18n::Locale::EnUs, false) =>
-                    "Junk scan report (verified rebuildable/disposable locations; report-only)",
+                    "Junk scan report (candidate evidence and gaps shown per row; report-only)",
             }
         );
         for candidate in &candidates {
@@ -1650,9 +1660,15 @@ fn run_junk_scan(
                 candidate.git.is_some(),
                 candidate.blockers.is_empty(),
             ) {
-                (sweepx_i18n::Locale::ZhCn, true, _) => " [Git 已忽略；置信度 high]".to_string(),
+                (sweepx_i18n::Locale::ZhCn, true, _) => format!(
+                    " [Git 已忽略；置信度 {}]",
+                    candidate.confidence.as_deref().unwrap_or("not_checked")
+                ),
                 (sweepx_i18n::Locale::EnUs, true, _) => {
-                    " [Git ignored; confidence high]".to_string()
+                    format!(
+                        " [Git ignored; confidence {}]",
+                        candidate.confidence.as_deref().unwrap_or("not_checked")
+                    )
                 }
                 (sweepx_i18n::Locale::ZhCn, false, false) => {
                     format!(" [Git 未提升：{}]", candidate.blockers.join(","))
@@ -1663,11 +1679,27 @@ fn run_junk_scan(
                 (_, false, true) => String::new(),
             };
             println!(
-                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}",
+                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}",
                 junk_size_label(&candidate.reclaimable, size_unit),
                 risk = candidate.risk,
                 rule = candidate.rule_id,
                 path = candidate.path,
+                format_note = candidate
+                    .project_format
+                    .as_ref()
+                    .map(|evidence| match context.locale() {
+                        sweepx_i18n::Locale::ZhCn => format!(
+                            " [格式：{}/{}；所有权未核验，仅报告]",
+                            evidence.status.code(),
+                            evidence.reason
+                        ),
+                        sweepx_i18n::Locale::EnUs => format!(
+                            " [format: {}/{}; ownership unverified, report-only]",
+                            evidence.status.code(),
+                            evidence.reason
+                        ),
+                    })
+                    .unwrap_or_default(),
             );
         }
         println!(
@@ -1779,6 +1811,7 @@ fn run_junk_scan(
                     "classification": candidate.classification,
                     "confidence": candidate.confidence,
                     "blockers": candidate.blockers,
+                    "projectFormat": candidate.project_format,
                     // Names the quantity in `reclaimable`. True means apparent logical size,
                     // because this platform declined to claim filesystem allocation; the two
                     // differ on compressed, sparse and multi-stream files, so a consumer that

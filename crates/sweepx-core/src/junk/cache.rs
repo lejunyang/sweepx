@@ -148,6 +148,8 @@ impl StoredJunkCandidate {
             classification: None,
             confidence: None,
             blockers: Vec::new(),
+            // Dynamic content interpretation is reconstructed from current rules, then reread.
+            project_format: None,
             source_entry: self.source_entry,
             git_scan_facts: self.git_scan_facts,
         }

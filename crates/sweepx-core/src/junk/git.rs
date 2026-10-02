@@ -240,6 +240,7 @@ impl GitEvidenceSession {
             candidate.git = None;
             candidate.classification = Some("known_generated".into());
             candidate.confidence = Some("medium".into());
+            candidate.reset_project_format_interpretation();
             candidate.blockers.retain(|blocker| {
                 !matches!(
                     blocker.as_str(),
@@ -450,8 +451,10 @@ impl GitEvidenceSession {
                                 repository_entry_id,
                                 check: "git.check-ignore.v1".into(),
                             });
-                            candidate.classification = Some("known_generated_ignored".into());
-                            candidate.confidence = Some("high".into());
+                            if candidate.project_format.is_none() {
+                                candidate.classification = Some("known_generated_ignored".into());
+                                candidate.confidence = Some("high".into());
+                            }
                             return Ok(());
                         }
                         1 => return Ok(()),
@@ -573,10 +576,11 @@ fn same_metadata(a: &EntryMetadata, b: &EntryMetadata) -> bool {
 }
 
 fn is_project_candidate(candidate: &JunkCandidate) -> bool {
-    matches!(
-        candidate.classification.as_deref(),
-        Some("known_generated" | "known_generated_ignored")
-    )
+    candidate.project_format.is_some()
+        || matches!(
+            candidate.classification.as_deref(),
+            Some("known_generated" | "known_generated_ignored")
+        )
 }
 
 fn matches_component(component: &NativePathComponent, metadata: &EntryMetadata) -> bool {
@@ -851,6 +855,44 @@ mod tests {
                 .len(),
             12
         );
+    }
+
+    #[test]
+    fn git_ignore_does_not_promote_required_project_content_or_ownership() {
+        use crate::junk::format::{ProjectFormatEvidence, ProjectFormatStatus};
+        let (_owner, _base, project) = fixture();
+        for status in [
+            ProjectFormatStatus::NotChecked,
+            ProjectFormatStatus::Unknown,
+            ProjectFormatStatus::Invalid,
+            ProjectFormatStatus::Recognized,
+        ] {
+            let mut rows = scan(&project);
+            // Exercise the shared Git contract independently of the Dart parser/native reader.
+            rows[0].project_format = Some(ProjectFormatEvidence {
+                profile: sweepx_catalog::junk::ProjectContentFormat::DartPubPackageConfigV2,
+                status,
+                reason: "controlled_test_observation",
+            });
+            session().refresh(&mut rows);
+            assert_eq!(rows[0].git.as_ref().unwrap().status, "ignored");
+            assert_eq!(
+                rows[0].confidence.as_deref(),
+                Some(if status == ProjectFormatStatus::Recognized {
+                    "medium"
+                } else {
+                    "low"
+                })
+            );
+            assert_ne!(
+                rows[0].classification.as_deref(),
+                Some("known_generated_ignored")
+            );
+            assert_eq!(
+                rows[0].project_execution_blocker(),
+                Some("project_ownership_not_verified")
+            );
+        }
     }
 
     #[test]

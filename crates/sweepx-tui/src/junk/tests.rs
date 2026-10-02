@@ -10,6 +10,7 @@ struct FixtureRow {
     path: &'static str,
     bytes: ByteValue,
     complete: bool,
+    report_only: bool,
     cost: usize,
 }
 impl JunkRow for FixtureRow {
@@ -34,6 +35,9 @@ impl JunkRow for FixtureRow {
     fn complete(&self) -> bool {
         self.complete
     }
+    fn report_allows_trash(&self) -> bool {
+        !self.report_only
+    }
     fn retained_bytes(&self) -> usize {
         self.cost
     }
@@ -46,6 +50,7 @@ fn row(key: &'static str, path: &'static str) -> Arc<dyn JunkRow> {
             value: DecimalU128::new(8),
         },
         complete: true,
+        report_only: false,
         cost: 256,
     })
 }
@@ -219,6 +224,7 @@ fn size_sort_keeps_unknown_last_and_path_sort_preserves_focus() {
             value: DecimalU128::new(32),
         },
         complete: true,
+        report_only: false,
         cost: 256,
     });
     let unknown: Arc<dyn JunkRow> = Arc::new(FixtureRow {
@@ -228,6 +234,7 @@ fn size_sort_keeps_unknown_last_and_path_sort_preserves_focus() {
             reason: ReasonCode::ResourceLimit,
         },
         complete: false,
+        report_only: false,
         cost: 256,
     });
     let zero: Arc<dyn JunkRow> = Arc::new(FixtureRow {
@@ -237,6 +244,7 @@ fn size_sort_keeps_unknown_last_and_path_sort_preserves_focus() {
             value: DecimalU128::new(0),
         },
         complete: true,
+        report_only: false,
         cost: 256,
     });
     model.apply(JunkEvent::Candidate {
@@ -675,6 +683,7 @@ fn budget_loss_and_partial_rows_never_reach_trash() {
             reason: ReasonCode::ResourceLimit,
         },
         complete: false,
+        report_only: false,
         cost: MAX_BYTES,
     });
     let mut provider = Provider {
@@ -724,6 +733,7 @@ fn renderer_preserves_lower_bounds_unknowns_and_locale() {
             reason: ReasonCode::ResourceLimit,
         },
         complete: false,
+        report_only: false,
         cost: 256,
     });
     model.apply(JunkEvent::Candidate {
@@ -778,4 +788,40 @@ fn failed_trash_retains_historical_row_and_requires_refresh() {
     assert!(!model.eligible("a"));
     assert!(model.trash_pending.is_empty());
     assert_eq!(model.outcome, Some(JunkOutcome::Partial));
+}
+
+#[test]
+fn complete_report_only_project_rows_remain_visible_without_offering_trash() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    for event in initial() {
+        model.apply(event);
+    }
+    let report: Arc<dyn JunkRow> = Arc::new(FixtureRow {
+        key: "dart",
+        path: "/project/.dart_tool",
+        bytes: EvidenceValue::Known {
+            value: DecimalU128::new(8),
+        },
+        complete: true,
+        report_only: true,
+        cost: 256,
+    });
+    model.apply(JunkEvent::Candidate {
+        revision: 1,
+        current: true,
+        historical: false,
+        row: report,
+    });
+    assert!(model.rows["dart"].row.complete());
+    assert!(!model.eligible("dart"));
+    assert_eq!(
+        model.trash_unavailable_message(&["dart".into()]),
+        "Selected evidence is report-only and does not meet Trash requirements"
+    );
+    assert!(model.eligible("a"));
+    model.apply(JunkEvent::Phase {
+        revision: 1,
+        phase: "formats",
+    });
+    assert_eq!(model.phase_label(), "Checking project file formats");
 }

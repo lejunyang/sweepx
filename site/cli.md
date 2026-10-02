@@ -109,6 +109,8 @@ sweepx --format json scan /absolute/path/to/root > scan.json
 sweepx --format ndjson scan /absolute/path/to/root
 ```
 
+Dart `.dart_tool` 候选会有界观察当前 `package_config.json`；JSON 新增 `projectFormat`（`profile`、`status`、`reason`），状态为 `not_checked`、`recognized`、`invalid` 或 `unknown`，字段和值不随语言改变。无内容 profile 的行该字段为 `null`。缓存命中后也重新观察；TUI 显示格式阶段与状态。`recognized` 只表示 pub v2 自声明格式与父根引用被识别，不证明目录独占归属或无活动，所以该 profile 始终仅报告，`junk --trash` 和 TUI 回收均拒绝。SvelteKit 内容解析尚未实现。`junk --timings` 另有 `projectFormats` 阶段；无新命令选项。
+
 ## 状态快照与取消
 
 Linux 或 macOS 上从 scan 输出取得 `operationId` 后，可以查询对应的 terminal snapshot：

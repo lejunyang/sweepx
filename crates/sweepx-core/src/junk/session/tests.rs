@@ -1316,3 +1316,62 @@ fn lossy_display_aliases_have_distinct_native_candidate_keys() {
     assert_ne!(cases[0].0, cases[1].0);
     shutdown(&session);
 }
+
+#[test]
+fn dart_content_is_current_on_selected_refresh_and_never_trash_authority() {
+    use crate::junk::format::ProjectFormatStatus;
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(target_os = "linux")]
+    let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let owner = tempfile::tempdir().unwrap();
+    let base = fixture_root(&owner);
+    let root = base.join("project");
+    fs::create_dir_all(root.join(".dart_tool")).unwrap();
+    fs::write(root.join("pubspec.yaml"), b"name: example\n").unwrap();
+    let file = root.join(".dart_tool/package_config.json");
+    let body = br#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/"}],"generator":"pub","generatorVersion":"3.6.0"}"#;
+    fs::write(&file, body).unwrap();
+    let mut request = JunkSessionRequest::new(vec![root]);
+    request.include_platform_rules = false;
+    #[cfg(target_os = "macos")]
+    {
+        request.cache_dir = Some(base.join("cache"));
+    }
+    let session = JunkSession::start(request).unwrap();
+    let events = drain(&session, JunkSessionRevision(1));
+    let rows = current(&events);
+    assert_eq!(rows.len(), 1);
+    let key = *rows.keys().next().unwrap();
+    assert!(rows[&key].complete());
+    assert_eq!(
+        rows[&key].candidate.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Recognized
+    );
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    assert!(events.iter().any(|e| matches!(&e.kind,
+        JunkSessionEventKind::Candidate { state: JunkSessionCandidateState::Base, row, .. }
+        if row.candidate.project_format.as_ref().is_some_and(|f| f.status == ProjectFormatStatus::NotChecked))));
+    fs::write(&file, vec![b'x'; body.len()]).unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[&key].candidate.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Invalid
+    );
+    assert_eq!(rows[&key].candidate.confidence.as_deref(), Some("low"));
+    assert!(rows[&key].complete());
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    // Full revisions also reread contents, including rows whose filesystem cache is validated.
+    fs::write(&file, body).unwrap();
+    let revision = session.refresh_all().unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(
+        rows[&key].candidate.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Recognized
+    );
+    assert_eq!(fs::read(&file).unwrap(), body);
+}

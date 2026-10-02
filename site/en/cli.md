@@ -108,6 +108,8 @@ sweepx --format json scan /absolute/path/to/root > scan.json
 sweepx --format ndjson scan /absolute/path/to/root
 ```
 
+Dart `.dart_tool` candidates observe the current `package_config.json` through bounded native reads. JSON adds `projectFormat` (`profile`, `status`, `reason`), with locale-independent `not_checked`, `recognized`, `invalid` or `unknown` statuses; rows without a content profile use `null`. Validated cache hits are reobserved and the TUI displays the content phase and outcome. `recognized` means the self-declared pub v2 shape and parent-root reference were recognized; it proves neither exclusive ownership nor inactivity. This profile remains report-only and both `junk --trash` and TUI Trash refuse it. SvelteKit content parsing remains unfinished. `junk --timings` adds a `projectFormats` phase; no new option is required.
+
 ## Status snapshots and cancellation
 
 On Linux or macOS, after reading `operationId` from scan output, the corresponding terminal snapshot can be queried:

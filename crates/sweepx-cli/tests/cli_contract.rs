@@ -1259,6 +1259,7 @@ fn junk_timings_preserve_report_and_account_for_phases() {
         "subtreeCacheValidation",
         "traversal",
         "classification",
+        "projectFormats",
         "gitEvidence",
         "cacheWrite",
         "report",
@@ -1321,6 +1322,9 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
 
 #[test]
 fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
+    #[cfg(target_os = "linux")]
+    let fixture = TempDir::new_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
     let fixture = TempDir::new().unwrap();
     #[cfg(unix)]
     let root = resolved_fixture_root(&fixture);
@@ -1348,7 +1352,21 @@ fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
             .iter()
             .map(|candidate| {
                 assert_eq!(candidate["risk"], "R3");
-                assert_eq!(candidate["classification"], "known_generated");
+                if candidate["ruleId"] == "dart.tool-state" {
+                    assert_eq!(candidate["classification"], "recognized_generated_format");
+                    assert_eq!(candidate["projectFormat"]["status"], "recognized");
+                    assert_eq!(candidate["confidence"], "medium");
+                    assert!(
+                        candidate["blockers"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|b| b == "project_ownership_not_verified")
+                    );
+                } else {
+                    assert_eq!(candidate["classification"], "known_generated");
+                    assert!(candidate["projectFormat"].is_null());
+                }
                 assert!(
                     candidate["evidence"]
                         .as_str()
@@ -3662,4 +3680,80 @@ fn sample_scan_json() -> String {
         "errors": []
     }))
     .unwrap()
+}
+
+#[test]
+fn junk_dart_formats_are_visible_and_nonterminal_trash_keeps_its_guard() {
+    #[cfg(target_os = "linux")]
+    let owner = TempDir::new_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let owner = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = resolved_fixture_root(&owner);
+    #[cfg(windows)]
+    let root = owner.path().to_path_buf();
+    std::fs::create_dir(root.join(".dart_tool")).unwrap();
+    std::fs::write(root.join("pubspec.yaml"), b"name: example\n").unwrap();
+    let file = root.join(".dart_tool/package_config.json");
+    for (body, status, classification, confidence) in [
+        (
+            r#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/"}],"generator":"pub","generatorVersion":"3.6.0"}"#,
+            "recognized",
+            "recognized_generated_format",
+            "medium",
+        ),
+        ("{invalid", "invalid", "project_layout", "low"),
+        (
+            r#"{"configVersion":3,"packages":[]}"#,
+            "unknown",
+            "project_layout",
+            "low",
+        ),
+    ] {
+        std::fs::write(&file, body).unwrap();
+        for locale in ["en-US", "zh-CN"] {
+            let output = cli_command()
+                .timeout(std::time::Duration::from_secs(20))
+                .args(["--locale", locale, "--format", "json", "junk"])
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["candidates"].as_array().unwrap().len(), 1);
+            let row = &json["candidates"][0];
+            assert_eq!(row["projectFormat"]["status"], status);
+            assert_eq!(
+                row["projectFormat"]["profile"],
+                "dart_pub_package_config_v2"
+            );
+            assert_eq!(row["classification"], classification);
+            assert_eq!(row["confidence"], confidence);
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b == "project_ownership_not_verified")
+            );
+            let refused = cli_command()
+                .timeout(std::time::Duration::from_secs(20))
+                .args(["--locale", locale, "junk", "--trash"])
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert_eq!(refused.status.code(), Some(2));
+            assert!(
+                String::from_utf8_lossy(&refused.stderr)
+                    .contains("foreground interactive terminal")
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), body.as_bytes());
+            // Content paths/values are not serialized through the format evidence object.
+            assert_eq!(row["projectFormat"].as_object().unwrap().len(), 3);
+        }
+    }
 }
