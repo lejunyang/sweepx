@@ -47,7 +47,9 @@ use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
 
 /// Schema marker for the on-disk root record; bump on an incompatible change.
-const STORED_SCHEMA: &str = "sweepx.junk-cache/v7";
+// v8 invalidates aggregates and native lineage captured with Darwin's old OBJID-as-inode
+// observation. File-length indexes are independent and retain their existing schema.
+const STORED_SCHEMA: &str = "sweepx.junk-cache/v8";
 /// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
 #[cfg(test)]
 const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,7 +103,7 @@ pub struct StoredJunkCandidate {
     pub source_entry: Option<sweepx_model::ScannedEntry>,
     /// Nested-repository and traversal coverage facts, excluding Git answers.
     pub git_scan_facts: Option<super::git::GitScanFacts>,
-    /// Optional historical recursive statistics; absent in older v7 records.
+    /// Optional historical recursive statistics; absence never proves current coverage.
     #[serde(default)]
     pub aggregate: Option<sweepx_model::DirectoryAggregate>,
 }
@@ -916,6 +918,7 @@ mod tests {
             "sweepx.junk-cache/v1",
             "sweepx.junk-cache/v5",
             "sweepx.junk-cache/v6",
+            "sweepx.junk-cache/v7",
         ] {
             stored.schema = old_schema.into();
             assert!(!stored.matches_root(&cache));

@@ -1491,6 +1491,69 @@ mod tests {
     }
 
     #[test]
+    fn bulk_file_id_matches_stat_inode_for_hard_links_and_directories() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = TempDir::new("bulk-file-id");
+        fs::write(fixture.path().join("file"), b"same-native-object").unwrap();
+        fs::hard_link(fixture.path().join("file"), fixture.path().join("alias")).unwrap();
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        symlink("file", fixture.path().join("link")).unwrap();
+        let scanner = MacosPlatformScanner::new();
+        let cancel = CancellationToken::new();
+        let mut admission = scanner
+            .admit_root(&ScanRoot::new(fixture.path()).unwrap(), &cancel)
+            .unwrap();
+        let mut observations = std::collections::BTreeMap::new();
+        loop {
+            let batch = scanner
+                .enumerate_children(
+                    &mut admission.directory,
+                    &cancel,
+                    DirectoryReadLimits {
+                        max_batch_entries: 8,
+                        max_batch_bytes: 8192,
+                    },
+                )
+                .unwrap();
+            // Inspect before advancing the batch so the production bulk hint path is exercised.
+            for child in batch.entries {
+                let expected = fs::symlink_metadata(&child.path).unwrap();
+                let metadata = match scanner
+                    .inspect_child(&admission.directory, &child, &cancel)
+                    .unwrap()
+                {
+                    WalkEntry::File(metadata) | WalkEntry::Link(metadata) => metadata,
+                    WalkEntry::Directory(directory) => directory.metadata,
+                    other => panic!("unexpected bulk record: {other:?}"),
+                };
+                assert_eq!(
+                    metadata.identity,
+                    Some(crate::EntryIdentity::from_unix(
+                        expected.dev(),
+                        expected.ino()
+                    ))
+                );
+                let NativeName::UnixBytes(bytes) = child.file_name else {
+                    unreachable!()
+                };
+                observations.insert(bytes, metadata.identity);
+            }
+            if batch.end_of_directory {
+                break;
+            }
+        }
+        assert_eq!(
+            observations[b"file".as_slice()],
+            observations[b"alias".as_slice()]
+        );
+        assert_ne!(
+            observations[b"file".as_slice()],
+            observations[b"link".as_slice()]
+        );
+        assert!(observations.contains_key(b"directory".as_slice()));
+    }
+
+    #[test]
     fn detail_mount_evidence_observes_files_and_dangling_links_without_payload_reads() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let fixture = TempDir::new("detail-mount");

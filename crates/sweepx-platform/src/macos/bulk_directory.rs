@@ -55,7 +55,7 @@ impl BulkDirectoryCursor {
                 | libc::ATTR_CMN_NAME
                 | libc::ATTR_CMN_DEVID
                 | libc::ATTR_CMN_OBJTYPE
-                | libc::ATTR_CMN_OBJID
+                | libc::ATTR_CMN_FILEID
                 | libc::ATTR_CMN_MODTIME
                 | libc::ATTR_CMN_CHGTIME
                 | libc::ATTR_CMN_ACCESSMASK
@@ -164,10 +164,6 @@ fn parse_attribute_page(buffer: &[u8], count: usize) -> io::Result<Vec<BulkChild
             cursor += size_of::<u32>();
             stat.st_mode = mode_from_vtype(obj_type);
         }
-        if returned.commonattr & libc::ATTR_CMN_OBJID != 0 {
-            stat.st_ino = read_unaligned::<u64>(buffer, cursor)?;
-            cursor += size_of::<u64>();
-        }
         if returned.commonattr & libc::ATTR_CMN_MODTIME != 0 {
             let modified = read_timespec(buffer, &mut cursor)?;
             stat.st_mtime = modified.0;
@@ -192,6 +188,16 @@ fn parse_attribute_page(buffer: &[u8], count: usize) -> io::Result<Vec<BulkChild
             stat.st_flags = read_unaligned::<u32>(buffer, cursor)?;
             cursor += size_of::<u32>();
         }
+        // OBJID is an fsobj_id_t link/object number, not a stat inode on modern volumes.
+        // FILEID supplies the 64-bit file identity, after FLAGS in common-bit packing order.
+        // Missing identity cannot become a fabricated zero, even if other fields are present.
+        if returned.commonattr & libc::ATTR_CMN_FILEID == 0
+            || returned.commonattr & libc::ATTR_CMN_DEVID == 0
+        {
+            return Err(invalid_data("bulk record omitted its native file identity"));
+        }
+        stat.st_ino = read_unaligned::<u64>(buffer, cursor)?;
+        cursor += size_of::<u64>();
         // The file section follows the common section.
         if returned.fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
             stat.st_size = read_unaligned::<libc::off_t>(buffer, cursor)?;
@@ -286,4 +292,55 @@ fn signed_offset(base: usize, relative: i32) -> io::Result<usize> {
 
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(include_file_id: bool) -> Vec<u8> {
+        let mut bytes = vec![0; 4];
+        let common = libc::ATTR_CMN_NAME
+            | libc::ATTR_CMN_DEVID
+            | libc::ATTR_CMN_OBJTYPE
+            | libc::ATTR_CMN_FLAGS
+            | if include_file_id {
+                libc::ATTR_CMN_FILEID
+            } else {
+                0
+            };
+        for value in [common, 0, 0, libc::ATTR_FILE_DATALENGTH, 0] {
+            bytes.extend(value.to_ne_bytes());
+        }
+        // Name attrreference at byte 24. Payload follows the common and file sections.
+        bytes.extend((if include_file_id { 36i32 } else { 28i32 }).to_ne_bytes());
+        bytes.extend(4u32.to_ne_bytes());
+        bytes.extend(17i32.to_ne_bytes()); // device
+        bytes.extend(1u32.to_ne_bytes()); // ordinary file vnode type
+        bytes.extend(0u32.to_ne_bytes()); // flags
+        if include_file_id {
+            bytes.extend(0x123456789abcdeffu64.to_ne_bytes());
+        }
+        bytes.extend(23i64.to_ne_bytes());
+        bytes.extend(b"abc\0");
+        let length = bytes.len() as u32;
+        bytes[..4].copy_from_slice(&length.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn decodes_full_width_file_id_after_flags_before_file_data() {
+        let parsed = parse_attribute_page(&record(true), 1).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, NativeName::unix(b"abc".to_vec()));
+        assert_eq!(parsed[0].stat.st_ino, 0x123456789abcdeff);
+        assert_eq!(parsed[0].stat.st_dev, 17);
+        assert_eq!(parsed[0].stat.st_size, 23);
+    }
+
+    #[test]
+    fn omitted_file_id_cannot_become_a_zero_native_identity() {
+        let error = parse_attribute_page(&record(false), 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
 }

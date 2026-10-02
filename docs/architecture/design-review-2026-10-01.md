@@ -534,3 +534,14 @@ macOS 局部扫描不发布完整根候选报告或部分文件索引，以免�
 原元数据压力用例把压力夹具放在无关兄弟目录，新局部遍历正确跳过它们，不再触发资源不足。已将夹具移入所选子树，保留不完整扫描不能移除旧候选、空保留日志也不能隐藏可靠失败及再次完整刷新才移除的原断言，没有排除该测试。
 
 交付验证（2026-10-02，arm64 macOS，Rust 1.98.0）：工作区 847 项通过、0 失败、2 项原有基准 ignored；随后增加缓存回归并整理发布守卫，最终 core 全量 188 项通过、1 项原有基准 ignored，其余未改代码复用上述结果，合计覆盖 848 项，不称为再次完整矩阵。工作区测试命令仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，系统 Trash 成功操作未验证。格式、最终工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy（含目标测试代码）、53 份 Markdown 和 23 项文档检查器测试通过。没有新增 crate、依赖或机器输出字段；公开 scanner 结果与会话事件增加上述局部覆盖/失效契约。没有本轮性能计时，不从少量受控检查次数推断全盘或尾延迟；目标宿主、Windows MSVC、实际系统 Trash 成功路径及 debug 热缓存 PTY 超时的独立缺口仍保留。下一步为同次遍历中的独立大文件分析，随后推进重复内容检测与规则覆盖。
+
+
+## macOS 批量文件身份修正（2026-10-02）
+
+独立大文件分析的硬链接回归暴露旧批量后端的身份错误：getattrlistbulk 请求 ATTR_CMN_OBJID，却把返回的 fsobj_id_t 直接解释为 stat inode。在本机两个真实硬链接路径返回不同的该属性，而普通 symlink_metadata/stat 返回相同 device/inode。Apple 的 [getattrlist 契约](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2) 区分 link/object ID 与 64 位 FILEID；本机 SDK 的 sys/attr.h 也说明 64 位对象 ID 卷应使用 ATTR_CMN_FILEID。不能把这些不同 domain 的值混用。
+
+批量请求改为 ATTR_CMN_FILEID，并按 common-bit 顺序在 FLAGS 后解析完整 64 位值；缺少 FILEID 或 DEVID 拒绝该页，不能生成零身份。仍使用同一有界页和 native no-follow 路径，没有逐文件新 syscall。真实目录、普通文件、硬链接与链接逐项用普通 symlink_metadata 独立核对 device/inode；硬链接相同、链接自身不同。另有固定 wire 布局回归验证高于 32 位的 FILEID 与后续逻辑大小，缺失字段回归验证失败关闭。
+
+macOS 整根垃圾缓存升级为 sweepx.junk-cache/v8，拒绝此前 v7 的 native lineage 与 aggregate，包括历史预览，避免继续回放错误的硬链接去重事实。独立的逐文件逻辑长度索引保持 v4；它不持久化原生文件身份或分配事实，也不能证明硬链接唯一性。旧 schema 拒绝回归保留并补入 v7。
+
+本机 macOS 分配大小仍是明确的 UnknownIdentity，并不因 stat.st_blocks 为零或已知就自动升级成物理/独占可回收证据。新增大文件测试最初错误假定它为 Known，已依据现有后端契约修正，保留逻辑大小与未知分配大小的独立断言；硬链接身份对照暴露的产品缺陷则实际修复，没有修改预期来掩盖它。受影响 platform 全量 87 项通过、1 项原有基准 ignored；三个新增原生/解析回归均通过。格式、最终 host 工作区 clippy 和 Linux GNU/Windows GNU 工作区交叉 clippy 通过。缓存升级后的 core/CLI 回归及工作区范围结果在后续大文件单元统一记录；Linux/Windows 原生运行、MSVC 和真实系统 Trash 成功路径缺口仍保留。
