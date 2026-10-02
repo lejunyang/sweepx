@@ -43,8 +43,17 @@ pub struct PlatformJunkEvidence {
     pub npm_installations: Vec<tool_installations::ToolInstallation>,
     by_rule: BTreeMap<String, PlatformRuleEvidence>,
     layout_roots: BTreeMap<String, Vec<Arc<LayoutRoot>>>,
+    tool_snapshots: BTreeMap<String, Vec<ToolRootSnapshot>>,
     layout_failure: Option<LayoutDiscoveryFailure>,
     tool_discovery_failure: Option<tool_installations::ToolDiscoveryFailure>,
+}
+
+// Current invocation interpretation, bound to the same native root as layout classification.
+// These environment-dependent answers are never filesystem-cache payloads.
+struct ToolRootSnapshot {
+    root: Arc<LayoutRoot>,
+    activity: ToolRootActivity,
+    superseded: Vec<String>,
 }
 
 impl PlatformJunkEvidence {
@@ -108,7 +117,7 @@ impl PlatformJunkEvidence {
     }
 
     /// Captures rule-derived locations using an invocation-local resolver snapshot.
-    /// Missing answers remain unknown. This performs read-only marker/layout discovery.
+    /// Missing answers remain unknown. This performs bounded native marker/layout discovery.
     pub fn precompute_with(
         rules: &[PlatformJunkRule],
         resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
@@ -125,6 +134,7 @@ impl PlatformJunkEvidence {
 
     /// Captures invocation-local layout facts with explicit resource limits and cancellation.
     /// Tool answers are supplied by the resolver; neither layout nor tool facts are persisted.
+    /// Limits are shared across tool cache layouts, browser profiles and known roots.
     pub fn precompute_with_limits(
         rules: &[PlatformJunkRule],
         resolve: impl FnMut(&PlatformJunkRule) -> Option<PathBuf>,
@@ -152,11 +162,34 @@ impl PlatformJunkEvidence {
     ) -> Self {
         let mut by_rule = BTreeMap::new();
         let mut layout_roots = BTreeMap::new();
+        let mut tool_snapshots = BTreeMap::new();
         let mut discovery = LayoutDiscovery::new(limits, cancel);
         for rule in rules {
-            let reported_root = resolve(rule);
-            let cache_candidates =
-                tool_cache_candidates_with_root(rule, reported_root.as_deref(), &npm_installations);
+            if !rule_applies_to_host(rule) || !discovery.admit_rule(&rule.id) {
+                continue;
+            }
+            let reported_root = resolve(rule).and_then(|path| discovery.retain_path(&path));
+            let snapshots = if rule.match_kind == "verified_tool_root" {
+                tool_cache_candidates_with_root(
+                    rule,
+                    reported_root.as_deref(),
+                    &npm_installations,
+                    &mut resolve_base,
+                    &mut discovery,
+                )
+            } else {
+                Vec::new()
+            };
+            // Each admitted snapshot reserves these copies before optional generation observations.
+            // Reaching a later limit must not erase already closed positive root facts.
+            let mut roots = Vec::new();
+            let mut cache_candidates = Vec::new();
+            for snapshot in &snapshots {
+                roots.reserve_exact(1);
+                roots.push(snapshot.root.clone());
+                cache_candidates.reserve_exact(1);
+                cache_candidates.push(snapshot.root.path.clone());
+            }
             by_rule.insert(
                 rule.id.clone(),
                 PlatformRuleEvidence {
@@ -164,12 +197,15 @@ impl PlatformJunkEvidence {
                     reported_root,
                 },
             );
+            if rule.match_kind == "verified_tool_root" {
+                layout_roots.insert(rule.id.clone(), roots);
+                tool_snapshots.insert(rule.id.clone(), snapshots);
+                continue;
+            }
             if !matches!(
                 rule.match_kind.as_str(),
                 "verified_browser_cache" | "verified_known_root" | "verified_cache_root"
-            ) || !rule_applies_to_host(rule)
-                || !discovery.admit_rule(&rule.id)
-            {
+            ) {
                 continue;
             }
             let roots = match rule.match_kind.as_str() {
@@ -196,6 +232,7 @@ impl PlatformJunkEvidence {
             by_rule,
             npm_installations,
             layout_roots,
+            tool_snapshots,
             layout_failure: discovery.failure,
             tool_discovery_failure: None,
         }
@@ -300,6 +337,18 @@ impl CombinedJunkClassifier<'_> {
                         // Path serialization must be lossless. Unsupported encodings decline cache
                         // reuse instead of letting two different native paths share a digest.
                         hash.fact(sweepx_model::NativeAbsolutePath::from_path(path).ok()?)?;
+                    }
+                    let mut roots = self
+                        .evidence
+                        .layout_roots
+                        .get(&rule.id)
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    roots.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                    hash.fact(roots.len())?;
+                    for root in roots {
+                        hash.fact(root.context_fact())?;
                     }
                 }
                 "verified_browser_cache" | "verified_cache_root" | "verified_known_root" => {
@@ -438,8 +487,7 @@ fn platform_rule_classifies(
 ///
 /// The comparison uses the captured lossless native path, not `display_path`: display paths are
 /// presentation data and are never execution or classification authority in this codebase. The
-/// markers are then re-checked so a rule only reports a directory that still has the cache's
-/// shape. This is report-only classification and grants no deletion authority; the scanner's
+/// scanned identity and root fingerprint must agree with the bounded native layout observation. This is report-only classification and grants no deletion authority; the scanner's
 /// no-follow identity checks remain the authority over what was traversed.
 fn tool_reported_root_matches(
     rule: &PlatformJunkRule,
@@ -490,33 +538,17 @@ pub fn classify_tool_root(
     entry: &sweepx_model::ScannedEntry,
     evidence: &PlatformJunkEvidence,
 ) -> Option<ToolRootActivity> {
-    let locator = entry.native_locator.as_ref()?;
-    // Without a captured native path there is nothing trustworthy to compare against, so the rule
-    // declines rather than falling back to the display string.
-    let captured = locator.scan_root_absolute_path.as_ref()?;
-    // Must be one of the candidates discovery itself verified, which means its markers and
-    // structural fingerprint were already checked against real bytes. Re-deriving the check from
-    // `display_path` would be wrong twice over: display paths are not classification authority, and
-    // the same directory reached through a differently-cased path would be judged a second time.
-    //
-    // Candidates and the live resolver are precomputed once (see `PlatformJunkEvidence`) rather
-    // than launched here: doing this per walk entry was the source of the multi-minute stall.
-    let rule_evidence = evidence.for_rule(rule)?;
-    let matched = rule_evidence
-        .cache_candidates
+    let path = entry
+        .native_locator
+        .as_ref()?
+        .scan_root_absolute_path
+        .as_ref()?;
+    evidence
+        .tool_snapshots
+        .get(&rule.id)?
         .iter()
-        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))?;
-    // Liveness compares directory identity, not spelling. The resolver and an environment override
-    // routinely name one directory with different casing, and comparing the resolver's raw string
-    // against the deduplicated candidate reported that single cache as both stale and live at once.
-    //
-    // No answer means `Unknown`, never `Stale`: a tool that cannot be asked has not told us this
-    // copy is abandoned, and claiming otherwise about a live cache is the worst outcome available.
-    Some(match rule_evidence.reported_root {
-        Some(ref reported) if same_directory(matched, reported) => ToolRootActivity::Live,
-        Some(_) => ToolRootActivity::Stale,
-        None => ToolRootActivity::Unknown,
-    })
+        .find(|snapshot| snapshot.root.matches(path, entry))
+        .map(|snapshot| snapshot.activity)
 }
 
 /// One Chromium-family browser installation whose caches SweepX knows how to find.
@@ -815,42 +847,25 @@ impl PlatformJunkSetup {
 pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf> {
     let rules = &platform.rules;
     let mut roots = Vec::new();
-    // Tool-reported roots come first because they are platform-independent. Every plausible
-    // location is enumerated, not just the one the tool named: an abandoned cache at a documented
-    // default is exactly what a resolver-only pass misses, and on this host it was the larger copy.
-    // Each candidate is verified by markers and structural fingerprint before admission.
-    for rule in rules {
-        if tool_reported_root_for(&rule.root_kind).is_none() {
-            continue;
-        }
-        for root in platform
-            .evidence
-            .for_rule(rule)
-            .into_iter()
-            .flat_map(|evidence| evidence.cache_candidates.iter().cloned())
-        {
-            // Identity, not spelling: two rules can name one directory, and a scan given the same
-            // directory twice reports it twice.
-            if !roots
-                .iter()
-                .any(|existing: &PathBuf| same_directory(existing.as_path(), root.as_path()))
-            {
-                roots.push(root);
+    // Preserve tool-first priority while sharing the captured identity across every rule.
+    // This is only scope selection; a later scan and cleanup still obtain current native facts.
+    let mut seen = Vec::<&LayoutRoot>::new();
+    for tool_pass in [true, false] {
+        for rule in rules {
+            if (rule.match_kind == "verified_tool_root") != tool_pass {
+                continue;
             }
-        }
-    }
-    for rule in rules {
-        for root in platform
-            .evidence
-            .layout_roots
-            .get(&rule.id)
-            .into_iter()
-            .flatten()
-        {
-            if !roots
-                .iter()
-                .any(|existing| same_directory(existing, &root.path))
+            for root in platform
+                .evidence
+                .layout_roots
+                .get(&rule.id)
+                .into_iter()
+                .flatten()
             {
+                if seen.iter().any(|existing| existing.same_object(root)) {
+                    continue;
+                }
+                seen.push(root);
                 roots.push(root.path.clone());
             }
         }
@@ -1108,147 +1123,176 @@ pub fn same_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Confirms a directory's own contents match the cache layout the rule claims.
-///
-/// This is what lets a rule report a cache at a location no tool named. Every check is read-only
-/// and uses `symlink_metadata`, so a symlink cannot impersonate the structure; the scanner's
-/// no-follow admission remains the authority over what is actually traversed.
-fn matches_structural_fingerprint(root: &Path, fingerprint: &StructuralFingerprint) -> bool {
+/// Structural discovery uses the same native, bounded snapshot as browser/known roots.
+fn matches_structural_fingerprint(
+    root: &LayoutRoot,
+    fingerprint: &StructuralFingerprint,
+    discovery: &mut LayoutDiscovery,
+) -> bool {
+    let markers = fingerprint
+        .required_children
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    if !discovery.has_markers(root, &markers) {
+        return false;
+    }
     if fingerprint.required_child.is_empty() {
         return true;
     }
-    if !root_has_named_children(root, fingerprint.required_children.iter().copied()) {
-        return false;
-    }
-    let child = root.join(fingerprint.required_child);
-    if !std::fs::symlink_metadata(&child).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+    if !discovery.has_directory(root, fingerprint.required_child) {
         return false;
     }
     let Some(expected) = fingerprint.hex_shard_count else {
         return true;
     };
-    // Counting shards is bounded by the directory's own size and reads no file contents. A wrong
-    // count means this is not the layout claimed, so the rule must decline rather than guess.
-    let Ok(entries) = std::fs::read_dir(&child) else {
+    let Some(child) = discovery.directory(&root.path.join(fingerprint.required_child)) else {
         return false;
     };
-    let mut shards = 0usize;
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
-            return false;
-        };
-        if !metadata.is_dir() {
-            return false;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return false;
-        };
-        if name.len() != 2
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            return false;
-        }
-        shards += 1;
-        if shards > expected {
-            return false;
-        }
-    }
-    shards == expected
+    discovery.has_hex_shards(&child, expected)
 }
 
-/// Every location this tool's cache might occupy, live or abandoned.
-///
-/// The resolver's answer comes first when available, then environment overrides, then documented
-/// defaults. Each candidate must exist, be a real directory, and carry both the rule's markers and
-/// the profile's structural fingerprint before it is admitted — otherwise a rule keyed to a default
-/// would report whatever unrelated directory now sits there.
+/// Source priority stays tool answer, overrides, installations, defaults. Identity deduplication
+/// and all path/record/root admission share LayoutDiscovery; incomplete positive listings are
+/// allowed, but a truncated exact shard fingerprint cannot admit a candidate.
 fn tool_cache_candidates_with_root(
     rule: &PlatformJunkRule,
     reported_root: Option<&Path>,
     installations: &[tool_installations::ToolInstallation],
-) -> Vec<PathBuf> {
+    resolve_base: &mut impl FnMut(&str) -> Option<PathBuf>,
+    discovery: &mut LayoutDiscovery,
+) -> Vec<ToolRootSnapshot> {
+    let reported = reported_root.and_then(|path| discovery.directory(path));
+    let profile = tool_cache_profile(&rule.root_kind);
     let mut candidates = Vec::new();
-    // Deduplication asks the filesystem, not the string. `%LOCALAPPDATA%\pip\Cache` and
-    // `…\pip\cache` are one directory on a case-insensitive volume and two on a case-sensitive one,
-    // and the resolver may name the same directory with different casing again. Comparing spellings
-    // reported that single cache three times. Case sensitivity is a property of the host and volume,
-    // so the identity is probed rather than assumed either way.
-    let push = |path: PathBuf, out: &mut Vec<PathBuf>| {
-        if !path.is_absolute()
-            || !is_existing_real_directory(&path)
-            || !root_has_required_markers(&path, &rule.required_markers)
-        {
-            return;
-        }
-        let already = out.iter().any(|existing| same_directory(existing, &path));
-        if !already {
-            out.push(path);
-        }
-    };
+    let mut snapshots = Vec::new();
+    let mut push =
+        |path: &Path, out: &mut Vec<Arc<LayoutRoot>>, discovery: &mut LayoutDiscovery| {
+            if !path.is_absolute() {
+                return;
+            }
+            let Some(root) = discovery.directory(path) else {
+                return;
+            };
+            if out.iter().any(|existing| existing.same_object(&root)) {
+                return;
+            }
+            if !discovery.has_markers(&root, &rule.required_markers)
+                || profile.as_ref().is_some_and(|profile| {
+                    !matches_structural_fingerprint(&root, &profile.fingerprint, discovery)
+                })
+            {
+                return;
+            }
+            // Native root refs, public path copies and interpretation storage are reserved together.
+            if !discovery.charge(512usize.saturating_add(root.path.capacity().saturating_mul(4))) {
+                return;
+            }
+            let count = out.len();
+            discovery.push_observed(root.clone(), out);
+            if out.len() == count {
+                return;
+            }
+            let activity = match &reported {
+                Some(reported) if root.same_object(reported) => ToolRootActivity::Live,
+                Some(_) => ToolRootActivity::Stale,
+                None => ToolRootActivity::Unknown,
+            };
+            let superseded = observed_generations(rule, &root, discovery);
+            snapshots.reserve_exact(1);
+            snapshots.push(ToolRootSnapshot {
+                root,
+                activity,
+                superseded,
+            });
+        };
     if let Some(reported) = reported_root {
-        push(reported.to_path_buf(), &mut candidates);
+        push(reported, &mut candidates, discovery);
     }
-    let Some(profile) = tool_cache_profile(&rule.root_kind) else {
-        return candidates;
+    let Some(profile) = &profile else {
+        return snapshots;
     };
     for name in profile.sources.env_overrides {
+        if !discovery.available() {
+            break;
+        }
         if let Some(value) = std::env::var_os(name) {
-            push(PathBuf::from(value), &mut candidates);
+            push(Path::new(&value), &mut candidates, discovery);
         }
     }
-    // npm is commonly installed several times (Homebrew plus one copy per Node version under
-    // nvm/fnm/volta). The resolver above only asks whichever npm is first on PATH, so a cache a
-    // non-default npm was explicitly configured to use would be missed. Ask every discovered
-    // installation for its own cache; the marker/fingerprint checks below still verify each.
     if rule.root_kind == "npm_reported_cache" {
         for installation in installations {
+            if !discovery.available() {
+                break;
+            }
             if let Some(cache) = &installation.cache {
-                push(cache.clone(), &mut candidates);
+                push(cache, &mut candidates, discovery);
             }
         }
     }
-    // Defaults are relative to the platform's per-user cache base. On Windows that is
-    // %LOCALAPPDATA%; elsewhere the home directory, where these tools use dotted names.
-    let base = if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    if !discovery.available() {
+        return snapshots;
+    }
+    let base = resolve_base(if cfg!(windows) {
+        "local_app_data"
     } else {
-        user_home_dir()
-    };
-    if let Some(base) = base.filter(|path| path.is_absolute()) {
+        "home"
+    });
+    if let Some(base) = base
+        .filter(|path| path.is_absolute())
+        .and_then(|path| discovery.retain_path(&path))
+    {
         for relative in profile.sources.relative_defaults {
-            // Join component by component so the result uses the platform separator throughout. A
-            // literal "a/b" on Windows produces a mixed-separator path that passes every local
-            // check here yet fails to line up with the scanner's captured native path, so the
-            // candidate is discovered and then silently never classified.
+            if !discovery.available() {
+                break;
+            }
             let mut path = base.clone();
             for component in relative.split('/') {
                 path.push(component);
             }
             match profile.sources.versioned_child_prefix {
-                // The default names a container of versioned stores; the roots are one level down.
-                // Enumerated rather than guessed, and each is still verified below.
                 Some(prefix) => {
-                    if let Ok(entries) = std::fs::read_dir(&path) {
-                        for entry in entries.flatten() {
-                            if entry
-                                .file_name()
-                                .to_str()
-                                .is_some_and(|name| name.starts_with(prefix))
-                            {
-                                push(entry.path(), &mut candidates);
-                            }
+                    for path in discovery.versions(&path, prefix).iter() {
+                        if !discovery.available() {
+                            break;
                         }
+                        push(path, &mut candidates, discovery);
                     }
                 }
-                None => push(path, &mut candidates),
+                None => push(&path, &mut candidates, discovery),
             }
         }
     }
-    candidates.retain(|path| matches_structural_fingerprint(path, &profile.fingerprint));
-    candidates
+    snapshots
+}
+fn observed_generations(
+    rule: &PlatformJunkRule,
+    root: &LayoutRoot,
+    discovery: &mut LayoutDiscovery,
+) -> Vec<String> {
+    let Some(profile) = tool_cache_profile(&rule.root_kind) else {
+        return Vec::new();
+    };
+    let mut present = Vec::new();
+    for generation in profile.generations {
+        if discovery.has_directory(root, generation.directory) {
+            present.push(generation);
+        }
+        if !discovery.available() || discovery.failure.is_some() {
+            return Vec::new();
+        }
+    }
+    if !present.iter().any(|generation| generation.current) {
+        return Vec::new();
+    }
+    let mut superseded = Vec::new();
+    for generation in present.into_iter().filter(|generation| !generation.current) {
+        if !discovery.charge(64 + generation.directory.len()) {
+            return Vec::new();
+        }
+        superseded.push(generation.directory.to_string());
+    }
+    superseded
 }
 
 /// Names the superseded cache-format directories present inside a matched root.
@@ -1259,56 +1303,27 @@ fn tool_cache_candidates_with_root(
 ///
 /// Reported only when a current generation is also present. Without that evidence the tool is
 /// simply an older version whose only format is the one on disk, and calling it superseded would be
-/// wrong. Read-only, `symlink_metadata`, and a marker rather than deletion authority.
+/// wrong. Consumes this invocation's bounded native observations, never deletion authority.
 pub fn superseded_format_generations(
     rule: &PlatformJunkRule,
     entry: &sweepx_model::ScannedEntry,
     evidence: &PlatformJunkEvidence,
 ) -> Vec<String> {
-    let Some(profile) = tool_cache_profile(&rule.root_kind) else {
-        return Vec::new();
-    };
-    if profile.generations.is_empty() {
-        return Vec::new();
-    }
-    // `NativeAbsolutePath` can only be compared, not converted back to a `PathBuf` — deliberately,
-    // since a display string is not reopenable. So the root used for these reads is the verified
-    // candidate that the captured path matches, never a string rebuilt from the report.
-    let Some(captured) = entry
+    let Some(path) = entry
         .native_locator
         .as_ref()
         .and_then(|locator| locator.scan_root_absolute_path.as_ref())
     else {
         return Vec::new();
     };
-    let rule_evidence = match evidence.for_rule(rule) {
-        Some(value) => value,
-        None => return Vec::new(),
-    };
-    let Some(root) = rule_evidence
-        .cache_candidates
-        .iter()
-        .find(|candidate| captured.equals_path(candidate).unwrap_or(false))
-    else {
-        return Vec::new();
-    };
-    let present = |generation: &FormatGeneration| {
-        std::fs::symlink_metadata(root.join(generation.directory))
-            .is_ok_and(|metadata| metadata.file_type().is_dir())
-    };
-    let has_current = profile
-        .generations
-        .iter()
-        .any(|generation| generation.current && present(generation));
-    if !has_current {
-        return Vec::new();
-    }
-    profile
-        .generations
-        .iter()
-        .filter(|generation| !generation.current && present(generation))
-        .map(|generation| generation.directory.to_string())
-        .collect()
+    evidence
+        .tool_snapshots
+        .get(&rule.id)
+        .into_iter()
+        .flatten()
+        .find(|snapshot| snapshot.root.matches(path, entry))
+        .map(|snapshot| snapshot.superseded.clone())
+        .unwrap_or_default()
 }
 
 /// Maps a `rootKind` to the tool that reports it.
@@ -1331,31 +1346,6 @@ pub fn tool_reported_root_for(root_kind: &str) -> Option<ToolReportedRoot> {
         }),
         _ => None,
     }
-}
-
-/// Confirms a directory has the shape the rule expects before it is reported.
-///
-/// Without this a rule would report whatever now occupies the path the tool named. The check is
-/// read-only and uses `symlink_metadata` so a symlinked marker cannot stand in for a real child;
-/// the scanner still performs the authoritative no-follow admission afterwards.
-fn root_has_required_markers(root: &Path, markers: &[String]) -> bool {
-    root_has_named_children_display(root, markers)
-}
-
-fn root_has_named_children<'a>(root: &Path, names: impl IntoIterator<Item = &'a str>) -> bool {
-    names.into_iter().all(|marker| {
-        std::fs::symlink_metadata(root.join(marker)).is_ok_and(|metadata| {
-            let file_type = metadata.file_type();
-            file_type.is_dir() || file_type.is_file()
-        })
-    })
-}
-
-fn root_has_named_children_display<'a>(
-    root: &Path,
-    names: impl IntoIterator<Item = &'a String>,
-) -> bool {
-    root_has_named_children(root, names.into_iter().map(String::as_str))
 }
 
 /// Resolves the current user home without deriving authority from a report path.
@@ -1827,6 +1817,182 @@ mod tests {
         assert!(observed.cache_candidates.contains(&cache));
     }
 
+    fn tool_fixture() -> (tempfile::TempDir, PathBuf, PlatformJunkRule) {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        let rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.root_kind == "pip_reported_cache")
+            .unwrap();
+        (owner, root, rule)
+    }
+
+    #[test]
+    fn later_layout_limits_retain_positive_tool_roots_and_decline_whole_root_cache() {
+        let (_owner, base, rule) = tool_fixture();
+        let cache = base.join("cache");
+        std::fs::create_dir_all(cache.join("wheels")).unwrap();
+        let rules = vec![rule];
+        let evidence = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| Some(cache.clone()),
+            Vec::new(),
+            LayoutDiscoveryLimits {
+                max_directory_probes: 1,
+                ..LayoutDiscoveryLimits::default()
+            },
+            CancellationToken::new(),
+            |_| Some(base.clone()),
+        );
+        assert_eq!(
+            evidence.layout_failure(),
+            Some(LayoutDiscoveryFailure::ResourceLimit)
+        );
+        assert_eq!(
+            evidence.for_rule(&rules[0]).unwrap().cache_candidates,
+            vec![cache.clone()]
+        );
+        let setup = PlatformJunkSetup { rules, evidence };
+        assert_eq!(default_platform_junk_roots(&setup), vec![cache]);
+        assert!(
+            JunkService::built_in()
+                .unwrap()
+                .with_platform(&setup.rules, &setup.evidence)
+                .classification_context_digest()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cancelled_or_zero_budget_layout_does_not_call_resolver_or_claim_empty_coverage() {
+        let (_owner, base, rule) = tool_fixture();
+        for (limits, cancel, expected) in [
+            (
+                LayoutDiscoveryLimits {
+                    max_retained_bytes: 0,
+                    ..LayoutDiscoveryLimits::default()
+                },
+                CancellationToken::new(),
+                LayoutDiscoveryFailure::ResourceLimit,
+            ),
+            (
+                LayoutDiscoveryLimits {
+                    deadline: std::time::Duration::ZERO,
+                    ..LayoutDiscoveryLimits::default()
+                },
+                CancellationToken::new(),
+                LayoutDiscoveryFailure::Deadline,
+            ),
+            (
+                LayoutDiscoveryLimits::default(),
+                {
+                    let token = CancellationToken::new();
+                    token.cancel();
+                    token
+                },
+                LayoutDiscoveryFailure::Cancelled,
+            ),
+        ] {
+            let evidence = PlatformJunkEvidence::precompute_with_layout(
+                std::slice::from_ref(&rule),
+                |_| panic!("resolver after exhausted admission"),
+                Vec::new(),
+                limits,
+                cancel,
+                |_| Some(base.clone()),
+            );
+            assert_eq!(evidence.layout_failure(), Some(expected));
+            assert!(evidence.discovery_incomplete());
+        }
+    }
+
+    #[test]
+    fn tool_interpretation_consumes_bound_snapshots_and_rejects_replacement_facts() {
+        let (_owner, base, rule) = tool_fixture();
+        let cache = base.join("cache");
+        for name in ["wheels", "http", "http-v2"] {
+            std::fs::create_dir_all(cache.join(name)).unwrap();
+        }
+        let rules = vec![rule];
+        let discover = || {
+            PlatformJunkEvidence::precompute_with_layout(
+                &rules,
+                |_| Some(cache.clone()),
+                Vec::new(),
+                LayoutDiscoveryLimits::default(),
+                CancellationToken::new(),
+                |_| Some(base.clone()),
+            )
+        };
+        let evidence = discover();
+        assert!(evidence.layout_failure().is_none());
+        let project = JunkService::built_in().unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = |evidence: &PlatformJunkEvidence| {
+            crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+                &context,
+                &crate::ScanRequest {
+                    roots: vec![cache.clone()],
+                    state_dir: None,
+                },
+                None,
+                &project.with_platform(&rules, evidence),
+                None,
+            )
+            .unwrap()
+        };
+        let old = scan(&evidence);
+        assert_eq!(old.decisions.len(), 1);
+        let entry = old.scan.summary.roots[0].clone();
+        assert_eq!(
+            classify_tool_root(&rules[0], &entry, &evidence),
+            Some(ToolRootActivity::Live)
+        );
+        assert_eq!(
+            superseded_format_generations(&rules[0], &entry, &evidence),
+            vec!["http"]
+        );
+        let mut display_only = entry.clone();
+        display_only.display_path = "unrelated presentation".into();
+        assert_eq!(
+            classify_tool_root(&rules[0], &display_only, &evidence),
+            Some(ToolRootActivity::Live)
+        );
+        let mut missing = entry.clone();
+        missing.native_locator = None;
+        assert!(classify_tool_root(&rules[0], &missing, &evidence).is_none());
+        std::fs::rename(&cache, base.join("old-cache")).unwrap();
+        for name in ["wheels", "http", "http-v2"] {
+            std::fs::create_dir_all(cache.join(name)).unwrap();
+        }
+        assert!(
+            scan(&evidence).decisions.is_empty(),
+            "same path cannot replace discovery identity"
+        );
+        assert_eq!(
+            superseded_format_generations(&rules[0], &entry, &evidence),
+            vec!["http"],
+            "interpretation never reopens the old displayed path"
+        );
+        let current = discover();
+        assert_ne!(
+            project
+                .with_platform(&rules, &evidence)
+                .classification_context_digest(),
+            project
+                .with_platform(&rules, &current)
+                .classification_context_digest()
+        );
+        assert_eq!(scan(&current).decisions.len(), 1);
+    }
+
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
@@ -2091,21 +2257,21 @@ mod tests {
     #[test]
     fn required_markers_are_checked_against_the_filesystem() {
         let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path();
-
-        // No markers yet: the directory must not qualify.
-        assert!(!root_has_required_markers(root, &["_cacache".to_string()]));
-        // An empty marker list is vacuously satisfied, which is why the validator forbids it
-        // for tool-reported rules.
-        assert!(root_has_required_markers(root, &[]));
-
+        #[cfg(unix)]
+        let root = temp.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = temp.path().to_path_buf();
+        let check = |markers: &[String]| {
+            let mut discovery =
+                LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+            let observed = discovery.directory(&root).unwrap();
+            discovery.has_markers(&observed, markers)
+        };
+        assert!(!check(&["_cacache".into()]));
+        assert!(check(&[]));
         std::fs::create_dir(root.join("_cacache")).unwrap();
-        assert!(root_has_required_markers(root, &["_cacache".to_string()]));
-        // Every marker must be present, not merely one of them.
-        assert!(!root_has_required_markers(
-            root,
-            &["_cacache".to_string(), "index-v5".to_string()]
-        ));
+        assert!(check(&["_cacache".into()]));
+        assert!(!check(&["_cacache".into(), "index-v5".into()]));
     }
 
     /// Every tool profile must be self-consistent and usable by discovery.
@@ -2151,6 +2317,14 @@ mod tests {
         }
     }
 
+    fn fingerprint_at(path: &Path, fingerprint: &StructuralFingerprint) -> bool {
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        discovery
+            .directory(path)
+            .is_some_and(|root| matches_structural_fingerprint(&root, fingerprint, &mut discovery))
+    }
+
     /// The structural fingerprint accepts a real store layout and rejects a lookalike.
     ///
     /// Pins the measured shape of a pnpm store: `files/` holding exactly 256 two-hex-digit shard
@@ -2159,7 +2333,11 @@ mod tests {
     #[test]
     fn the_store_fingerprint_needs_the_measured_shard_layout() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let root = temp.path().join("store");
+        #[cfg(unix)]
+        let base = temp.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
+        let root = base.join("store");
         let files = root.join("files");
         std::fs::create_dir_all(&files).expect("create files");
         let fingerprint = StructuralFingerprint {
@@ -2169,25 +2347,25 @@ mod tests {
         };
 
         // Empty: the child exists but the layout does not match.
-        assert!(!matches_structural_fingerprint(&root, &fingerprint));
+        assert!(!fingerprint_at(&root, &fingerprint));
 
         for shard in 0..256u32 {
             std::fs::create_dir(files.join(format!("{shard:02x}"))).expect("create shard");
         }
         assert!(
-            matches_structural_fingerprint(&root, &fingerprint),
+            fingerprint_at(&root, &fingerprint),
             "256 lowercase two-hex-digit shards is the layout measured on a real pnpm store"
         );
 
         // One extra child breaks it: a directory that merely contains hex-named folders is not a
         // store, and admitting it would let the rule name an unrelated tree a pnpm store.
         std::fs::create_dir(files.join("zz")).expect("create intruder");
-        assert!(!matches_structural_fingerprint(&root, &fingerprint));
+        assert!(!fingerprint_at(&root, &fingerprint));
 
         // A missing required child is refused even when nothing else is wrong.
-        let bare = temp.path().join("bare");
+        let bare = base.join("bare");
         std::fs::create_dir(&bare).expect("create bare");
-        assert!(!matches_structural_fingerprint(&bare, &fingerprint));
+        assert!(!fingerprint_at(&bare, &fingerprint));
     }
 
     /// A fingerprint with no required child imposes no structural condition.
@@ -2197,12 +2375,16 @@ mod tests {
     #[test]
     fn an_empty_fingerprint_accepts_any_directory() {
         let temp = tempfile::tempdir().expect("temp dir");
+        #[cfg(unix)]
+        let root = temp.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = temp.path().to_path_buf();
         let fingerprint = StructuralFingerprint {
             required_children: &[],
             required_child: "",
             hex_shard_count: None,
         };
-        assert!(matches_structural_fingerprint(temp.path(), &fingerprint));
+        assert!(fingerprint_at(&root, &fingerprint));
     }
 
     /// Activity codes are distinct, stable and machine-safe.

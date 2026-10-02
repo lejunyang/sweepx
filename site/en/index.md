@@ -52,7 +52,7 @@ The CLI and TUI auto-detect `zh-CN` / `en-US` and accept an explicit `--locale` 
 Release automation builds five target archives, checksums, installers, and this GitHub Pages site. The v0.0.1 development release is published; no stable release has been published yet.
 
 
-Browser and known-cache discovery in `junk --system` shares a bounded invocation snapshot with classification, avoiding profile enumeration for each candidate. Permission, observation or resource failures set `layoutDiscovery.complete` to false with an `incompleteReason`, report partial and return exit code 4. Confirmed results remain visible; an empty list does not prove there is no junk. The native deadline is cooperative between calls and cannot interrupt blocking OS access. Non-interactive cleanup/Trash requests are rejected before discovery.
+Tool cache roots, browser and known-cache discovery in `junk --system` shares a bounded invocation layout snapshot with classification. Version expansion and shard checks consume the shared budget; classification does not enumerate or resolve paths per candidate. Permission, observation or resource failures set `layoutDiscovery.complete` to false with an `incompleteReason`, report partial and return exit code 4. Confirmed results remain visible; an empty list does not prove there is no junk. The native deadline is cooperative between calls and cannot interrupt blocking OS access. Non-interactive cleanup/Trash requests are rejected before discovery.
 
 Whole-root candidate records bind the currently enabled rules and discovery scope, triggering fresh classification when they change. File-length caches are validated independently, so an old empty candidate report cannot hide results introduced by newly enabled rules.
 

@@ -12,12 +12,12 @@ use sweepx_platform::{
 };
 use sweepx_scanner::HostPlatformScanner;
 
-/// Invocation-wide bounds for browser and known-root discovery, separate from tool probes.
+/// Invocation-wide bounds for tool, browser and known-root layout discovery, separate from tool probes.
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutDiscoveryLimits {
     /// Maximum distinct directory probes, including absent paths.
     pub max_directory_probes: usize,
-    /// Maximum native records consumed across all profile/partition enumerations.
+    /// Maximum native records consumed across all version/profile/partition/shard enumerations.
     pub max_enumerated_entries: usize,
     /// Maximum root references retained across rules, including shared roots.
     pub max_roots: usize,
@@ -113,15 +113,27 @@ impl LayoutRoot {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ChildSelection {
+    All,
+    BrowserProfiles,
+    VersionPrefix(&'static str),
+}
+
+#[derive(Clone)]
+struct ChildListing {
+    paths: Arc<[PathBuf]>,
+    complete: bool,
+}
+
 pub(super) struct LayoutDiscovery {
     backend: HostPlatformScanner,
     cancel: CancellationToken,
     limits: LayoutDiscoveryLimits,
     deadline: Option<Instant>,
     directories: BTreeMap<PathBuf, Option<Arc<LayoutRoot>>>,
-    // Cache selected profiles rather than every file in a user-data directory. The boolean
-    // distinguishes named browser profiles from partition containers whose every child qualifies.
-    profiles: BTreeMap<(PathBuf, bool), Arc<[PathBuf]>>,
+    // Selection belongs to the memo key: a version listing must not reuse browser filtering.
+    profiles: BTreeMap<(PathBuf, ChildSelection), ChildListing>,
     enumerated: usize,
     root_references: usize,
     retained: usize,
@@ -150,7 +162,8 @@ impl LayoutDiscovery {
         }
     }
 
-    fn available(&mut self) -> bool {
+    /// Check shared cancellation/deadline before any additional native work.
+    pub fn available(&mut self) -> bool {
         if self.cancel.is_cancelled() {
             self.fail(LayoutDiscoveryFailure::Cancelled);
             return false;
@@ -172,7 +185,8 @@ impl LayoutDiscovery {
         self.failure.get_or_insert(failure);
     }
 
-    fn charge(&mut self, bytes: usize) -> bool {
+    /// Conservative cumulative admission; dropped temporary data does not refund the budget.
+    pub fn charge(&mut self, bytes: usize) -> bool {
         if self.retained.saturating_add(bytes) > self.limits.max_retained_bytes {
             self.fail(LayoutDiscoveryFailure::ResourceLimit);
             return false;
@@ -197,6 +211,53 @@ impl LayoutDiscovery {
         self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
     }
 
+    /// Charge before copying a caller/environment path. Oversized input never enters native I/O.
+    pub fn retain_path(&mut self, path: &Path) -> Option<PathBuf> {
+        if !self.available()
+            || !self.charge(64usize.saturating_add(path.as_os_str().len().saturating_mul(4)))
+        {
+            return None;
+        }
+        if path.as_os_str().len() > 64 * 1024 {
+            self.fail(LayoutDiscoveryFailure::ResourceLimit);
+            return None;
+        }
+        Some(path.to_path_buf())
+    }
+
+    fn open_observed(
+        &mut self,
+        observed: &LayoutRoot,
+    ) -> Option<
+        sweepx_platform::RootAdmission<<HostPlatformScanner as PlatformScanner>::DirectoryHandle>,
+    > {
+        if !self.available() {
+            return None;
+        }
+        let root =
+            ScanRoot::new(observed.path.clone()).expect("native discovery admitted this path");
+        let admitted = match self.backend.admit_root(&root, &self.cancel) {
+            Ok(admitted)
+                if admitted.metadata.identity.as_ref() == Some(&observed.identity)
+                    && admitted.metadata.filesystem_identity.as_ref()
+                        == Some(&observed.filesystem)
+                    && admitted.metadata.mount_identity.as_ref() == Some(&observed.mount)
+                    && admitted.metadata.fingerprint == observed.fingerprint =>
+            {
+                admitted
+            }
+            Ok(_) => {
+                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                return None;
+            }
+            Err(error) => {
+                self.record_error(&error);
+                return None;
+            }
+        };
+        self.available().then_some(admitted)
+    }
+
     pub fn directory(&mut self, path: &Path) -> Option<Arc<LayoutRoot>> {
         if !self.available() {
             return None;
@@ -208,7 +269,7 @@ impl LayoutDiscovery {
             self.fail(LayoutDiscoveryFailure::ResourceLimit);
             return None;
         }
-        let key = path.to_path_buf();
+        let key = self.retain_path(path)?;
         // Account for the node/key even for a negative observation, so absent layouts cannot
         // build an unbounded memoization table. Capacity units are conservatively doubled.
         if !self.charge(256usize.saturating_add(key.capacity().saturating_mul(2))) {
@@ -219,6 +280,9 @@ impl LayoutDiscovery {
                 let root = ScanRoot::new(path.to_path_buf()).ok()?;
                 match self.backend.admit_root(&root, &self.cancel) {
                     Ok(admitted) => {
+                        if !self.available() {
+                            return None;
+                        }
                         let metadata = admitted.metadata;
                         match (
                             metadata.identity,
@@ -275,6 +339,14 @@ impl LayoutDiscovery {
         let Some(root) = self.directory(path) else {
             return;
         };
+        self.push_observed(root, roots);
+    }
+
+    /// Retain a previously verified root within the shared reference quota.
+    pub fn push_observed(&mut self, root: Arc<LayoutRoot>, roots: &mut Vec<Arc<LayoutRoot>>) {
+        if !self.available() {
+            return;
+        }
         if roots.iter().any(|existing| existing.same_object(&root)) {
             return;
         }
@@ -290,54 +362,30 @@ impl LayoutDiscovery {
 
     pub fn has_markers(&mut self, observed: &LayoutRoot, markers: &[String]) -> bool {
         if markers.is_empty() {
-            return true;
+            return self.available();
         }
-        if !self.available() {
+        self.check_markers(observed, markers.iter().map(String::as_str), false)
+    }
+
+    /// Require a no-follow ordinary directory on the retained parent's filesystem and mount.
+    pub fn has_directory(&mut self, observed: &LayoutRoot, name: &str) -> bool {
+        self.check_markers(observed, [name], true)
+    }
+
+    fn check_markers<'a>(
+        &mut self,
+        observed: &LayoutRoot,
+        markers: impl IntoIterator<Item = &'a str>,
+        directories_only: bool,
+    ) -> bool {
+        let Some(admitted) = self.open_observed(observed) else {
             return false;
-        }
-        let root =
-            ScanRoot::new(observed.path.clone()).expect("native discovery admitted this path");
-        let admitted = match self.backend.admit_root(&root, &self.cancel) {
-            Ok(admitted)
-                if admitted.metadata.identity.as_ref() == Some(&observed.identity)
-                    && admitted.metadata.filesystem_identity.as_ref()
-                        == Some(&observed.filesystem)
-                    && admitted.metadata.mount_identity.as_ref() == Some(&observed.mount)
-                    && admitted.metadata.fingerprint == observed.fingerprint =>
-            {
-                admitted
-            }
-            Ok(_) => {
-                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
-                return false;
-            }
-            Err(error) => {
-                self.record_error(&error);
-                return false;
-            }
         };
         for marker in markers {
             if !self.available() {
                 return false;
             }
-            let marker_path = observed.path.join(marker);
-            let Some(name) = marker_path.file_name() else {
-                return false;
-            };
-            #[cfg(unix)]
-            let native_name = {
-                use std::os::unix::ffi::OsStrExt;
-                sweepx_model::NativeName::unix(name.as_bytes().to_vec())
-            };
-            #[cfg(windows)]
-            let native_name = {
-                use std::os::windows::ffi::OsStrExt;
-                sweepx_model::NativeName::windows_utf16(name.encode_wide().collect::<Vec<_>>())
-            };
-            let Ok(child) = sweepx_platform::DirectoryEntryRecord::from_parent_and_name(
-                &observed.path,
-                native_name,
-            ) else {
+            let Ok(child) = child_record(&observed.path, std::ffi::OsStr::new(marker)) else {
                 return false;
             };
             // The inspected marker is resolved against the retained root handle. At most the
@@ -349,8 +397,15 @@ impl LayoutDiscovery {
                 &child,
                 &self.cancel,
             ) {
-                Ok(sweepx_platform::WalkEntry::File(_))
-                | Ok(sweepx_platform::WalkEntry::Directory(_)) => {}
+                Ok(sweepx_platform::WalkEntry::File(_)) if !directories_only => {}
+                Ok(sweepx_platform::WalkEntry::Directory(child))
+                    if child.metadata.filesystem_identity.as_ref()
+                        == Some(&observed.filesystem)
+                        && child.metadata.mount_identity.as_ref() == Some(&observed.mount) => {}
+                Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
+                    self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                    return false;
+                }
                 Ok(sweepx_platform::WalkEntry::Error(error)) => {
                     if error.kind != sweepx_platform::ErrorKind::NotFound {
                         self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
@@ -364,41 +419,110 @@ impl LayoutDiscovery {
                 }
             }
         }
-        true
+        self.available()
     }
 
     pub fn profiles(&mut self, path: &Path, named: bool) -> Arc<[PathBuf]> {
-        if !self.available() {
-            return Arc::from([]);
+        self.children(
+            path,
+            if named {
+                ChildSelection::BrowserProfiles
+            } else {
+                ChildSelection::All
+            },
+        )
+        .paths
+    }
+
+    /// Share one bounded version-container listing per native path and prefix per invocation.
+    pub fn versions(&mut self, path: &Path, prefix: &'static str) -> Arc<[PathBuf]> {
+        self.children(path, ChildSelection::VersionPrefix(prefix))
+            .paths
+    }
+
+    /// Exact count requires clean EOF and independently admitted no-follow directories. A bounded
+    /// prefix never establishes the layout. Each child must remain on the observed parent's mount.
+    pub fn has_hex_shards(&mut self, parent: &LayoutRoot, expected: usize) -> bool {
+        let listing = self.children(&parent.path, ChildSelection::All);
+        if !listing.complete || listing.paths.len() != expected {
+            return false;
         }
-        let key = (path.to_path_buf(), named);
+        let Some(admitted) = self.open_observed(parent) else {
+            return false;
+        };
+        for path in listing.paths.iter() {
+            if !self.available() {
+                return false;
+            }
+            let Some(name) = path.file_name() else {
+                return false;
+            };
+            let valid_name = name.to_str().is_some_and(|name| {
+                name.len() == 2
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            });
+            if !valid_name {
+                return false;
+            }
+            let Ok(record) = child_record(&parent.path, name) else {
+                return false;
+            };
+            // One retained parent and one transient shard handle; avoid opening each ancestor
+            // chain or retaining a per-shard root index solely to validate a count.
+            match sweepx_platform::inspect_bound_child(
+                &self.backend,
+                &admitted.directory,
+                &parent.path,
+                &record,
+                &self.cancel,
+            ) {
+                Ok(sweepx_platform::WalkEntry::Directory(child))
+                    if child.metadata.filesystem_identity.as_ref() == Some(&parent.filesystem)
+                        && child.metadata.mount_identity.as_ref() == Some(&parent.mount) => {}
+                Ok(sweepx_platform::WalkEntry::Error(_))
+                | Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
+                    self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
+                    return false;
+                }
+                Err(error) => {
+                    self.record_error(&error);
+                    return false;
+                }
+                Ok(_) => return false,
+            }
+        }
+        // Detect parent replacement/mutation during the interval; this is not an atomic tree snapshot.
+        self.open_observed(parent).is_some()
+    }
+
+    fn children(&mut self, path: &Path, selection: ChildSelection) -> ChildListing {
+        let empty = || ChildListing {
+            paths: Arc::from([]),
+            complete: false,
+        };
+        if !self.available() {
+            return empty();
+        }
+        let Some(key_path) = self.retain_path(path) else {
+            return empty();
+        };
+        let key = (key_path, selection);
         if let Some(found) = self.profiles.get(&key) {
             return found.clone();
         }
         let Some(observed) = self.directory(path) else {
-            return Arc::from([]);
+            return empty();
         };
         if !self.charge(256usize.saturating_add(key.0.capacity().saturating_mul(2))) {
-            return Arc::from([]);
+            return empty();
         }
-        let root = ScanRoot::new(path.to_path_buf())
-            .expect("observed path was admitted as an absolute root");
-        let mut admitted = match self.backend.admit_root(&root, &self.cancel) {
-            Ok(admitted)
-                if admitted.metadata.identity.as_ref() == Some(&observed.identity)
-                    && admitted.metadata.fingerprint == observed.fingerprint =>
-            {
-                admitted
-            }
-            Ok(_) => {
-                self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
-                return Arc::from([]);
-            }
-            Err(error) => {
-                self.record_error(&error);
-                return Arc::from([]);
-            }
+        let Some(mut admitted) = self.open_observed(&observed) else {
+            return empty();
         };
+        let mut complete = false;
+        let mut valid_records = true;
         let mut found = Vec::new();
         #[cfg(test)]
         {
@@ -430,16 +554,29 @@ impl LayoutDiscovery {
                 }
             };
             self.enumerated += batch.entries.len();
+            if !self.available() {
+                break;
+            }
             if batch.entries.is_empty() && !batch.end_of_directory {
                 self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
                 break;
             }
             for entry in batch.entries {
                 if entry.validate_for_parent(path).is_err() {
+                    valid_records = false;
                     self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
                     continue;
                 }
-                if named && !is_named_profile(&entry.file_name) {
+                let selected = match selection {
+                    ChildSelection::All => true,
+                    ChildSelection::BrowserProfiles => is_named_profile(&entry.file_name),
+                    ChildSelection::VersionPrefix(prefix) => entry
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(prefix)),
+                };
+                if !selected {
                     continue;
                 }
                 if !self.charge(64usize.saturating_add(entry.path.capacity().saturating_mul(2))) {
@@ -449,13 +586,34 @@ impl LayoutDiscovery {
                 found.push(entry.path);
             }
             if batch.end_of_directory {
+                complete = self.available();
                 break;
             }
         }
-        let found: Arc<[PathBuf]> = Arc::from(found);
+        let found = ChildListing {
+            paths: Arc::from(found),
+            complete: complete && valid_records && self.open_observed(&observed).is_some(),
+        };
         self.profiles.insert(key, found.clone());
         found
     }
+}
+
+fn child_record(
+    parent: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<sweepx_platform::DirectoryEntryRecord, sweepx_platform::DirectoryEntryInvariantError> {
+    #[cfg(unix)]
+    let native_name = {
+        use std::os::unix::ffi::OsStrExt;
+        sweepx_model::NativeName::unix(name.as_bytes().to_vec())
+    };
+    #[cfg(windows)]
+    let native_name = {
+        use std::os::windows::ffi::OsStrExt;
+        sweepx_model::NativeName::windows_utf16(name.encode_wide().collect::<Vec<_>>())
+    };
+    sweepx_platform::DirectoryEntryRecord::from_parent_and_name(parent, native_name)
 }
 
 fn is_named_profile(name: &sweepx_model::NativeName) -> bool {
@@ -575,6 +733,151 @@ mod tests {
         );
         assert!(expired.directory(&root).is_none());
         assert_eq!(expired.failure, Some(LayoutDiscoveryFailure::Deadline));
+    }
+
+    #[test]
+    fn version_selection_is_memoized_separately_and_truncation_is_explicit() {
+        let (_owner, root) = fixture();
+        for name in ["v3", "v10", "Default", "unrelated"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let expected = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_str().unwrap().starts_with('v'))
+            .collect::<BTreeSet<_>>();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let versions = discovery.versions(&root, "v");
+        assert_eq!(versions.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        assert!(Arc::ptr_eq(&versions, &discovery.versions(&root, "v")));
+        assert_eq!(discovery.enumerations, 1);
+        assert_eq!(
+            discovery.profiles(&root, true).as_ref(),
+            &[root.join("Default")]
+        );
+        assert_eq!(discovery.enumerations, 2);
+        let mut bounded = LayoutDiscovery::new(
+            LayoutDiscoveryLimits {
+                max_enumerated_entries: 1,
+                ..LayoutDiscoveryLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let listing = bounded.children(&root, ChildSelection::VersionPrefix("v"));
+        assert!(!listing.complete);
+        assert!(listing.paths.len() <= 1);
+        assert_eq!(bounded.failure, Some(LayoutDiscoveryFailure::ResourceLimit));
+    }
+
+    #[test]
+    fn exact_shards_require_complete_native_directories_without_a_per_shard_root_index() {
+        let (_owner, root) = fixture();
+        for shard in 0..256u32 {
+            std::fs::create_dir(root.join(format!("{shard:02x}"))).unwrap();
+        }
+        let ordinary = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ordinary.len(), 256);
+        assert!(
+            ordinary
+                .iter()
+                .all(|entry| std::fs::symlink_metadata(entry.path()).unwrap().is_dir())
+        );
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let observed = discovery.directory(&root).unwrap();
+        assert!(discovery.has_hex_shards(&observed, 256));
+        assert_eq!(
+            discovery.directories.len(),
+            1,
+            "shards use the retained native parent"
+        );
+        assert_eq!(discovery.enumerations, 1);
+        let mut truncated = LayoutDiscovery::new(
+            LayoutDiscoveryLimits {
+                max_enumerated_entries: 255,
+                ..LayoutDiscoveryLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let observed = truncated.directory(&root).unwrap();
+        assert!(
+            !truncated.has_hex_shards(&observed, 255),
+            "a matching retained prefix is not a complete count"
+        );
+        assert_eq!(
+            truncated.failure,
+            Some(LayoutDiscoveryFailure::ResourceLimit)
+        );
+        std::fs::remove_dir(root.join("00")).unwrap();
+        std::fs::write(root.join("00"), b"user file").unwrap();
+        let mut wrong_type =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let observed = wrong_type.directory(&root).unwrap();
+        assert!(!wrong_type.has_hex_shards(&observed, 256));
+        assert!(
+            wrong_type.failure.is_none(),
+            "ordinary files are intentional exclusions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hex_named_link_cannot_impersonate_a_directory_shard() {
+        let (_owner, root) = fixture();
+        std::fs::create_dir(root.join("target")).unwrap();
+        let files = root.join("files");
+        std::fs::create_dir(&files).unwrap();
+        std::os::unix::fs::symlink(root.join("target"), files.join("00")).unwrap();
+        assert!(
+            std::fs::metadata(files.join("00")).unwrap().is_dir(),
+            "following stat reproduces the old false positive"
+        );
+        assert!(
+            std::fs::symlink_metadata(files.join("00"))
+                .unwrap()
+                .is_symlink()
+        );
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let observed = discovery.directory(&files).unwrap();
+        assert!(!discovery.has_hex_shards(&observed, 1));
+    }
+
+    #[test]
+    fn oversized_paths_and_replaced_listing_parents_decline_observation() {
+        let (_owner, root) = fixture();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        assert!(
+            discovery
+                .directory(&root.join("x".repeat(65_537)))
+                .is_none()
+        );
+        assert_eq!(
+            discovery.failure,
+            Some(LayoutDiscoveryFailure::ResourceLimit)
+        );
+        assert!(discovery.directories.is_empty());
+        let parent = root.join("parent");
+        std::fs::create_dir_all(parent.join("00")).unwrap();
+        let mut discovery =
+            LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+        let observed = discovery.directory(&parent).unwrap();
+        assert!(discovery.has_hex_shards(&observed, 1));
+        std::fs::rename(&parent, root.join("old-parent")).unwrap();
+        std::fs::create_dir_all(parent.join("00")).unwrap();
+        assert!(
+            !discovery.has_hex_shards(&observed, 1),
+            "memoized names do not authorize a replaced parent"
+        );
+        assert_eq!(
+            discovery.failure,
+            Some(LayoutDiscoveryFailure::ObservationUnavailable)
+        );
     }
 
     #[cfg(unix)]

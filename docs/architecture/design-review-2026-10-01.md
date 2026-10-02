@@ -452,7 +452,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
 | 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；完整语言语义、真实工具版本采集、独占所有权/活动依据仍缺失。 |
 
-另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举已补共享预算与去重，工具缓存根及指纹等路径仍待审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含本轮受控共享缓存正例的 ProbeUnavailable，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
+另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
 crate 已从 22 收敛到 17，core 与终端依赖已分离；第二轮未发现进一步合并的明确收益。继续合并不作为独立待办，只有具体契约、所有权或依赖收益成立时再评估。
 
@@ -672,3 +672,20 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 另外记录一项未定位验证缺口：上述最后 core 复验最初为 224 项通过、1 项失败、1 项基准 ignored，失败是共享缓存正例的 `ProbeUnavailable`，当时尚未记录子进程具体失败类型。加入只记录状态/耗时/字节数、不打印答案的测试诊断及失败夹具保留后，完整相同顺序运行 225 项通过；随后预先固定十次独立同二进制运行也全部通过，未提前遇到通过即停止。没有放宽 2 秒 probe/10 秒总期限、移除断言或排除测试，仍未证明原失败根因，不能把后续通过表述为修复该间歇问题。此处的已通过检查与未定位稳定性缺口分别保留，不称为整体全绿。
 
 Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang.org/std/os/windows/fs/trait.MetadataExt.html#tymethod.file_attributes)、[Microsoft 文件属性常量](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants)（2026-10-02）；使用已有 windows-sys 常量，不自行复制 ABI 值。
+
+
+## 工具缓存根的有界原生布局快照（2026-10-02）
+
+工具缓存根原来在布局预算之外展开版本目录，并用无上限 `read_dir` 检查分片；`flatten` 忽略迭代错误，分片的 `entry.metadata()` 还会跟随最终链接。此次复用 core 内已有 `LayoutDiscovery`，没有新增 crate、规则引擎或后台线程。
+
+- 工具根、浏览器和 known-root 共享 4,096 个不同目录探测、16,384 条原生枚举记录、1,024 个根引用及 8 MiB 数据准入估算；工具答复、路径副本、解释快照和筛选列表也扣数据额度，单路径超过 64 KiB 在复制/原生访问之前拒绝。5 秒和取消在原生调用之间检查，不能中断阻塞内核调用。npm 安装/活动发现的独立预算保持不变。
+- 版本容器按路径及筛选类型每调用只枚举一次；完整性与正向路径分开保留。精确分片数需要完整 EOF、合法名称，以及 retained-parent 下 no-follow 的普通目录、filesystem/mount 检查。每次只保留一个枚举父句柄和一个临时子目录句柄，不为各分片重复打开祖先链或保留目录根索引。枚举前后检查父身份及变化指纹，但不宣称跨文件原子快照。
+- 工具根与其他布局根一样保留原生身份、filesystem/mount 及根变化指纹；分类须与当前扫描的完整事实一致，同路径替换不能沿用旧匹配。整根缓存上下文加入工具根原生事实。根选择按已捕获身份去重，live/stale/unknown 关系及旧格式提示在发现时计算，候选解释不再 canonicalize/stat；这些答案每调用重建，不写文件系统缓存，也不证明无活动或可删除。
+- 后续预算耗尽仍保留已准入的正向根和解释，缺口沿已有 `layoutDiscovery`、核心可靠错误及 Partial 终态传播，并拒绝整根候选缓存复用。未知答复/未能原生观察的报告根保留 unknown，不推断 stale。取消、期限或零字节预算不能进入后续 resolver。
+- 回归通过普通目录枚举/no-follow metadata 独立核对版本集合和 256 个分片；覆盖链接/普通文件冒充分片、枚举前缀恰好等于期望值仍不能作精确匹配、替换父目录、超长输入、筛选缓存隔离、单父句柄观察、后续上限保留正向根、当前 native 身份绑定、显示路径变化及相同路径替换导致上下文失效。
+
+没有本轮端到端计时或新的加速倍数。规则所有权/活动、其他系统发现路径审计、Linux/Windows 缓存体验、原生宿主/MSVC、真实 provider、系统 Trash 成功及最终 pathname 竞态仍保留。旧 300 ms 正例超时在本轮无交叉编译的串行 core 运行也复现，不能仅归因于并行构建。
+
+交付验证（arm64 macOS，Rust 1.98.0）：最终完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 937 项通过、0 失败、2 项原有基准 ignored；core 232 项通过，CLI 单元/契约/relay 为 48/62/1 项通过。受影响 core 及最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy（含目标测试代码）、fmt/diff、53 份 Markdown 检查及 core 包清单通过。真实系统 Trash 成功用例仍因已诊断挂起显式排除；Linux/Windows 原生、MSVC 和真实 provider 仍未验收。
+
+保留本轮失败记录：最初 sandbox 中 junk 专项为 118 项通过、1 项失败、1 项 ignored，未改动的 `an_untouched_root_round_trips_as_current` 在 10 秒 fixture 历史 settle 限额内失败；采样请求到达时进程已自然结束，未取得阻塞堆栈。随后可访问宿主事件服务的 core 全量运行中，该缓存测试通过，但旧 `captures_complete_answer_and_exit_status` 在 300 ms 内 `TimedOut`，结果为 231 项通过、1 项失败、1 项 ignored，当时没有交叉编译运行。最后工作区全量通过，不证明前述间歇原因已修复；没有放宽期限、移除断言或排除这两个测试，不将整体路线图描述为全绿。下一步继续规则所有权/活动及尚未定位的性能、平台收尾。

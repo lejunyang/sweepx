@@ -1472,7 +1472,10 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
                 std::slice::from_ref(&rule),
                 cancel,
             );
-            assert!(evidence.layout_failure().is_none());
+            assert_eq!(
+                evidence.layout_failure(),
+                Some(super::super::platform::LayoutDiscoveryFailure::Cancelled)
+            );
             assert_eq!(
                 evidence.tool_discovery_failure(),
                 Some(crate::tools::ToolDiscoveryFailure::Cancelled)
