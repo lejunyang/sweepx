@@ -5,6 +5,8 @@ use crate::{
 #[cfg(target_os = "macos")]
 mod bulk_directory;
 #[cfg(target_os = "macos")]
+mod content_guard;
+#[cfg(target_os = "macos")]
 pub mod fsevents;
 #[cfg(target_os = "macos")]
 use crate::{DirectoryHandleAdmission, OpenedDirectory};
@@ -541,6 +543,60 @@ mod backend {
             Ok(())
         }
 
+        fn open_bound_regular_file(
+            parent: &OpenDirectory,
+            request: &BoundedRegularFileReadRequest,
+            cancel: &CancellationToken,
+        ) -> Result<(OwnedFd, RegularFileObservation), BoundedRegularFileReadError> {
+            Self::ensure_not_cancelled_read(cancel)?;
+            Self::assert_directory_identity_current(parent).map_err(|error| {
+                BoundedRegularFileReadError::Io {
+                    detail: error.to_string(),
+                    io_kind: None,
+                }
+            })?;
+            let parent_fd = Self::dirfd(parent).map_err(BoundedRegularFileReadError::io)?;
+            let child_name = Self::name_c_string(request.child_name())
+                .map_err(|error| BoundedRegularFileReadError::Unsupported(error.to_string()))?;
+            let preview = match Self::fstatat_raw(parent_fd, &child_name) {
+                Ok(value) => value,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(BoundedRegularFileReadError::NotFound);
+                }
+                Err(error) => return Err(BoundedRegularFileReadError::io(error)),
+            };
+            Self::validate_regular_file_preview_kind(&preview)?;
+            let preview_observed = preview.regular_file_observation(parent.mount_identity.clone());
+            Self::ensure_not_cancelled_read(cancel)?;
+            #[cfg(test)]
+            Self::maybe_run_read_test_hook_after_preview(parent, request.child_name());
+
+            // SAFETY: `parent_fd` is live, `child_name` is NUL-terminated, and the flags force a
+            // no-follow open of the final basename while keeping the descriptor nonblocking.
+            let raw_fd = unsafe {
+                libc::openat(
+                    parent_fd,
+                    child_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+            };
+            if raw_fd < 0 {
+                return Self::classify_open_failure_after_preview(
+                    parent,
+                    &child_name,
+                    &preview_observed,
+                    io::Error::last_os_error(),
+                );
+            }
+            // SAFETY: `openat` returned a fresh owned descriptor.
+            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let observed_before = Self::read_regular_file_observation(&fd)
+                .map_err(BoundedRegularFileReadError::io)?;
+            Self::validate_regular_file_expectation(request, &observed_before)?;
+            Self::compare_regular_file_observations(&preview_observed, &observed_before)?;
+            Ok((fd, observed_before))
+        }
+
         fn validate_regular_file_expectation(
             request: &BoundedRegularFileReadRequest,
             observed_before: &RegularFileObservation,
@@ -719,12 +775,12 @@ mod backend {
             Ok(observed)
         }
 
-        fn classify_open_failure_after_preview(
+        fn classify_open_failure_after_preview<T>(
             parent: &OpenDirectory,
             child_name: &CString,
             preview: &RegularFileObservation,
             open_error: io::Error,
-        ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
+        ) -> Result<T, BoundedRegularFileReadError> {
             match Self::fstatat_raw(
                 Self::dirfd(parent).map_err(BoundedRegularFileReadError::io)?,
                 child_name,
@@ -1144,58 +1200,81 @@ mod backend {
             }
         }
 
+        fn stream_regular_file_relative(
+            &self,
+            parent: &Self::DirectoryHandle,
+            request: &crate::RegularFileStreamRequest,
+            cancel: &CancellationToken,
+            consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
+        ) -> Result<crate::RegularFileStreamResult, BoundedRegularFileReadError> {
+            Self::ensure_not_cancelled_read(cancel)?;
+            let policy = super::content_guard::NoMaterialization::enter()?;
+            let result = (|| {
+                let binding = BoundedRegularFileReadRequest::new(
+                    request.child_name().clone(),
+                    request.expectation().clone(),
+                    0,
+                )?;
+                let (fd, before) = Self::open_bound_regular_file(parent, &binding, cancel)?;
+                let observed = Self::fstat(&fd).map_err(BoundedRegularFileReadError::io)?;
+                // Public sys/stat.h SF_DATALESS; libc does not expose this Darwin flag.
+                if observed.stat.st_flags & 0x4000_0000 != 0 {
+                    return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                        "file is a dataless object".into(),
+                    ));
+                }
+                crate::content::stream_observed_file(
+                    request,
+                    cancel,
+                    before,
+                    |offset, buffer| {
+                        // SAFETY: fd is exclusively retained for this range, the offset fits
+                        // off_t and writable buffer size bounds the native positional read.
+                        loop {
+                            Self::ensure_not_cancelled_read(cancel)?;
+                            let count = unsafe {
+                                libc::pread(
+                                    fd.as_raw_fd(),
+                                    buffer.as_mut_ptr().cast(),
+                                    buffer.len(),
+                                    offset as libc::off_t,
+                                )
+                            };
+                            if count >= 0 {
+                                return Ok(count as usize);
+                            }
+                            let error = io::Error::last_os_error();
+                            if error.kind() != io::ErrorKind::Interrupted {
+                                return Err(BoundedRegularFileReadError::io(error));
+                            }
+                        }
+                    },
+                    || {
+                        Self::read_regular_file_observation(&fd)
+                            .map_err(BoundedRegularFileReadError::io)
+                    },
+                    consume,
+                )
+            })();
+            // Surface restoration errors on success; preserve the original failure otherwise.
+            // RAII also restores after opening, read, consumer, cancellation and panic failures.
+            let restored = policy.restore();
+            match result {
+                Ok(value) => {
+                    restored?;
+                    Ok(value)
+                }
+                Err(error) => Err(error),
+            }
+        }
+
         fn read_regular_file_relative(
             &self,
             parent: &Self::DirectoryHandle,
             request: &BoundedRegularFileReadRequest,
             cancel: &CancellationToken,
         ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
-            Self::ensure_not_cancelled_read(cancel)?;
-            Self::assert_directory_identity_current(parent).map_err(|error| {
-                BoundedRegularFileReadError::Io {
-                    detail: error.to_string(),
-                    io_kind: None,
-                }
-            })?;
-            let parent_fd = Self::dirfd(parent).map_err(BoundedRegularFileReadError::io)?;
-            let child_name = Self::name_c_string(request.child_name())
-                .map_err(|error| BoundedRegularFileReadError::Unsupported(error.to_string()))?;
-            let preview = match Self::fstatat_raw(parent_fd, &child_name) {
-                Ok(value) => value,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    return Err(BoundedRegularFileReadError::NotFound);
-                }
-                Err(error) => return Err(BoundedRegularFileReadError::io(error)),
-            };
-            Self::validate_regular_file_preview_kind(&preview)?;
-            let preview_observed = preview.regular_file_observation(parent.mount_identity.clone());
-            Self::ensure_not_cancelled_read(cancel)?;
-            #[cfg(test)]
-            Self::maybe_run_read_test_hook_after_preview(parent, request.child_name());
-
-            // SAFETY: `parent_fd` is live, `child_name` is NUL-terminated, and the flags force a
-            // no-follow open of the final basename while keeping the descriptor nonblocking.
-            let raw_fd = unsafe {
-                libc::openat(
-                    parent_fd,
-                    child_name.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                )
-            };
-            if raw_fd < 0 {
-                return Self::classify_open_failure_after_preview(
-                    parent,
-                    &child_name,
-                    &preview_observed,
-                    io::Error::last_os_error(),
-                );
-            }
-            // SAFETY: `openat` returned a fresh owned descriptor.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-            let observed_before = Self::read_regular_file_observation(&fd)
-                .map_err(BoundedRegularFileReadError::io)?;
-            Self::validate_regular_file_expectation(request, &observed_before)?;
-            Self::compare_regular_file_observations(&preview_observed, &observed_before)?;
+            let (fd, observed_before) = Self::open_bound_regular_file(parent, request, cancel)?;
             if observed_before.logical_bytes > DecimalU128::new(request.max_bytes() as u128) {
                 return Err(BoundedRegularFileReadError::LimitExceeded {
                     max_bytes: request.max_bytes(),

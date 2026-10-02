@@ -32,7 +32,11 @@ use sweepx_model::{
 };
 use thiserror::Error;
 
+/// Bounded, handle-relative content streams for explicit content analyses.
+pub mod content;
 pub mod privilege;
+
+pub use content::{RegularFileStreamRequest, RegularFileStreamResult, stream_bound_regular_file};
 
 pub use privilege::{
     ElevatedRelaunch, ElevationPolicy, ElevationRefusal, PrivilegeLevel, PrivilegeObservation,
@@ -1200,6 +1204,24 @@ pub trait PlatformScanner: Send + Sync {
     ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
         Err(BoundedRegularFileReadError::Unsupported(format!(
             "{} does not implement handle-relative bounded regular-file reads",
+            self.platform_name()
+        )))
+    }
+
+    /// Streams a bounded range from one no-follow, identity-bound ordinary file.
+    /// Backends must reject provider/offline files before payload access, enforce the request's
+    /// identity and optional change stamp before emitting bytes, and reobserve after reading.
+    /// Callers use [`stream_bound_regular_file`] and discard provisional bytes on any error.
+    /// The default has no pathname or whole-file buffering fallback.
+    fn stream_regular_file_relative(
+        &self,
+        _parent: &Self::DirectoryHandle,
+        _request: &RegularFileStreamRequest,
+        _cancel: &CancellationToken,
+        _consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
+    ) -> Result<RegularFileStreamResult, BoundedRegularFileReadError> {
+        Err(BoundedRegularFileReadError::Unsupported(format!(
+            "{} does not implement bounded content streams",
             self.platform_name()
         )))
     }

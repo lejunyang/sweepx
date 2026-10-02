@@ -1106,6 +1106,57 @@ mod backend {
             Ok(())
         }
 
+        fn open_bound_regular_file(
+            parent: &WindowsDirectoryHandle,
+            request: &BoundedRegularFileReadRequest,
+            cancel: &CancellationToken,
+        ) -> Result<(OwnedHandle, RegularFileObservation), BoundedRegularFileReadError> {
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+            let NativeName::WindowsUtf16(name) = request.child_name() else {
+                return Err(BoundedRegularFileReadError::ForeignName);
+            };
+            request
+                .child_name()
+                .validate_basename()
+                .map_err(|_| BoundedRegularFileReadError::UnsafeName)?;
+            if Self::is_reserved_dos_device_name(name) {
+                return Err(BoundedRegularFileReadError::UnsafeName);
+            }
+
+            let parent_metadata =
+                Self::query_metadata(&parent.handle).map_err(map_regular_file_io)?;
+            if Self::is_provider_boundary(parent_metadata.attributes) {
+                return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                    "parent directory has an offline or recall-on-access attribute".to_string(),
+                ));
+            }
+            if parent_metadata.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || parent_metadata.attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || !parent_metadata.standard.Directory
+                || !Self::valid_identity(&parent_metadata)
+                || object_identity(&parent_metadata) != parent.identity
+            {
+                return Err(BoundedRegularFileReadError::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "parent directory identity or type changed before file read",
+                )));
+            }
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+
+            let handle = Self::open_regular_file_relative(&parent.handle, name)?;
+            if cancel.is_cancelled() {
+                return Err(BoundedRegularFileReadError::Cancelled);
+            }
+            let before_metadata = Self::query_regular_file_metadata(&handle)?;
+            let observed_before = Self::regular_file_observation(&before_metadata)?;
+            Self::validate_regular_file_expectation_before_read(parent, request, &observed_before)?;
+            Ok((handle, observed_before))
+        }
+
         fn read_bounded_bytes(
             handle: &OwnedHandle,
             max_bytes: usize,
@@ -1755,55 +1806,66 @@ mod backend {
             Ok(root_mount == entry_mount && root_filesystem == entry_filesystem)
         }
 
+        fn stream_regular_file_relative(
+            &self,
+            parent: &Self::DirectoryHandle,
+            request: &crate::RegularFileStreamRequest,
+            cancel: &CancellationToken,
+            consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
+        ) -> Result<crate::RegularFileStreamResult, BoundedRegularFileReadError> {
+            let binding = BoundedRegularFileReadRequest::new(
+                request.child_name().clone(),
+                request.expectation().clone(),
+                0,
+            )?;
+            let (handle, before) = Self::open_bound_regular_file(parent, &binding, cancel)?;
+            crate::content::stream_observed_file(
+                request,
+                cancel,
+                before,
+                |offset, buffer| {
+                    // Recheck provider/reparse flags before every chunk, under the same handle.
+                    Self::regular_file_observation(&Self::query_regular_file_metadata(&handle)?)?;
+                    // SAFETY: owned synchronous handle is exclusively used here. The position
+                    // fits i64 and the chunk fits u32; ReadFile cannot exceed writable storage.
+                    if unsafe {
+                        windows_sys::Win32::Storage::FileSystem::SetFilePointerEx(
+                            handle.as_raw_handle() as HANDLE,
+                            offset as i64,
+                            ptr::null_mut(),
+                            windows_sys::Win32::Storage::FileSystem::FILE_BEGIN,
+                        )
+                    } == 0
+                    {
+                        return Err(map_regular_file_io(io::Error::last_os_error()));
+                    }
+                    let mut count = 0;
+                    if unsafe {
+                        ReadFile(
+                            handle.as_raw_handle() as HANDLE,
+                            buffer.as_mut_ptr(),
+                            buffer.len() as u32,
+                            &mut count,
+                            ptr::null_mut(),
+                        )
+                    } == 0
+                    {
+                        return Err(map_regular_file_io(io::Error::last_os_error()));
+                    }
+                    Ok(count as usize)
+                },
+                || Self::regular_file_observation(&Self::query_regular_file_metadata(&handle)?),
+                consume,
+            )
+        }
+
         fn read_regular_file_relative(
             &self,
             parent: &Self::DirectoryHandle,
             request: &BoundedRegularFileReadRequest,
             cancel: &CancellationToken,
         ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
-            if cancel.is_cancelled() {
-                return Err(BoundedRegularFileReadError::Cancelled);
-            }
-            let NativeName::WindowsUtf16(name) = request.child_name() else {
-                return Err(BoundedRegularFileReadError::ForeignName);
-            };
-            request
-                .child_name()
-                .validate_basename()
-                .map_err(|_| BoundedRegularFileReadError::UnsafeName)?;
-            if Self::is_reserved_dos_device_name(name) {
-                return Err(BoundedRegularFileReadError::UnsafeName);
-            }
-
-            let parent_metadata =
-                Self::query_metadata(&parent.handle).map_err(map_regular_file_io)?;
-            if Self::is_provider_boundary(parent_metadata.attributes) {
-                return Err(BoundedRegularFileReadError::ProviderOrOffline(
-                    "parent directory has an offline or recall-on-access attribute".to_string(),
-                ));
-            }
-            if parent_metadata.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || parent_metadata.attributes & FILE_ATTRIBUTE_DIRECTORY == 0
-                || !parent_metadata.standard.Directory
-                || !Self::valid_identity(&parent_metadata)
-                || object_identity(&parent_metadata) != parent.identity
-            {
-                return Err(BoundedRegularFileReadError::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "parent directory identity or type changed before file read",
-                )));
-            }
-            if cancel.is_cancelled() {
-                return Err(BoundedRegularFileReadError::Cancelled);
-            }
-
-            let handle = Self::open_regular_file_relative(&parent.handle, name)?;
-            if cancel.is_cancelled() {
-                return Err(BoundedRegularFileReadError::Cancelled);
-            }
-            let before_metadata = Self::query_regular_file_metadata(&handle)?;
-            let observed_before = Self::regular_file_observation(&before_metadata)?;
-            Self::validate_regular_file_expectation_before_read(parent, request, &observed_before)?;
+            let (handle, observed_before) = Self::open_bound_regular_file(parent, request, cancel)?;
             if observed_before.logical_bytes.0 > request.max_bytes() as u128 {
                 return Err(BoundedRegularFileReadError::LimitExceeded {
                     max_bytes: request.max_bytes(),

@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 显式重复内容分析 | 尚未实现硬链接别名排除、分阶段内容读取、完整 hash、变化复验及云占位保护。 |
+| 2 | 显式重复内容分析 | 已提供分块原生读取及跨阶段变化复验前置；硬链接别名排除、大小/采样分组、完整 hash、总资源预算及 core/CLI 接入仍未交付。 |
 | 3 | 垃圾规则扩展 | 本轮统一规则实现，但未扩大识别覆盖；仍需格式/所有权/上下文依据、误报反例和工具版本测试。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计；8,192 文件 debug 热缓存 PTY 超时的根因定位；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
@@ -561,3 +561,22 @@ macOS 整根垃圾缓存升级为 sweepx.junk-cache/v8，拒绝此前 v7 的 nat
 首轮检查中的 lifetime 借用、测试字段名及测试排序 lint 均已修正并完成检查。原生大小回归的 macOS Known 假设与真实硬链接身份缺陷按上一节分别处理；plain scan 的 macOS fixture 根改用 Unix-only canonicalization，保留生产拒绝链接祖先规则，Windows 未套用该变换。没有排除新测试、放宽 cfg 或重试到偶然通过。
 
 交付验证（arm64 macOS，Rust 1.98.0）：工作区 864 项通过、0 失败、2 项原有基准 ignored，显式排除已诊断的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations 系统 Trash 挂起；随后只升级 macOS 整根缓存 schema 并整理 scanner rustdoc，最终 core/CLI 全量 296 项通过、1 项原有基准 ignored，其余未变测试复用工作区结果，不称为再次完整矩阵。最终格式、host 工作区 all-targets/all-features clippy 和 Linux GNU/Windows GNU 工作区交叉 clippy（含测试）通过。53 份 Markdown、23 项文档检查器测试通过，analysis/core 包清单包含新增 large_files.rs。没有新性能计时或加速倍数，目标宿主运行、MSVC 与系统 Trash 成功路径仍未验收。下一步推进显式重复内容分析、垃圾规则覆盖及其他收尾项。
+
+
+## 重复检测前置：有界原生内容流（2026-10-02）
+
+现有 BoundedRegularFileReadRequest 为小配置文件一次保留整个内容，不适合大文件完整 hash。platform 新增 RegularFileStreamRequest / RegularFileStreamResult 与 stream_bound_regular_file，三个原生后端提供保留父目录下的普通文件分块读取，复用既有 no-follow 打开、身份、文件系统及 mount 检查，不从 display path 恢复权限。既有小配置文件读取的语义保留；没有新增 crate、依赖、CLI 参数或重复文件输出。
+
+请求携带原生 basename、身份/文件系统/mount expectation、offset、最大范围和可选上一阶段的 RegularFileObservation。范围拒绝超过 signed 64-bit 位置；Linux 使用明确的 pread64，不能在 32 位 off_t 配置下截断位置。共享循环保留固定 64 KiB 缓冲，先检查普通文件、绑定及跨阶段 size/change stamp，再发送各 chunk；只读实际逻辑范围，不额外读取一个 EOF 探测字节。读后身份、mount、size 与 change stamp 必须相同。短读继续，提前 EOF、异常长度、变化、取消或消费方拒绝均失败，已收到的 chunk 必须丢弃。外层再次核对精确长度，并保留消费方拒绝，不能被错误 backend 忽略后覆盖为成功。
+
+每次调用只保留一个内容句柄及有界传输缓冲；Linux 打开期间另有短暂 O_PATH pin。上层仍需限制总文件数、metadata、调用次数、累计 IO 和并发；本接口没有全局预算或目录队列。同步原生调用无法在中途强制打断，取消在打开、chunk 与复验边界检查，消费者应在工作线程调用，不宣称具有硬实时 IO deadline。结果是稳定观察区间，不是原子快照、跨文件同一时刻证明或删除授权。
+
+macOS 在元数据和内容打开前设置线程级禁止 dataless materialization，随后拒绝 SF_DATALESS。SDK sys/resource.h 与 sys/stat.h 确认 ABI，使用 [Apple XNU 的线程策略契约](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c)；仅靠读前 flag 检查不能保护观察与 read 之间的变化。guard 不可跨线程，成功显式恢复并报告恢复错误，错误或 unwind 也由 RAII 恢复。原生回归独立查询线程策略，验证作用域内 OFF、正常和提前退出后的原值；本轮未使用真实 iCloud 占位文件，云服务端到端行为仍未验收。
+
+Windows 保持 FILE_OPEN_NO_RECALL / FILE_OPEN_REPARSE_POINT 打开，并在每个 chunk 前拒绝 offline、recall 或 reparse 属性；依据 [Microsoft 占位文件指导](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/placeholders_guidance)。这些是原生标记和 no-recall 打开边界，不是对任意第三方 provider 的保证。Linux 没有覆盖任意 provider 的通用占位标志，流式读取仅准入 ext4、Btrfs、tmpfs；FUSE、overlay、远程及未知类型返回 ProviderOrOffline，不采用更弱的读取回退。Linux 新原生夹具明确使用 /dev/shm 的 tmpfs；该宿主能力不足时应报告环境缺口，不能改用未知文件系统并称为等价验证。上述收紧仅适用于新内容流，普通元数据扫描和既有小配置读取不改变。
+
+十项新增回归覆盖独立 byte slice / 普通 fs::read 与 stat 对照、非零范围和完整流、hard-link 相同身份、分阶段及读取中修改、链接替换、错误 identity、短读/提前 EOF/异常 chunk count、零/EOF 范围、取消、消费方拒绝与错误 backend 的返回值，以及原生线程策略恢复。首轮测试错误把 RootAdmission 结构体当作 enum，已按现有 API 修正；libc 未提供 SF_DATALESS，改用已核对 SDK 的公开 ABI 值，没有放宽生产检查。
+
+交付验证（arm64 macOS，Rust 1.98.0）：平台全量 97 项通过、1 项原有基准 ignored；工作区 874 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations。沙盒首次平台检查中三个 FSEvents 服务用例失败（current event ID 为零、stream 无法启动）；在普通宿主环境保留原测试重验通过，没有修改预期或排除它们。格式、affected platform 与工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 clippy（含新原生目标测试代码）、无 backend 的契约 build 和 53 份 Markdown 检查通过；platform 包清单包含新 stream、测试和 guard 模块。最后的 Linux pread64 修正只影响 Linux cfg，Linux 工作区交叉 lint 已重验，其余未变代码复用通过结果。没有性能计时或提速结论。
+
+重复检测验收项继续不勾选。下一步在 analysis 中接入大小筛选、硬链接排除、采样和完整 SHA-256，再接 core/CLI 并限制累计资源。Linux/Windows 原生运行、MSVC、真实云占位文件和实际系统 Trash 成功的独立缺口仍保留。

@@ -58,6 +58,8 @@ Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、
 
 大文件分析在既有 `sweepx-analysis` 模块中使用有界 top-K；core 的 `scan_large_files_with_store` 与普通 scan 共享一次 scanner 遍历及输出 envelope。observer 的 `on_entry` 在可选行保留/分类之前传递每个原生观察，`on_directory_coverage` 在可选 aggregate/index 保留之前传递覆盖。所需文件事实使逻辑长度缓存退回当前文件观察，不制造缺失的分配或 mount 证据；普通 junk 路径仍保留原缓存快路径。收集器只复制入榜的原生条目，分类器、垃圾候选和执行授权不参与大小排序。
 
+显式内容分析可通过 platform 的 `stream_bound_regular_file` 在保留父目录下分块读取指定范围，固定 64 KiB 缓冲，并检查跨阶段及读后原生身份、mount、大小和 change stamp；失败时 chunk 仅是临时数据，不能形成完整 hash 证明。macOS 在线程上禁止 dataless 下载，Windows 检查 no-recall/provider/reparse 边界，Linux 仅准入 ext4、Btrfs、tmpfs。调用者仍需工作线程、累计 IO/metadata/并发预算；原生同步读取的取消是协作式。这是重复检测的读取前置，尚未提供重复分组或 CLI 检测命令。
+
 `sweepx-core::junk::session` 提供显式目录根或系统自动发现的后台垃圾扫描会话，由 CLI adapter 接入 `junk --tui`。阶段、候选、边界、错误和终态使用有界背压队列，进度与目录统计合并；稳定候选键与 revision 分离。选中刷新复验原生绑定，只有完整观察才能移除旧行；取消或不完整扫描保留未确认的旧证据。TUI 只绘制可见行，选择独立于扫描，后台回收复用原生绑定检查和现有 Trash adapter。macOS 缓存存储和文件复用已迁到 core 共用；会话先发送明确标记的历史候选，再重建当前目录身份、分类及 Git 证据，完整观察后才能移除旧键。缓存失败退回现场扫描。系统全量刷新重新发现根，macOS 缓存绑定本次范围；系统模式先发现范围再读取历史预览，游标仍在发现之前捕获。Linux 临时对象保留独立的测量事实和会话身份，不制造目录 aggregate 或普通 Trash 身份；临时对象刷新整个系统范围，TUI 的 `x` 已接入独立隔离预览、精确摘要确认与结果状态；完整原生运行仍缺 Linux 宿主验证。选中目录刷新保留原始根与原生身份链，只递归所选子树，浅层枚举祖先所需的规则及 Git 标记；祖先旧统计成为历史，原生绑定仍可供再次选中刷新。祖先枚举完整与递归覆盖分开记录，父标记截断不能产生否定分类，所有所选目录都获得完整覆盖后才替换旧行。局部扫描不发布完整根报告或截断的文件索引，保留此前缓存代际，后续全量扫描仍验证其原游标。自定义全根分类器不能使用该局部接口。会话取消独立于下述持久化 `cancel` 命令。
 
 Linux 临时对象服务提供共享预算与合作式取消；目录名、递归身份指纹、进程枚举和 mount/socket 表输入都有界。资源失败不可恢复为本次完整阴性结论；报告与清理重验复用同一实现，各次调用独立建立预算和当前引用证据。

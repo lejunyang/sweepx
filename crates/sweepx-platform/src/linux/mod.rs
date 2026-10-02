@@ -431,6 +431,58 @@ impl LinuxPlatformScanner {
         })
     }
 
+    fn open_bound_regular_file(
+        parent: &LinuxDirectoryHandle,
+        request: &BoundedRegularFileReadRequest,
+        cancel: &CancellationToken,
+        require_local_content: bool,
+    ) -> Result<(OwnedFd, RegularFileObservation), BoundedRegularFileReadError> {
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        let name = Self::child_name_c_string(request.child_name()).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                BoundedRegularFileReadError::UnsafeName
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        let pinned =
+            Self::pin_child(&parent.fd, &name).map_err(Self::map_regular_file_open_error)?;
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        let pinned_observation = Self::classify_pinned_regular_file(&pinned)?;
+        if require_local_content {
+            let mut statfs = MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: pinned is a live O_PATH capability; statfs is writable storage.
+            if unsafe { libc::fstatfs(pinned.as_raw_fd(), statfs.as_mut_ptr()) } != 0 {
+                return Err(BoundedRegularFileReadError::io(io::Error::last_os_error()));
+            }
+            let kind = unsafe { statfs.assume_init() }.f_type;
+            // No portable Linux placeholder flag covers arbitrary FUSE/HSM providers. Admit
+            // only these native local filesystem families; reject overlay/remote/unknown types.
+            if !matches!(
+                kind,
+                libc::EXT4_SUPER_MAGIC | libc::BTRFS_SUPER_MAGIC | libc::TMPFS_MAGIC
+            ) {
+                return Err(BoundedRegularFileReadError::ProviderOrOffline(format!(
+                    "content residency is not established for filesystem type {kind:#x}"
+                )));
+            }
+        }
+        let read_fd = Self::open_child_regular_file(&parent.fd, &name)
+            .map_err(Self::map_regular_file_open_error)?;
+        let observed_before = Self::observe_regular_file_fd(&read_fd).map_err(|error| {
+            if error.kind() == io::ErrorKind::Unsupported {
+                BoundedRegularFileReadError::Unsupported(error.to_string())
+            } else {
+                BoundedRegularFileReadError::io(error)
+            }
+        })?;
+        Self::compare_pinned_and_opened_regular_file(&pinned_observation, &observed_before)?;
+        Self::compare_expected_regular_file(request, &observed_before)?;
+        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+
+        Ok((read_fd, observed_before))
+    }
+
     fn classify_pinned_regular_file(
         pinned: &OwnedFd,
     ) -> Result<RegularFileObservation, BoundedRegularFileReadError> {
@@ -900,36 +952,57 @@ impl PlatformScanner for LinuxPlatformScanner {
         }
     }
 
+    fn stream_regular_file_relative(
+        &self,
+        parent: &Self::DirectoryHandle,
+        request: &crate::RegularFileStreamRequest,
+        cancel: &CancellationToken,
+        consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
+    ) -> Result<crate::RegularFileStreamResult, BoundedRegularFileReadError> {
+        let binding = BoundedRegularFileReadRequest::new(
+            request.child_name().clone(),
+            request.expectation().clone(),
+            0,
+        )?;
+        let (fd, before) = Self::open_bound_regular_file(parent, &binding, cancel, true)?;
+        crate::content::stream_observed_file(
+            request,
+            cancel,
+            before,
+            |offset, buffer| {
+                loop {
+                    Self::ensure_regular_file_read_not_cancelled(cancel)?;
+                    // SAFETY: no-follow live fd, checked signed position and bounded buffer.
+                    let count = unsafe {
+                        libc::pread64(
+                            fd.as_raw_fd(),
+                            buffer.as_mut_ptr().cast(),
+                            buffer.len(),
+                            offset as libc::off64_t,
+                        )
+                    };
+                    if count >= 0 {
+                        return Ok(count as usize);
+                    }
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(Self::map_regular_file_read_error(error));
+                    }
+                }
+            },
+            || Self::observe_regular_file_fd(&fd).map_err(BoundedRegularFileReadError::io),
+            consume,
+        )
+    }
+
     fn read_regular_file_relative(
         &self,
         parent: &Self::DirectoryHandle,
         request: &BoundedRegularFileReadRequest,
         cancel: &CancellationToken,
     ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
-        Self::ensure_regular_file_read_not_cancelled(cancel)?;
-        let name = Self::child_name_c_string(request.child_name()).map_err(|error| {
-            if error.kind() == io::ErrorKind::InvalidInput {
-                BoundedRegularFileReadError::UnsafeName
-            } else {
-                BoundedRegularFileReadError::io(error)
-            }
-        })?;
-        let pinned =
-            Self::pin_child(&parent.fd, &name).map_err(Self::map_regular_file_open_error)?;
-        Self::ensure_regular_file_read_not_cancelled(cancel)?;
-        let pinned_observation = Self::classify_pinned_regular_file(&pinned)?;
-        let read_fd = Self::open_child_regular_file(&parent.fd, &name)
-            .map_err(Self::map_regular_file_open_error)?;
-        let observed_before = Self::observe_regular_file_fd(&read_fd).map_err(|error| {
-            if error.kind() == io::ErrorKind::Unsupported {
-                BoundedRegularFileReadError::Unsupported(error.to_string())
-            } else {
-                BoundedRegularFileReadError::io(error)
-            }
-        })?;
-        Self::compare_pinned_and_opened_regular_file(&pinned_observation, &observed_before)?;
-        Self::compare_expected_regular_file(request, &observed_before)?;
-        Self::ensure_regular_file_read_not_cancelled(cancel)?;
+        let (read_fd, observed_before) =
+            Self::open_bound_regular_file(parent, request, cancel, false)?;
 
         let mut bytes = Vec::new();
         let hard_cap = request.max_bytes().saturating_add(1);
