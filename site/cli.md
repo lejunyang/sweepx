@@ -52,6 +52,21 @@ human 显示独立的逻辑大小/分配大小表，最多 40 行；JSON 新增 
 
 收集器最多保留 64 MiB 的 owned-data 准入估算，包括 native lineage；这不是精确 RSS。正常 top-K 截断不表示遍历失败；未知逻辑大小、保留预算不足、取消、权限/挂载或真实遍历截断则留下明确的不完整原因，不能把空列表说成没有大文件。只做 no-follow 元数据观察，不读取内容。硬链接路径仍分别展示，分配证据未知时原样保留（macOS 当前为 unknown），也不求和冒充可回收空间。大文件不是垃圾候选，本模式没有清理操作。
 
+## 显式重复内容分析
+
+```bash
+sweepx scan --no-state --duplicates --min-duplicate-bytes 1024 /absolute/root
+sweepx --format json scan --no-state --duplicates --duplicate-read-bytes 1073741824 /absolute/root
+```
+
+`--duplicates` 在普通元数据遍历之后显式读取内容，默认包含逻辑大小至少 1 KiB 的普通文件。`--min-duplicate-bytes` 是包含等于的非负整数阈值；设为 0 才比较空文件。先按大小分组，排除同一原生对象的硬链接别名及重叠根观察，再比较最多各 4 KiB 的头尾采样。只有完整 SHA-256 相同、最终原生身份/大小/变化指纹复验成功的至少两个不同对象才进入组；采样相同不是重复证明。
+
+`--duplicate-max-files` 默认 20000、范围 1..=100000；`--duplicate-read-bytes` 默认 8 GiB、范围 1..=9223372036854775807；`--duplicate-deadline-ms` 默认 30000、范围 1..=300000。四个参数都要求 `--duplicates`，该模式与 `--tui`、`--large-files` 互斥。整个调用共享最多 64 MiB 的 owned-data 准入估算（不是精确 RSS）、每个文件最大 8 GiB 和最多 max-files × 4 次内容阶段范围请求，包括最终零字节复验。后端还有有界元数据打开/探测，不计为内容阶段请求。单次只读取一个文件、使用固定 64 KiB 缓冲，没有并行内容读取。总读取预算在每次请求前扣除，包括采样和完整 hash；失败/短读不退还，实际交付字节单独计数。期限及取消在原生调用/chunk 边界合作检查，不能中断阻塞的内核调用。
+
+JSON 在 `data.duplicates` 输出 `options`、`groups`、`observedFiles`、`retainedFiles`、`hardLinkAliasesExcluded`、`readBudgetChargedBytes`、`deliveredBytes`、`readOperations`、`complete` 和 `incompleteReasons`。每组包含 `sha256`、`logicalBytes` 和携带原生证据的 `files`；字段、十进制字节字符串及枚举不随 locale 变化。human 显示完整摘要和最多 40 个组内路径。普通扫描未启用分析时不增加此字段；分析不依赖被截断的普通结果列表。覆盖/元数据/保留量/读取预算/期限/取消/变化/provider/读取失败各自保留缺口，空的不完整报告不证明没有重复文件；整体为 partial 时返回 4。
+
+内容读取沿保留的原生根/父目录身份链执行，不从显示路径恢复权限，不跟随链接或跨挂载。macOS 禁止线程内 dataless materialization；Windows 保留 no-recall 并拒绝 offline/recall/reparse 属性；Linux 仅准入 ext4、Btrfs、tmpfs，FUSE、overlay、远程及未知文件系统保持 `provider_or_offline`。未知分配大小不升级为零；结果不选择保留者、不合计可回收空间、不形成垃圾分类或删除授权。当前不持久缓存内容 hash，跨文件结果不是原子快照，实际云服务行为仍需宿主验证。
+
 ## 安装
 
 正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。

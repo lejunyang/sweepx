@@ -13,6 +13,167 @@ use sweepx_protocol::{
 };
 use tempfile::TempDir;
 
+fn duplicate_fixture() -> (TempDir, PathBuf) {
+    // Content tests need a supported local filesystem, independently of the host's /tmp mount.
+    #[cfg(target_os = "linux")]
+    let fixture = tempfile::tempdir_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let fixture = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = fixture.path().canonicalize().unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    (fixture, root)
+}
+
+#[test]
+fn duplicate_content_scan_reports_full_hashes_and_distinct_objects_in_both_locales() {
+    let (_fixture, root) = duplicate_fixture();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("one"), b"abc").unwrap();
+    fs::write(root.join("nested/two"), b"abc").unwrap();
+    fs::write(root.join("different"), b"abd").unwrap();
+    fs::hard_link(root.join("one"), root.join("alias")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("one"), root.join("link")).unwrap();
+    let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    for locale in ["en-US", "zh-CN"] {
+        let output = cli_command()
+            .timeout(std::time::Duration::from_secs(10))
+            .args([
+                "--locale",
+                locale,
+                "--format",
+                "json",
+                "scan",
+                "--no-state",
+                "--duplicates",
+                "--min-duplicate-bytes",
+                "3",
+            ])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let report = &value["data"]["duplicates"];
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["options"]["minimumLogicalBytes"], "3");
+        assert_eq!(report["hardLinkAliasesExcluded"], "1");
+        let groups = report["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["sha256"], digest);
+        assert_eq!(groups[0]["logicalBytes"], "3");
+        let files = groups[0]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        let mut identities = BTreeSet::new();
+        for file in files {
+            assert_eq!(file["objectType"], "file");
+            assert!(file.get("nativeLocator").is_some());
+            identities
+                .insert(serde_json::to_string(&file["identity"]["platformFileIdentity"]).unwrap());
+            assert_eq!(
+                fs::read(file["displayPath"].as_str().unwrap()).unwrap(),
+                b"abc"
+            );
+        }
+        assert_eq!(identities.len(), 2);
+        assert!(groups[0].get("keeper").is_none() && groups[0].get("reclaimableBytes").is_none());
+    }
+    let output = cli_command()
+        .timeout(std::time::Duration::from_secs(10))
+        .args([
+            "--locale",
+            "en-US",
+            "scan",
+            "--no-state",
+            "--duplicates",
+            "--min-duplicate-bytes",
+            "3",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Duplicate-content groups") && text.contains(digest));
+    assert!(text.contains("does not establish disposability"));
+    assert_eq!(fs::read(root.join("one")).unwrap(), b"abc");
+    assert_eq!(fs::read(root.join("different")).unwrap(), b"abd");
+}
+
+#[test]
+fn duplicate_limits_return_explicit_partial_reports_without_hashes() {
+    let (_fixture, root) = duplicate_fixture();
+    fs::write(root.join("one"), b"abc").unwrap();
+    fs::write(root.join("two"), b"abc").unwrap();
+    for (flag, limit, reason) in [
+        ("--duplicate-read-bytes", "1", "read_limit"),
+        ("--duplicate-max-files", "1", "retention_limit"),
+    ] {
+        let output = cli_command()
+            .timeout(std::time::Duration::from_secs(10))
+            .args([
+                "--format",
+                "json",
+                "scan",
+                "--no-state",
+                "--duplicates",
+                "--min-duplicate-bytes",
+                "0",
+                flag,
+                limit,
+            ])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["status"], "partial");
+        let report = &value["data"]["duplicates"];
+        assert_eq!(report["complete"], false);
+        assert!(report["groups"].as_array().unwrap().is_empty());
+        assert!(
+            report["incompleteReasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason))
+        );
+        assert_eq!(report["readOperations"], "0");
+    }
+    assert_eq!(fs::read(root.join("two")).unwrap(), b"abc");
+}
+
+#[test]
+fn duplicate_options_require_opt_in_and_plain_scan_has_no_content_report() {
+    for args in [
+        vec!["scan", "--min-duplicate-bytes", "1"],
+        vec!["scan", "--duplicate-read-bytes", "1"],
+        vec!["scan", "--duplicate-max-files", "1"],
+        vec!["scan", "--duplicate-deadline-ms", "1"],
+        vec!["scan", "--duplicates", "--tui"],
+        vec!["scan", "--duplicates", "--large-files"],
+        vec!["scan", "--duplicates", "--duplicate-read-bytes", "0"],
+        vec!["scan", "--duplicates", "--duplicate-max-files", "100001"],
+        vec!["scan", "--duplicates", "--duplicate-deadline-ms", "300001"],
+    ] {
+        cli_command().args(args).assert().code(2);
+    }
+    let (_fixture, root) = duplicate_fixture();
+    let output = cli_command()
+        .args(["--format", "json", "scan", "--no-state"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["data"].get("duplicates").is_none());
+}
+
 #[test]
 fn large_file_scan_reports_independent_ranked_metadata_in_both_locales() {
     let fixture = TempDir::new().unwrap();

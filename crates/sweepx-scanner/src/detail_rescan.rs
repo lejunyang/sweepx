@@ -20,6 +20,9 @@ use sweepx_platform::{
 };
 use thiserror::Error;
 
+mod file_content;
+pub use file_content::{FileContentError, FileContentRequest};
+
 use super::{
     EvidenceAccumulator, ORDINARY_SCAN_MAX_ORDINAL, complete_coverage, native_locator_evidence,
     native_path_component, scan_object_identity, scanned_entry_from_metadata,

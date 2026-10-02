@@ -1,7 +1,13 @@
 mod candidate;
 mod digest;
+mod duplicates;
 mod explain;
 mod large_files;
+
+pub use duplicates::{
+    DuplicateCollector, DuplicateContentSource, DuplicateGroup, DuplicateIncompleteReason,
+    DuplicateOptions, DuplicateOptionsError, DuplicateReport,
+};
 
 pub use large_files::{
     LargeFileCollector, LargeFileIncompleteReason, LargeFileOptions, LargeFileOptionsError,

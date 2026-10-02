@@ -178,6 +178,21 @@ enum Commands {
         /// Rank ordinary files by logical size during the same metadata walk; report-only.
         #[arg(long, conflicts_with = "tui")]
         large_files: bool,
+        /// Explicitly read local file content to report duplicate SHA-256 groups; read-only.
+        #[arg(long, conflicts_with_all = ["tui", "large_files"])]
+        duplicates: bool,
+        /// Inclusive logical-byte threshold for --duplicates (default 1 KiB).
+        #[arg(long, requires = "duplicates", default_value_t = 1024)]
+        min_duplicate_bytes: u128,
+        /// Total attempted content-range bytes; failed reads remain charged (default 8 GiB).
+        #[arg(long, requires = "duplicates", default_value_t = 8 * 1024 * 1024 * 1024u64, value_parser = clap::value_parser!(u64).range(1..=i64::MAX as u64))]
+        duplicate_read_bytes: u64,
+        /// Distinct retained native file objects (default 20000, maximum 100000).
+        #[arg(long, requires = "duplicates", default_value_t = 20000, value_parser = clap::value_parser!(u32).range(1..=100000))]
+        duplicate_max_files: u32,
+        /// Cooperative content-phase deadline in milliseconds (default 30000, maximum 300000).
+        #[arg(long, requires = "duplicates", default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=300000))]
+        duplicate_deadline_ms: u64,
         /// Inclusive exact logical-byte threshold for --large-files (default 100 MiB).
         #[arg(long, requires = "large_files", default_value_t = 100 * 1024 * 1024)]
         min_file_bytes: u128,
@@ -384,6 +399,11 @@ fn main() -> ProcessExitCode {
         Commands::Scan {
             tui,
             large_files,
+            duplicates,
+            min_duplicate_bytes,
+            duplicate_read_bytes,
+            duplicate_max_files,
+            duplicate_deadline_ms,
             min_file_bytes,
             top_files,
             no_state,
@@ -437,7 +457,25 @@ fn main() -> ProcessExitCode {
                 tui,
                 format == OutputFormat::Human,
             );
-            let scan = if large_files {
+            let scan = if duplicates {
+                sweepx_core::scan_duplicates_with_store(
+                    &context,
+                    &ScanRequest {
+                        roots,
+                        state_dir: state_dir.clone(),
+                    },
+                    store.as_ref(),
+                    &sweepx_core::DuplicateOptions {
+                        minimum_logical_bytes: min_duplicate_bytes.into(),
+                        max_read_bytes: duplicate_read_bytes,
+                        max_files: duplicate_max_files as usize,
+                        max_duration_ms: duplicate_deadline_ms,
+                        max_read_operations: duplicate_max_files as usize * 4,
+                        ..Default::default()
+                    },
+                    &CancellationToken::new(),
+                )
+            } else if large_files {
                 let request = ScanRequest {
                     roots,
                     state_dir: state_dir.clone(),

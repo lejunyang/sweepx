@@ -1157,6 +1157,7 @@ dependencies = [
  "sha2",
  "sweepx-canonical",
  "sweepx-model",
+ "sweepx-platform",
  "sweepx-scanner",
  "thiserror",
 ]

@@ -51,6 +51,21 @@ Human output adds a separate logical/allocated table, displaying at most 40 rows
 
 The collector admits at most a 64 MiB owned-data estimate, including native lineage; this is not exact RSS. Intentional top-K truncation is distinct from unknown logical lengths, retention pressure, cancellation, permission/mount boundaries or incomplete traversal. Those gaps remain explicit; an incomplete empty ranking does not prove absence. This performs no-follow metadata observation without reading contents. Hard-link paths remain separate aliases. Unknown allocation stays unknown (currently the macOS contract), and no sum is presented as reclaimable space. Large files are not junk candidates; this mode provides no cleanup operation.
 
+## Explicit duplicate-content analysis
+
+```bash
+sweepx scan --no-state --duplicates --min-duplicate-bytes 1024 /absolute/root
+sweepx --format json scan --no-state --duplicates --duplicate-read-bytes 1073741824 /absolute/root
+```
+
+`--duplicates` explicitly reads content after the ordinary metadata walk. The default inclusive logical-size threshold is 1 KiB; `--min-duplicate-bytes 0` also compares empty files. Size grouping excludes same-object hard-link aliases and repeated observations from overlapping roots, then screens up to 4 KiB each from the prefix and suffix. Samples do not prove duplicate content. A group requires at least two distinct objects with matching complete SHA-256 hashes and successful final native identity, length and change-stamp validation.
+
+`--duplicate-max-files` defaults to 20000 and allows 1..=100000; `--duplicate-read-bytes` defaults to 8 GiB and allows 1..=9223372036854775807; `--duplicate-deadline-ms` defaults to 30000 and allows 1..=300000. All four options require `--duplicates`, which conflicts with `--tui` and `--large-files`. One invocation shares a 64 MiB owned-data admission estimate (not exact RSS), an 8 GiB per-file limit, and at most max-files × 4 content-stage range requests, including zero-byte final revalidation. Backends also perform bounded metadata opens/probes, separate from content-stage requests. Content reads are serial with a fixed 64 KiB buffer. Requested ranges are charged before each attempt, including samples and full hashes; failures/short reads do not refund the budget. Delivered bytes are counted separately. Deadlines and cancellation are cooperative between native calls/chunks, without preempting blocked kernel calls.
+
+JSON adds `data.duplicates` with `options`, `groups`, `observedFiles`, `retainedFiles`, `hardLinkAliasesExcluded`, `readBudgetChargedBytes`, `deliveredBytes`, `readOperations`, `complete` and `incompleteReasons`. Each group contains `sha256`, `logicalBytes` and `files` preserving native evidence. Machine fields, decimal byte strings and enum values do not change with locale. Human output displays complete digests and at most 40 grouped paths. Plain scan output has no additional field when analysis is disabled; analysis does not depend on the truncated ordinary listing. Traversal/metadata/retention/read-limit/deadline/cancellation/change/provider/read failures remain distinct gaps. An incomplete empty report does not prove absence; a partial overall scan returns 4.
+
+Reads use retained native root/parent lineage, without recovering authority from display paths, following links or crossing mounts. macOS prohibits thread-local dataless materialization; Windows preserves no-recall and refuses offline/recall/reparse attributes; Linux admits only ext4, Btrfs and tmpfs, reporting `provider_or_offline` for FUSE, overlay, remote or unknown filesystems. Unknown allocation stays unknown. Results select no keeper, sum no reclaimable space, and grant no junk classification or deletion authority. Content hashes are not persistently cached; cross-file results are not an atomic snapshot, and actual cloud-provider behavior still needs host validation.
+
 ## Install
 
 A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.

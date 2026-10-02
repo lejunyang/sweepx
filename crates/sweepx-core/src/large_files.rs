@@ -1,7 +1,10 @@
 //! Independent file ranking shares the ordinary scan, output envelope and native boundaries.
 
 use super::*;
-use sweepx_analysis::LargeFileCollector;
+use sweepx_analysis::{
+    DuplicateCollector, DuplicateContentSource, DuplicateOptions, DuplicateReport,
+    LargeFileCollector,
+};
 use sweepx_scanner::ClassifiedScanObserver;
 
 /// Runs the ordinary read-only scan and an independent bounded file ranking in the same walk.
@@ -25,18 +28,52 @@ pub fn scan_large_files_with_store<S: SnapshotStore>(
         None,
         None,
         None,
-        Some(LargeFileObservation { options, cancel }),
+        Some(FileAnalysisObservation {
+            options: FileAnalysisOptions::Large(options),
+            cancel,
+        }),
     )
     .map(|result| result.scan)
 }
 
-pub(super) struct LargeFileObservation<'a> {
-    pub options: &'a LargeFileOptions,
+pub(super) enum FileAnalysisOptions<'a> {
+    Large(&'a LargeFileOptions),
+    Duplicates(&'a DuplicateOptions),
+}
+pub(super) struct FileAnalysisObservation<'a> {
+    pub options: FileAnalysisOptions<'a>,
     pub cancel: &'a CancellationToken,
 }
-
-pub(super) struct LargeFileObserver {
-    collector: LargeFileCollector,
+enum FileCollector {
+    Large(LargeFileCollector),
+    Duplicates(DuplicateCollector),
+}
+pub(super) enum FileAnalysisReport {
+    Large(LargeFileReport),
+    Duplicates(DuplicateReport),
+}
+impl FileAnalysisReport {
+    pub(super) fn complete(&self) -> bool {
+        match self {
+            Self::Large(report) => report.complete,
+            Self::Duplicates(report) => report.complete,
+        }
+    }
+    pub(super) fn into_data(self) -> (&'static str, Value) {
+        match self {
+            Self::Large(report) => (
+                "largeFiles",
+                camelize_json_keys(serde_json::to_value(report).expect("large file report")),
+            ),
+            Self::Duplicates(report) => (
+                "duplicates",
+                camelize_json_keys(serde_json::to_value(report).expect("duplicate report")),
+            ),
+        }
+    }
+}
+pub(super) struct FileAnalysisObserver {
+    collector: FileCollector,
     finished: bool,
     incomplete: bool,
     expected_roots: usize,
@@ -44,10 +81,20 @@ pub(super) struct LargeFileObserver {
     current_root: Option<PathBuf>,
 }
 
-impl LargeFileObserver {
-    pub(super) fn new(options: LargeFileOptions, expected_roots: usize) -> Result<Self, CoreError> {
+impl FileAnalysisObserver {
+    pub(super) fn new(
+        options: FileAnalysisOptions<'_>,
+        expected_roots: usize,
+    ) -> Result<Self, CoreError> {
         Ok(Self {
-            collector: LargeFileCollector::new(options)?,
+            collector: match options {
+                FileAnalysisOptions::Large(options) => {
+                    FileCollector::Large(LargeFileCollector::new(options.clone())?)
+                }
+                FileAnalysisOptions::Duplicates(options) => {
+                    FileCollector::Duplicates(DuplicateCollector::new(options.clone())?)
+                }
+            },
             finished: false,
             incomplete: false,
             expected_roots,
@@ -56,19 +103,33 @@ impl LargeFileObserver {
         })
     }
 
-    pub(super) fn finish(self, cancelled: bool) -> LargeFileReport {
-        self.collector.finish(
-            self.finished
-                && !self.incomplete
-                && !cancelled
-                && self.completed_roots == self.expected_roots,
-        )
+    pub(super) fn finish(
+        self,
+        cancelled: bool,
+        source: &mut dyn DuplicateContentSource,
+        cancel: &CancellationToken,
+    ) -> FileAnalysisReport {
+        let complete = self.finished
+            && !self.incomplete
+            && !cancelled
+            && self.completed_roots == self.expected_roots;
+        match self.collector {
+            FileCollector::Large(collector) => {
+                FileAnalysisReport::Large(collector.finish(complete))
+            }
+            FileCollector::Duplicates(collector) => {
+                FileAnalysisReport::Duplicates(collector.analyze(source, complete, cancel))
+            }
+        }
     }
 }
 
-impl ClassifiedScanObserver for LargeFileObserver {
+impl ClassifiedScanObserver for FileAnalysisObserver {
     fn on_entry(&mut self, entry: &ScannedEntry) {
-        self.collector.observe(entry);
+        match &mut self.collector {
+            FileCollector::Large(collector) => collector.observe(entry),
+            FileCollector::Duplicates(collector) => collector.observe(entry),
+        }
     }
 
     fn wants_file_observations(&self) -> bool {
@@ -211,7 +272,10 @@ mod tests {
             None,
             None,
             None,
-            Some(LargeFileObservation { options, cancel }),
+            Some(FileAnalysisObservation {
+                options: FileAnalysisOptions::Large(options),
+                cancel,
+            }),
         )
         .unwrap()
         .scan

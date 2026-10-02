@@ -8,7 +8,7 @@ pub use acceleration::{
 };
 pub use detail_rescan::{
     DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest,
-    DetailRescanResult, DetailRescanner,
+    DetailRescanResult, DetailRescanner, FileContentError, FileContentRequest,
 };
 pub use locator_reader::{
     CargoConfigMemberObservation, CargoConfigMemberPresenceObservation, CargoConfigPairConsistency,
@@ -265,6 +265,12 @@ pub trait ScanSink {
     /// precondition for reusing that subtree later. Default no-op for sinks that do not cache.
     fn note_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
+    /// Reports native traversal coverage before retention losses weaken stored aggregates.
+    /// Live analyses receive every boundary themselves and can distinguish an omitted log from
+    /// an unvisited subtree. This hook does not establish reusable cache or clean authority;
+    /// consumers needing retained evidence must use `note_directory_coverage` instead.
+    fn note_native_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
+
     /// Records an unchanged cached file under its current parent, including its next-generation listing.
     ///
     /// The classified sink uses it to keep the parent's file-marker set complete for marker-based
@@ -414,8 +420,9 @@ pub trait ClassifiedScanObserver {
     /// Reports a boundary even when the retained boundary log is full.
     fn on_boundary(&mut self, _boundary: &BoundaryRecord) {}
 
-    /// Receives recursive coverage before optional aggregate/index retention, for every directory.
-    /// A truncated result listing is distinct from an unobserved filesystem subtree.
+    /// Receives native recursive coverage before optional row, boundary-log or aggregate retention
+    /// losses weaken stored coverage. Combine with live boundaries/errors for the analysis scope;
+    /// this does not upgrade retained summaries, classifications or cache reuse authority.
     fn on_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
     /// Reports a committed directory batch as lower-bound statistics.
@@ -1093,10 +1100,13 @@ impl ScanSink for CollectingScanSink<'_> {
             .and_then(ClassifiedScanObserver::preferred_directory)
     }
 
-    fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+    fn note_native_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
         if let Some(observer) = self.observer.as_deref_mut() {
             observer.on_directory_coverage(path, coverage);
         }
+    }
+
+    fn note_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
         if let Some(paths) = self.selected_paths {
             for (index, selected) in paths.iter().enumerate() {
                 if path == selected {
@@ -2792,7 +2802,17 @@ where
         // aggregates were flagged `resource_limit` purely because the scan produced more rows
         // than the result buffer holds. The truncation is still visible as a boundary record, so
         // the *listing* is honestly reported as partial while the *totals* stay exact.
-        if sink.overflow_count() > overflow_count_before {
+        let retention_overflow = sink.overflow_count() > overflow_count_before;
+        if retention_overflow {
+            // Live consumers already received each boundary. Preserve the native walk's coverage
+            // separately while keeping stored summaries and reuse indexes conservative. Normal
+            // scans reuse the final aggregate below, avoiding a second aggregate computation.
+            for (path, state) in &directory_states {
+                sink.note_native_directory_coverage(
+                    path,
+                    &state.aggregate(&self.options.scan_id, true).coverage,
+                );
+            }
             mark_all_open_incomplete(&mut directory_states, ReasonCode::ResourceLimit);
         }
 
@@ -2804,6 +2824,9 @@ where
             left.directory_identity.cmp(&right.directory_identity)
         });
         for (path, aggregate) in aggregates {
+            if !retention_overflow {
+                sink.note_native_directory_coverage(&path, &aggregate.coverage);
+            }
             // Report the directory path and its coverage before the sink possibly drops the
             // aggregate; used to record full subtree coverage for the reuse index.
             sink.note_directory_coverage(&path, &aggregate.coverage);
@@ -2882,6 +2905,7 @@ fn emit_closed_subtree(
 ) -> Result<(), ScanError> {
     let state = states.remove(path).expect("closed subtree retained");
     let aggregate = state.into_aggregate(scan_id);
+    sink.note_native_directory_coverage(path, &aggregate.coverage);
     sink.note_directory_coverage(path, &aggregate.coverage);
     sink.push_aggregate(root, aggregate)
 }
@@ -4143,6 +4167,103 @@ mod tests {
             (!self.statistics.is_empty())
                 .then(|| self.preference_after_batch.clone())
                 .flatten()
+        }
+    }
+
+    #[test]
+    fn live_traversal_coverage_does_not_upgrade_retention_limited_cache_evidence() {
+        #[derive(Default)]
+        struct CoverageObserver {
+            coverage: BTreeMap<PathBuf, Coverage>,
+        }
+        impl ClassifiedScanObserver for CoverageObserver {
+            fn on_directory_coverage(&mut self, path: &Path, coverage: &Coverage) {
+                assert!(
+                    self.coverage
+                        .insert(path.to_path_buf(), coverage.clone())
+                        .is_none()
+                );
+            }
+        }
+        struct RootCandidate;
+        impl JunkClassifier for RootCandidate {
+            fn classify(
+                &self,
+                _: &ScannedEntry,
+                _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+            ) -> Option<String> {
+                Some("fixture:root".into())
+            }
+        }
+        for directory_limit in [usize::MAX, 1] {
+            let root = test_path("root");
+            let file = root.join("file");
+            let link = root.join("link");
+            // Classified scans do not retain ordinary file rows, so a row cap alone cannot
+            // create this loss. A real link boundary with zero log capacity exercises it.
+            let platform = FakePlatform::new(
+                root.clone(),
+                vec![test_entry(&root, "file"), test_entry(&root, "link")],
+                BTreeMap::from([
+                    (
+                        file.clone(),
+                        WalkEntry::File(test_metadata(file, "file", EntryKind::File, Some(1))),
+                    ),
+                    (
+                        link.clone(),
+                        WalkEntry::Link(test_metadata(link, "link", EntryKind::Symlink, Some(1))),
+                    ),
+                ]),
+            )
+            .with_batch_size(1);
+            let mut observer = CoverageObserver::default();
+            let result = Scanner::new(
+                platform,
+                ScannerOptions {
+                    resource_limits: ScanResourceLimits {
+                        max_retained_entries: 1,
+                        max_retained_boundaries: 0,
+                        max_directory_entries: directory_limit,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .scan_classified_with_observer(
+                &[ScanRoot::new(root.clone()).unwrap()],
+                &CancellationToken::new(),
+                &RootCandidate,
+                None,
+                &mut observer,
+            )
+            .unwrap();
+            assert!(result.summary.boundaries.is_empty());
+            assert!(!result.covered_paths.is_empty());
+            assert!(
+                result.covered_paths.values().all(|complete| !complete),
+                "retained cache evidence remains conservative"
+            );
+            assert!(
+                result
+                    .summary
+                    .aggregates
+                    .iter()
+                    .all(|aggregate| !aggregate.coverage.complete)
+            );
+            if directory_limit == usize::MAX {
+                assert_eq!(
+                    observer.coverage.len(),
+                    1,
+                    "controlled root has only a file and link"
+                );
+                assert!(observer.coverage.values().all(|coverage| coverage.complete));
+                assert!(observer.coverage[&root].complete);
+            } else {
+                assert!(
+                    !observer.coverage[&root].complete,
+                    "real traversal truncation remains a gap"
+                );
+            }
         }
     }
 

@@ -2,8 +2,10 @@ mod cache_validity;
 mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;
+mod duplicates;
 pub mod junk;
 mod large_files;
+pub use duplicates::scan_duplicates_with_store;
 pub mod tools;
 pub use large_files::scan_large_files_with_store;
 use std::collections::BTreeMap;
@@ -14,7 +16,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub use sweepx_analysis::{LargeFileOptions, LargeFileReport};
+pub use sweepx_analysis::{DuplicateOptions, DuplicateReport, LargeFileOptions, LargeFileReport};
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -448,6 +450,9 @@ pub enum CoreError {
     /// Invalid top-K or retained-data bounds, rejected before traversal.
     #[error(transparent)]
     InvalidLargeFileOptions(#[from] sweepx_analysis::LargeFileOptionsError),
+    /// Invalid explicit content-analysis limits, rejected before traversal.
+    #[error(transparent)]
+    InvalidDuplicateOptions(#[from] sweepx_analysis::DuplicateOptionsError),
     #[error("analysis input path must be absolute: {0}")]
     NonAbsoluteAnalysisInput(PathBuf),
     #[error("analysis input exceeds byte limit: limit={limit}, observed={observed}")]
@@ -1081,7 +1086,7 @@ fn scan_with_store_options<S: SnapshotStore>(
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
     live: Option<JunkScanObservation<'_>>,
-    large_files: Option<large_files::LargeFileObservation<'_>>,
+    large_files: Option<large_files::FileAnalysisObservation<'_>>,
 ) -> Result<ScanWorkResult, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
@@ -1162,9 +1167,7 @@ fn scan_with_store_options<S: SnapshotStore>(
         let default_cancel = CancellationToken::new();
         let large_cancel = large_files.as_ref().map(|request| request.cancel);
         let mut large_observer = large_files
-            .map(|request| {
-                large_files::LargeFileObserver::new(request.options.clone(), roots.len())
-            })
+            .map(|request| large_files::FileAnalysisObserver::new(request.options, roots.len()))
             .transpose()?;
         let mut live = live;
         let cancel = large_cancel
@@ -1217,7 +1220,6 @@ fn scan_with_store_options<S: SnapshotStore>(
         };
         let stored_preview =
             store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
-        let finished_at = timestamp_now();
         // A bounded progress log is not a reliable cancellation flag: its final marker can
         // replace earlier observations. Caller-owned cancellation is the authoritative signal.
         let mut status = if cancel.is_cancelled() {
@@ -1225,12 +1227,23 @@ fn scan_with_store_options<S: SnapshotStore>(
         } else {
             scan_status(&summary)
         };
-        let large_report = large_observer.map(|observer| observer.finish(cancel.is_cancelled()));
+        let mut content_reader = sweepx_scanner::DetailRescanner::new(
+            HostPlatformScanner::new(),
+            sweepx_platform::ScanResourceLimits::default(),
+        );
+        let large_report = large_observer
+            .map(|observer| observer.finish(cancel.is_cancelled(), &mut content_reader, cancel));
+        if cancel.is_cancelled() {
+            status = OutputStatus::Cancelled;
+        }
         if status == OutputStatus::Ok
-            && large_report.as_ref().is_some_and(|report| !report.complete)
+            && large_report
+                .as_ref()
+                .is_some_and(|report| !report.complete())
         {
             status = OutputStatus::Partial;
         }
+        let finished_at = timestamp_now();
         let cache_metadata = cache_preview_metadata(&summary, &loaded_preview, &stored_preview);
 
         let mut output = OutputEnvelope::new(
@@ -1267,9 +1280,8 @@ fn scan_with_store_options<S: SnapshotStore>(
             })).collect::<Vec<_>>()
         }));
         if let Some(report) = large_report {
-            output.data["largeFiles"] = camelize_json_keys(
-                serde_json::to_value(report).expect("large-file report serializable"),
-            );
+            let (key, data) = report.into_data();
+            output.data[key] = data;
         }
 
         if status == OutputStatus::Partial {
@@ -3016,6 +3028,13 @@ fn render_human_scan_output(
         Locale::EnUs => ">= marks a lower bound from an incomplete scan. Reclaimable estimates exclusive allocated disk bytes that removal may release; it is not logical file size or a guarantee.".to_string(),
     });
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
+    duplicates::append_human_groups(
+        context.locale(),
+        &output.data,
+        &mut lines,
+        max_rows,
+        size_unit,
+    );
     large_files::append_human_ranking(
         context.locale(),
         &output.data,
@@ -5395,6 +5414,7 @@ pub fn core_error_exit_code(error: &CoreError) -> ExitCode {
         | CoreError::InvalidReplayCursor(_)
         | CoreError::InvalidAnalysisInputLimit
         | CoreError::InvalidLargeFileOptions(_)
+        | CoreError::InvalidDuplicateOptions(_)
         | CoreError::NonAbsoluteAnalysisInput(_)
         | CoreError::AnalysisInputTooLarge { .. }
         | CoreError::AnalysisInputJson(_)
