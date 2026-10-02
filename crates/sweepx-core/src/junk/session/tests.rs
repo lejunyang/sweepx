@@ -1437,3 +1437,75 @@ fn legacy_svelte_content_changes_are_reobserved_in_selected_and_full_revisions()
     assert!(rows[&key].candidate.project_execution_blocker().is_some());
     assert_eq!(fs::read(config).unwrap(), SVELTEKIT2_CONFIG.as_bytes());
 }
+
+#[test]
+fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let target = project(&root, "project", b"positive-row");
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.include_platform_rules = true;
+    let shared = Arc::new(Shared::new(request.limits));
+    let job = Job {
+        revision: JunkSessionRevision(1),
+        selected: None,
+        cancel: CancellationToken::new(),
+    };
+    let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+    let mut worker = Worker {
+        request,
+        session_id: "controlled-incomplete-tool-discovery".into(),
+        current: Rows::new(),
+        preview_keys: BTreeSet::new(),
+        scan_roots: Vec::new(),
+    };
+    worker
+        .run_with_discovery(&job, &mut writer, |_| {
+            let rule = super::super::platform::load_platform_junk_rules()
+                .unwrap()
+                .into_iter()
+                .find(|rule| rule.root_kind == "npm_reported_cache")
+                .unwrap();
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let evidence = super::super::platform::PlatformJunkEvidence::precompute_with_cancel(
+                std::slice::from_ref(&rule),
+                cancel,
+            );
+            assert!(evidence.layout_failure().is_none());
+            assert_eq!(
+                evidence.tool_discovery_failure(),
+                Some(crate::tools::ToolDiscoveryFailure::Cancelled)
+            );
+            Ok((
+                PlatformJunkSetup {
+                    rules: vec![rule],
+                    evidence,
+                },
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+    let session = JunkSession { shared };
+    let events = drain(&session, job.revision);
+    assert!(events.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Error(failure) if failure.code == "discovery_incomplete")));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Partial,
+            ..
+        }
+    ));
+    let rows = current(&events);
+    assert_eq!(rows.len(), 1);
+    let row = rows.values().next().unwrap();
+    assert_eq!(row.observed_native_path().as_ref(), Some(&target));
+    assert_eq!(
+        row.logical_bytes(),
+        &sweepx_platform::known_u128(u128::from(
+            fs::symlink_metadata(target.join("payload")).unwrap().len()
+        ))
+    );
+    assert_eq!(fs::read(target.join("payload")).unwrap(), b"positive-row");
+    session.close();
+}

@@ -111,6 +111,8 @@ sweepx --format ndjson scan /absolute/path/to/root
 
 Dart 与 SvelteKit 候选使用有界原生内容观察，JSON 的 `projectFormat` 包含 `profile`、`status`、`reason`；状态为 `not_checked`、`recognized`、`invalid` 或 `unknown`，跨语言稳定。无内容 profile 的行该字段为 `null`。缓存命中也重新观察，TUI 显示格式阶段和结果。Dart 识别 pub v2 自声明格式及父根引用；SvelteKit 检查 legacy JSON 配置和生成声明签名，读取后再复验两个文件，仍明确非原子。它不解析完整 TypeScript、不求值 JS 配置或证明工具版本、独占归属与无活动。两类 profile 均仅报告，`junk --trash`、TUI 与后台回收拒绝。默认单文件 256 KiB、累计最坏请求 32 MiB、最多 128 项、合作期限 5 秒；SvelteKit 每项预留四次完整读取（最多 1 MiB），因此纯 SvelteKit 批次最多 32 项。`junk --timings` 的 `projectFormats` 单独计时；无新命令选项。
 
+系统扫描中的 npm 安装发现共享 4,096 次文件系统观察、64 个安装、4 MiB 累计准入估算、单路径/环境值 64 KiB，以及工具调用的 10 秒期限和取消。相同缓存路径只观察一次直接子项修改时间；这不是精确最后使用时间，截断不返回部分最大值。JSON 的 `npmDiscovery.complete` 与 `incompleteReason` 跨语言稳定；发现缺口使报告为 partial、退出码 4，并拒绝整根候选缓存复用，保留已确认的安装/候选及未知字段；显式项目根未请求发现时，该对象为 `null`。边界在同步原生调用之间检查，不能强制中断阻塞内核操作。
+
 ## 状态快照与取消
 
 Linux 或 macOS 上从 scan 输出取得 `operationId` 后，可以查询对应的 terminal snapshot：

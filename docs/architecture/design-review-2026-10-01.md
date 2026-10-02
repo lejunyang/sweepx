@@ -452,7 +452,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
 | 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；完整语言语义、真实工具版本采集、独占所有权/活动依据仍缺失。 |
 
-另外保留独立收尾项：其他工具发现路径的资源审计；8,192 文件 debug 热缓存 PTY 超时的根因定位；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
+另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举已补共享预算与去重，工具缓存根及指纹等路径仍待审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含本轮受控共享缓存正例的 ProbeUnavailable，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
 crate 已从 22 收敛到 17，core 与终端依赖已分离；第二轮未发现进一步合并的明确收益。继续合并不作为独立待办，只有具体契约、所有权或依赖收益成立时再评估。
 
@@ -652,3 +652,23 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 本阶段验证：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 串行运行 918 项通过、0 失败、2 项原有基准 ignored。已诊断的宿主系统 Trash 挂起用例仍显式排除，未验证实际 Trash 成功。为与交叉编译资源分开，本轮先完成测试再执行 lint；上一阶段 300 ms 工具成功探测的并行超时根因仍未解决，串行通过不等于其并行稳定性已证明。
 
 最终 host 工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 lint（包含测试代码）、fmt/diff、53 份 Markdown 检查通过；core 包清单包含新增 SvelteKit 模块。未运行 Linux/Windows 原生、MSVC、实际云 provider 或对应 SDK 版本录制，不据此关闭规则扩展和整体路线图。
+
+
+## npm 安装发现资源边界与热缓存诊断（2026-10-02）
+
+此前 npm 安装发现无上限枚举各管理器版本及 PATH，反复 canonicalize 比较，并逐安装重枚举同一缓存的直接子项；子进程预算耗尽、取消或期限到达后仍可能继续文件系统工作。本轮在原 tools 模块内加入 `ToolDiscoveryLimits` / `ToolDiscoveryReport`，原 Vec API 保留为有界正向清单兼容入口，不能据其空结果证明没有安装。
+
+- 默认整个 npm 调用最多 4,096 次文件系统操作、64 个不同 executable 身份、4 MiB 累计路径/字符串/集合节点准入估算，以及单路径/环境值 64 KiB。失败的探测和目录迭代结束检查也扣额度；不因去重、失败或丢弃临时索引返还。环境复制、路径展开及集合都有固定输入或准入边界；估算不是精确 RSS。文件系统调用共享 ProbeRunner 的 10 秒总预算、启动额度和取消，前后检查；同步内核调用仍不可强制中断。
+- executable 拼写解析和同一缓存路径的活动观察在本次调用内去重，不持久保存。工具 launcher 解析保留管理器符号链接支持，这是安装清单而非 scanner/删除权限；缓存根与直接子项用 no-follow metadata，链接目标不成为活动时间。Windows 额外拒绝声明 reparse/offline/recall 属性的活动根；这不是原生身份绑定或 provider 运行验收，路径与时间观察都不提供删除授权。活动只说明非原子的 root/direct-child mtime，截断/读取失败不返回部分最大值，也不能证明精确最后使用时间或无活动。
+- JSON 新增 `npmDiscovery` 的 complete/incompleteReason，显式项目根未请求该发现时为 null；human 两种语言提示缺口，CLI 为 partial/退出 4。核心会话发送可靠 discovery_incomplete 及 Partial 终态，并保留正向安装和已完成候选；完整根候选缓存的 classification context 在发现不完整时拒绝复用。文件事实索引仍独立验证，不缓存工具发现或活动答案。
+- 受控回归覆盖零/到期/取消/启动耗尽、晚到取消、文件操作/路径/数据/安装上限、正向清单保留、可执行路径去重、目录截断未知、每调用活动重观察、链接自身与目标区分、共享缓存、上下文缓存拒绝、核心 Partial 事件和两种语言的 CLI 报告。共享缓存夹具有两个真实测试 launcher、128 个文件；320 次操作额度能完成一次缓存遍历及安装探测，不能容纳两次遍历。普通 read_dir/stat 及完整 payload 是独立核验路径，不从实现计数制造活动时间。
+
+[debug 热缓存 PTY 原始诊断](junk-tui-debug-warm-diagnostic-2026-10-02.json)记录重构前 clean 632a6e7 的本机 arm64 macOS、Rust 1.98.0 debug 二进制，三个独立、预置缓存的目录，每次 8,192 个 8 字节文件及一个 sentinel。历史首屏为 76.2/121.0/73.5 ms，当前完成视图为 182.7/280.0/180.2 ms，q 返回 0、终端属性/alternate screen 恢复，独立数量/长度及 sentinel 核验通过，未发送删除键。起点是 PTY wrapper 启动后的采样，不是纯扫描或进程 wall；OS 缓存不受控，没有记录验证命中数或二进制 hash。三次未复现旧 10 秒超时，未取得慢堆栈，因此根因项继续未完成；这些记录不能证明修复或推断尾延迟。旧 300 ms 工具测试在并行构建下的超时也未定位，本轮未修改其期限。
+
+工具缓存根的候选展开/指纹路径等资源审计、规则所有权/活动依据、Linux/Windows 原生与 MSVC、真实云 provider、实际 Trash 成功及最终 pathname 竞态仍未完成，不勾选整体规则/会话/TUI 验收。
+
+本阶段验证（arm64 macOS、Rust 1.98.0）：完整工作区串行 928 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations`，实际系统 Trash 成功未验证。随后追加 PATH 临时清单上限，最终 core 全量 225 项通过、1 项原有基准 ignored；最终 CLI 单元 48 项、契约 62 项与 relay 1 项通过。其余未变代码复用工作区结果，合计覆盖 930 项，不称为又一次完整矩阵。Windows 交叉 lint 指出枚举循环可用 while-let，已等价改写并复验 tools；最终活动根及缺失路径/迭代失败区分后，core 全量复验包含新增缺失观察回归。初次共享缓存测试误放到函数内，未实际运行，移到模块级后真实通过，没有将零项测试视为验证。格式、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy（含测试分支）、53 份 Markdown 检查通过；core 包清单包含安装测试模块。源码与编译检查不证明 Windows reparse/provider 或 Linux 原生行为，MSVC、目标宿主、云 provider 与上述 Trash 缺口保留。
+
+另外记录一项未定位验证缺口：上述最后 core 复验最初为 224 项通过、1 项失败、1 项基准 ignored，失败是共享缓存正例的 `ProbeUnavailable`，当时尚未记录子进程具体失败类型。加入只记录状态/耗时/字节数、不打印答案的测试诊断及失败夹具保留后，完整相同顺序运行 225 项通过；随后预先固定十次独立同二进制运行也全部通过，未提前遇到通过即停止。没有放宽 2 秒 probe/10 秒总期限、移除断言或排除测试，仍未证明原失败根因，不能把后续通过表述为修复该间歇问题。此处的已通过检查与未定位稳定性缺口分别保留，不称为整体全绿。
+
+Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang.org/std/os/windows/fs/trait.MetadataExt.html#tymethod.file_attributes)、[Microsoft 文件属性常量](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants)（2026-10-02）；使用已有 windows-sys 常量，不自行复制 ABI 值。

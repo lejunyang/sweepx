@@ -683,11 +683,11 @@ impl Worker {
         } else {
             (PlatformJunkSetup::default(), Vec::new())
         };
-        let mut partial = platform.evidence.layout_failure().is_some();
+        let mut partial = platform.evidence.discovery_incomplete();
         if partial {
             writer.failure(JunkSessionFailure::new(
                 "discovery_incomplete",
-                "current platform layout discovery is incomplete",
+                "current platform layout or tool discovery is incomplete",
             ));
         }
         if job.cancel.is_cancelled() {

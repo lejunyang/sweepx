@@ -1206,6 +1206,10 @@ fn project_junk_scan_does_not_launch_npm_inventory() {
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["toolInstallations"], json!([]));
     assert!(
+        json["npmDiscovery"].is_null(),
+        "project-only scans do not observe npm inventory"
+    );
+    assert!(
         !sentinel.exists(),
         "project scanning must not invoke unrelated npm"
     );
@@ -3824,4 +3828,48 @@ fn junk_legacy_sync_unknown_and_invalid_contents_keep_locale_stable_report_only_
             assert_eq!(std::fs::read(&ambient_path).unwrap(), ambient.as_bytes());
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn junk_system_reports_bounded_tool_discovery_in_both_locales() {
+    let fixture = TempDir::new().unwrap();
+    let root = resolved_fixture_root(&fixture);
+    let home = root.join("home");
+    let cache = home.join("Library/Caches/Homebrew");
+    fs::create_dir_all(cache.join("downloads")).unwrap();
+    let payload = cache.join("downloads/user-data");
+    fs::write(&payload, b"unchanged discovery fixture").unwrap();
+    // Oversized PATH is supplied only to each child. No process-global environment mutation,
+    // tool execution or live user cache is required to exercise the production discovery gate.
+    let oversized_path = "x".repeat(65_537);
+    for locale in ["en-US", "zh-CN"] {
+        let output = cli_command()
+            .timeout(std::time::Duration::from_secs(15))
+            .env("HOME", &home)
+            .env("PATH", &oversized_path)
+            .args(["--locale", locale, "--format", "json", "--state-dir"])
+            .arg(root.join(format!("state-{locale}")))
+            .args(["junk", "--system"])
+            .assert()
+            .code(4)
+            .get_output()
+            .clone();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "partial");
+        assert_eq!(
+            report["npmDiscovery"],
+            json!({"complete": false, "incompleteReason": "resource_limit"})
+        );
+        assert_eq!(report["toolInstallations"], json!([]));
+        assert!(
+            report["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["ruleId"] == "macos.homebrew-cache"
+                    && row["path"] == cache.display().to_string())
+        );
+    }
+    assert_eq!(fs::read(payload).unwrap(), b"unchanged discovery fixture");
 }

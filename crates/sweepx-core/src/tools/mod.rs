@@ -5,7 +5,10 @@
 //! because these probes consume a single machine-readable answer, not diagnostic transcripts.
 
 mod installations;
-pub use installations::{ToolInstallation, discover_npm_installations};
+pub use installations::{
+    ToolDiscoveryFailure, ToolDiscoveryLimits, ToolDiscoveryReport, ToolInstallation,
+    discover_npm_installations, discover_npm_installations_with_limits,
+};
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -89,7 +92,19 @@ impl ProbeRunner {
 
     /// Whether the next probe can still be admitted. No child is launched after cancellation.
     pub fn is_exhausted(&self) -> bool {
-        self.cancel.is_cancelled() || self.remaining == 0 || Instant::now() >= self.deadline
+        self.check_budget().is_err()
+    }
+
+    // Filesystem discovery uses the same invocation deadline and cancellation as subprocesses.
+    // It must not keep enumerating installations or caches after probe admission is exhausted.
+    pub(super) fn check_budget(&self) -> Result<(), ProbeError> {
+        if self.cancel.is_cancelled() {
+            Err(ProbeError::Cancelled)
+        } else if self.remaining == 0 || Instant::now() >= self.deadline {
+            Err(ProbeError::BudgetExhausted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Runs fixed-argument discovery with null stdin/stderr and bounded stdout.
@@ -98,12 +113,7 @@ impl ProbeRunner {
     /// stdio and process containment; do not use it for interactive tools or filesystem mutation.
     /// Ordinary process launch and OS process reaping remain subject to the host scheduler.
     pub fn run(&mut self, command: &mut Command) -> Result<ProbeOutput, ProbeError> {
-        if self.cancel.is_cancelled() {
-            return Err(ProbeError::Cancelled);
-        }
-        if self.is_exhausted() {
-            return Err(ProbeError::BudgetExhausted);
-        }
+        self.check_budget()?;
         self.remaining -= 1;
         let deadline = self.deadline.min(
             Instant::now()

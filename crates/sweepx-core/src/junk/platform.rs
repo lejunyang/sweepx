@@ -44,6 +44,7 @@ pub struct PlatformJunkEvidence {
     by_rule: BTreeMap<String, PlatformRuleEvidence>,
     layout_roots: BTreeMap<String, Vec<Arc<LayoutRoot>>>,
     layout_failure: Option<LayoutDiscoveryFailure>,
+    tool_discovery_failure: Option<tool_installations::ToolDiscoveryFailure>,
 }
 
 impl PlatformJunkEvidence {
@@ -67,19 +68,28 @@ impl PlatformJunkEvidence {
                 reported.insert(rule.id.clone(), tool.resolve(&mut runner));
             }
         }
-        let npm_installations = if rules
+        let npm_discovery = if rules
             .iter()
             .any(|rule| rule.root_kind == "npm_reported_cache")
         {
-            tool_installations::discover_npm_installations(&mut runner)
+            Some(tool_installations::discover_npm_installations_with_limits(
+                &mut runner,
+                tool_installations::ToolDiscoveryLimits::default(),
+            ))
         } else {
-            Vec::new()
+            None
         };
+        let tool_discovery_failure = npm_discovery
+            .as_ref()
+            .and_then(|report| report.incomplete_reason);
+        let npm_installations = npm_discovery
+            .map(|report| report.installations)
+            .unwrap_or_default();
         let npm_root = npm_installations
             .iter()
             .find(|installation| installation.is_path_default)
             .and_then(|installation| installation.cache.clone());
-        Self::precompute_with_layout(
+        let mut evidence = Self::precompute_with_layout(
             rules,
             |rule| {
                 if rule.root_kind == "npm_reported_cache" {
@@ -92,7 +102,9 @@ impl PlatformJunkEvidence {
             LayoutDiscoveryLimits::default(),
             cancel,
             browser_base_dir,
-        )
+        );
+        evidence.tool_discovery_failure = tool_discovery_failure;
+        evidence
     }
 
     /// Captures rule-derived locations using an invocation-local resolver snapshot.
@@ -185,12 +197,23 @@ impl PlatformJunkEvidence {
             npm_installations,
             layout_roots,
             layout_failure: discovery.failure,
+            tool_discovery_failure: None,
         }
     }
 
     /// A missing layout observation means partial discovery, not proof of an empty scope.
     pub fn layout_failure(&self) -> Option<LayoutDiscoveryFailure> {
         self.layout_failure
+    }
+
+    /// Why bounded npm discovery could not establish complete inventory/cache coverage.
+    pub fn tool_discovery_failure(&self) -> Option<tool_installations::ToolDiscoveryFailure> {
+        self.tool_discovery_failure
+    }
+
+    /// Missing layout or tool discovery cannot prove an empty scope or justify candidate reuse.
+    pub fn discovery_incomplete(&self) -> bool {
+        self.layout_failure.is_some() || self.tool_discovery_failure.is_some()
     }
 
     /// Whether a known/browser root matches this invocation's native discovery facts.
@@ -251,7 +274,7 @@ impl CombinedJunkClassifier<'_> {
     /// Serialization streams at most 1 MiB into fixed hash state. Sorting retains at most 1,024
     /// references per rule; tool paths larger than 64 KiB decline reuse before native conversion.
     pub fn classification_context_digest(&self) -> Option<[u8; 32]> {
-        if self.evidence.layout_failure.is_some() {
+        if self.evidence.discovery_incomplete() {
             return None;
         }
         let mut hash = super::context::ContextHash::new(&self.project.rule_bytes_digest);
@@ -1400,6 +1423,14 @@ mod tests {
         changed[0].risk = "R3".into();
         assert_ne!(digest(&changed, &evidence), digest(&rules, &evidence));
         assert_eq!(digest(&rules, &PlatformJunkEvidence::default()), None);
+        evidence.tool_discovery_failure =
+            Some(tool_installations::ToolDiscoveryFailure::ResourceLimit);
+        assert_eq!(
+            digest(&rules, &evidence),
+            None,
+            "truncated tool scope cannot reuse whole-root candidates"
+        );
+        evidence.tool_discovery_failure = None;
         evidence.layout_failure = Some(LayoutDiscoveryFailure::ObservationUnavailable);
         assert_eq!(digest(&rules, &evidence), None);
         let edited = format!("{}\n", super::super::PROJECT_RULES_JSON);

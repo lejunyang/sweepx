@@ -245,6 +245,7 @@ enum Commands {
         timings: bool,
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
+        /// npm inventory also bounds filesystem observations and reports incomplete discovery.
         #[arg(long)]
         system: bool,
         /// Move approved stale Linux temporary objects to a recoverable quarantine.
@@ -1252,6 +1253,21 @@ fn run_junk_scan(
         evidence,
     } = platform.unwrap_or_default();
     let layout_failure = evidence.layout_failure();
+    let tool_failure = evidence.tool_discovery_failure();
+    if let Some(failure) = tool_failure
+        && format == OutputFormat::Human
+    {
+        eprintln!(
+            "{} ({})",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    "npm 安装发现不完整：可能遗漏安装或缓存，缺失活动信息不代表未使用",
+                sweepx_i18n::Locale::EnUs =>
+                    "npm installation discovery is incomplete: installations or caches may be missing; unknown activity does not mean unused",
+            },
+            failure.code()
+        );
+    }
     if let Some(failure) = layout_failure
         && format == OutputFormat::Human
     {
@@ -1771,13 +1787,17 @@ fn run_junk_scan(
             "{}",
             json!({
                 "schema": "sweepx.junk.result/v1",
-                "status": if scan_status_ok && temp_discovery_complete && layout_failure.is_none() { "ok" } else { "partial" },
+                "status": if scan_status_ok && temp_discovery_complete && !evidence.discovery_incomplete() { "ok" } else { "partial" },
                 "readOnly": true,
                 "tempDiscovery": temp_discovery_json,
                 "layoutDiscovery": {
                     "complete": layout_failure.is_none(),
                     "incompleteReason": layout_failure.map(|failure| failure.code()),
                 },
+                "npmDiscovery": platform_rules.iter().any(|rule| rule.root_kind == "npm_reported_cache").then(|| json!({
+                    "complete": tool_failure.is_none(),
+                    "incompleteReason": tool_failure.map(|failure| failure.code()),
+                })),
                 "candidateCount": candidates.len(),
                 "knownReclaimableBytes": known_reclaimable.map(|value| value.to_string()),
                 "incompleteSizeCount": incomplete_size_count,
@@ -1847,7 +1867,7 @@ fn run_junk_scan(
         result.scan.output.conservative_exit_code() as u8
     });
     ProcessExitCode::from(
-        if scan_exit == 0 && (!temp_discovery_complete || layout_failure.is_some()) {
+        if scan_exit == 0 && (!temp_discovery_complete || evidence.discovery_incomplete()) {
             4
         } else {
             scan_exit

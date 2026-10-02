@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-02",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.12.14"
+  },
+  "binary": {
+    "build": "cargo build -p sweepx-cli --locked (debug, Rust 1.98.0)",
+    "sourceCommit": "632a6e7",
+    "sourceState": "clean before npm discovery changes",
+    "sha256": null,
+    "hashRecorded": false
+  },
+  "workload": {
+    "roots": 1,
+    "generatedEightByteFiles": 8192,
+    "additionalPayloadFiles": 1,
+    "additionalPayloadBytes": 21,
+    "repetitions": 3,
+    "terminalRows": 30,
+    "terminalColumns": 140
+  },
+  "cache": "preseeded SweepX state; historical preview observed; validation hit counts not instrumented; OS cache uncontrolled",
+  "measurement": "PTY wrapper sampling start to independently decoded historical/current complete candidate view; includes polling and rendering, not process wall time or pure scan time",
+  "verification": "independent glob/stat file count and logical length, unchanged sentinel payload, q exit 0, terminal attributes and alternate screen restored; no mutation input",
+  "samples": [
+    {
+      "historicalSeconds": 0.0761765000061132,
+      "completeSeconds": 0.18274087501049507,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    },
+    {
+      "historicalSeconds": 0.12102804199093953,
+      "completeSeconds": 0.2799672919936711,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    },
+    {
+      "historicalSeconds": 0.07348908300627954,
+      "completeSeconds": 0.1801896660035709,
+      "sampleCaptured": false,
+      "historicalPreviewObserved": true,
+      "mode": "quit",
+      "exitCode": 0,
+      "completeCandidateView": true,
+      "terminalAttributesRestored": true,
+      "alternateScreenRestored": true,
+      "payloadUnchanged": true
+    }
+  ],
+  "unresolved": "Prior 10-second timeout did not reproduce in these three runs; no slow process stack was captured and the root cause remains unproven."
+}
