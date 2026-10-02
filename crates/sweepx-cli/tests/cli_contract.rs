@@ -27,6 +27,92 @@ fn duplicate_fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
+fn cargo_context_reports_current_declarations_in_both_locales_without_ownership() {
+    let (_fixture, base) = duplicate_fixture();
+    let root = base.join("project");
+    fs::create_dir_all(root.join("nested/project/target")).unwrap();
+    let project = root.join("nested/project");
+    let manifest = project.join("Cargo.toml");
+    let payload = project.join("target/personal");
+    fs::write(&payload, b"preserved").unwrap();
+    let cases = [
+        (
+            &b"[workspace]\nmembers=['crates/*']\n"[..],
+            "observed",
+            json!(1),
+        ),
+        (
+            &b"[package]\nname='member'\nworkspace='../'\n"[..],
+            "observed",
+            Value::Null,
+        ),
+        (&b"[workspace]\nmembers=["[..], "invalid", Value::Null),
+    ];
+    for (body, status, patterns) in cases {
+        fs::write(&manifest, body).unwrap();
+        let mut contexts = Vec::new();
+        for locale in ["en-US", "zh-CN"] {
+            let output = cli_command()
+                .timeout(std::time::Duration::from_secs(10))
+                .args(["--locale", locale, "--format", "json", "--state-dir"])
+                .arg(base.join(locale))
+                .arg("junk")
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let rows = report["candidates"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(row["ruleId"], "rust.target");
+            assert_eq!(row["projectContext"]["profile"], "cargo_manifest");
+            assert_eq!(row["projectContext"]["status"], status);
+            assert_eq!(
+                row["projectContext"]["cargoManifest"]["memberPatterns"],
+                patterns
+            );
+            assert_eq!(
+                row["executionPolicy"],
+                "require_project_ownership_and_activity"
+            );
+            for blocker in [
+                "project_ownership_not_verified",
+                "project_activity_not_verified",
+            ] {
+                assert!(
+                    row["blockers"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(blocker))
+                );
+            }
+            contexts.push(row["projectContext"].clone());
+            let human = cli_command()
+                .args(["--locale", locale, "junk"])
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert!(human.status.success());
+            let text = String::from_utf8(human.stdout).unwrap();
+            assert!(text.contains(if locale == "zh-CN" {
+                "项目上下文"
+            } else {
+                "project context"
+            }));
+            assert!(text.contains(status));
+        }
+        assert_eq!(contexts[0], contexts[1]);
+        assert_eq!(fs::read(&manifest).unwrap(), body);
+        assert_eq!(fs::read(&payload).unwrap(), b"preserved");
+    }
+}
+
+#[test]
 fn actual_dart_recordings_keep_locale_stable_formats_and_workspace_notes() {
     for recording in sweepx_fixtures::project_junk::recordings::DART {
         let (_fixture, base) = duplicate_fixture();

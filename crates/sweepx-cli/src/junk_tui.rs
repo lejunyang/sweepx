@@ -85,7 +85,7 @@ impl JunkRow for Row {
     fn context(&self) -> String {
         let candidate = &self.row.candidate;
         format!(
-            "risk={} · classification={} · confidence={} · activity={} · format={} · blockers={}",
+            "risk={} · classification={} · confidence={} · activity={} · format={} · projectContext={} · blockers={}",
             candidate.risk,
             candidate.classification.as_deref().unwrap_or("not_checked"),
             candidate.confidence.as_deref().unwrap_or("not_checked"),
@@ -95,6 +95,21 @@ impl JunkRow for Row {
                 .as_ref()
                 .map(|e| format!("{}/{}", e.status.code(), e.reason))
                 .unwrap_or_else(|| "not_required".into()),
+            candidate
+                .project_context
+                .as_ref()
+                .map(super::junk_project_context_label)
+                .unwrap_or_else(|| {
+                    // Restored history has not loaded the current rule's input requirements.
+                    // An absent cached projection cannot claim that no context is required.
+                    if candidate.execution_policy
+                        == sweepx_core::junk::candidate::JunkExecutionPolicy::NotChecked
+                    {
+                        "not_checked".into()
+                    } else {
+                        "not_required".into()
+                    }
+                }),
             candidate.blockers.join(",")
         )
     }

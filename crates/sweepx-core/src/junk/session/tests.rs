@@ -1318,6 +1318,96 @@ fn lossy_display_aliases_have_distinct_native_candidate_keys() {
 }
 
 #[test]
+fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
+    use crate::junk::manifest::ProjectContextStatus;
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(target_os = "linux")]
+    let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let owner = tempfile::tempdir().unwrap();
+    let base = fixture_root(&owner);
+    let root = base.join("project");
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::write(root.join("target/personal"), b"preserved").unwrap();
+    let manifest = root.join("Cargo.toml");
+    let original = b"[workspace]\nmembers=['a']\n";
+    fs::write(&manifest, original).unwrap();
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.include_platform_rules = false;
+    #[cfg(target_os = "macos")]
+    {
+        request.cache_dir = Some(base.join("cache"));
+    }
+    let session = JunkSession::start(request).unwrap();
+    let events = drain(&session, JunkSessionRevision(1));
+    let rows = current(&events);
+    assert_eq!(rows.len(), 1);
+    let key = *rows.keys().next().unwrap();
+    assert_eq!(
+        rows[&key]
+            .candidate
+            .project_context
+            .unwrap()
+            .cargo_manifest
+            .unwrap()
+            .member_patterns,
+        Some(1)
+    );
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    assert!(events.iter().any(|e| matches!(&e.kind,
+        JunkSessionEventKind::Candidate { state: JunkSessionCandidateState::Base, row, .. }
+        if row.candidate.project_context.is_some_and(|c| c.status == ProjectContextStatus::NotChecked))));
+    fs::write(&manifest, b"[workspace]\nexclude=['a']\n").unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(
+        rows[&key].candidate.project_context.unwrap().status,
+        ProjectContextStatus::Observed
+    );
+    assert_eq!(
+        rows[&key]
+            .candidate
+            .project_context
+            .unwrap()
+            .cargo_manifest
+            .unwrap()
+            .member_patterns,
+        None
+    );
+    assert!(rows[&key].complete());
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    fs::write(&manifest, b"[workspace]\nmembers=[").unwrap();
+    let revision = session.refresh_all().unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(
+        rows[&key].candidate.project_context.unwrap().status,
+        ProjectContextStatus::Invalid
+    );
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    fs::write(&manifest, original).unwrap();
+    let revision = session.refresh_all().unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(
+        rows[&key]
+            .candidate
+            .project_context
+            .unwrap()
+            .cargo_manifest
+            .unwrap()
+            .member_patterns,
+        Some(1)
+    );
+    assert_eq!(
+        fs::read(root.join("target/personal")).unwrap(),
+        b"preserved"
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), original);
+    shutdown(&session);
+}
+
+#[test]
 fn dart_content_is_current_on_selected_refresh_and_never_trash_authority() {
     use crate::junk::format::ProjectFormatStatus;
     let _serial = SESSION_TESTS

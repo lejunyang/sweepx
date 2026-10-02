@@ -17,6 +17,8 @@ mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]
 pub mod linux_temp;
+/// Current native-bound manifest declarations, independent of project ownership and activity.
+pub mod manifest;
 /// Independent preview and recoverable execution for explicitly confirmed Linux temporary objects.
 #[cfg(target_os = "linux")]
 pub mod quarantine;
@@ -449,6 +451,9 @@ mod tests {
         assert!(!service.needs_project_marker(&name("ordinary-payload.bin")));
         let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
         rules[0]["requiredParentMarkers"] = serde_json::json!(["custom.marker"]);
+        // This fixture replaces Cargo.toml with a structural marker, so it must not retain the
+        // fixed-input Cargo context profile. Catalog admission still rejects that mismatch.
+        rules[0]["contextProfile"] = serde_json::Value::Null;
         let service = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
         assert!(service.needs_project_marker(&name("custom.marker")));
         assert!(!service.needs_project_marker(&name("Cargo.toml")));

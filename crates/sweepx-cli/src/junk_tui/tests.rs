@@ -304,6 +304,9 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
     // guard. Both following cases change identity and must reject before a real Trash call.
     let mut old = (*project_row).clone();
     old.candidate.rule_id = "test.native-cache".into();
+    // This lower-layer platform-style fixture tests stale native identities, independently of
+    // project manifest/ownership requirements. It must not carry the original Rust context.
+    old.candidate.project_context = None;
     old.candidate.execution_policy =
         sweepx_core::junk::candidate::JunkExecutionPolicy::NativeRevalidationRequired;
     let old = Arc::new(old);

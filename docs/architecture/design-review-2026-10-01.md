@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；Cargo 父 manifest 的当前声明观察已接入 CLI/会话/TUI，并复用独立 cleaner 的解析器，但尚未求解有效配置或独占关系；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -747,3 +747,23 @@ Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang
 这定位出一个可重复的宿主首次直接执行效应，尚未取得慢子进程堆栈，不能在进程加载、宿主策略和调度之间归因，也不能将其认定为旧 300 ms 答案测试或 2 秒共享缓存失败的唯一原因。没有改用显式解释器启动生产工具、延长期限或忽略失败；debug 热缓存 TUI 停顿与事件历史 settle 问题也未由本轮实验关闭。两个独立回归用 shell 控制“直接子进程已退出但后代仍持有 stdout”和“stdout 已关闭但直接子进程仍运行”，核对两种失败均拒绝答案且诊断区分 EOF/退出；另外验证成功、启动失败、预算拒绝之间不会残留旧事实。
 
 交付验证：工具专项 24 项通过；完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 951 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的真实系统 Trash 成功用例。受影响 core 与 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查及 core 包清单通过；诊断 artifact 的 50 个独立执行记录、70 个探测重复记录和成功状态已核验。Linux/Windows 原生运行、MSVC、真实云 provider 与系统 Trash 成功未验收；交叉 lint 不是运行时证据，没有端到端提速结论，原间歇失败仍保留。
+
+## Cargo 当前父配置声明与原生祖先读取（2026-10-02）
+
+此前项目行只有布局/Git/生成格式，Cargo typed cleaner 的输入则要求真正捕获的 manifest 行与完整根身份，不能从 classified scan 省略的普通文件行伪造。scanner 现提供 `read_captured_ancestor_regular_file`：祖先只能来自原始 locator，先验证完整原生链直到候选自身，再在保留的祖先句柄下做同一零字节 probe/整文件读取。超过原扫描根、同名候选替换、链接、mount/provider 不确定、取消或预算不足均拒绝；完整链及文件名仍计入预算，即使目标文件位于根目录也不跳过候选验证。步进最多额外保留一个所选祖先句柄，不从显示路径生成 parent、扫描行或执行身份。已有直接子文件和 Cargo collector 复用这一重开接缝。
+
+catalog 为 rust.target 声明严格可选 `contextProfile: cargo_manifest`，必须包含固定父 marker Cargo.toml；未知 profile 拒绝。core 与 Cargo cleaner 共用一个 TOML/manifest 声明解析器，新增纯声明投影支持 package/virtual_workspace/workspace_package、members/exclude/default-members 的声明模式数、显式 package.workspace 和字符串 path dependency 声明。cleaner 的既有窄 workspace/成员/路径依赖准入保持原限制，不把新声明投影传成身份绑定 typed evidence。
+
+来源访问日期：2026-10-02。Cargo 的[workspace 契约](https://doc.rust-lang.org/cargo/reference/workspaces.html)说明 members 可含 glob、路径依赖可能成为成员、祖先与 package.workspace 都会影响归属，成员默认共用输出目录。因此此处只展示当前 manifest 自己声明了什么：不运行 Cargo、不展开模式、不打开声明路径、不求解祖先/config/env/CLI 优先级，缺失成员字段也不表示没有其他成员或共享。观测区间非原子，不能建立独占归属、无活动或回收权限。
+
+CLI 的既有 projectFormats 阶段与 core 的 Formats worker 阶段同时观察内容和 context，共享最多 128 次尝试、256 KiB/文件、32 MiB 最坏读取预留与 5 秒合作期限；失败也先扣预算，两类 dedup map 总保留受同一尝试数限制。当前规则初始化 context 为 not_checked；历史缓存不持久化配置/声明答案，新调用、缓存重新解释和每个 revision 都重新观察。JSON 增加 locale-stable projectContext，human/TUI 展示声明与失败；渲染留在 CLI，核心数据无需终端即可调用。项目执行约束仍独立，observed 不解除所有权/活动 blocker，布局候选混入用户文件也继续可见但不能回收。
+
+回归覆盖严格 profile/固定 marker、声明模式与实际成员概念分离、中文声明不泄漏到报告、缺失与空列表、显式 workspace/path dependency、无效/重复 TOML、字节/次数共享预算、取消、同名候选替换、完整 ancestor 成本、probe 到内容读取之间变化、缓存不保存 context、同长度 manifest 变化、Base/Current/选中及完整 revision，以及双语 JSON/human 和用户 payload 不变。原生读取用普通文件读取作为独立内容对照，不制造完整 manifest 扫描身份。
+
+独立对照还使用隔离 Cargo home/env 的固定 Rust 1.98.0 `cargo metadata --offline --no-deps`，一个 `crates/*` 声明实际解析出 a/b 两个成员；SweepX 报告 `memberPatterns: 1`，继续保留所有权/活动 blocker，普通读取核对 manifest 和个人 payload 未变化。[Cargo 声明对照记录](cargo-context-oracle-2026-10-02.json)保存声明字节摘要、实际成员数量、SweepX 投影、宿主和二进制摘要；生产扫描和普通 Rust 回归不执行 Cargo，这一额外实验不证明完整配置、归属或活动语义。
+
+交付验证：原生整文件/祖先专项实际执行 4 项，新增核心上下文、会话和双语 CLI 契约通过；完整工作区矩阵 961 项通过、0 失败、2 项原有基准 ignored。随后更新规则来源日期/引用及执行约束原因后，最终 core/CLI 全量 361 项通过、1 项原有基准 ignored；catalog 当前来源字节下的全量结果与未改 scanner/其他 crate 复用此前检查，不称为又跑完整工作区。最终 host、Linux GNU 与 Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 及三个受影响包清单通过。仍显式排除已诊断挂起的真实系统 Trash 成功测试；Linux/Windows 原生、MSVC 与真实云 provider 未验收，没有本轮扫描加速倍数。
+
+保留失败经过：首次祖先专项过滤名未匹配，零项不计作验证，已改用真实 content_tests 模块执行；新增测试最初误用含中文的 Rust byte literal，另一次误移动 format 字段，均修正夹具写法/借用后真实执行。首轮工作区在旧自定义 marker 夹具失败：该夹具替换 Cargo.toml 却保留固定 context profile，现明确关闭该 profile，保留原 marker/digest 断言和生产严格准入。补强 context 对伪造 native policy 的阻断时，最初覆盖了 ReportOnly 的既有原因；生产修复仅在 native-policy 分支阻断 context，独立 report-only 原因继续保留，原断言未放宽；原生替换 worker 的下层平台式夹具明确清除项目 context，继续验证真实 Trash 前的身份拒绝。
+
+该次受影响矩阵还复现旧共享缓存探测失败：[首次输出前的失败阶段记录](cargo-context-probe-failure-2026-10-02.json)显示 launch/setup 约 6.6 ms 返回，2 秒期限内未观察到输出、EOF 或直接子进程退出；tool-b 随后 1.09 秒返回，后续版本查询约 7–13 ms。fixture 已保留，但进程清理后才取得失败记录，没有慢堆栈，不能归因或认定解决。修复上述独立原因优先级后只进行一次预定的最终 core/CLI 矩阵并通过，不把原探测故障解释为该修复解决，没有延长期限、忽略 probe 测试或反复重试直到通过。性能/间歇失败及规则有效配置、所有权/活动仍未完成；声明 observed 不能关闭规则扩展验收。

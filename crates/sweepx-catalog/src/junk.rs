@@ -30,6 +30,10 @@ pub struct ProjectJunkRule {
     /// exclusive ownership and inactivity are independent, unverified conditions.
     #[serde(default)]
     pub content_format: Option<ProjectContentFormat>,
+    /// Optional current project-manifest observation, independent of generated-content signatures
+    /// and ownership. A fixed-input profile never resolves or executes project configuration.
+    #[serde(default)]
+    pub context_profile: Option<ProjectContextProfile>,
     /// Intent declared by the rule, never proof of ownership or inactivity. Omitted policies
     /// require independent ownership/activity evidence and cannot inherit legacy deletion access.
     #[serde(default)]
@@ -63,6 +67,15 @@ pub enum ProjectContentFormat {
     /// Legacy SvelteKit sync configuration plus generated ambient signatures; non-atomic and
     /// report-only, without evaluating JS configuration or proving TypeScript correctness.
     SvelteKitLegacySync,
+}
+
+/// Supported fixed-input context observations. Unknown profiles fail catalog admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectContextProfile {
+    /// Declaration projection from the captured parent directory's Cargo.toml, not effective Cargo
+    /// configuration, resolved workspace membership, exclusive ownership or inactivity.
+    CargoManifest,
 }
 
 /// Admission failure for the project-artifact catalog.
@@ -114,6 +127,12 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
                 }
             });
         if rule.id.trim().is_empty()
+            || rule.context_profile.is_some_and(|profile| match profile {
+                ProjectContextProfile::CargoManifest => !rule
+                    .required_parent_markers
+                    .iter()
+                    .any(|name| name == "Cargo.toml"),
+            })
             || rule.content_format.is_some_and(|profile| {
                 let required: &[&str] = match profile {
                     ProjectContentFormat::DartPubPackageConfigV2 => &["package_config.json"],
@@ -208,6 +227,26 @@ mod tests {
             rules[0]["executionPolicy"] = value;
             assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn context_profile_requires_its_fixed_parent_marker() {
+        let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        assert_eq!(
+            load_project_rules().unwrap()[0].context_profile,
+            Some(ProjectContextProfile::CargoManifest)
+        );
+        rules[0]["contextProfile"] = serde_json::json!("arbitrary_config_execution");
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+        rules[0]["contextProfile"] = serde_json::json!("cargo_manifest");
+        rules[0]["requiredParentMarkers"] = serde_json::json!(["package.json"]);
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+        rules[0].as_object_mut().unwrap().remove("contextProfile");
+        assert!(
+            load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap()[0]
+                .context_profile
+                .is_none()
+        );
     }
 
     #[test]

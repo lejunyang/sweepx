@@ -234,6 +234,25 @@ impl<P: PlatformScanner> LocatorReader<P> {
         name: &NativeName,
         cancel: &CancellationToken,
     ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
+        self.read_captured_ancestor_regular_file(directory, 0, name, cancel)
+    }
+
+    /// Reads a fixed-name ordinary file in an ancestor captured by a live directory's locator.
+    /// Zero levels means the directory itself; one means its parent. Levels cannot cross the
+    /// original scan root. The complete original lineage, including the captured directory, is
+    /// revalidated before reading, rather than deriving a parent from a display path or fabricating
+    /// a scanned manifest row. At most one extra ancestor handle is retained during that walk.
+    ///
+    /// Uses the same per-call budgets, no-follow/mount/provider checks and probe/full-read binding
+    /// as [`Self::read_captured_regular_file`]. Ancestor and candidate observations are not atomic;
+    /// this provides current context bytes, never absence, exclusive ownership or deletion rights.
+    pub fn read_captured_ancestor_regular_file(
+        &self,
+        directory: &ScannedEntry,
+        ancestor_levels: usize,
+        name: &NativeName,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
         self.validate_scanned_directory(directory)
             .map_err(|_| LocatorReadFailure::InvalidBinding)?;
         self.validate_directory_binding_budget(directory)
@@ -274,7 +293,12 @@ impl<P: PlatformScanner> LocatorReader<P> {
             ReadAttempt::Absent => LocatorReadFailure::ReadFailed,
         };
         let parent = self
-            .reopen_base(directory, cancel, &mut BatchBudget::default())
+            .reopen_base_ancestor(
+                directory,
+                ancestor_levels,
+                cancel,
+                &mut BatchBudget::default(),
+            )
             .map_err(failed)?;
         let probe = RegularFileStreamRequest::new(
             name.clone(),
@@ -1343,9 +1367,24 @@ impl<P: PlatformScanner> LocatorReader<P> {
         cancel: &CancellationToken,
         budget: &mut BatchBudget,
     ) -> Result<OpenedDirectory<P::DirectoryHandle>, ReadAttempt> {
+        self.reopen_base_ancestor(base, 0, cancel, budget)
+    }
+
+    fn reopen_base_ancestor(
+        &self,
+        base: &ScannedEntry,
+        ancestor_levels: usize,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> Result<OpenedDirectory<P::DirectoryHandle>, ReadAttempt> {
         let locator = base
             .executable_native_locator()
             .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?
+            .ok_or(ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
+        let ancestor_depth = locator
+            .parent_reopen_recipe
+            .len()
+            .checked_sub(ancestor_levels)
             .ok_or(ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
         let identity = base
             .identity
@@ -1388,11 +1427,13 @@ impl<P: PlatformScanner> LocatorReader<P> {
             metadata,
             handle: directory,
         };
-        for expected in locator
+        let mut retained_ancestor = None;
+        for (depth, expected) in locator
             .parent_reopen_recipe
             .iter()
             .skip(1)
             .chain(std::iter::once(&locator.entry))
+            .enumerate()
         {
             let child = self
                 .find_child(&mut current, &expected.native_basename, cancel, budget)?
@@ -1409,15 +1450,19 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 return Err(ReadAttempt::Failed(LocatorReadFailure::IdentityMismatch));
             };
             validate_component(expected, &opened.metadata)?;
-            current = OpenedDirectory {
+            let next = OpenedDirectory {
                 path: opened.metadata.path.clone(),
                 metadata: opened.metadata,
                 handle: opened.handle,
             };
+            if depth == ancestor_depth {
+                retained_ancestor = Some(current);
+            }
+            current = next;
         }
         validate_component(&locator.entry, &current.metadata)?;
         let _ = identity;
-        Ok(current)
+        Ok(retained_ancestor.unwrap_or(current))
     }
 
     fn open_optional_directory(

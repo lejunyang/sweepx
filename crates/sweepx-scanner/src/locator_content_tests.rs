@@ -125,6 +125,140 @@ fn new_reader(limits: LocatorReadLimits, mutation: Option<PathBuf>) -> LocatorRe
 }
 
 #[test]
+fn captured_ancestor_content_uses_full_lineage_and_never_display_parents() {
+    let (_owner, directory, _captured) = fixture();
+    let root = directory.parent().unwrap();
+    let nested = directory.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(root.join("manifest.toml"), b"root context").unwrap();
+    std::fs::write(directory.join("manifest.toml"), b"parent context").unwrap();
+    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+        .scan(
+            &[ScanRoot::new(root.to_path_buf()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let mut captured = summary
+        .entries
+        .into_iter()
+        .find(|entry| entry.native_basename == native("nested"))
+        .unwrap();
+    captured.display_path = "/invented/display/parent/nested".into();
+    let reader = new_reader(LocatorReadLimits::default(), None);
+    for (levels, path) in [(1, &directory), (2, &root.to_path_buf())] {
+        let read = reader
+            .read_captured_ancestor_regular_file(
+                &captured,
+                levels,
+                &native("manifest.toml"),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            read.bytes,
+            std::fs::read(path.join("manifest.toml")).unwrap()
+        );
+        assert_eq!(read.observed_before, read.observed_after);
+    }
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        reader.read_captured_ancestor_regular_file(
+            &captured,
+            3,
+            &native("manifest.toml"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadFailure::InvalidBinding)
+    );
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 4);
+    // Even a root-context read must budget the complete nested candidate validation.
+    let limited = new_reader(
+        LocatorReadLimits {
+            max_total_components: 3,
+            ..LocatorReadLimits::default()
+        },
+        None,
+    );
+    assert_eq!(
+        limited.read_captured_ancestor_regular_file(
+            &captured,
+            2,
+            &native("manifest.toml"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadFailure::ResourceLimit)
+    );
+    assert_eq!(limited.platform.streams.load(Ordering::SeqCst), 0);
+
+    std::fs::rename(&nested, directory.join("retained-nested")).unwrap();
+    std::fs::create_dir(&nested).unwrap();
+    assert_eq!(
+        reader.read_captured_ancestor_regular_file(
+            &captured,
+            1,
+            &native("manifest.toml"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadFailure::IdentityMismatch)
+    );
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn ancestor_content_preserves_cancellation_read_bounds_and_probe_binding() {
+    let (_owner, directory, captured) = fixture();
+    let path = directory.parent().unwrap().join("manifest.toml");
+    std::fs::write(&path, b"context").unwrap();
+    let reader = new_reader(LocatorReadLimits::default(), Some(path.clone()));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        reader.read_captured_ancestor_regular_file(&captured, 1, &native("manifest.toml"), &cancel),
+        Err(LocatorReadFailure::Cancelled)
+    );
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        reader.read_captured_ancestor_regular_file(
+            &captured,
+            1,
+            &native("manifest.toml"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadFailure::ReadFailed)
+    );
+    let limited = new_reader(
+        LocatorReadLimits {
+            max_file_bytes: 1,
+            ..LocatorReadLimits::default()
+        },
+        None,
+    );
+    assert_eq!(
+        limited.read_captured_ancestor_regular_file(
+            &captured,
+            1,
+            &native("manifest.toml"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadFailure::ResourceLimit)
+    );
+    assert_eq!(limited.platform.streams.load(Ordering::SeqCst), 1);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("manifest.toml", path.with_file_name("linked.toml")).unwrap();
+        assert!(matches!(
+            reader.read_captured_ancestor_regular_file(
+                &captured,
+                1,
+                &native("linked.toml"),
+                &CancellationToken::new()
+            ),
+            Err(LocatorReadFailure::SymlinkOrReparse | LocatorReadFailure::NotRegular)
+        ));
+    }
+}
+
+#[test]
 fn captured_content_is_complete_bounded_and_independent_of_display_paths() {
     let (_owner, directory, mut captured) = fixture();
     captured.display_path = "forged display path".into();

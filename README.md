@@ -287,3 +287,5 @@ macOS 变更历史查询最多接受 256 个绝对 UTF-8 根和 1 MiB 路径字�
 SvelteKit 1.0.0/2.0.0 的格式回归现包含实际 SDK `sync` 生成的原始文件、依赖锁及字节校验记录，普通测试离线消费；目录混入用户文件时依旧只报告。采集方式和证据边界见[项目规则执行样本](docs/development/project-rule-corpus.md)。
 
 Dart 2.18.0/3.6.0 已加入真实 SDK 单项目与共享 workspace 的生成样本。格式识别支持其中中文/空格文件名的百分号 UTF-8 路径签名，继续拒绝无效编码、控制字符及编码后的路径分隔符等不支持形式；不求解完整 URI 语义或打开 URI。共享根配置和混入个人文件的目录仍只报告，缺少 package map 的成员笔记目录不据此识别为垃圾。
+
+Rust target 候选现通过捕获的原生身份链读取父目录 `Cargo.toml`，在 CLI/TUI 中展示当前 package/workspace、成员模式数量、显式 workspace 路径及路径依赖声明。JSON 新增 `projectContext`，状态为 `observed` / `invalid` / `unknown` / `not_checked`；`memberPatterns` 是声明字符串数量，不能当作实际成员数量。不会执行 Cargo、展开 glob、跟随声明路径或解析完整配置优先级。上下文与格式共用有界观察预算，缓存不保存声明答案，每次调用或刷新重新读取；这些声明不能证明独占所有权或无活动，项目回收限制继续保留。

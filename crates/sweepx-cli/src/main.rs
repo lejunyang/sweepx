@@ -231,6 +231,7 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
+    /// Cargo target candidates report current parent-manifest declarations; these do not prove ownership.
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
@@ -1695,11 +1696,25 @@ fn run_junk_scan(
                 (_, false, true) => String::new(),
             };
             println!(
-                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}{execution_note}",
+                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}{context_note}{execution_note}",
                 junk_size_label(&candidate.reclaimable, size_unit),
                 risk = candidate.risk,
                 rule = candidate.rule_id,
                 path = candidate.path,
+                context_note = candidate
+                    .project_context
+                    .as_ref()
+                    .map(|e| match context.locale() {
+                        sweepx_i18n::Locale::ZhCn => format!(
+                            " [项目上下文：{}；声明未解析为所有权]",
+                            junk_project_context_label(e)
+                        ),
+                        sweepx_i18n::Locale::EnUs => format!(
+                            " [project context: {}; declarations do not establish ownership]",
+                            junk_project_context_label(e)
+                        ),
+                    })
+                    .unwrap_or_default(),
                 execution_note = match (context.locale(), candidate.project_execution_blocker()) {
                     (sweepx_i18n::Locale::ZhCn, Some(_)) =>
                         " [回收受限：规则仅报告或所有权/活动未核验]",
@@ -1839,6 +1854,7 @@ fn run_junk_scan(
                     "confidence": candidate.confidence,
                     "blockers": candidate.blockers,
                     "projectFormat": candidate.project_format,
+                    "projectContext": candidate.project_context,
                     "executionPolicy": candidate.execution_policy,
                     // Names the quantity in `reclaimable`. True means apparent logical size,
                     // because this platform declined to claim filesystem allocation; the two
@@ -2551,6 +2567,27 @@ fn junk_evidence_bytes(value: &ByteValue) -> Option<u128> {
         EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => Some(value.0),
         _ => None,
     }
+}
+
+fn junk_project_context_label(
+    evidence: &sweepx_core::junk::manifest::ProjectContextEvidence,
+) -> String {
+    let mut label = format!("{}/{}", evidence.status.code(), evidence.reason);
+    if let Some(manifest) = evidence.cargo_manifest {
+        use std::fmt::Write;
+        let members = manifest
+            .member_patterns
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not_declared".into());
+        let _ = write!(
+            label,
+            "; kind={}; memberPatterns={members}; explicitWorkspace={}; pathDependenciesDeclared={}",
+            manifest.kind.code(),
+            manifest.explicit_workspace,
+            manifest.path_dependencies_declared
+        );
+    }
+    label
 }
 
 fn junk_size_label(value: &ByteValue, unit: HumanSizeUnit) -> String {

@@ -1,4 +1,4 @@
-//! Current, bounded content evidence. No package URI is opened and no deletion is authorized.
+//! Current, bounded content/context evidence. No declared path is opened or deletion authorized.
 //!
 //! Profiles recognize bounded generated signatures, not arbitrary Dart URI/YAML or TypeScript/JS
 //! semantics. Unsupported shapes remain unknown. Even a perfect imitation is report-only: a
@@ -8,10 +8,11 @@ mod sveltekit;
 pub use sveltekit::inspect_sveltekit_sync;
 
 use super::candidate::JunkCandidate;
+use super::manifest::{ProjectContextEvidence, inspect_cargo_manifest_context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
-use sweepx_catalog::junk::ProjectContentFormat;
+use sweepx_catalog::junk::{ProjectContentFormat, ProjectContextProfile};
 use sweepx_model::{NativeName, ScanEntryId};
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::HostPlatformScanner;
@@ -68,7 +69,8 @@ impl ProjectFormatEvidence {
 /// work before I/O, including failed attempts. This is conservative requested work, not actual RSS.
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectFormatLimits {
-    /// Maximum distinct candidate observations (repeated scan IDs reuse current answers).
+    /// Maximum distinct content/context observations, shared across profiles. Repeated scan IDs
+    /// reuse current answers within this session only.
     pub max_observations: usize,
     /// Maximum payload for each complete-file read (profiles may require multiple reads).
     pub max_file_bytes: usize,
@@ -97,7 +99,7 @@ impl Default for ProjectFormatLimits {
     }
 }
 
-/// Serial, worker-owned content observations. Answers are deduplicated only within this session;
+/// Serial, worker-owned content/context observations. Answers deduplicate only within this session;
 /// reconstruct this object for every CLI invocation or TUI revision, including validated cache hits.
 pub struct ProjectFormatSession<P: PlatformScanner = HostPlatformScanner> {
     reader: LocatorReader<P>,
@@ -107,6 +109,7 @@ pub struct ProjectFormatSession<P: PlatformScanner = HostPlatformScanner> {
     reserved_bytes: usize,
     attempts: usize,
     observed: BTreeMap<(ScanEntryId, ProjectContentFormat), ProjectFormatEvidence>,
+    contexts: BTreeMap<(ScanEntryId, ProjectContextProfile), ProjectContextEvidence>,
 }
 impl ProjectFormatSession {
     /// Uses the host backend's provider-safe full-file reader, retaining no configuration bytes.
@@ -136,12 +139,14 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             reserved_bytes: 0,
             attempts: 0,
             observed: BTreeMap::new(),
+            contexts: BTreeMap::new(),
         }
     }
 
-    /// Refreshes required content evidence. Unreadable/unsupported formats stay visible and
+    /// Refreshes required content and manifest evidence. Unreadable/unsupported inputs stay visible and
     /// report-only. This never changes filesystem coverage, reads display paths or invokes tools.
     pub fn refresh(&mut self, candidate: &mut JunkCandidate) {
+        self.refresh_context(candidate);
         let Some(profile) = candidate.project_format.as_ref().map(|e| e.profile) else {
             return;
         };
@@ -161,32 +166,109 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             ProjectContentFormat::DartPubPackageConfigV2 => 1,
             ProjectContentFormat::SvelteKitLegacySync => 4,
         };
-        let reservation = self.limits.max_file_bytes.checked_mul(reads);
         let evidence = if self.cancel.is_cancelled() {
             outcome(profile, ProjectFormatStatus::Unknown, "cancelled")
         } else if self.started.elapsed() >= self.limits.timeout {
             outcome(profile, ProjectFormatStatus::Unknown, "deadline")
         } else if let Some(current) = self.observed.get(&key) {
             current.clone()
-        } else if self.attempts >= self.limits.max_observations
-            || self.limits.max_file_bytes == 0
-            || reservation
-                .and_then(|bytes| self.reserved_bytes.checked_add(bytes))
-                .is_none_or(|sum| sum > self.limits.max_reserved_file_bytes)
-        {
-            outcome(profile, ProjectFormatStatus::Unknown, "resource_limit")
+        } else if let Err(reason) = self.reserve_observation(reads) {
+            outcome(profile, ProjectFormatStatus::Unknown, reason)
         } else {
             // Count before any failure. Native enumeration is independently bounded per attempt,
             // so max_observations * four bounds cumulative read/metadata/lineage work. Every
             // profile's full worst-case payload (including rereads) is charged before the first I/O.
-            self.attempts += 1;
-            self.reserved_bytes += reservation.expect("admitted bounded reservation");
             let current = self.observe(candidate, profile);
             self.observed.insert(key, current.clone());
             current
         };
         candidate.project_format = Some(evidence);
         candidate.reset_project_format_interpretation();
+    }
+
+    fn check_current(&self) -> Result<(), &'static str> {
+        if self.cancel.is_cancelled() {
+            Err("cancelled")
+        } else if self.started.elapsed() >= self.limits.timeout {
+            Err("deadline")
+        } else {
+            Ok(())
+        }
+    }
+
+    // Context and generated-content inputs share the same attempt/byte/deadline budgets. Failed
+    // attempts reserve before native I/O and never refund; neither cache can grow beyond attempts.
+    fn reserve_observation(&mut self, reads: usize) -> Result<(), &'static str> {
+        self.check_current()?;
+        let reservation = self.limits.max_file_bytes.checked_mul(reads);
+        let Some(total) = reservation.and_then(|bytes| self.reserved_bytes.checked_add(bytes))
+        else {
+            return Err("resource_limit");
+        };
+        if self.attempts >= self.limits.max_observations
+            || self.limits.max_file_bytes == 0
+            || total > self.limits.max_reserved_file_bytes
+        {
+            return Err("resource_limit");
+        }
+        self.attempts += 1;
+        self.reserved_bytes = total;
+        Ok(())
+    }
+
+    fn refresh_context(&mut self, candidate: &mut JunkCandidate) {
+        let Some(profile) = candidate.project_context.map(|e| e.profile) else {
+            return;
+        };
+        let evidence = if let Err(reason) = self.check_current() {
+            ProjectContextEvidence::unknown(profile, reason)
+        } else if candidate.entry_id.as_str().len() > 1024 {
+            ProjectContextEvidence::unknown(profile, "resource_limit")
+        } else {
+            let key = (candidate.entry_id.clone(), profile);
+            if let Some(current) = self.contexts.get(&key) {
+                *current
+            } else if let Err(reason) = self.reserve_observation(1) {
+                ProjectContextEvidence::unknown(profile, reason)
+            } else {
+                let current = self.observe_context(candidate, profile);
+                self.contexts.insert(key, current);
+                current
+            }
+        };
+        candidate.project_context = Some(evidence);
+    }
+
+    fn observe_context(
+        &self,
+        candidate: &JunkCandidate,
+        profile: ProjectContextProfile,
+    ) -> ProjectContextEvidence {
+        let Some(entry) = candidate.source_entry.as_ref() else {
+            return ProjectContextEvidence::unknown(profile, "native_binding_unavailable");
+        };
+        if entry
+            .executable_native_locator()
+            .ok()
+            .flatten()
+            .is_none_or(|locator| locator.parent_reopen_recipe.is_empty())
+        {
+            return ProjectContextEvidence::unknown(profile, "context_outside_scan_root");
+        }
+        let read = match profile {
+            ProjectContextProfile::CargoManifest => self.read_file_at(entry, "Cargo.toml", 1),
+        };
+        match read {
+            Ok(read) => {
+                let evidence = inspect_cargo_manifest_context(&read.bytes);
+                if let Err(reason) = self.check_current() {
+                    ProjectContextEvidence::unknown(profile, reason)
+                } else {
+                    evidence
+                }
+            }
+            Err(reason) => ProjectContextEvidence::unknown(profile, reason),
+        }
     }
 
     fn observe(
@@ -222,6 +304,15 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
         entry: &sweepx_model::ScannedEntry,
         name: &str,
     ) -> Result<sweepx_platform::PresentRegularFileRead, &'static str> {
+        self.read_file_at(entry, name, 0)
+    }
+
+    fn read_file_at(
+        &self,
+        entry: &sweepx_model::ScannedEntry,
+        name: &str,
+        ancestor_levels: usize,
+    ) -> Result<sweepx_platform::PresentRegularFileRead, &'static str> {
         if self.cancel.is_cancelled() {
             return Err("cancelled");
         }
@@ -235,7 +326,7 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
         };
         let read = self
             .reader
-            .read_captured_regular_file(entry, &name, &self.cancel)
+            .read_captured_ancestor_regular_file(entry, ancestor_levels, &name, &self.cancel)
             .map_err(read_reason)?;
         if self.cancel.is_cancelled() {
             return Err("cancelled");

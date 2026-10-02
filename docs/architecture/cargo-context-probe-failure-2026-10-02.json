@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-02",
+  "host": "arm64 macOS 25.5.0",
+  "build": "Rust 1.98.0 debug unit-test executable; Cargo context work after native-policy guard update",
+  "test": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+  "result": "ProbeUnavailable; no deadline/assertion changes",
+  "diagnostics": [
+    "probe result=Some(TimedOut), diagnostics=ProbeDiagnostics { stage: Drain, elapsed: 2.0013325s, launched_after: Some(6.609375ms), ready_after: Some(6.611958ms), first_stdout_after: None, stdout_bytes: 0, stdout_eof: false, exit_status: None }",
+    "cache probe Some(\"tool-a\"): elapsed=2.001345834s, successful=false, output_bytes=None",
+    "required cache probe rejected: tool probe timed out",
+    "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 1.092260834s, launched_after: Some(586.125\u00b5s), ready_after: Some(588.5\u00b5s), first_stdout_after: Some(1.092245792s), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+    "cache probe Some(\"tool-b\"): elapsed=1.092273084s, successful=true, output_bytes=Some(74)",
+    "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.094917ms, launched_after: Some(558.792\u00b5s), ready_after: Some(561\u00b5s), first_stdout_after: Some(13.084417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }",
+    "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.783917ms, launched_after: Some(513.292\u00b5s), ready_after: Some(515.167\u00b5s), first_stdout_after: Some(6.776042ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }"
+  ],
+  "interpretation": "The failing attempt returned from launch/setup in about 6.6 ms, then reached its 2 s deadline without observed stdout/EOF/child exit. This localizes the wait but does not establish its cause. Cleanup had completed by observation; no live slow child stack was captured. Later successes must not be treated as a fix."
+}

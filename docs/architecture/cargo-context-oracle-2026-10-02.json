@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-02",
+  "rustVersion": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "manifest": "[workspace]\nmembers=[\"crates/*\"]\nresolver=\"2\"\n",
+  "manifestSha256": "e266f8e28368b4c3dd8a8d131c09f1231c730f5debab23c5338f735589c1d612",
+  "oracle": "pinned Cargo metadata --offline --no-deps --format-version 1; isolated Cargo home/environment; read-only fixture, no build or user configuration",
+  "resolvedWorkspaceMembers": 2,
+  "packageNames": [
+    "a",
+    "b"
+  ],
+  "sweepxContext": {
+    "profile": "cargo_manifest",
+    "status": "observed",
+    "reason": "manifest_declarations_observed",
+    "cargoManifest": {
+      "kind": "virtual_workspace",
+      "memberPatterns": 1,
+      "excludePatterns": null,
+      "defaultMemberPatterns": null,
+      "explicitWorkspace": false,
+      "pathDependenciesDeclared": false
+    }
+  },
+  "trashBlockers": [
+    "project_ownership_not_verified",
+    "project_activity_not_verified",
+    "git_repository_boundary"
+  ],
+  "payloadPreserved": true,
+  "scope": "Independent declaration-vs-members oracle; not validation of full Cargo/config semantics, ownership, activity or platform runtime",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64"
+  },
+  "sweepxBinary": {
+    "build": "Rust 1.98.0 debug; cargo test -p sweepx-cli --test cli_contract",
+    "baseCommit": "4cf3dcd",
+    "sourceState": "current Cargo-context changes before commit",
+    "sha256": "1584d2a139e1d618b5ad220167dadab500b67a7aaf86785995fb489342619536"
+  }
+}

@@ -62,6 +62,8 @@ pub struct JunkCandidate {
     /// Current required content observation; never persisted as a filesystem fact. A recognized
     /// self-declared format still does not prove exclusive ownership or inactivity.
     pub project_format: Option<super::format::ProjectFormatEvidence>,
+    /// Current parent-manifest declarations, never cached as ownership or activity evidence.
+    pub project_context: Option<super::manifest::ProjectContextEvidence>,
     /// Current admitted rule constraint; cache restoration starts as NotChecked. This enum is
     /// never native execution authority and cannot be waived by confidence or Git ignore status.
     pub execution_policy: JunkExecutionPolicy,
@@ -127,7 +129,13 @@ impl JunkCandidate {
             JunkExecutionPolicy::RequireProjectOwnershipAndActivity => {
                 Some("project_ownership_not_verified")
             }
-            JunkExecutionPolicy::NativeRevalidationRequired => None,
+            // Required manifest declarations cannot become platform execution evidence if a
+            // caller changes the policy/display fields. Explicit report-only reasons remain
+            // independent above; neither path can authorize Trash from project observations.
+            JunkExecutionPolicy::NativeRevalidationRequired => self
+                .project_context
+                .as_ref()
+                .map(|_| "project_ownership_not_verified"),
             JunkExecutionPolicy::NotChecked => unreachable!("handled historical interpretation"),
         }
     }
@@ -274,8 +282,8 @@ pub fn assemble_project_candidate(
             .iter()
             .map(|component| component.entry_id.clone())
             .collect(),
-        // A project build output has no "which copy is the tool using" question: it belongs to
-        // the tree it sits in. Claiming an activity here would be noise.
+        // Layout does not prove exclusive ownership or inactivity. Current declarations and
+        // future activity observations remain separate from the traversal facts assembled here.
         activity: None,
         stale_formats: Vec::new(),
         size_is_logical: size.is_logical_fallback,
@@ -286,6 +294,9 @@ pub fn assemble_project_candidate(
         project_format: rule
             .content_format
             .map(super::format::ProjectFormatEvidence::not_checked),
+        project_context: rule
+            .context_profile
+            .map(super::manifest::ProjectContextEvidence::not_checked),
         execution_policy: rule.execution_policy.into(),
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
@@ -350,6 +361,7 @@ pub fn assemble_platform_candidate(
         confidence: None,
         blockers: Vec::new(),
         project_format: None,
+        project_context: None,
         execution_policy: JunkExecutionPolicy::NativeRevalidationRequired,
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
@@ -408,6 +420,11 @@ pub fn refresh_candidate_interpretation(
         .find(|rule| rule.id == candidate.rule_id)
         .and_then(|rule| rule.content_format)
         .map(super::format::ProjectFormatEvidence::not_checked);
+    candidate.project_context = project_rules
+        .iter()
+        .find(|rule| rule.id == candidate.rule_id)
+        .and_then(|rule| rule.context_profile)
+        .map(super::manifest::ProjectContextEvidence::not_checked);
     candidate.reset_project_format_interpretation();
     if let Some(rule) = platform_rule
         && tool_reported_root_for(&rule.root_kind).is_some()

@@ -1,13 +1,14 @@
 [
   {
     "id": "rust.target",
+    "contextProfile": "cargo_manifest",
     "names": ["target"],
     "risk": "R2",
     "executionPolicy": "require_ownership_and_activity",
     "requiredParentMarkers": ["Cargo.toml"],
     "evidence": "Cargo documents target-dir as the build output directory; the workspace manifest remains outside the selected directory. Layout and Git ignore status do not establish exclusive ownership or inactivity; current observations remain report-only.",
-    "sourceReviewedAt": "2026-08-29",
-    "references": ["https://doc.rust-lang.org/cargo/reference/build-cache.html"]
+    "sourceReviewedAt": "2026-10-02",
+    "references": ["https://doc.rust-lang.org/cargo/reference/build-cache.html", "https://doc.rust-lang.org/cargo/reference/workspaces.html"]
   },
   {
     "id": "node.modules",

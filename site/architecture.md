@@ -114,6 +114,8 @@ scan -> explain -> immutable plan -> explicit authorization -> live revalidation
 
 项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
 
-SvelteKit 1.0.0/2.0.0 的格式回归包含实际 SDK sync 生成的原始文件、冻结依赖锁与逐文件字节校验记录，独立于手写结构夹具；普通测试离线消费。真实生成目录混入用户文件时仍拒绝回收，macOS 缓存后重新观察当前格式。更广版本/配置与 Dart 实际 SDK 样本尚待采集，这些记录不证明归属、无活动或被扫描机器的工具版本。
+SvelteKit 1.0.0/2.0.0 的格式回归包含实际 SDK sync 生成的原始文件、冻结依赖锁与逐文件字节校验记录，独立于手写结构夹具；普通测试离线消费。真实生成目录混入用户文件时仍拒绝回收，macOS 缓存后重新观察当前格式。更广版本/配置仍待采集；Dart 指定版本的实际 SDK 样本已补齐，见下段。这些记录不证明归属、无活动或被扫描机器的工具版本。
 
 Dart 2.18.0/3.6.0 的实际离线 pub 记录覆盖单项目、从成员调用的共享 workspace 与中文/空格成员路径。格式 profile 支持这些 SDK 产生的百分号 UTF-8 文件名签名，普通 ASCII 路径保持无分配检查；无效编码、控制字符、编码的分隔符/dot 与 URI 结构语法仍 unknown，不解析 YAML、不求解完整 URI 语义，也不打开 URI。源码、锁文件及成员笔记通过普通读取核对不变，根 map 的 recognized 不能证明独占归属或无活动。
+
+Rust target 候选现通过捕获的原生身份链读取父目录 `Cargo.toml`，在 CLI/TUI 中展示当前 package/workspace、成员模式数量、显式 workspace 路径及路径依赖声明。JSON 新增 `projectContext`，状态为 `observed` / `invalid` / `unknown` / `not_checked`；`memberPatterns` 是声明字符串数量，不能当作实际成员数量。不会执行 Cargo、展开 glob、跟随声明路径或解析完整配置优先级。上下文与格式共用有界观察预算，缓存不保存声明答案，每次调用或刷新重新读取；这些声明不能证明独占所有权或无活动，项目回收限制继续保留。

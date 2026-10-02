@@ -1,11 +1,11 @@
-//! Bounded, side-effect-free Cargo Z0 evidence decoding and classification.
+//! Bounded Cargo declarations and handle-bound cleaner evidence decoding/classification.
 //!
 //! `Known` in this module means only that caller-provided parsing substrate was decoded or
 //! classified without ambiguity. It is not filesystem admission or deletion authority. The
-//! crate-private input has deliberately private fields and no production constructor: a future
-//! handle-bound reader must construct it in this module before detector wiring is allowed. This
-//! module never opens a path, expands an environment variable, starts a process, or produces a
-//! cleanup candidate or plan.
+//! Native collectors construct private typed inputs only after their locator checks. The manifest
+//! declaration projection reuses their parser without fabricating scanned manifest rows or cleaner
+//! identity evidence. Readers are bounded and do not execute Cargo/configuration; this module
+//! starts no process and produces no cleanup candidate or plan.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1638,68 +1638,151 @@ fn validate_input_budget<'a>(
     Ok(())
 }
 
-fn decode_workspace_manifest(
-    root_entry_id: &ScanEntryId,
-    manifest_entry_id: &ScanEntryId,
+/// Top-level manifest declaration shape. This does not establish effective workspace membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoManifestDeclarationKind {
+    /// A package table without a workspace table; ancestor/explicit workspace resolution is separate.
+    Package,
+    /// A workspace table without a root package.
+    VirtualWorkspace,
+    /// Both workspace and root-package tables.
+    WorkspacePackage,
+}
+impl CargoManifestDeclarationKind {
+    /// Locale-independent code, identical to the serialized declaration kind.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Package => "package",
+            Self::VirtualWorkspace => "virtual_workspace",
+            Self::WorkspacePackage => "workspace_package",
+        }
+    }
+}
+
+/// Bounded declaration projection, independent of Cargo cleaner's identity-bound typed evidence.
+/// Paths, patterns and package names are not retained or followed. Missing member lists differ from
+/// explicit empty lists; neither proves a workspace is exclusive, inactive or safe to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoManifestDeclarations {
+    /// Parsed package/workspace table shape, not a complete Cargo manifest validity check.
+    pub kind: CargoManifestDeclarationKind,
+    /// Number of declared member strings, possibly globs; never the resolved package count.
+    pub member_patterns: Option<usize>,
+    /// Number of declared exclusion strings; patterns are not resolved.
+    pub exclude_patterns: Option<usize>,
+    /// Number of declared default-member strings; not the effective package selection.
+    pub default_member_patterns: Option<usize>,
+    /// Whether package.workspace declares an explicit workspace path; the path is not followed.
+    pub explicit_workspace: bool,
+    /// Whether supported dependency tables contain a string-valued path declaration. False is not
+    /// proof of complete Cargo dependency semantics or of an unshared target directory.
+    pub path_dependencies_declared: bool,
+}
+
+/// Projects bytes obtained independently through native bindings, without synthesizing scan rows.
+pub(crate) fn inspect_cargo_manifest_declarations(
     bytes: &[u8],
-) -> CargoEvidence<CargoWorkspaceEvidenceV1> {
+) -> Result<CargoManifestDeclarations, &'static str> {
+    decode_manifest_declarations(bytes).map_err(CargoEvidenceReason::code)
+}
+
+fn decode_manifest_declarations(
+    bytes: &[u8],
+) -> Result<CargoManifestDeclarations, CargoEvidenceReason> {
+    use CargoEvidenceReason::{ResourceLimit, UnsupportedManifestShape};
     if bytes.is_empty() {
-        return unknown(CargoEvidenceReason::MissingManifest);
+        return Err(CargoEvidenceReason::MissingManifest);
     }
     if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
-        return unknown(CargoEvidenceReason::ResourceLimit);
+        return Err(ResourceLimit);
     }
-    let table = match parse_toml(bytes) {
-        Ok(table) => table,
-        Err(reason) => return unknown(reason),
-    };
+    let table = parse_toml(bytes)?;
     let package = table.get("package");
     let workspace = table.get("workspace");
     if package.is_some_and(|value| !value.is_table())
         || workspace.is_some_and(|value| !value.is_table())
     {
-        return unknown(CargoEvidenceReason::UnsupportedManifestShape);
+        return Err(UnsupportedManifestShape);
     }
-    let manifest_kind = match (package.is_some(), workspace.is_some()) {
-        (true, true) => CargoManifestKind::WorkspacePackage,
-        (false, true) => CargoManifestKind::VirtualWorkspace,
-        (true, false) | (false, false) => {
+    let kind = match (package.is_some(), workspace.is_some()) {
+        (true, true) => CargoManifestDeclarationKind::WorkspacePackage,
+        (false, true) => CargoManifestDeclarationKind::VirtualWorkspace,
+        (true, false) => CargoManifestDeclarationKind::Package,
+        (false, false) => return Err(UnsupportedManifestShape),
+    };
+    let mut explicit_workspace = false;
+    if let Some(package) = package.and_then(toml::Value::as_table) {
+        if package
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err(UnsupportedManifestShape);
+        }
+        if let Some(path) = package.get("workspace") {
+            if workspace.is_some() || path.as_str().is_none_or(|path| path.trim().is_empty()) {
+                return Err(UnsupportedManifestShape);
+            }
+            explicit_workspace = true;
+        }
+    }
+    let pattern_count = |key| -> Result<Option<usize>, CargoEvidenceReason> {
+        let Some(value) = workspace
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get(key))
+        else {
+            return Ok(None);
+        };
+        let values = value.as_array().ok_or(UnsupportedManifestShape)?;
+        if values
+            .iter()
+            .any(|value| value.as_str().is_none_or(|s| s.trim().is_empty()))
+        {
+            return Err(UnsupportedManifestShape);
+        }
+        Ok(Some(values.len()))
+    };
+    Ok(CargoManifestDeclarations {
+        kind,
+        member_patterns: pattern_count("members")?,
+        exclude_patterns: pattern_count("exclude")?,
+        default_member_patterns: pattern_count("default-members")?,
+        explicit_workspace,
+        path_dependencies_declared: contains_path_dependency(&table),
+    })
+}
+
+fn decode_workspace_manifest(
+    root_entry_id: &ScanEntryId,
+    manifest_entry_id: &ScanEntryId,
+    bytes: &[u8],
+) -> CargoEvidence<CargoWorkspaceEvidenceV1> {
+    let declarations = match decode_manifest_declarations(bytes) {
+        Ok(declarations) => declarations,
+        Err(reason) => return unknown(reason),
+    };
+    let manifest_kind = match declarations.kind {
+        CargoManifestDeclarationKind::WorkspacePackage => CargoManifestKind::WorkspacePackage,
+        CargoManifestDeclarationKind::VirtualWorkspace => CargoManifestKind::VirtualWorkspace,
+        CargoManifestDeclarationKind::Package => {
             return unknown(CargoEvidenceReason::UnsupportedManifestShape);
         }
     };
-    if let Some(package) = package {
-        let package = package.as_table().expect("package kind requires a table");
-        let Some(name) = package.get("name").and_then(toml::Value::as_str) else {
-            return unknown(CargoEvidenceReason::UnsupportedManifestShape);
-        };
-        if name.trim().is_empty() {
-            return unknown(CargoEvidenceReason::UnsupportedManifestShape);
-        }
-        if package.contains_key("workspace") {
-            return unknown(CargoEvidenceReason::UnsupportedManifestShape);
-        }
-    }
-    let workspace = workspace
-        .and_then(toml::Value::as_table)
-        .expect("workspace kind requires a table");
-    for key in ["members", "exclude", "default-members"] {
-        let Some(value) = workspace.get(key) else {
-            continue;
-        };
-        let Some(values) = value.as_array() else {
-            return unknown(CargoEvidenceReason::UnsupportedManifestShape);
-        };
-        if !values.is_empty()
-            || values.iter().any(|member| {
-                member
-                    .as_str()
-                    .is_none_or(|member| member.trim().is_empty())
-            })
-        {
-            return unknown(CargoEvidenceReason::UnsupportedManifestShape);
-        }
-    }
-    if contains_path_dependency(&table) {
+    // The cleaner's existing narrow contract stays unchanged. Context declarations with members,
+    // path dependencies or explicit workspace resolution do not become trusted cleaner evidence.
+    if declarations.explicit_workspace
+        || declarations.path_dependencies_declared
+        || [
+            declarations.member_patterns,
+            declarations.exclude_patterns,
+            declarations.default_member_patterns,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|count| count != 0)
+    {
         return unknown(CargoEvidenceReason::UnsupportedManifestShape);
     }
     CargoEvidence::Known {
