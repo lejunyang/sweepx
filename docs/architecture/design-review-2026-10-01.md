@@ -958,3 +958,30 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 普通 CLI 候选准备在 64 根/1024 候选中约 501.09 → 15.17 ms，在单根/8192 候选补测中约 102.09 → 35.68 ms。首轮单根索引全部分组导致 1.99 → 5.61 ms 回退，负结果保留；恢复提前停止后只对两个固定单根场景补测，未变多根 helper 复用首轮结果，artifact 区分两份二进制、harness 摘要和样本来源。单根会话候选及索引仍有额外开销，不宣称所有负载都加速。没有测 256 根/8192 候选，没有端到端或 p95/p99 结论；旧热缓存 PTY 是一个 target 内含 8192 文件，不能用此处多个 target 的准备计时关闭其停顿根因。
 
 交付验证见[缓存发布检查记录](cache-publication-validation-2026-10-03.json)：工作区串行 1035 项通过、0 失败、3 项 ignored（两个原有基准及本轮显式另跑的 release 微基准），同一系统 Trash 挂起用例仍由命令显式排除。最后审查补充了候选 capture 后、文件索引捕获前的取消检查；变更仅在会话缓存模块，最终整个 session 专项 36 项通过、1 项 opt-in ignored，其他未改用例复用工作区结果，不称为第二次完整矩阵。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试及 core/CLI 包清单通过。早期测试参考访问私有字段、slice 类型与测试 lint 的编译失败均保留，修复未扩大生产可见性或屏蔽 cfg；没有排除新的行为回归。交叉 lint 不证明目标宿主/MSVC、真实 provider 或实际 Trash/隔离成功。规则有效配置/独占归属/活动、其他发现路径审计、跨平台缓存、旧间歇根因及最终 pathname 竞态继续开放，整体会话/TUI/规则清单仍不勾选。
+
+## Cargo workspace 的固定版本独立对照（2026-10-03）
+
+[53 场景原始对照](cargo-workspace-oracle-2026-10-03.json)通过[可复验脚本](../../scripts/cargo-workspace-oracle.py)在隔离 fixture/cwd/home 中运行本机固定 Cargo/Rust 1.98.0 的 `metadata --offline --no-deps --format-version=1`。预定 53 个场景全部记录：40 个 metadata 成功、13 个 Cargo 语义拒绝，没有期限/输出越界或输入变化，未生成额外文件。每场景声明输入最多 64 文件/128 KiB，子进程共享 stdout/stderr 256 KiB 保留额度、5 秒合作期限与另计 2 秒清理；这些不是内核硬中断、全磁盘配额或项目文件系统原子快照。没有生产 SDK 调用、构建、用户项目读取、Trash 或性能声明。
+
+原始输入、版本、二进制/harness 摘要、完整 metadata 输出及拒绝文本均保留；独立复核所有输入长度/SHA-256、成功结果的 workspace root、默认 target 及成员/default-member ID 集合，不要求枚举顺序一致。脚本 AST、子进程输出/期限/清理自测和文档链接检查通过。本次不改变 Rust 行为，复用前一单元检查，不重新执行无关 Rust 矩阵。
+
+- 成功场景的默认输出属于解析后的 workspace root，而不是任意最近带 Cargo.toml 的父目录。显式 literal member、glob member、exclude 前缀、未使用 workspace dependency/patch 与实际继承的 path dependency 不能统一成一个简单的列表差集。normal/dev/build、inactive target、optional 及传递 path dependency 均有实测成员影响。
+- 外部成员的 `package.workspace` 指针、嵌套 workspace 冲突、成员指向错误根及缺失成员均需要独立观察/拒绝。`default-members` 的检查与本次 cwd 有关；从有效成员启动不等同于在 workspace 根执行默认选择。
+- 空 virtual workspace 和依赖成员环被此处 metadata/no-deps 接受；所有成功记录 `resolve=null`，这不证明构建或完整依赖解析有效，也不证明生成目录独占、没有进程活动或可以回收。Cargo 的路径解析结果不授予 SweepX 的 no-follow 原生身份关系。
+
+这是后续生产模型的独立输入，未实现 workspace 默认输出求解。当前 `cargoOutput` 仍保持受限 invocation 范围和 `workspace_default_not_resolved`；更广配置、原生输出匹配、独占归属及活动仍开放，不能因 oracle 成功勾选规则扩展。
+
+## 当前未完成摘要（2026-10-03）
+
+前文按交付顺序保留历史叙述；下面汇总当前缺口，避免把后续已完成的内容再次当作待办。
+
+| 项目 | 仍缺的内容 | 当前边界 |
+| --- | --- | --- |
+| 项目规则的有效上下文 | Cargo workspace 默认输出/成员关系的生产求解，relative/missing home、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置和依赖样本 | 已有有界原生配置观察、受限输出模型和真实 SDK 样本；53 场景 Cargo oracle 只是独立证据 |
+| 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
+| 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
+| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
+| 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、实际系统 Trash 与 Linux 隔离成功 | GNU 交叉 lint 只证明编译；会话/TUI 整体验收仍待目标宿主证据 |
+| 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
+
+大文件/重复内容分析及动态 TUI、选中刷新持久缓存片段合并、取消后 Base 残留修复、跨刷新呈现预算、macOS 普通文件 mount 证据和 22 → 17 crate 收敛已经完成，不再列为实现待办。会话/TUI 的主功能已经具备，未勾选主要体现原生验收与上述明确缺口；继续合并 crate 需要新的实际依赖/契约收益依据。
