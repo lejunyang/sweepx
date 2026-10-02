@@ -1,0 +1,5 @@
+name: member_0
+publish_to: none
+environment:
+  sdk: ^3.6.0
+resolution: workspace

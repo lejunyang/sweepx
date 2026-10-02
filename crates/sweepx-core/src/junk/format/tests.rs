@@ -8,6 +8,69 @@ use sweepx_scanner::{Scanner, ScannerOptions};
 const PUB: &[u8] = br#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/","languageVersion":"2.18"}],"generator":"pub","generatorVersion":"2.18.0"}"#;
 
 #[test]
+fn actual_dart_sdk_maps_recognize_standalone_and_member_invoked_workspaces() {
+    for recording in sweepx_fixtures::project_junk::recordings::DART {
+        let file = recording
+            .files
+            .iter()
+            .find(|file| file.recording_name == "package_config.json")
+            .unwrap();
+        let evidence = inspect_dart_pub_config(file.bytes);
+        assert_eq!(
+            evidence.status,
+            ProjectFormatStatus::Recognized,
+            "{}: {}",
+            recording.case_id,
+            evidence.reason
+        );
+        assert_eq!(evidence.reason, "pub_v2_self_declared_parent_root");
+    }
+}
+
+#[test]
+fn encoded_pub_uri_signatures_decline_structural_escapes_controls_and_invalid_utf8() {
+    for (uri, recognized) in [
+        ("../packages/%E7%BB%84%E4%BB%B6%20a", true),
+        ("file:///C:/Users/A%20B/pub-cache/package", true),
+        ("file:///home/caf%c3%a9/package", true),
+        ("../packages/raw space", false),
+        ("../packages/组件", false),
+        ("../packages/%", false),
+        ("../packages/%G0", false),
+        ("../packages/%E7%BB", false),
+        ("../packages/%FF", false),
+        ("../packages/%2Fprivate", false),
+        ("../packages/%5Cprivate", false),
+        ("../packages/%2e%2e/private", false),
+        ("../packages/%00", false),
+        ("../packages/%7f", false),
+        ("../packages/%C2%85", false),
+        ("../packages/%2532", false),
+        ("../packages/%3A", false),
+        ("../packages/%3F", false),
+        ("../packages/%23", false),
+        ("https://example.invalid/package", false),
+    ] {
+        let mut config: serde_json::Value = serde_json::from_slice(PUB).unwrap();
+        config["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "dependency", "rootUri": uri, "packageUri": "lib/",
+            }));
+        let evidence = inspect_dart_pub_config(&serde_json::to_vec(&config).unwrap());
+        assert_eq!(
+            evidence.status == ProjectFormatStatus::Recognized,
+            recognized,
+            "{uri}"
+        );
+        if !recognized {
+            assert_eq!(evidence.reason, "unsupported_package_uri");
+        }
+    }
+}
+
+#[test]
 fn dart_profile_distinguishes_recognized_invalid_and_unsupported_shapes() {
     assert_eq!(
         inspect_dart_pub_config(PUB).status,
@@ -535,6 +598,49 @@ fn executed_legacy_sdk_outputs_match_without_rewriting_generated_bytes() {
     }
 }
 
+fn scan_recorded_project(root: &std::path::Path) -> (JunkService, Vec<JunkCandidate>) {
+    let service = JunkService::built_in().unwrap();
+    let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+        sweepx_i18n::Locale::EnUs,
+        sweepx_i18n::LocaleSource::Explicit,
+    ));
+    let scan = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+        &context,
+        &crate::ScanRequest {
+            roots: vec![root.to_path_buf()],
+            state_dir: None,
+        },
+        None,
+        &service,
+        None,
+    )
+    .unwrap();
+    let aggregates = scan
+        .scan
+        .summary
+        .aggregates
+        .iter()
+        .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+        .collect();
+    let candidates = scan
+        .scan
+        .summary
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let identity = entry.identity.as_ref()?;
+            service.interpret(
+                scan.decisions.get(&identity.entry_id)?,
+                entry,
+                &aggregates,
+                &[],
+                &PlatformJunkEvidence::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    (service, candidates)
+}
+
 #[test]
 fn recorded_sdk_project_with_personal_payload_remains_report_only_and_reobserves_cache() {
     for recording in sweepx_fixtures::project_junk::recordings::SVELTEKIT {
@@ -556,45 +662,8 @@ fn recorded_sdk_project_with_personal_payload_remains_report_only_and_reobserves
             b"keep these user notes",
         )
         .unwrap();
-        let service = JunkService::built_in().unwrap();
-        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
-            sweepx_i18n::Locale::EnUs,
-            sweepx_i18n::LocaleSource::Explicit,
-        ));
-        let scan = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
-            &context,
-            &crate::ScanRequest {
-                roots: vec![root.clone()],
-                state_dir: None,
-            },
-            None,
-            &service,
-            None,
-        )
-        .unwrap();
-        let aggregates = scan
-            .scan
-            .summary
-            .aggregates
-            .iter()
-            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
-            .collect();
-        let mut candidates = scan
-            .scan
-            .summary
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let identity = entry.identity.as_ref()?;
-                service.interpret(
-                    scan.decisions.get(&identity.entry_id)?,
-                    entry,
-                    &aggregates,
-                    &[],
-                    &PlatformJunkEvidence::default(),
-                )
-            })
-            .collect::<Vec<_>>();
+        // Only the macOS cache round trip below consumes the returned service.
+        let (_service, mut candidates) = scan_recorded_project(&root);
         assert_eq!(candidates.len(), 1);
         let candidate = &mut candidates[0];
         assert_eq!(candidate.rule_id, "node.sveltekit-output");
@@ -628,7 +697,7 @@ fn recorded_sdk_project_with_personal_payload_remains_report_only_and_reobserves
             assert!(serialized.get("project_format").is_none());
             let mut restored = refresh_candidate_interpretation(
                 stored.into_candidate(),
-                service.project_rules(),
+                _service.project_rules(),
                 &[],
                 &PlatformJunkEvidence::default(),
             )
@@ -661,6 +730,60 @@ fn recorded_sdk_project_with_personal_payload_remains_report_only_and_reobserves
                 b"keep these user notes"
             );
         }
+    }
+}
+
+#[test]
+fn real_dart_workspace_maps_do_not_classify_member_notes_or_authorize_root_trash() {
+    for recording in sweepx_fixtures::project_junk::recordings::DART {
+        #[cfg(target_os = "linux")]
+        let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = owner.path().to_path_buf();
+        for file in recording.files {
+            let path = root.join(file.project_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, file.bytes).unwrap();
+        }
+        std::fs::write(
+            root.join(".dart_tool/personal-root-notes"),
+            b"keep root notes",
+        )
+        .unwrap();
+        let (_service, mut candidates) = scan_recorded_project(&root);
+        assert_eq!(candidates.len(), 1, "{}", recording.case_id);
+        let candidate = &mut candidates[0];
+        assert_eq!(candidate.rule_id, "dart.tool-state");
+        assert_eq!(candidate.path, root.join(".dart_tool").to_string_lossy());
+        ProjectFormatSession::new(Default::default(), CancellationToken::new()).refresh(candidate);
+        assert_eq!(
+            candidate.project_format.as_ref().unwrap().status,
+            ProjectFormatStatus::Recognized
+        );
+        assert_eq!(
+            candidate.project_execution_blocker(),
+            Some("project_ownership_not_verified")
+        );
+        // SDK workspace discovery deleted obsolete member maps but retained personal notes.
+        // The scanner must preserve all these bytes and must not invent a member junk candidate.
+        for file in recording.files {
+            assert_eq!(
+                std::fs::read(root.join(file.project_path)).unwrap(),
+                file.bytes
+            );
+        }
+        let receipt: serde_json::Value = serde_json::from_str(recording.receipt).unwrap();
+        for absent in receipt["removedObsoleteMaps"].as_array().unwrap() {
+            assert!(!root.join(absent.as_str().unwrap()).exists());
+        }
+        assert_eq!(
+            std::fs::read(root.join(".dart_tool/personal-root-notes")).unwrap(),
+            b"keep root notes"
+        );
     }
 }
 

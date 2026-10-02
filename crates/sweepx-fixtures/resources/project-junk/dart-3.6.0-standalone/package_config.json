@@ -1,0 +1,15 @@
+{
+  "configVersion": 2,
+  "packages": [
+    {
+      "name": "sweepx_corpus",
+      "rootUri": "../",
+      "packageUri": "lib/",
+      "languageVersion": "2.18"
+    }
+  ],
+  "generated": "2026-10-02T08:38:37.058136Z",
+  "generator": "pub",
+  "generatorVersion": "3.6.0",
+  "pubCache": "file:///private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-dart-corpus-eytdu3y0/pub-cache"
+}

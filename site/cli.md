@@ -511,3 +511,5 @@ macOS 变更历史查询最多接受 256 个绝对 UTF-8 根和 1 MiB 路径字�
 
 
 项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
+
+Dart 2.18.0/3.6.0 的真实生成样本覆盖单项目和共享 workspace；中文/空格成员路径的百分号 UTF-8 签名现可识别。无效或不支持的 URI 形式仍报告 unknown，配置中的 URI 不会被打开；recognized 也不能让共享根或混入个人文件的项目候选获得回收资格。

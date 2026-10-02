@@ -361,8 +361,8 @@ pub fn inspect_dart_pub_config(bytes: &[u8]) -> ProjectFormatEvidence {
         {
             return outcome(profile, ProjectFormatStatus::Unknown, "resource_limit");
         }
-        // The recognizer does not implement arbitrary URI escaping/resolution. Only ordinary
-        // ASCII relative paths and file: dependency locations are recognized; all others decline.
+        // Recognize bounded relative/file path signatures, including pub's percent-encoded UTF-8
+        // names. Never resolve a URI; encoded separators/dot components and other schemes decline.
         if !plain_package_uri(&package.root_uri)
             || package
                 .package_uri
@@ -461,7 +461,7 @@ fn exceeds_json_depth(bytes: &[u8]) -> bool {
     false
 }
 fn plain_package_uri(uri: &str) -> bool {
-    if uri.is_empty() {
+    if uri.is_empty() || uri.len() > 4096 {
         return false;
     }
     let path = if let Some(path) = uri.strip_prefix("file:///") {
@@ -477,8 +477,53 @@ fn plain_package_uri(uri: &str) -> bool {
     } else {
         uri
     };
-    path.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+    // Preserve the ordinary URI fast path without allocating a decode buffer.
+    if !path.contains('%') {
+        return path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'));
+    }
+    if !path.is_ascii() {
+        return false;
+    }
+    // SDK recordings establish UTF-8 names and spaces encoded with %HH. Bound the temporary
+    // buffer by the admitted URI length, decode once, and retain no decoded location. This is
+    // format evidence only: accepting an escaped filename must never create path authority.
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let Some(high) = bytes.next().and_then(|b| char::from(b).to_digit(16)) else {
+                return false;
+            };
+            let Some(low) = bytes.next().and_then(|b| char::from(b).to_digit(16)) else {
+                return false;
+            };
+            let byte = (high * 16 + low) as u8;
+            // Decline structural escapes, recursive encoding and ASCII controls rather than
+            // interpreting a different directory topology or hiding path syntax in a name.
+            if matches!(
+                byte,
+                b'/' | b'.' | b'\\' | b':' | b'?' | b'#' | b'%' | 0..=31 | 127
+            ) {
+                return false;
+            }
+            decoded.push(byte);
+        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-') {
+            decoded.push(byte);
+        } else {
+            return false;
+        }
+    }
+    std::str::from_utf8(&decoded).is_ok_and(|path| {
+        path.chars().all(|ch| {
+            if ch.is_ascii() {
+                ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ' ')
+            } else {
+                !ch.is_control() && !ch.is_whitespace()
+            }
+        })
+    })
 }
 
 #[cfg(test)]

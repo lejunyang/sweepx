@@ -1,0 +1,27 @@
+{
+  "configVersion": 2,
+  "packages": [
+    {
+      "name": "sweepx_corpus",
+      "rootUri": "../",
+      "packageUri": "lib/",
+      "languageVersion": "3.6"
+    },
+    {
+      "name": "member_0",
+      "rootUri": "../packages/%E7%BB%84%E4%BB%B6%20a",
+      "packageUri": "lib/",
+      "languageVersion": "3.6"
+    },
+    {
+      "name": "member_1",
+      "rootUri": "../packages/b",
+      "packageUri": "lib/",
+      "languageVersion": "3.6"
+    }
+  ],
+  "generated": "2026-10-02T08:38:37.380689Z",
+  "generator": "pub",
+  "generatorVersion": "3.6.0",
+  "pubCache": "file:///private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-dart-corpus-eytdu3y0/pub-cache"
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "sweepx.generated-format-recording/v1",
+  "tool": "dart pub",
+  "version": "3.6.0",
+  "sdk": "Dart SDK version: 3.6.0 (stable) (Thu Dec 5 07:46:24 2024 -0800) on \"macos_arm64\"",
+  "sdkRevision": "ae7ca5199a0559db0ae60533e9cedd3ce0d6ab04",
+  "recordedAt": "2026-10-02T08:38:37.095294+00:00",
+  "host": {
+    "os": "Darwin",
+    "arch": "arm64"
+  },
+  "requestedEnvironmentKeys": [
+    "CI",
+    "DART_SUPPRESS_ANALYTICS",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PUB_CACHE",
+    "TMPDIR"
+  ],
+  "generator": "dart pub get --offline",
+  "invocationDirectory": ".",
+  "removedObsoleteMaps": [],
+  "scope": "generated format only; report-only",
+  "files": {
+    "pubspec.yaml": {
+      "bytes": 75,
+      "sha256": "5e5cc70d961fb3d6883cd7f7ef361fd16ab16ce15d16c01539928d5c5c4b8134"
+    },
+    "lib/example.dart": {
+      "bytes": 15,
+      "sha256": "12e3f0ab9f3e6b936c95dcfe87f4f506f6b2e3108281ea220ce1e0360cfe739a"
+    },
+    "pubspec.lock": {
+      "bytes": 115,
+      "sha256": "32e49e2c8461d3091db38e630a6888d59438ab22fafb31f5ec7039eba85ce182"
+    },
+    "package_config.json": {
+      "bytes": 391,
+      "sha256": "db19d5e2226b93e4ae3e33b400c684cb87029d995151d2743b3321140c221fe9"
+    },
+    "UPSTREAM-LICENSE": {
+      "bytes": 1502,
+      "sha256": "2cfa3ee8e7512e6d44c854b986510810fadc815f93f890373b3a81c1b6ccd256"
+    }
+  }
+}

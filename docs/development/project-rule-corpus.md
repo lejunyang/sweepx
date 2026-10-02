@@ -71,9 +71,58 @@ is observed as unknown rather than inheriting the prior recognized result.
 These are generated-format and regression observations. They do not establish exclusive ownership,
 inactivity, complete TypeScript/configuration semantics, atomic cross-file snapshots, an installed
 tool version on a scanned machine or deletion authority. The separate [design review](../architecture/design-review-2026-10-01.md)
-tracks those remaining requirements. Dart recordings, broader SvelteKit versions/configurations,
+tracks those remaining requirements. Broader Dart/SvelteKit versions/configurations,
 target-host runtime qualification and real cloud-provider behavior remain open.
 
 Primary references: [SvelteKit sync CLI](https://svelte.dev/docs/kit/cli),
 [published kit 1.0.0 metadata](https://registry.npmjs.org/@sveltejs/kit/1.0.0),
 [published kit 2.0.0 metadata](https://registry.npmjs.org/@sveltejs/kit/2.0.0).
+
+## Recorded Dart runs and URI compatibility
+
+On 2026-10-02, arm64 macOS ran official Dart 2.18.0 and 3.6.0 SDKs. Both standalone runs and two
+3.6.0 workspaces were acquired with `dart pub get --offline`, without third-party dependencies.
+The workspace commands run from a member directory and record the shared root map; pub removes
+an obsolete member map while preserving personal notes next to it. One workspace includes the
+literal member path `packages/组件 a`. The SDK emits that location as a percent-encoded UTF-8 URI.
+
+The first production-parser regression rejected this actual Unicode/space workspace as
+`unsupported_package_uri`. The fix recognizes a bounded subset of percent-encoded UTF-8 filename
+signatures, retaining the allocation-free ordinary ASCII path. It never resolves or opens a package
+URI. Invalid UTF-8, controls, malformed encodings, encoded path separators/dots, query/fragment/scheme
+syntax and recursive encoding remain unknown. This is not a general URI/YAML/workspace resolver.
+Recognized root output may be shared by several projects and still cannot enter Trash.
+
+The SDK ZIPs were downloaded using the [official archive](https://dart.dev/get-dart/archive) URL
+scheme and checked against its corresponding `.zip.sha256sum` before unpacking or execution:
+
+| SDK | Artifact | Verified SHA-256 |
+| --- | --- | --- |
+| 2.18.0 | macos-arm64 release ZIP | `c1f521eab5f2f23002d135502735e1e12ad5d8342cf52bd8f0f1ad360671f9c0` |
+| 3.6.0 | macos-arm64 release ZIP | `1bdbc6544aaa53673e7cbbf66ad7cde914cb7598936ebbd6a4245e1945a702a0` |
+
+SDK binaries are not checked into SweepX or installed globally. To repeat with already verified
+SDKs, use the separate acquisition entry, which shares the existing bounded runner/file reader:
+
+```sh
+python3 scripts/capture-dart-corpus.py \
+  --dart-2 /absolute/path/to/dart-2.18.0/bin/dart \
+  --dart-3 /absolute/path/to/dart-3.6.0/bin/dart \
+  --output /tmp/sweepx-dart-new-recording
+python3 -m unittest discover -s scripts/tests -p 'test_capture*corpus.py'
+```
+
+The tool checks actual runtime versions, requests analytics suppression/disablement and uses a
+disposable HOME/PUB_CACHE. Raw inputs, map, lock, preserved notes, upstream SDK license and receipt
+are retained. Actual generated timestamps and temporary `pubCache` URI values remain in the raw
+recording; they are controlled fixture paths, not the user's real SDK cache. Re-acquisition checks
+all other map fields and all non-map bytes independently; it must not pretend timestamp/cache
+differences are identical raw output. Ordinary tests remain offline. Wrong SDK versions cannot
+issue a receipt, and existing captures are preserved before running a tool.
+
+Native core and both CLI locales materialize all four recordings. They recognize the root map,
+retain byte-identical sources/notes and do not classify the member's remaining `.dart_tool` notes
+without its required map. Root candidates remain report-only. The acquired SDK behavior is macOS
+evidence; cross-target test compilation alone does not qualify Windows/Linux SDK or native runtime
+behavior. More versions, dependencies, configuration shapes, ownership/activity and complete language
+semantics remain open. Primary workspace reference: [Dart pub workspaces](https://dart.dev/tools/pub/workspaces).

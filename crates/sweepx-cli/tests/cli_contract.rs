@@ -27,6 +27,60 @@ fn duplicate_fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
+fn actual_dart_recordings_keep_locale_stable_formats_and_workspace_notes() {
+    for recording in sweepx_fixtures::project_junk::recordings::DART {
+        let (_fixture, base) = duplicate_fixture();
+        let root = base.join("project");
+        for file in recording.files {
+            let path = root.join(file.project_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file.bytes).unwrap();
+        }
+        for locale in ["en-US", "zh-CN"] {
+            let output = cli_command()
+                .timeout(std::time::Duration::from_secs(10))
+                .args(["--locale", locale, "--format", "json", "--state-dir"])
+                .arg(base.join(locale))
+                .arg("junk")
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let rows = report["candidates"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "{}", recording.case_id);
+            let row = &rows[0];
+            assert_eq!(row["ruleId"], "dart.tool-state");
+            assert_eq!(row["projectFormat"]["status"], "recognized");
+            assert_eq!(
+                row["projectFormat"]["profile"],
+                "dart_pub_package_config_v2"
+            );
+            assert_eq!(row["executionPolicy"], "report_only");
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("project_ownership_not_verified"))
+            );
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("project_activity_not_verified"))
+            );
+            for file in recording.files {
+                assert_eq!(fs::read(root.join(file.project_path)).unwrap(), file.bytes);
+            }
+        }
+    }
+}
+
+#[test]
 fn duplicate_content_scan_reports_full_hashes_and_distinct_objects_in_both_locales() {
     let (_fixture, root) = duplicate_fixture();
     fs::create_dir(root.join("nested")).unwrap();

@@ -1,0 +1,70 @@
+{
+  "schema": "sweepx.generated-format-recording/v1",
+  "tool": "dart pub",
+  "version": "3.6.0",
+  "sdk": "Dart SDK version: 3.6.0 (stable) (Thu Dec 5 07:46:24 2024 -0800) on \"macos_arm64\"",
+  "sdkRevision": "ae7ca5199a0559db0ae60533e9cedd3ce0d6ab04",
+  "recordedAt": "2026-10-02T08:38:37.261559+00:00",
+  "host": {
+    "os": "Darwin",
+    "arch": "arm64"
+  },
+  "requestedEnvironmentKeys": [
+    "CI",
+    "DART_SUPPRESS_ANALYTICS",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PUB_CACHE",
+    "TMPDIR"
+  ],
+  "generator": "dart pub get --offline",
+  "invocationDirectory": "packages/a",
+  "removedObsoleteMaps": [
+    "packages/a/.dart_tool/package_config.json"
+  ],
+  "scope": "generated format only; report-only",
+  "files": {
+    "pubspec.yaml": {
+      "bytes": 109,
+      "sha256": "02fec103bf9ef70c1ca10eb5b3699d454ced34eb9e1a55aa96a1ac924cb6d7f0"
+    },
+    "lib/example.dart": {
+      "bytes": 15,
+      "sha256": "12e3f0ab9f3e6b936c95dcfe87f4f506f6b2e3108281ea220ce1e0360cfe739a"
+    },
+    "packages/a/pubspec.yaml": {
+      "bytes": 81,
+      "sha256": "0b38525e28c35e721d6c2e1ace4660a6eaef9804db4565ee4c26a87f025b876a"
+    },
+    "packages/a/lib/example.dart": {
+      "bytes": 15,
+      "sha256": "12e3f0ab9f3e6b936c95dcfe87f4f506f6b2e3108281ea220ce1e0360cfe739a"
+    },
+    "packages/b/pubspec.yaml": {
+      "bytes": 81,
+      "sha256": "10dccf969e5fd9a814e949c0d9dfaff5f75b5e58b6514c8f4587b049d58dcafd"
+    },
+    "packages/b/lib/example.dart": {
+      "bytes": 15,
+      "sha256": "12e3f0ab9f3e6b936c95dcfe87f4f506f6b2e3108281ea220ce1e0360cfe739a"
+    },
+    "member-personal-notes.txt": {
+      "bytes": 22,
+      "sha256": "a04175580b1cfcc91dabffb0ca691e8344fc725f3fa3bf2cc130791ac4efe5a2"
+    },
+    "pubspec.lock": {
+      "bytes": 114,
+      "sha256": "5bbf0e6325a3c6ce3a450dd2322645f20b5ba8c795e3d4b2763a5cb2aff4f21f"
+    },
+    "package_config.json": {
+      "bytes": 654,
+      "sha256": "dd7637286510c9782b8bbc27bde7c1f73b8734f2658f03a2d6bbfcc247d811e2"
+    },
+    "UPSTREAM-LICENSE": {
+      "bytes": 1502,
+      "sha256": "2cfa3ee8e7512e6d44c854b986510810fadc815f93f890373b3a81c1b6ccd256"
+    }
+  }
+}

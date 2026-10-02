@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 已补实际 SDK 生成文件、冻结依赖锁与字节记录；完整语言语义、Dart 与更广版本/配置采集、独占所有权/活动观察仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -720,3 +720,16 @@ Windows 属性依据：[Rust MetadataExt::file_attributes](https://doc.rust-lang
 交付验证：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 944 项通过、0 失败、2 项原有基准 ignored，既有系统 Trash 成功挂起继续显式排除。之后仅加强 cache JSON 无格式字段断言，实际目标回归再执行 1 项通过，其余未改行为复用完整结果。受影响 core/fixtures、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查通过；fixtures/core 包清单通过，fixtures 包含全部 18 份原始录制文件。采集工具六项测试通过；超时子进程测试用实际 child-ready 标记确认已启动后再检查迟到写入不存在，避免启动失败冒充取消成功。本轮没有重现或宣称修复旧 300 ms probe、共享缓存 ProbeUnavailable 或 debug 热缓存 PTY 问题；跨编译不作为 Linux/Windows 运行证据，MSVC、实际 cloud provider 与 Trash 成功未验收。
 
 最后按仓库冻结依赖重新运行两版真实 SDK，逐文件与原记录比较，两版各八份输入/输出/许可文件全部字节相同；新 receipt 仅采集时刻不同，不用后来的时间覆盖原始记录。采集读取使用限长读和前后元数据核对，拒绝 final link、特殊文件及超出生成项目的路径，不靠 stat 后的无界 read_bytes 声称字节有界。
+
+
+## 实际 Dart SDK、共享 workspace 与编码路径修正（2026-10-02）
+
+官方 macos-arm64 Dart 2.18.0/3.6.0 ZIP 经其 SHA-256 核对后在任务临时目录展开，未全局安装或纳入仓库。独立隔离的 HOME/PUB_CACHE、显式关闭/抑制 analytics 与无第三方依赖的 offline pub get 产生四份原始记录：两版单项目、3.6.0 共享 workspace 和带中文/空格成员路径的 workspace。workspace 命令从成员调用，实际 SDK 删除过时成员 map 且保留旁边个人笔记；source/lock/map/notes、SDK license、版本/revision、调用目录与逐文件 SHA-256/长度 receipt 均保留。SDK 样本与手写正反例分开，普通 Rust 回归离线消费，不在产品扫描时执行 SDK。复验入口与证据边界见[项目规则执行样本](../development/project-rule-corpus.md#recorded-dart-runs-and-uri-compatibility)。
+
+新增实际 map 回归首次失败，明确为 3.6.0 Unicode workspace 的 unsupported_package_uri：旧识别器只接受 ASCII 字符，拒绝 SDK 自己生成的百分号 UTF-8 名称。本次只扩展有界 URI 文件名签名：普通 ASCII 路径保留无分配路径，转义分支最多暂存已准入的 4096 URI 字节，只解码一次、不留存位置、不打开 URI；坏 UTF-8、控制字符、无效转义、编码的分隔符/dot、递归编码、query/fragment/scheme 等不支持形状保持 unknown。没有新的依赖、crate、探测线程或读取阶段，也没有将识别升级为文件系统/执行授权。
+
+独立 receipt 回归核对全部源输入和生成字节；真实 SDK 格式正例保持原输出，另以明确 URI 正反例覆盖 Win drive 签名、大小写 hex、无效 UTF-8 与结构/控制转义。原生 core 与双语 CLI 物化四份样本，只取得根 dart.tool-state 候选，不把已删除 map 的成员个人笔记目录当垃圾。普通 fs::read 核对所有输入/生成/personal bytes 不变，recognized 根仍保留所有权/活动阻碍和 report_only 执行策略。既有 cache/revision 格式重观察、provider/链接/取消/预算和 SvelteKit 实际样本回归保留。
+
+再次采集四种实际场景后，所有非 map 输入/输出字节一致，map 除 generated 时间和受控 pubCache 临时路径外的全部字段一致；不改写原录制的动态字段或宣称原始字节完全一样。采集工具复用既有有界子进程/文件读，仅增加 SDK 版本拒绝与已有采集保护的独立失败回归。更广 SDK/配置/依赖、完整 YAML/URI/语言语义、独占归属、活动观察与目标宿主/真实 provider/Trash 成功仍未完成；规则扩展不勾选，旧性能/间歇失败/最终路径竞态也不由这些样本关闭。
+
+交付验证（arm64 macOS、Rust 1.98.0）：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 949 项通过、0 失败、2 项原有基准 ignored；既有系统 Trash 成功挂起仍显式排除。受影响 core/CLI/fixtures、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查通过；三个受影响包清单通过，fixtures 包含全部 52 份原始 SDK 录制文件（本轮新增 Dart 34 份）。两种采集工具共八项实际进程/文件边界/失败回归通过。初次实际 Unicode map 专项为 0 通过、1 失败，修正生产识别器后全部内容专项 17 项通过，未改写 SDK 正例来迎合旧实现；Linux/Windows 首轮交叉 lint 因抽取后的测试局部变量只在 macOS 缓存分支使用而失败，窄化该绑定后两个完整目标复验通过。该测试绑定修正后宿主内容专项 17 项与受影响 clippy 再通过，其余未变实现复用完整结果，不称为又跑一次全工作区。没有放宽生产 cfg、忽略断言或重试偶发失败直到通过；实际 Linux/Windows/MSVC、云 provider、系统 Trash 成功仍未验收，旧 probe/cache/PTY 间歇原因和最终 pathname 竞态继续开放。
