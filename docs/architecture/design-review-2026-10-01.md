@@ -454,6 +454,8 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
+另有两个明确的体验接缝尚未完成：选中刷新已有局部遍历，但没有将片段安全合并到持久缓存代际；独立大文件/重复内容分析已有 core/CLI，尚未接入 TUI 结果视图、重复组保留者选择和交互回收。对应 CLI 选项目前与 TUI 互斥，不能将分析器验收当作这些交互功能已交付。Git 的重复范围查询随后已合并并补等价计时，见文末；上述间歇根因项仍保持开放。
+
 crate 已从 22 收敛到 17，core 与终端依赖已分离；第二轮未发现进一步合并的明确收益。继续合并不作为独立待办，只有具体契约、所有权或依赖收益成立时再评估。
 
 工具探测现已补固定大小的最近一次阶段诊断，独立实验定位出本机新建脚本首次直接执行的额外等待；共享缓存的旧超时随后再次复现，最新活体取样取得了实际测试子进程的启动堆栈，但尚未捕获超时当次的原因，不能认定根因已解决。详见文末工具探测及活体取样记录。
@@ -793,3 +795,24 @@ scanner 的新祖先配置观察先复验原始完整链直到候选自身，再
 [独立 Cargo 配置对照](cargo-local-config-oracle-2026-10-02.json)在固定 Cargo 1.98.0、隔离 home/覆盖环境的三个 offline metadata 场景中核对：两个文件均声明、无扩展名文件未声明 target-dir、只有现代文件。实际 Cargo 分别使用 legacy 路径、默认 target、modern 路径；SweepX 分别报告各文件自己的声明而保持 precedenceComplete=false 和项目回收阻碍。普通读取确认配置/manifest/个人载荷未变。生产和普通 Rust 回归不执行 Cargo；这个对照不证明全部有效配置、所有权、活动或删除安全。
 
 交付验证：完整工作区串行 965 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，实际系统 Trash 成功未验证。之后仅去除重复测试断言、补内部 rustdoc，并将 Linux 配置内容夹具放到已知本地 /dev/shm；最终原生内容/祖先专项 6 项通过，其余未变宿主行为复用工作区结果，不称为第二次完整矩阵。最终受影响 crate 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 和三包清单通过；三个独立 Cargo 对照的投影、状态及保留字节核验通过。Linux 专用测试代码只交叉 lint，原生 Linux/Windows、MSVC、真实云 provider 和系统 Trash 成功仍未验收。没有端到端计时或提速结论；旧 probe/PTY/FSEvents 间歇失败及有效配置、所有权、活动和最终 pathname 竞态继续开放。
+
+## 合并 Git 范围查询与扫描计时（2026-10-02）
+
+每个项目候选原先分别启动 Git，查询工作区顶层与绝对 .git 位置，然后查询 tracked/ignore。共享 GitEvidenceSession 现在用一次有界 rev-parse 同时取得两个位置，普通候选完整判断由四次启动减到三次；tracked 候选仍在 tracked 命中时提前拒绝。两个位置继续各自进行原生 no-follow、identity、filesystem/mount 和 fingerprint 核对，候选与仓库的前后复验保持原路径，不跨候选或调用缓存范围答案。Git 环境重定向仍移除，外部配置改变工作区时仍拒绝，名称/ignore 不提供项目回收权限。CLI 与 TUI 的 Git 阶段共用这次修改。
+
+来源访问日期为 2026-10-02，Git 的 [rev-parse 文档](https://git-scm.com/docs/git-rev-parse)定义工作区与绝对 Git 目录输出。联合结果仅接受两个完整绝对路径记录，截断、额外记录、空/相对路径或失败均不提供范围依据；保留原 Unix 无损字节及 Windows UTF-8/CRLF 解码契约。Unix 原生名字含换行时不采用联合拆行，继续两个独立有界查询；该分支不宣称减少启动。新增回归实际创建中文/换行工作区，用独立 Git ignore 与普通文件读取对照；三次启动额度仍能完成普通候选解释，复用扫描事实时新 index 的 tracked 优先，外部 core.worktree 变化在同一会话内重查，项目回收阻碍保持。
+
+[完整扫描对照](git-scope-benchmark-2026-10-02.json)使用本机 arm64 macOS Darwin 25.5.0、Rust 1.98.0、Apple Git 2.50.1 的默认 CLI feature/debug 构建；修改前来自 d1fc89e，artifact 保存两个二进制及源文件摘要。受控仓库有 32 个显式项目根，每个 target 内 64 个文件、18,400 逻辑字节，共 2,048 文件；30 个未跟踪忽略目标、一个带跟踪文件的目标、一个未忽略目标。独立 Git 命令核对每个目标的 index/ignore 关系及联合/两次 scope 字节一致，普通目录枚举、长度和全部原始文件字节核对数量/总量/无改动。修改前后全部候选、当前 Git/配置解释与执行约束一致，只排除单次扫描 ID 等观察标识；不执行 Trash。
+
+最终测量固定每个二进制六轮空 SweepX 缓存与六轮热尝试，交替修改前/后顺序；没有同时运行本任务的编译或测试。OS cache 未清空或受控，不将空 SweepX 缓存称为冷磁盘。两个二进制各自首轮热尝试为 32 根 miss，另五轮均为 32 根 hit，按实际命中单独归组，不能把六轮全叫缓存命中。
+
+| 实际状态 | 修改前扫描 wall 中位数 | 修改后扫描 wall 中位数 | 修改前 Git 阶段中位数 | 修改后 Git 阶段中位数 | 每二进制样本数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 空 SweepX 缓存，32 根 miss | 2.290 s | 1.794 s | 1.973 s | 1.472 s | 6 |
+| 热尝试，32 根 hit | 2.026 s | 1.602 s | 1.906 s | 1.468 s | 5 |
+
+该受控负载下，扫描 wall 中位数分别减少约 22%/21%，Git 阶段分别减少约 25%/23%；这是完整只读 CLI 调用及其明确阶段，不代表真实全盘吞吐、TUI 首屏或 p95/p99。最初独立 oracle 错误预期带跟踪文件的目标仍被 check-ignore 命中，实际 Git 返回 1，尚未执行扫描；仅修正 harness 的这项预期。随后一轮完整等价测量与短时 core lint 有部分重叠，其全部原始样本另存 artifact 的 diagnosticAttempts、排除于上表；最终固定次数串行测量单独记录，没有遇到快样本就结束或混用两轮数据。
+
+这减少一次确定的重复启动，没有定位旧 300 ms/2 秒工具失败、8,192 文件热缓存 PTY 超时或 FSEvents settle 偶发失败，也不关闭有效配置、归属/活动、缓存片段合并、大文件/重复 TUI、跨平台缓存及目标宿主/执行验收缺口。路线图保持进行中。
+
+交付验证：Git 专项实际运行七项通过，完整工作区串行 969 项通过、0 失败、两个原有基准 ignored；仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，实际系统 Trash 成功未验证。受影响 core、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 与 core 包清单通过；24 个最终计时样本的等价摘要、实际命中状态、中位数及被测源文件摘要独立复核。Linux/Windows 新测试代码只交叉 lint，原生宿主、Windows MSVC、真实 provider 和系统 Trash 成功继续未验收；已通过检查不关闭上述间歇根因项，没有放宽期限或排除额外测试。

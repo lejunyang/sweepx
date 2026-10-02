@@ -509,30 +509,55 @@ impl GitEvidenceSession {
         repository: &Path,
         git: &EntryMetadata,
     ) -> Result<(), &'static str> {
-        for (argument, expected) in [
-            ("--show-toplevel", repository),
-            ("--absolute-git-dir", git.path.as_path()),
-        ] {
-            if self.probes.is_exhausted() {
-                return Err("git_query_budget_exhausted");
-            }
-            let mut command = self.command(repository, &["rev-parse", argument]);
-            let output = self
-                .probes
-                .run(&mut command)
-                .map_err(|_| "git_query_failed")?;
-            if !output.status.success() {
-                return Err("git_query_failed");
-            }
-            let path = output_path(&output.stdout).ok_or("git_repository_boundary")?;
+        // Both answers come from the same Git configuration observation. Do not cache scope:
+        // external config can change between candidates without changing the repository inode.
+        // rev-parse has newline framing, not NUL framing. Keep independent bounded queries for
+        // native names containing newlines rather than splitting a valid Unix pathname.
+        let expected = [repository, git.path.as_path()];
+        let paths = if expected
+            .iter()
+            .any(|path| path.as_os_str().as_encoded_bytes().contains(&b'\n'))
+        {
+            [
+                output_path(&self.scope_output(repository, &["--show-toplevel"])?)
+                    .ok_or("git_repository_boundary")?,
+                output_path(&self.scope_output(repository, &["--absolute-git-dir"])?)
+                    .ok_or("git_repository_boundary")?,
+            ]
+        } else {
+            scope_output_paths(
+                &self.scope_output(repository, &["--show-toplevel", "--absolute-git-dir"])?,
+            )
+            .ok_or("git_repository_boundary")?
+        };
+        for (path, expected) in paths.iter().zip(expected) {
             // Git may normalize spelling; native admission compares identity and enforces no-follow.
-            let actual = self.admit(&path).ok_or("git_repository_boundary")?;
+            let actual = self.admit(path).ok_or("git_repository_boundary")?;
             let expected = self.admit(expected).ok_or("git_repository_boundary")?;
             if !same_metadata(&actual.metadata, &expected.metadata) {
                 return Err("git_repository_boundary");
             }
         }
         Ok(())
+    }
+
+    fn scope_output(
+        &mut self,
+        repository: &Path,
+        arguments: &[&str],
+    ) -> Result<Vec<u8>, &'static str> {
+        if !self.available() || self.probes.is_exhausted() {
+            return Err("git_query_budget_exhausted");
+        }
+        let mut command = self.command(repository, &["rev-parse"]);
+        let output = self
+            .probes
+            .run(command.args(arguments))
+            .map_err(|_| "git_query_failed")?;
+        if !output.status.success() {
+            return Err("git_query_failed");
+        }
+        Ok(output.stdout)
     }
 
     fn query(
@@ -639,6 +664,18 @@ fn output_path(bytes: &[u8]) -> Option<PathBuf> {
         let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
         Some(PathBuf::from(std::str::from_utf8(bytes).ok()?))
     }
+}
+
+// Exactly two complete records; truncated, extra or empty output never becomes a partial scope.
+// Decode each path using the existing native-byte/Windows UTF-8 contract, without trimming names.
+fn scope_output_paths(bytes: &[u8]) -> Option<[PathBuf; 2]> {
+    let mut records = bytes.split_inclusive(|byte| *byte == b'\n');
+    let worktree = output_path(records.next()?)?;
+    let git = output_path(records.next()?)?;
+    if records.next().is_some() || !worktree.is_absolute() || !git.is_absolute() {
+        return None;
+    }
+    Some([worktree, git])
 }
 
 fn captured_path<'a>(
@@ -802,6 +839,133 @@ mod tests {
             ],
         );
         (owner, base, project)
+    }
+
+    #[test]
+    fn scope_pair_requires_two_complete_native_paths() {
+        #[cfg(unix)]
+        let (worktree, directory, valid) = (
+            PathBuf::from("/project space"),
+            PathBuf::from("/project space/.git"),
+            b"/project space\n/project space/.git\n".as_slice(),
+        );
+        #[cfg(windows)]
+        let (worktree, directory, valid) = (
+            PathBuf::from(r"C:\project space"),
+            PathBuf::from(r"C:\project space\.git"),
+            b"C:\\project space\r\nC:\\project space\\.git\r\n".as_slice(),
+        );
+        assert_eq!(scope_output_paths(valid), Some([worktree, directory]));
+        for rejected in [
+            &valid[..valid.len() - 1],
+            b"\n\n",
+            b"relative\nrelative/.git\n",
+            b"/only-one\n",
+            b"/a\n/a/.git\n/extra\n",
+        ] {
+            assert!(scope_output_paths(rejected).is_none(), "{rejected:?}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let paths = scope_output_paths(b"/space \xff\r\n/space \xff\r/.git\n").unwrap();
+            assert_eq!(paths[0].as_os_str().as_bytes(), b"/space \xff\r");
+            assert_eq!(paths[1].as_os_str().as_bytes(), b"/space \xff\r/.git");
+        }
+    }
+
+    #[test]
+    fn one_scope_probe_preserves_budget_for_current_tracked_and_ignore_queries() {
+        let (_owner, base, project) = fixture();
+        git(&base, &["check-ignore", "--quiet", "--", "project/target"]);
+        let limits = GitEvidenceLimits {
+            probes: ProbeLimits {
+                max_processes: 3,
+                ..ProbeLimits::default()
+            },
+            ..GitEvidenceLimits::default()
+        };
+        let mut rows = scan(&project);
+        GitEvidenceSession::new(limits, CancellationToken::new()).refresh(&mut rows);
+        assert_eq!(rows[0].git.as_ref().unwrap().status, "ignored");
+        assert_eq!(rows[0].confidence.as_deref(), Some("high"));
+        assert_eq!(
+            rows[0].project_execution_blocker(),
+            Some("project_ownership_not_verified")
+        );
+        assert_eq!(
+            std::fs::read(project.join("target/file")).unwrap(),
+            b"user-content"
+        );
+        // Current index changes still win over ignore, including when traversal facts are reused.
+        git(&base, &["add", "--force", "project/target/file"]);
+        GitEvidenceSession::new(limits, CancellationToken::new()).refresh(&mut rows);
+        assert!(rows[0].git.is_none());
+        assert!(
+            rows[0]
+                .blockers
+                .iter()
+                .any(|reason| reason == "tracked_descendant")
+        );
+    }
+
+    #[test]
+    fn scope_is_queried_again_when_external_configuration_redirects_the_worktree() {
+        let (_owner, base, _project) = fixture();
+        let foreign = base.join("foreign workspace");
+        std::fs::create_dir(&foreign).unwrap();
+        let mut session = GitEvidenceSession::new(
+            GitEvidenceLimits {
+                probes: ProbeLimits {
+                    max_processes: 2,
+                    ..ProbeLimits::default()
+                },
+                ..GitEvidenceLimits::default()
+            },
+            CancellationToken::new(),
+        );
+        let Marker::Repository { git: directory, .. } = session.observe_marker(&base) else {
+            panic!("independently created native repository");
+        };
+        session.check_query_scope(&base, &directory).unwrap();
+        git(
+            &base,
+            &["config", "core.worktree", foreign.to_str().unwrap()],
+        );
+        assert_eq!(
+            session.check_query_scope(&base, &directory),
+            Err("git_repository_boundary")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newline_repository_names_keep_independently_framed_scope_queries() {
+        let owner = tempfile::tempdir().unwrap();
+        let base = owner.path().canonicalize().unwrap().join("中文\nworkspace");
+        std::fs::create_dir_all(base.join("target")).unwrap();
+        std::fs::write(base.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        std::fs::write(base.join("target/file"), b"personal data").unwrap();
+        std::fs::write(base.join(".gitignore"), b"target/\n").unwrap();
+        git(&base, &["init", "--quiet"]);
+        git(&base, &["check-ignore", "--quiet", "--", "target"]);
+        let mut rows = scan(&base);
+        GitEvidenceSession::new(
+            GitEvidenceLimits {
+                probes: ProbeLimits {
+                    max_processes: 4,
+                    ..ProbeLimits::default()
+                },
+                ..GitEvidenceLimits::default()
+            },
+            CancellationToken::new(),
+        )
+        .refresh(&mut rows);
+        assert_eq!(rows[0].git.as_ref().unwrap().status, "ignored");
+        assert_eq!(
+            std::fs::read(base.join("target/file")).unwrap(),
+            b"personal data"
+        );
     }
 
     #[test]

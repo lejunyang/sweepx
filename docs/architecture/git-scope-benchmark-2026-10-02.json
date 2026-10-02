@@ -1,0 +1,3149 @@
+{
+  "schema": "sweepx.git-scope.benchmark/v1",
+  "dateUtc": "2026-10-02T11:25:45.989417+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64"
+  },
+  "toolchain": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "source": {
+    "beforeCommit": "d1fc89e",
+    "afterBaseCommit": "d1fc89ed764d849ac72ca10c15df08c98df8028b",
+    "afterDiffSha256": "286609c9b8c1d524554748aad9c36809736569b91234182c5c9dd857f58ca5ba",
+    "afterGitSourceSha256": "ba23890256d274e25ae5373172352e44bd2871bf3d7e4d7b002c3f3205c40a03"
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/sweepx-git-scope-before-2026-10-02",
+      "sha256": "aba5d2689df05b5e52de0118b263f5674f549561c20dad81ca78c6b66befe1e4",
+      "build": "debug, default CLI features, pinned Rust"
+    },
+    "after": {
+      "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/debug/sweepx",
+      "sha256": "ee20cf92b63b9f9777e88c92d85a7790a2178e60937343a026edf0d7418a2dc3",
+      "build": "debug, default CLI features, pinned Rust"
+    }
+  },
+  "workload": {
+    "fixture": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文",
+    "scanRoots": 32,
+    "filesPerTarget": 64,
+    "logicalBytesPerTarget": 18400,
+    "ignoredUntrackedTargets": 30,
+    "trackedTargets": 1,
+    "unignoredTargets": 1,
+    "repetitionsPerStatePerBinary": 6,
+    "order": "alternate before/after per repetition; cold then warm-attempt",
+    "setupSettleSeconds": 1
+  },
+  "osCache": "uncontrolled; cold means empty SweepX cache only; actual root hits recorded per sample",
+  "verification": {
+    "equivalentFilesystemGitContextExecutionFacts": true,
+    "independentGitScopeOutputMatchesTwoQueries": true,
+    "independentGitTrackedAndIgnoreQueries": true,
+    "ordinaryFileCountSizeAndBytesUnchanged": true,
+    "candidateScanIdsExcluded": true,
+    "systemTrashExercised": false,
+    "tailLatencyClaimed": false,
+    "oldIntermittentFailuresReproduced": false
+  },
+  "scopeOracle": {
+    "individualOutputs": [
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文\n",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/.git\n"
+    ],
+    "jointOutput": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文\n/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/.git\n"
+  },
+  "facts": [
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-00/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-01/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-02/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-03/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-04/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-05/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-06/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-07/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-08/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-09/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-10/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-11/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-12/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-13/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-14/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-15/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-16/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-17/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-18/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-19/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-20/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-21/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-22/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-23/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-24/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-25/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-26/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-27/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-28/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-29/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated_ignored",
+      "confidence": "high",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": {
+        "status": "ignored",
+        "check": "git.check-ignore.v1"
+      }
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-30/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated",
+      "confidence": "medium",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified",
+        "tracked_descendant"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": null
+    },
+    {
+      "path": "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-git-scope-benchmark-gwk7rr1n/repository space 中文/project-31/target",
+      "ruleId": "rust.target",
+      "risk": "R2",
+      "reclaimable": {
+        "state": "known",
+        "value": "18400"
+      },
+      "sizeIsLogical": true,
+      "classification": "known_generated",
+      "confidence": "medium",
+      "blockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "executionPolicy": "require_project_ownership_and_activity",
+      "projectContext": {
+        "profile": "cargo_manifest",
+        "status": "observed",
+        "reason": "manifest_declarations_observed",
+        "cargoManifest": {
+          "kind": "virtual_workspace",
+          "memberPatterns": 0,
+          "excludePatterns": null,
+          "defaultMemberPatterns": null,
+          "explicitWorkspace": false,
+          "pathDependenciesDeclared": false
+        },
+        "cargoConfig": {
+          "consistency": "non_atomic",
+          "config": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "configToml": {
+            "status": "unknown",
+            "reason": "config_not_observed_non_atomic",
+            "declared": null
+          },
+          "precedenceComplete": false
+        }
+      },
+      "projectFormat": null,
+      "git": null
+    }
+  ],
+  "summary": {
+    "before/cold/root-cache-miss": {
+      "samples": 6,
+      "medianWallNs": 2289670875,
+      "medianGitEvidenceNs": 1973396146
+    },
+    "after/cold/root-cache-miss": {
+      "samples": 6,
+      "medianWallNs": 1793516042,
+      "medianGitEvidenceNs": 1471960625
+    },
+    "before/warm-attempt/root-cache-miss": {
+      "samples": 1,
+      "medianWallNs": 2158355875,
+      "medianGitEvidenceNs": 1845938125
+    },
+    "after/warm-attempt/root-cache-miss": {
+      "samples": 1,
+      "medianWallNs": 1766324709,
+      "medianGitEvidenceNs": 1447964125
+    },
+    "after/warm-attempt/root-cache-hit": {
+      "samples": 5,
+      "medianWallNs": 1602046042,
+      "medianGitEvidenceNs": 1468180917
+    },
+    "before/warm-attempt/root-cache-hit": {
+      "samples": 5,
+      "medianWallNs": 2025848541,
+      "medianGitEvidenceNs": 1906086042
+    }
+  },
+  "samples": [
+    {
+      "wallNs": 2383238333,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2335145292,
+        "phasesNs": {
+          "discovery": 1180875,
+          "setup": 12730667,
+          "rootCacheValidation": 5990333,
+          "subtreeCacheValidation": 209,
+          "traversal": 93056166,
+          "classification": 967500,
+          "projectFormats": 43507125,
+          "gitEvidence": 1998196792,
+          "cacheWrite": 174558417,
+          "report": 3450791,
+          "tail": 1491584
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 1,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1916255459,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1891134875,
+        "phasesNs": {
+          "discovery": 1023208,
+          "setup": 15304750,
+          "rootCacheValidation": 6908667,
+          "subtreeCacheValidation": 83,
+          "traversal": 94720417,
+          "classification": 667833,
+          "projectFormats": 64596458,
+          "gitEvidence": 1521076500,
+          "cacheWrite": 181525209,
+          "report": 3755666,
+          "tail": 1542792
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 1,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2158355875,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2143115917,
+        "phasesNs": {
+          "discovery": 20333,
+          "setup": 880625,
+          "rootCacheValidation": 3578000,
+          "subtreeCacheValidation": 84,
+          "traversal": 68614708,
+          "classification": 299375,
+          "projectFormats": 34122917,
+          "gitEvidence": 1845938125,
+          "cacheWrite": 184832416,
+          "report": 3330292,
+          "tail": 1485500
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 1,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1766324709,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1753661542,
+        "phasesNs": {
+          "discovery": 20958,
+          "setup": 863875,
+          "rootCacheValidation": 2016375,
+          "subtreeCacheValidation": 42,
+          "traversal": 72250750,
+          "classification": 287042,
+          "projectFormats": 41743000,
+          "gitEvidence": 1447964125,
+          "cacheWrite": 183603083,
+          "report": 3324125,
+          "tail": 1574750
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 1,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1718569667,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1705256209,
+        "phasesNs": {
+          "discovery": 21250,
+          "setup": 912917,
+          "rootCacheValidation": 2085750,
+          "subtreeCacheValidation": 42,
+          "traversal": 74909625,
+          "classification": 299041,
+          "projectFormats": 40521334,
+          "gitEvidence": 1417888750,
+          "cacheWrite": 163570916,
+          "report": 3474167,
+          "tail": 1558375
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 2,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2190200750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2177112667,
+        "phasesNs": {
+          "discovery": 25375,
+          "setup": 972333,
+          "rootCacheValidation": 2084625,
+          "subtreeCacheValidation": 42,
+          "traversal": 73452167,
+          "classification": 365375,
+          "projectFormats": 29969000,
+          "gitEvidence": 1891948916,
+          "cacheWrite": 173208792,
+          "report": 3374708,
+          "tail": 1692792
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 2,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1569268875,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1556802750,
+        "phasesNs": {
+          "discovery": 21792,
+          "setup": 933875,
+          "rootCacheValidation": 83965916,
+          "subtreeCacheValidation": 334,
+          "traversal": 708,
+          "projectFormats": 43903083,
+          "gitEvidence": 1423360084,
+          "cacheWrite": 804458,
+          "report": 3536167,
+          "tail": 264291
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 2,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2025848541,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2011689417,
+        "phasesNs": {
+          "discovery": 21792,
+          "setup": 917167,
+          "rootCacheValidation": 64316791,
+          "subtreeCacheValidation": 1334,
+          "traversal": 1458,
+          "projectFormats": 35810625,
+          "gitEvidence": 1906086042,
+          "cacheWrite": 811875,
+          "report": 3445166,
+          "tail": 263292
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 2,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2247552917,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2233522291,
+        "phasesNs": {
+          "discovery": 19666,
+          "setup": 883292,
+          "rootCacheValidation": 2122167,
+          "subtreeCacheValidation": 0,
+          "traversal": 67948875,
+          "classification": 301125,
+          "projectFormats": 33508875,
+          "gitEvidence": 1948595500,
+          "cacheWrite": 175050791,
+          "report": 3463792,
+          "tail": 1615833
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 3,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1740649667,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1727867417,
+        "phasesNs": {
+          "discovery": 23500,
+          "setup": 1043334,
+          "rootCacheValidation": 2101625,
+          "subtreeCacheValidation": 41,
+          "traversal": 72106125,
+          "classification": 309417,
+          "projectFormats": 41267917,
+          "gitEvidence": 1422844750,
+          "cacheWrite": 183100875,
+          "report": 3425958,
+          "tail": 1626792
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 3,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2034060708,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2020184042,
+        "phasesNs": {
+          "discovery": 25375,
+          "setup": 934250,
+          "rootCacheValidation": 50778292,
+          "subtreeCacheValidation": 208,
+          "traversal": 584,
+          "projectFormats": 32524750,
+          "gitEvidence": 1931377666,
+          "cacheWrite": 729209,
+          "report": 3527458,
+          "tail": 271958
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 3,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1602046042,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1590623666,
+        "phasesNs": {
+          "discovery": 24708,
+          "setup": 868708,
+          "rootCacheValidation": 66951375,
+          "subtreeCacheValidation": 125,
+          "traversal": 667,
+          "projectFormats": 49512458,
+          "gitEvidence": 1468180917,
+          "cacheWrite": 1253542,
+          "report": 3554083,
+          "tail": 262625
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 3,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1875252750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1862821167,
+        "phasesNs": {
+          "discovery": 38250,
+          "setup": 985334,
+          "rootCacheValidation": 2081750,
+          "subtreeCacheValidation": 166,
+          "traversal": 79729167,
+          "classification": 337167,
+          "projectFormats": 43657291,
+          "gitEvidence": 1546766959,
+          "cacheWrite": 184213791,
+          "report": 3471959,
+          "tail": 1523750
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 4,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2434753209,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2420003834,
+        "phasesNs": {
+          "discovery": 21000,
+          "setup": 895834,
+          "rootCacheValidation": 3187166,
+          "subtreeCacheValidation": 125,
+          "traversal": 68612125,
+          "classification": 302875,
+          "projectFormats": 34507500,
+          "gitEvidence": 2131376084,
+          "cacheWrite": 176499041,
+          "report": 3306959,
+          "tail": 1281000
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 4,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1603495500,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1591212750,
+        "phasesNs": {
+          "discovery": 22875,
+          "setup": 881792,
+          "rootCacheValidation": 54518666,
+          "subtreeCacheValidation": 125,
+          "traversal": 750,
+          "projectFormats": 43784542,
+          "gitEvidence": 1487223958,
+          "cacheWrite": 830667,
+          "report": 3679542,
+          "tail": 256416
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 4,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2210880750,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2195638208,
+        "phasesNs": {
+          "discovery": 24291,
+          "setup": 917584,
+          "rootCacheValidation": 58343875,
+          "subtreeCacheValidation": 1083,
+          "traversal": 1208,
+          "projectFormats": 38308417,
+          "gitEvidence": 2093033292,
+          "cacheWrite": 1114958,
+          "report": 3643917,
+          "tail": 234583
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 4,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2225310917,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2211012291,
+        "phasesNs": {
+          "discovery": 30333,
+          "setup": 1099125,
+          "rootCacheValidation": 1938500,
+          "subtreeCacheValidation": 125,
+          "traversal": 66656417,
+          "classification": 325916,
+          "projectFormats": 27269959,
+          "gitEvidence": 1922916125,
+          "cacheWrite": 185632583,
+          "report": 3481458,
+          "tail": 1643542
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 5,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1725818250,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1712765250,
+        "phasesNs": {
+          "discovery": 22625,
+          "setup": 974416,
+          "rootCacheValidation": 3035167,
+          "subtreeCacheValidation": 42,
+          "traversal": 75717333,
+          "classification": 325083,
+          "projectFormats": 41946042,
+          "gitEvidence": 1399975708,
+          "cacheWrite": 185804375,
+          "report": 3384250,
+          "tail": 1566584
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 5,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2001622958,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1988040000,
+        "phasesNs": {
+          "discovery": 20791,
+          "setup": 868792,
+          "rootCacheValidation": 57297167,
+          "subtreeCacheValidation": 166,
+          "traversal": 500,
+          "projectFormats": 37443542,
+          "gitEvidence": 1887566542,
+          "cacheWrite": 1004750,
+          "report": 3543791,
+          "tail": 276792
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 5,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1568707000,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1556983875,
+        "phasesNs": {
+          "discovery": 25167,
+          "setup": 926416,
+          "rootCacheValidation": 45190375,
+          "subtreeCacheValidation": 209,
+          "traversal": 666,
+          "projectFormats": 45507209,
+          "gitEvidence": 1460569083,
+          "cacheWrite": 813375,
+          "report": 3668333,
+          "tail": 270667
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 5,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1846382417,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1834308208,
+        "phasesNs": {
+          "discovery": 21916,
+          "setup": 953875,
+          "rootCacheValidation": 2148042,
+          "subtreeCacheValidation": 83,
+          "traversal": 74323792,
+          "classification": 293708,
+          "projectFormats": 40154584,
+          "gitEvidence": 1522850875,
+          "cacheWrite": 188426375,
+          "report": 3535833,
+          "tail": 1583042
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 6,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2331788833,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 2318113416,
+        "phasesNs": {
+          "discovery": 23041,
+          "setup": 986209,
+          "rootCacheValidation": 2213833,
+          "subtreeCacheValidation": 167,
+          "traversal": 75088083,
+          "classification": 338250,
+          "projectFormats": 29587917,
+          "gitEvidence": 2022513125,
+          "cacheWrite": 182645458,
+          "report": 3402958,
+          "tail": 1298042
+        },
+        "rootCount": 32,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 32,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 6,
+      "requestedState": "cold",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 1746256291,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1733706625,
+        "phasesNs": {
+          "discovery": 22833,
+          "setup": 953667,
+          "rootCacheValidation": 178751375,
+          "subtreeCacheValidation": 291,
+          "traversal": 834,
+          "projectFormats": 43526833,
+          "gitEvidence": 1505502250,
+          "cacheWrite": 1019458,
+          "report": 3663750,
+          "tail": 253292
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "after",
+      "repetition": 6,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    },
+    {
+      "wallNs": 2002323042,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 1989804625,
+        "phasesNs": {
+          "discovery": 22166,
+          "setup": 906417,
+          "rootCacheValidation": 58848792,
+          "subtreeCacheValidation": 333,
+          "traversal": 1375,
+          "projectFormats": 33699917,
+          "gitEvidence": 1891729583,
+          "cacheWrite": 720125,
+          "report": 3578833,
+          "tail": 282125
+        },
+        "rootCount": 32,
+        "rootCacheHits": 32,
+        "rootCacheMisses": 0,
+        "candidateCount": 32
+      },
+      "stderr": [],
+      "binary": "before",
+      "repetition": 6,
+      "requestedState": "warm-attempt",
+      "factsSha256": "f076e4e7baa1a60d5fa17af04aee1fcff0cc885e883720fff0b33225e62408fe"
+    }
+  ],
+  "harnessSha256": "13828a083f543a34d21ce9572268c2fb84667bc0c994cd6da4ca1be3aceabb8b",
+  "diagnosticAttempts": {
+    "initialOracleFailure": {
+      "scansRun": 0,
+      "reason": "harness incorrectly expected check-ignore to match the directory with a tracked descendant; actual Git returned 1",
+      "correction": "expected negative answer for both tracked and unignored targets; no production/test changes"
+    },
+    "preliminaryRun": {
+      "qualification": "six cold/warm repetitions completed and equivalent; a short affected-core clippy overlapped part of this run, so these timings are excluded from the final comparison",
+      "samples": [
+        {
+          "wallNs": 6936562917,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2544036334,
+            "phasesNs": {
+              "discovery": 152459,
+              "setup": 3760750,
+              "rootCacheValidation": 5012791,
+              "subtreeCacheValidation": 209,
+              "traversal": 91141458,
+              "classification": 383500,
+              "projectFormats": 48298833,
+              "gitEvidence": 2208276417,
+              "cacheWrite": 181576500,
+              "report": 3613625,
+              "tail": 1798000
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 1,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 3430585542,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1905514958,
+            "phasesNs": {
+              "discovery": 128875,
+              "setup": 2499417,
+              "rootCacheValidation": 4301833,
+              "subtreeCacheValidation": 250,
+              "traversal": 98352458,
+              "classification": 385875,
+              "projectFormats": 47688042,
+              "gitEvidence": 1560609500,
+              "cacheWrite": 186343208,
+              "report": 3450917,
+              "tail": 1737375
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 1,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 3150272125,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 3135702167,
+            "phasesNs": {
+              "discovery": 22875,
+              "setup": 981125,
+              "rootCacheValidation": 2038500,
+              "subtreeCacheValidation": 42,
+              "traversal": 82560042,
+              "classification": 345291,
+              "projectFormats": 54849792,
+              "gitEvidence": 2787550708,
+              "cacheWrite": 201433625,
+              "report": 4100709,
+              "tail": 1798791
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 1,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2274211375,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2258612875,
+            "phasesNs": {
+              "discovery": 96250,
+              "setup": 1192125,
+              "rootCacheValidation": 2806667,
+              "subtreeCacheValidation": 208,
+              "traversal": 86417500,
+              "classification": 346625,
+              "projectFormats": 46172459,
+              "gitEvidence": 1929043500,
+              "cacheWrite": 187228875,
+              "report": 3461458,
+              "tail": 1826458
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 1,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1972236833,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1958970083,
+            "phasesNs": {
+              "discovery": 29458,
+              "setup": 1006334,
+              "rootCacheValidation": 2428125,
+              "subtreeCacheValidation": 41,
+              "traversal": 66837542,
+              "classification": 321708,
+              "projectFormats": 28665917,
+              "gitEvidence": 1663588500,
+              "cacheWrite": 190965000,
+              "report": 3403042,
+              "tail": 1705583
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 2,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2321772333,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2305268000,
+            "phasesNs": {
+              "discovery": 22000,
+              "setup": 892000,
+              "rootCacheValidation": 2055958,
+              "subtreeCacheValidation": 83,
+              "traversal": 71221084,
+              "classification": 313958,
+              "projectFormats": 34050333,
+              "gitEvidence": 2013167375,
+              "cacheWrite": 178442250,
+              "report": 3481250,
+              "tail": 1608459
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 2,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1618890416,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1605957000,
+            "phasesNs": {
+              "discovery": 21250,
+              "setup": 905750,
+              "rootCacheValidation": 67811916,
+              "subtreeCacheValidation": 125,
+              "traversal": 625,
+              "projectFormats": 46474042,
+              "gitEvidence": 1485851125,
+              "cacheWrite": 1078083,
+              "report": 3555542,
+              "tail": 243708
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 2,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2030621625,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2016641000,
+            "phasesNs": {
+              "discovery": 22167,
+              "setup": 968417,
+              "rootCacheValidation": 55346583,
+              "subtreeCacheValidation": 125,
+              "traversal": 542,
+              "projectFormats": 34101500,
+              "gitEvidence": 1920686708,
+              "cacheWrite": 1095458,
+              "report": 4080125,
+              "tail": 318792
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 2,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2275547125,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2261093666,
+            "phasesNs": {
+              "discovery": 25583,
+              "setup": 1110250,
+              "rootCacheValidation": 1997542,
+              "subtreeCacheValidation": 125,
+              "traversal": 71684583,
+              "classification": 288917,
+              "projectFormats": 28467291,
+              "gitEvidence": 1962389042,
+              "cacheWrite": 189849625,
+              "report": 3589667,
+              "tail": 1676000
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 3,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1736441458,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1723602000,
+            "phasesNs": {
+              "discovery": 21875,
+              "setup": 919958,
+              "rootCacheValidation": 2072375,
+              "subtreeCacheValidation": 42,
+              "traversal": 73190917,
+              "classification": 295666,
+              "projectFormats": 43855375,
+              "gitEvidence": 1405297792,
+              "cacheWrite": 192936417,
+              "report": 3423916,
+              "tail": 1573917
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 3,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1956579334,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1942194917,
+            "phasesNs": {
+              "discovery": 21542,
+              "setup": 898667,
+              "rootCacheValidation": 55245416,
+              "subtreeCacheValidation": 3125,
+              "traversal": 625,
+              "projectFormats": 36427250,
+              "gitEvidence": 1845001084,
+              "cacheWrite": 784833,
+              "report": 3550667,
+              "tail": 249791
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 3,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1595176416,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1583567500,
+            "phasesNs": {
+              "discovery": 22209,
+              "setup": 903416,
+              "rootCacheValidation": 63798334,
+              "subtreeCacheValidation": 250,
+              "traversal": 625,
+              "projectFormats": 46742375,
+              "gitEvidence": 1467412875,
+              "cacheWrite": 756583,
+              "report": 3663625,
+              "tail": 255417
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 3,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1781610792,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1769043375,
+            "phasesNs": {
+              "discovery": 21125,
+              "setup": 939666,
+              "rootCacheValidation": 2122209,
+              "subtreeCacheValidation": 208,
+              "traversal": 74762833,
+              "classification": 348084,
+              "projectFormats": 46916125,
+              "gitEvidence": 1452478541,
+              "cacheWrite": 186640459,
+              "report": 3315500,
+              "tail": 1485416
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 4,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2688658083,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2674402916,
+            "phasesNs": {
+              "discovery": 19708,
+              "setup": 864750,
+              "rootCacheValidation": 1925333,
+              "subtreeCacheValidation": 125,
+              "traversal": 74034459,
+              "classification": 343250,
+              "projectFormats": 36496541,
+              "gitEvidence": 2389485250,
+              "cacheWrite": 165941584,
+              "report": 3622125,
+              "tail": 1648916
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 4,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2189069333,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2075116750,
+            "phasesNs": {
+              "discovery": 26042,
+              "setup": 1058250,
+              "rootCacheValidation": 79467917,
+              "subtreeCacheValidation": 333,
+              "traversal": 542,
+              "projectFormats": 46750041,
+              "gitEvidence": 1942352625,
+              "cacheWrite": 1531334,
+              "report": 3629583,
+              "tail": 280375
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 4,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2293856708,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2277848000,
+            "phasesNs": {
+              "discovery": 26709,
+              "setup": 957291,
+              "rootCacheValidation": 63347959,
+              "subtreeCacheValidation": 375,
+              "traversal": 625,
+              "projectFormats": 34275958,
+              "gitEvidence": 2174666292,
+              "cacheWrite": 807083,
+              "report": 3478958,
+              "tail": 273125
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 4,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2416727375,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2401619167,
+            "phasesNs": {
+              "discovery": 20542,
+              "setup": 914125,
+              "rootCacheValidation": 2181500,
+              "subtreeCacheValidation": 42,
+              "traversal": 74232916,
+              "classification": 338417,
+              "projectFormats": 39482708,
+              "gitEvidence": 2089533875,
+              "cacheWrite": 189908625,
+              "report": 3397209,
+              "tail": 1591875
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 5,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1888924916,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1873718916,
+            "phasesNs": {
+              "discovery": 25083,
+              "setup": 1050125,
+              "rootCacheValidation": 2343500,
+              "subtreeCacheValidation": 42,
+              "traversal": 78116875,
+              "classification": 322500,
+              "projectFormats": 43174083,
+              "gitEvidence": 1572783375,
+              "cacheWrite": 170935292,
+              "report": 3439583,
+              "tail": 1516208
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 5,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2060042541,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2046378000,
+            "phasesNs": {
+              "discovery": 28792,
+              "setup": 947500,
+              "rootCacheValidation": 162636750,
+              "subtreeCacheValidation": 250,
+              "traversal": 542,
+              "projectFormats": 28380083,
+              "gitEvidence": 1849675500,
+              "cacheWrite": 827375,
+              "report": 3598083,
+              "tail": 268084
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 5,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1591960875,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1579514667,
+            "phasesNs": {
+              "discovery": 24000,
+              "setup": 916833,
+              "rootCacheValidation": 57932625,
+              "subtreeCacheValidation": 125,
+              "traversal": 459,
+              "projectFormats": 52956750,
+              "gitEvidence": 1463030208,
+              "cacheWrite": 827333,
+              "report": 3553584,
+              "tail": 259791
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 5,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1736874667,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1724533875,
+            "phasesNs": {
+              "discovery": 26459,
+              "setup": 970916,
+              "rootCacheValidation": 2258792,
+              "subtreeCacheValidation": 42,
+              "traversal": 74021875,
+              "classification": 304416,
+              "projectFormats": 40352417,
+              "gitEvidence": 1415594083,
+              "cacheWrite": 186074625,
+              "report": 3476042,
+              "tail": 1439875
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 6,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2569637125,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2555648500,
+            "phasesNs": {
+              "discovery": 24542,
+              "setup": 930875,
+              "rootCacheValidation": 2087667,
+              "subtreeCacheValidation": 83,
+              "traversal": 71564000,
+              "classification": 331208,
+              "projectFormats": 35593375,
+              "gitEvidence": 2247995084,
+              "cacheWrite": 191934208,
+              "report": 3641917,
+              "tail": 1526541
+            },
+            "rootCount": 32,
+            "rootCacheHits": 0,
+            "rootCacheMisses": 32,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 6,
+          "requestedState": "cold",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 1791644833,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 1777428917,
+            "phasesNs": {
+              "discovery": 26625,
+              "setup": 991167,
+              "rootCacheValidation": 190399417,
+              "subtreeCacheValidation": 333,
+              "traversal": 1625,
+              "projectFormats": 45950375,
+              "gitEvidence": 1535471958,
+              "cacheWrite": 798042,
+              "report": 3508417,
+              "tail": 266750
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "after",
+          "repetition": 6,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        },
+        {
+          "wallNs": 2068402958,
+          "timings": {
+            "schema": "sweepx.junk.timings/v1",
+            "complete": true,
+            "totalNs": 2054991459,
+            "phasesNs": {
+              "discovery": 22209,
+              "setup": 963333,
+              "rootCacheValidation": 48531750,
+              "subtreeCacheValidation": 208,
+              "traversal": 625,
+              "projectFormats": 27369792,
+              "gitEvidence": 1973574125,
+              "cacheWrite": 743625,
+              "report": 3511583,
+              "tail": 260959
+            },
+            "rootCount": 32,
+            "rootCacheHits": 32,
+            "rootCacheMisses": 0,
+            "candidateCount": 32
+          },
+          "stderr": [],
+          "binary": "before",
+          "repetition": 6,
+          "requestedState": "warm-attempt",
+          "factsSha256": "f6d1687832f1822f2c0118b439bb4958447f648fedc6a36615b3a9198e3d109e"
+        }
+      ],
+      "summary": {
+        "before/cold/root-cache-miss": {
+          "samples": 6,
+          "medianWallNs": 2493182250,
+          "medianGitEvidenceNs": 2148905146
+        },
+        "after/cold/root-cache-miss": {
+          "samples": 6,
+          "medianWallNs": 1835267854,
+          "medianGitEvidenceNs": 1506544020
+        },
+        "before/warm-attempt/root-cache-miss": {
+          "samples": 1,
+          "medianWallNs": 3150272125,
+          "medianGitEvidenceNs": 2787550708
+        },
+        "after/warm-attempt/root-cache-miss": {
+          "samples": 1,
+          "medianWallNs": 2274211375,
+          "medianGitEvidenceNs": 1929043500
+        },
+        "after/warm-attempt/root-cache-hit": {
+          "samples": 5,
+          "medianWallNs": 1618890416,
+          "medianGitEvidenceNs": 1485851125
+        },
+        "before/warm-attempt/root-cache-hit": {
+          "samples": 5,
+          "medianWallNs": 2060042541,
+          "medianGitEvidenceNs": 1920686708
+        }
+      },
+      "binaries": {
+        "before": {
+          "path": "/private/tmp/sweepx-git-scope-before-2026-10-02",
+          "sha256": "aba5d2689df05b5e52de0118b263f5674f549561c20dad81ca78c6b66befe1e4",
+          "build": "debug, default CLI features, pinned Rust"
+        },
+        "after": {
+          "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/debug/sweepx",
+          "sha256": "ee20cf92b63b9f9777e88c92d85a7790a2178e60937343a026edf0d7418a2dc3",
+          "build": "debug, default CLI features, pinned Rust"
+        }
+      },
+      "verification": {
+        "equivalentFilesystemGitContextExecutionFacts": true,
+        "independentGitScopeOutputMatchesTwoQueries": true,
+        "independentGitTrackedAndIgnoreQueries": true,
+        "ordinaryFileCountSizeAndBytesUnchanged": true,
+        "candidateScanIdsExcluded": true,
+        "systemTrashExercised": false,
+        "tailLatencyClaimed": false,
+        "oldIntermittentFailuresReproduced": false
+      }
+    },
+    "finalRun": {
+      "taskBuildsOrTestsOverlapped": false,
+      "repetitionsPredeclared": true
+    }
+  }
+}

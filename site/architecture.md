@@ -58,6 +58,8 @@ macOS 详情扫描通过 `inspect_bound_child_with_mount_identity` 补充文件/
 
 Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个最多 256 action 的封闭 R4 plan；普通文件执行一次 exact-basename `unlinkat`，目录按 manifest 后序逐项执行 `unlinkat`/nonrecursive `rmdir`。该 adapter 在非 Linux 构建中不存在。
 
+Git 增强由 core 的 `GitEvidenceSession` 共用于普通报告和垃圾会话。每个候选通过一次有界 `rev-parse` 同时观察工作区和 `.git` 位置，再分别进行原生身份、filesystem/mount 和变化指纹核对；范围不跨候选缓存，环境重定向仍移除，外部配置变化不能沿用旧范围。Unix 路径含换行时保留两个独立查询，避免输出分隔符歧义；其他联合输出必须有且仅有两个完整绝对路径，截断、额外记录或查询失败不提供范围依据。当前 tracked/ignore 查询、资源期限与项目回收约束继续独立生效。
+
 ## 状态与取消
 
 大文件分析在既有 `sweepx-analysis` 模块中使用有界 top-K；core 的 `scan_large_files_with_store` 与普通 scan 共享一次 scanner 遍历及输出 envelope。observer 的 `on_entry` 在可选行保留/分类之前传递每个原生观察，`on_directory_coverage` 在可选 aggregate/index 保留之前传递覆盖。所需文件事实使逻辑长度缓存退回当前文件观察，不制造缺失的分配或 mount 证据；普通 junk 路径仍保留原缓存快路径。收集器只复制入榜的原生条目，分类器、垃圾候选和执行授权不参与大小排序。

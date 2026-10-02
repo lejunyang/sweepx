@@ -152,6 +152,7 @@ macOS 垃圾缓存的根记录和文件索引共用一次事件历史验证，�
 只有既命中独立项目规则、又未跟踪且被 ignore、同时没有嵌套仓库或不完整扫描证据的
 目录才标记为 `known_generated_ignored` / `high`；ignore 本身不会发现任意候选、降低风险
 或授予 Trash 权限，`.env.local` 等本地状态也不会仅因被 ignore 而出现。
+每个候选的工作区与 `.git` 范围由同一次有界查询确认，减少一次 Git 启动；两个位置仍分别核对原生身份，配置变化会重新查询。含换行的 Unix 路径保留独立查询，避免混淆路径与输出分隔符。
 
 `scan` 接受相对路径、`~`、一个或多个绝对根；不传路径时扫描当前平台文件系统根。`scan --no-state` 跳过 operation snapshot/event journal，适合不需要后续 `status`/operation state 或 state filesystem 不支持 journal 的显式只读扫描；它不能与 `--state-dir` 同时使用。默认 `human` 输出最多显示 40 行，按可回收大小降序，并用自动人类单位；`--unit auto|b|kib|mib|gib|tib` 与 `--sort size|path` 可覆盖。`>=` 表示受边界影响的下限，不是精确值；“可回收”是预计可释放的独占分配空间，不等同逻辑大小，也不作释放保证。`json` 始终保留精确字节。`scan --format ndjson` 会在扫描前以 unsupported 拒绝。Linux 已接入 bounded SQLite journal，在单个事务中写入完整事件流与 terminal snapshot；Core 的 `status` 优先读取 journal。Linux 现支持 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1...]` 的 completed-stream replay。TUI 只做 root admission 就进入界面，单根自动进入；当前层先展示，直接子目录大小随后由后台递归聚合回填，后代不作为 TUI 行长期保留。目录 detail rescan 使用 single-flight 后台任务，deadline 为 30 s，导航或退出不会等待非协作 worker。`explain` 默认最多读取 8 MiB 的导入 JSON。
 
