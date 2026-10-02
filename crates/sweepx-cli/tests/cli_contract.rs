@@ -1352,7 +1352,9 @@ fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
             .iter()
             .map(|candidate| {
                 assert_eq!(candidate["risk"], "R3");
-                if candidate["ruleId"] == "dart.tool-state" {
+                if candidate["ruleId"] == "dart.tool-state"
+                    || candidate["ruleId"] == "node.sveltekit-output"
+                {
                     assert_eq!(candidate["classification"], "recognized_generated_format");
                     assert_eq!(candidate["projectFormat"]["status"], "recognized");
                     assert_eq!(candidate["confidence"], "medium");
@@ -3754,6 +3756,72 @@ fn junk_dart_formats_are_visible_and_nonterminal_trash_keeps_its_guard() {
             assert_eq!(std::fs::read(&file).unwrap(), body.as_bytes());
             // Content paths/values are not serialized through the format evidence object.
             assert_eq!(row["projectFormat"].as_object().unwrap().len(), 3);
+        }
+    }
+}
+
+#[test]
+fn junk_legacy_sync_unknown_and_invalid_contents_keep_locale_stable_report_only_status() {
+    use sweepx_fixtures::project_junk::{SVELTEKIT_AMBIENT, SVELTEKIT2_CONFIG};
+    #[cfg(target_os = "linux")]
+    let owner = TempDir::new_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let owner = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = resolved_fixture_root(&owner);
+    #[cfg(windows)]
+    let root = owner.path().to_path_buf();
+    std::fs::create_dir(root.join(".svelte-kit")).unwrap();
+    std::fs::write(root.join("svelte.config.js"), "export default {}\n").unwrap();
+    let config_path = root.join(".svelte-kit/tsconfig.json");
+    let ambient_path = root.join(".svelte-kit/ambient.d.ts");
+    for (config, ambient, status) in [
+        (SVELTEKIT2_CONFIG, SVELTEKIT_AMBIENT, "recognized"),
+        ("{invalid", SVELTEKIT_AMBIENT, "invalid"),
+        (
+            SVELTEKIT2_CONFIG,
+            "user source with no generated signatures",
+            "unknown",
+        ),
+    ] {
+        std::fs::write(&config_path, config).unwrap();
+        std::fs::write(&ambient_path, ambient).unwrap();
+        for locale in ["en-US", "zh-CN"] {
+            let output = cli_command()
+                .timeout(std::time::Duration::from_secs(20))
+                .args(["--locale", locale, "--format", "json", "junk"])
+                .arg(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["candidates"].as_array().unwrap().len(), 1);
+            let row = &report["candidates"][0];
+            assert_eq!(row["ruleId"], "node.sveltekit-output");
+            assert_eq!(row["projectFormat"]["profile"], "svelte_kit_legacy_sync");
+            assert_eq!(row["projectFormat"]["status"], status);
+            assert_eq!(
+                row["confidence"],
+                if status == "recognized" {
+                    "medium"
+                } else {
+                    "low"
+                }
+            );
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b == "project_ownership_not_verified")
+            );
+            assert_eq!(row["projectFormat"].as_object().unwrap().len(), 3);
+            assert_eq!(std::fs::read(&config_path).unwrap(), config.as_bytes());
+            assert_eq!(std::fs::read(&ambient_path).unwrap(), ambient.as_bytes());
         }
     }
 }

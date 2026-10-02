@@ -44,6 +44,9 @@ pub struct ProjectJunkRule {
 pub enum ProjectContentFormat {
     /// Pub's v2 package map and self-declared generator, without following package URIs.
     DartPubPackageConfigV2,
+    /// Legacy SvelteKit sync configuration plus generated ambient signatures; non-atomic and
+    /// report-only, without evaluating JS configuration or proving TypeScript correctness.
+    SvelteKitLegacySync,
 }
 
 /// Admission failure for the project-artifact catalog.
@@ -95,11 +98,18 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
                 }
             });
         if rule.id.trim().is_empty()
-            || (rule.content_format == Some(ProjectContentFormat::DartPubPackageConfigV2)
-                && !rule
-                    .required_own_markers
-                    .iter()
-                    .any(|name| name == "package_config.json"))
+            || rule.content_format.is_some_and(|profile| {
+                let required: &[&str] = match profile {
+                    ProjectContentFormat::DartPubPackageConfigV2 => &["package_config.json"],
+                    ProjectContentFormat::SvelteKitLegacySync => &["tsconfig.json", "ambient.d.ts"],
+                };
+                required.iter().any(|name| {
+                    !rule
+                        .required_own_markers
+                        .iter()
+                        .any(|marker| marker == name)
+                })
+            })
             || !ids.insert(&rule.id)
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
             || rule.names.is_empty()
@@ -209,5 +219,15 @@ mod tests {
         ));
         edited[5]["contentFormat"] = serde_json::Value::Null;
         assert!(load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).is_ok());
+        for markers in [
+            serde_json::json!(["tsconfig.json"]),
+            serde_json::json!(["ambient.d.ts"]),
+        ] {
+            edited[6]["requiredOwnMarkers"] = markers;
+            assert!(matches!(
+                load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()),
+                Err(ProjectRuleError::InvalidRule(_))
+            ));
+        }
     }
 }

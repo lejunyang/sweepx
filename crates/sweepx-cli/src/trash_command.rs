@@ -1013,6 +1013,12 @@ mod project_format_tests {
 
     #[test]
     fn recognized_project_format_is_refused_before_any_bulk_or_worker_trash() {
+        for svelte in [false, true] {
+            check_recognized_profile_refusal(svelte);
+        }
+    }
+
+    fn check_recognized_profile_refusal(svelte: bool) {
         #[cfg(target_os = "linux")]
         let owner = tempfile::tempdir_in("/dev/shm").unwrap();
         #[cfg(not(target_os = "linux"))]
@@ -1021,18 +1027,33 @@ mod project_format_tests {
         let root = owner.path().canonicalize().unwrap();
         #[cfg(windows)]
         let root = owner.path().to_path_buf();
-        std::fs::create_dir(root.join(".dart_tool")).unwrap();
+        let directory = if svelte { ".svelte-kit" } else { ".dart_tool" };
+        std::fs::create_dir(root.join(directory)).unwrap();
         std::fs::write(root.join("pubspec.yaml"), b"name: example\n").unwrap();
-        let file = root.join(".dart_tool/package_config.json");
-        let bytes = br#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/"}],"generator":"pub","generatorVersion":"3.6.0"}"#;
+        std::fs::write(root.join("svelte.config.js"), "export default {}\n").unwrap();
+        let file = root.join(directory).join(if svelte {
+            "tsconfig.json"
+        } else {
+            "package_config.json"
+        });
+        let dart_bytes = br#"{"configVersion":2,"packages":[{"name":"example","rootUri":"../","packageUri":"lib/"}],"generator":"pub","generatorVersion":"3.6.0"}"#;
+        let bytes = if svelte {
+            sweepx_fixtures::project_junk::SVELTEKIT2_CONFIG.as_bytes()
+        } else {
+            dart_bytes.as_slice()
+        };
         std::fs::write(&file, bytes).unwrap();
+        let ambient = root.join(directory).join("ambient.d.ts");
+        if svelte {
+            std::fs::write(&ambient, sweepx_fixtures::project_junk::SVELTEKIT_AMBIENT).unwrap();
+        }
         let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
             .unwrap();
         let entry = summary
             .entries
             .iter()
-            .find(|e| e.display_path.ends_with(".dart_tool"))
+            .find(|e| e.display_path.ends_with(directory))
             .unwrap();
         let aggregates: BTreeMap<_, _> = summary
             .aggregates
@@ -1042,7 +1063,11 @@ mod project_format_tests {
         let service = JunkService::built_in().unwrap();
         let mut candidate = service
             .interpret(
-                "project:dart.tool-state",
+                if svelte {
+                    "project:node.sveltekit-output"
+                } else {
+                    "project:dart.tool-state"
+                },
                 entry,
                 &aggregates,
                 &[],
@@ -1084,5 +1109,11 @@ mod project_format_tests {
             "project_ownership_not_verified"
         );
         assert_eq!(std::fs::read(file).unwrap(), bytes);
+        if svelte {
+            assert_eq!(
+                std::fs::read(ambient).unwrap(),
+                sweepx_fixtures::project_junk::SVELTEKIT_AMBIENT.as_bytes()
+            );
+        }
     }
 }

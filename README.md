@@ -145,7 +145,7 @@ macOS 垃圾缓存的根记录和文件索引共用一次事件历史验证，�
 
 项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
 
-新增 Dart `.dart_tool` 与 SvelteKit 1/2 `.svelte-kit` 的 R3 候选。前者要求父目录普通文件 `pubspec.yaml` 和自身普通文件 `package_config.json`；后者要求父目录 `svelte.config.js` 和自身 `tsconfig.json`、`ambient.d.ts` 两个普通文件。缺失、错位或链接标记不匹配。Dart 还会有界读取当前 `package_config.json`，报告 `projectFormat` 的 `recognized` / `invalid` / `unknown` / `not_checked` 状态；识别范围包括 v2、pub 自声明版本及父项目根引用。配置内容不持久化，缓存命中与 TUI 刷新都会重新观察。格式或 Git 忽略仍不能证明目录归属和无活动，因此带此内容 profile 的 Dart 候选只供展示，`--trash`、TUI 与后台回收均拒绝；SvelteKit 仍仅识别目录结构。源文件、锁文件、自定义输出路径及 SvelteKit 3 新布局不据此纳入。
+新增 Dart `.dart_tool` 与 SvelteKit 1/2 `.svelte-kit` 的 R3 候选。前者要求父目录普通文件 `pubspec.yaml` 和自身普通文件 `package_config.json`；后者要求父目录 `svelte.config.js` 和自身 `tsconfig.json`、`ambient.d.ts` 两个普通文件。缺失、错位或链接标记不匹配。Dart 会有界读取当前 `package_config.json`；SvelteKit 会读取 JSON 配置和生成声明签名，并复验两个文件的身份、变化指纹和内容。`projectFormat` 显式报告 `recognized` / `invalid` / `unknown` / `not_checked`。SvelteKit 的联合观察非原子，也不证明任意 TypeScript 语法正确。配置内容不持久化，缓存命中与 TUI 刷新都会重新观察。格式或 Git 忽略仍不能证明目录归属和无活动，因此带内容 profile 的两类候选只供展示，`--trash`、TUI 与后台回收均拒绝。源文件、锁文件、自定义输出路径及 SvelteKit 3 新布局不据此纳入。
 
 当显式根中能完整识别 Git 工作区时，`junk` 会通过有界、非交互的 Git 查询给现有
 `target`、`node_modules`、Python cache 与常见 build-output 候选补充 ignore/tracked 证据。

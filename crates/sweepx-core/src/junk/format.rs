@@ -1,9 +1,11 @@
 //! Current, bounded content evidence. No package URI is opened and no deletion is authorized.
 //!
-//! Pub permits optional generator metadata and additional fields. This profile deliberately
-//! recognizes a narrower pub-generated shape rather than claiming to implement Dart's URI/YAML
+//! Profiles recognize bounded generated signatures, not arbitrary Dart URI/YAML or TypeScript/JS
 //! semantics. Unsupported shapes remain unknown. Even a perfect imitation is report-only: a
-//! self-declared generator and parent-root reference cannot prove exclusive directory ownership.
+//! self-declared generator cannot prove exclusive directory ownership or inactivity.
+
+mod sveltekit;
+pub use sveltekit::inspect_sveltekit_sync;
 
 use super::candidate::JunkCandidate;
 use serde::{Deserialize, Serialize};
@@ -21,9 +23,9 @@ use sweepx_scanner::{LocatorReadFailure, LocatorReadLimits, LocatorReader};
 pub enum ProjectFormatStatus {
     /// No current content observation has run (including historical/base rows).
     NotChecked,
-    /// The bounded profile recognizes the self-declared pub format, not directory ownership.
+    /// The bounded profile recognizes generated signatures, not directory ownership.
     Recognized,
-    /// Malformed required JSON fields or contradictory package-map fields.
+    /// Malformed required fields or invalid source encoding for the bounded profile.
     Invalid,
     /// Read/cancellation/resource failure, unsupported version or unrecognized profile shape.
     Unknown,
@@ -68,9 +70,10 @@ impl ProjectFormatEvidence {
 pub struct ProjectFormatLimits {
     /// Maximum distinct candidate observations (repeated scan IDs reuse current answers).
     pub max_observations: usize,
-    /// Maximum complete-file payload for one observation.
+    /// Maximum payload for each complete-file read (profiles may require multiple reads).
     pub max_file_bytes: usize,
-    /// Cumulative payload reservations; failed reads do not refund their allowance.
+    /// Cumulative worst-case payload reservations, including all profile rereads. Failed reads
+    /// do not refund their allowance; a legacy SvelteKit observation reserves four reads.
     pub max_reserved_file_bytes: usize,
     /// Native lineage, enumeration and handle-bound read limits per observation.
     pub locator: LocatorReadLimits,
@@ -154,6 +157,11 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             return;
         }
         let key = (candidate.entry_id.clone(), profile);
+        let reads = match profile {
+            ProjectContentFormat::DartPubPackageConfigV2 => 1,
+            ProjectContentFormat::SvelteKitLegacySync => 4,
+        };
+        let reservation = self.limits.max_file_bytes.checked_mul(reads);
         let evidence = if self.cancel.is_cancelled() {
             outcome(profile, ProjectFormatStatus::Unknown, "cancelled")
         } else if self.started.elapsed() >= self.limits.timeout {
@@ -162,17 +170,17 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             current.clone()
         } else if self.attempts >= self.limits.max_observations
             || self.limits.max_file_bytes == 0
-            || self
-                .reserved_bytes
-                .checked_add(self.limits.max_file_bytes)
+            || reservation
+                .and_then(|bytes| self.reserved_bytes.checked_add(bytes))
                 .is_none_or(|sum| sum > self.limits.max_reserved_file_bytes)
         {
             outcome(profile, ProjectFormatStatus::Unknown, "resource_limit")
         } else {
             // Count before any failure. Native enumeration is independently bounded per attempt,
-            // so max_observations also bounds cumulative metadata/lineage work and retained keys.
+            // so max_observations * four bounds cumulative read/metadata/lineage work. Every
+            // profile's full worst-case payload (including rereads) is charged before the first I/O.
             self.attempts += 1;
-            self.reserved_bytes += self.limits.max_file_bytes;
+            self.reserved_bytes += reservation.expect("admitted bounded reservation");
             let current = self.observe(candidate, profile);
             self.observed.insert(key, current.clone());
             current
@@ -193,24 +201,13 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
                 "native_binding_unavailable",
             );
         };
-        let name = if cfg!(windows) {
-            NativeName::WindowsUtf16("package_config.json".encode_utf16().collect())
-        } else {
-            NativeName::UnixBytes(b"package_config.json".to_vec())
-        };
-        let result = self
-            .reader
-            .read_captured_regular_file(entry, &name, &self.cancel);
-        if self.cancel.is_cancelled() {
-            return outcome(profile, ProjectFormatStatus::Unknown, "cancelled");
+        let evidence = match profile {
+            ProjectContentFormat::DartPubPackageConfigV2 => self
+                .read_file(entry, "package_config.json")
+                .map(|read| inspect_dart_pub_config(&read.bytes)),
+            ProjectContentFormat::SvelteKitLegacySync => self.observe_sveltekit(entry),
         }
-        if self.started.elapsed() >= self.limits.timeout {
-            return outcome(profile, ProjectFormatStatus::Unknown, "deadline");
-        }
-        let evidence = match result {
-            Ok(read) => inspect_dart_pub_config(&read.bytes),
-            Err(failure) => outcome(profile, ProjectFormatStatus::Unknown, read_reason(failure)),
-        };
+        .unwrap_or_else(|reason| outcome(profile, ProjectFormatStatus::Unknown, reason));
         if self.cancel.is_cancelled() {
             outcome(profile, ProjectFormatStatus::Unknown, "cancelled")
         } else if self.started.elapsed() >= self.limits.timeout {
@@ -218,6 +215,53 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
         } else {
             evidence
         }
+    }
+
+    fn read_file(
+        &self,
+        entry: &sweepx_model::ScannedEntry,
+        name: &str,
+    ) -> Result<sweepx_platform::PresentRegularFileRead, &'static str> {
+        if self.cancel.is_cancelled() {
+            return Err("cancelled");
+        }
+        if self.started.elapsed() >= self.limits.timeout {
+            return Err("deadline");
+        }
+        let name = if cfg!(windows) {
+            NativeName::WindowsUtf16(name.encode_utf16().collect())
+        } else {
+            NativeName::UnixBytes(name.as_bytes().to_vec())
+        };
+        let read = self
+            .reader
+            .read_captured_regular_file(entry, &name, &self.cancel)
+            .map_err(read_reason)?;
+        if self.cancel.is_cancelled() {
+            return Err("cancelled");
+        }
+        if self.started.elapsed() >= self.limits.timeout {
+            return Err("deadline");
+        }
+        Ok(read)
+    }
+
+    fn observe_sveltekit(
+        &self,
+        entry: &sweepx_model::ScannedEntry,
+    ) -> Result<ProjectFormatEvidence, &'static str> {
+        let config = self.read_file(entry, "tsconfig.json")?;
+        let ambient = self.read_file(entry, "ambient.d.ts")?;
+        // Close the obvious inter-file change window with current identity/stamp/body comparisons.
+        // Two path-bound intervals remain non-atomic; neither these comparisons nor their
+        // signatures prove a sealed generation, directory ownership or permission to mutate.
+        for (name, first) in [("tsconfig.json", &config), ("ambient.d.ts", &ambient)] {
+            let current = self.read_file(entry, name)?;
+            if current.observed_before != first.observed_after || current.bytes != first.bytes {
+                return Err("content_changed_between_reads");
+            }
+        }
+        Ok(inspect_sveltekit_sync(&config.bytes, &ambient.bytes))
     }
 }
 

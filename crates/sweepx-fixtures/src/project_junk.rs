@@ -5,10 +5,21 @@
 //! SvelteKit 1.0/2.0 sync writes: tagged `packages/kit/src/core/sync` sources at
 //! https://github.com/sveltejs/kit. Version 3 moved configuration and generated type files;
 //! https://svelte.dev/docs/kit/project-structure documents the current project layout.
-//! Dart payloads include independently authored pub v2 fields for content recognition. SvelteKit
-//! payloads remain minimal structural examples; none are recordings of executed SDKs.
+//! Dart and SvelteKit payloads include independently authored generated signatures. None are
+//! recordings of executed SDKs or complete TypeScript grammar fixtures.
 
 use std::path::{Path, PathBuf};
+
+/// Independently authored default-output signature from the SvelteKit 1.0.0 sync source.
+/// This is not an SDK execution recording and is not derived from the production parser.
+pub const SVELTEKIT1_CONFIG: &str = r#"{"compilerOptions":{"baseUrl":"..","paths":{},"rootDirs":["..","./types"],"isolatedModules":true,"importsNotUsedAsValues":"error","preserveValueImports":true,"moduleResolution":"node","module":"esnext","target":"esnext"},"include":["ambient.d.ts","./types/**/$types.d.ts","../src/**/*.svelte"],"exclude":["../node_modules/**","./[!ambient.d.ts]**"]}"#;
+
+/// Independently authored default-output signature from the SvelteKit 2.0.0 sync source.
+pub const SVELTEKIT2_CONFIG: &str = r#"{"compilerOptions":{"paths":{},"rootDirs":["..","./types"],"isolatedModules":true,"verbatimModuleSyntax":true,"noEmit":true,"moduleResolution":"bundler","module":"esnext","target":"esnext"},"include":["ambient.d.ts","non-ambient.d.ts","./types/**/$types.d.ts","../src/**/*.svelte"],"exclude":["../node_modules/**"]}"#;
+
+/// Minimal generated ambient signatures from both legacy source layouts, without real env values.
+/// Recognition of these strings is not proof of TypeScript correctness or exclusive ownership.
+pub const SVELTEKIT_AMBIENT: &str = "\n// this file is generated — do not edit it\n\n/// <reference types=\"@sveltejs/kit\" />\n\ndeclare module '$env/static/private' {\n}\ndeclare module '$env/static/public' {\n}\ndeclare module '$env/dynamic/private' {\n}\ndeclare module '$env/dynamic/public' {\n}\n";
 
 /// One independently authored layout with exact expected candidate paths and rule IDs.
 pub struct ProjectJunkLayoutCase {
@@ -65,11 +76,8 @@ pub const CASES: &[ProjectJunkLayoutCase] = &[
         version: "SvelteKit 1.0.0 default sync output",
         files: &[
             ("svelte.config.js", "export default {}"),
-            (".svelte-kit/tsconfig.json", "{\"compilerOptions\":{}}"),
-            (
-                ".svelte-kit/ambient.d.ts",
-                "/// <reference types=\"@sveltejs/kit\" />",
-            ),
+            (".svelte-kit/tsconfig.json", SVELTEKIT1_CONFIG),
+            (".svelte-kit/ambient.d.ts", SVELTEKIT_AMBIENT),
             ("src/routes/+page.svelte", "<p>source</p>"),
         ],
         directories: &[],
@@ -80,11 +88,8 @@ pub const CASES: &[ProjectJunkLayoutCase] = &[
         version: "SvelteKit 2.0.0 default sync output",
         files: &[
             ("svelte.config.js", "export default {}"),
-            (".svelte-kit/tsconfig.json", "{\"compilerOptions\":{}}"),
-            (
-                ".svelte-kit/ambient.d.ts",
-                "/// <reference types=\"@sveltejs/kit\" />",
-            ),
+            (".svelte-kit/tsconfig.json", SVELTEKIT2_CONFIG),
+            (".svelte-kit/ambient.d.ts", SVELTEKIT_AMBIENT),
             (".svelte-kit/non-ambient.d.ts", "export {}"),
         ],
         directories: &[],

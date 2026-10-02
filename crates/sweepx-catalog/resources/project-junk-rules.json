@@ -61,7 +61,8 @@
     "risk": "R3",
     "requiredParentMarkers": ["svelte.config.js"],
     "requiredOwnMarkers": ["tsconfig.json", "ambient.d.ts"],
-    "evidence": "SvelteKit 1/2 generate tsconfig.json and ambient.d.ts in the default .svelte-kit output directory beside svelte.config.js. These ordinary-file markers establish layout only; contents and activity remain unverified. Review before selecting for Trash. Custom output paths and SvelteKit 3 layouts are not inferred.",
+    "contentFormat": "svelte_kit_legacy_sync",
+    "evidence": "SvelteKit 1/2 generate tsconfig.json and ambient.d.ts in the default .svelte-kit output directory beside svelte.config.js. These ordinary-file markers establish layout only; current content-profile status is reported separately. Non-atomic generated signatures do not prove exclusive ownership or inactivity, so this profile remains report-only and cannot enter Trash. Custom output paths and SvelteKit 3 layouts are not inferred.",
     "sourceReviewedAt": "2026-10-02",
     "references": ["https://svelte.dev/docs/kit/project-structure", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/sync.js", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%401.0.0/packages/kit/src/core/sync/write_tsconfig.js"]
   }

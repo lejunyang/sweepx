@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；SvelteKit 内容验证、更多独占所有权/活动依据仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；完整语言语义、真实工具版本采集、独占所有权/活动依据仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计；8,192 文件 debug 热缓存 PTY 超时的根因定位；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -637,3 +637,18 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 本阶段验证：初始工作区矩阵 907 项通过、2 项基准 ignored，继续显式排除已诊断的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 宿主 Trash 挂起用例。后续修改复验中，深层扩展字段回归暴露 serde 跳过未知字段时没有递归限额，已加入完整 payload 的词法深度资源准入；最终格式 9 项、catalog 27 项、CLI 单元 48 项与契约 60 项/relay 1 项、TUI 89 项通过，Core 最终整体运行 209 项通过、1 项失败、1 项基准 ignored。失败为未修改的工具成功探测用例在 300 ms 内返回 `TimedOut`，发生在并行交叉编译期间；同一二进制受控子进程的三次单独观察为 34.87/11.03/11.46 ms，7 项工具契约隔离串行运行通过。这只定位到成功用例的时间预算，未证明并行失败根因或稳定性，因此保留验证缺口，不能将此最终矩阵写成全绿。由于 Core 失败，随后 TUI 步骤未执行，已单独补跑并通过。
 
 最终 host 工作区 all-targets/all-features clippy、Linux GNU 与 Windows GNU 工作区交叉 clippy（含测试代码）、后续 TUI 文案的两个目标复验、fmt/diff 与 53 份 Markdown 检查通过；core 包清单包含新模块和测试。未执行 Linux/Windows 原生运行、MSVC、实际云 provider 或系统 Trash 成功验证。旧性能/平台/执行竞态与规则所有权、活动收尾继续未完成，不据此关闭整体路线图。
+
+
+## Legacy SvelteKit 当前内容签名（2026-10-02）
+
+- `svelte_kit_legacy_sync` 作为严格可选 catalog profile 接入原有 `ProjectFormatSession`，要求已捕获的 `tsconfig.json`、`ambient.d.ts` 普通文件。支持从 1.0.0/2.0.0 tagged sync 源码核对的 node/bundler 生成签名：原生完整读取、已知 JSON 字段类型/重复检查、默认父根/type/include/exclude 及编译选项；ambient 只识别生成头、kit 引用和四种 env module 声明签名，不声称实现 TypeScript 语法验证。自定义 config hook、未来输出、缺失签名、链接/权限/provider/身份变化保留 unknown；没有求值 JS、执行 SDK、打开 alias/glob 或序列化环境声明内容。识别签名不推断实际安装的工具版本。
+- 两个文件读取后各完整重读一次，对比先前结束观察与当前开始观察的原生身份/变化指纹及字节。文件间变化撤回 recognized，原因 `content_changed_between_reads`；签名结果的 reason 明确包含 `non_atomic`，不承诺封闭目录代际或原子跨文件快照。
+- 首次 I/O 前预留四个单文件上限，即默认每项最坏 1 MiB，失败不返还；与 Dart 共用 32 MiB 内容请求预算，所以纯 SvelteKit 调用最多观察 32 项。最多 128 项候选及每项最多四次有界原生读取共同限制累计元数据/祖先枚举；单个读取的零字节 probe 与 full read 都计入其自身限额。5 秒期限保持合作式，不打断阻塞内核调用；不作扫描性能改善声明。
+- CLI/TUI、缓存命中和选中/完整 revision 沿用当前格式观察，不保存格式答案。所有权和活动仍未确认，两个 profile 都保留 `project_ownership_not_verified`；Git 不提升缺失内容证据，已识别签名同样被批量/交互/后台 Trash 拒绝。源文件、锁文件、自定义路径及 SvelteKit 3 新布局仍不匹配；旧 pathname 到系统 Trash 的竞态未解决。
+- 独立夹具已加强为两代内容签名；仍是按源码编写的例子，尚不是对应 SDK 的运行录制。新增回归覆盖两代正例、用户源/更改的声明、无效 JSON/UTF-8、预算边界与零读取、provider/取消、两文件之间变化、显示路径伪造、会话同名同长度内容变更和刷新、locale 稳定报告与独立回收拒绝。完整所有权/活动、更多工具版本、实际 provider/目标宿主的路线图缺口仍保留，规则扩展验收不打勾。
+
+主要依据：[1.0.0 配置生成](https://github.com/sveltejs/kit/blob/%40sveltejs/kit%401.0.0/packages/kit/src/core/sync/write_tsconfig.js)、[2.0.0 配置生成](https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/write_tsconfig.js)、[2.0.0 声明生成](https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/write_ambient.js)。
+
+本阶段验证：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 串行运行 918 项通过、0 失败、2 项原有基准 ignored。已诊断的宿主系统 Trash 挂起用例仍显式排除，未验证实际 Trash 成功。为与交叉编译资源分开，本轮先完成测试再执行 lint；上一阶段 300 ms 工具成功探测的并行超时根因仍未解决，串行通过不等于其并行稳定性已证明。
+
+最终 host 工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 lint（包含测试代码）、fmt/diff、53 份 Markdown 检查通过；core 包清单包含新增 SvelteKit 模块。未运行 Linux/Windows 原生、MSVC、实际云 provider 或对应 SDK 版本录制，不据此关闭规则扩展和整体路线图。

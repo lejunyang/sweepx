@@ -78,7 +78,7 @@ CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并�
 
 与 scan/status 分离，`cache status` 只读取 preview cache 的现存状态。Linux、macOS 与 Windows 支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录。`available` 只表示缓存结构和受限校验可读，不代表任何 live/current 文件事实；warning、error 或 quarantine presence 会把结果降为 `degraded`。
 
-项目内容观察由 `junk::format::ProjectFormatSession` 串行执行，独立于纯规则 VM。Dart profile 使用捕获目录的有界原生完整文件读取，按当前内容识别 pub v2 自声明格式及父项目根引用，不打开配置中的 URI、不解析 pubspec YAML、不运行 SDK。每个命令调用/会话 revision 重建观察器，缓存不保存格式答案；历史和 Base 行是 `not_checked`。默认每个文件最多 256 KiB、最多 128 个不同候选、累计预留 32 MiB 内容，每次尝试包括失败均扣除最坏请求预算；祖先与目录枚举受单次限额约束，因此累计元数据工作也受尝试数限制。5 秒是合作期限，不能打断阻塞内核调用。配置无效、provider/权限/身份变化、超限与取消都显式保留；格式识别成功仍有 `project_ownership_not_verified`，Git 不覆盖它，CLI/TUI/后台回收均拒绝此 profile。SvelteKit 内容验证、独占所有权及活动证据仍待实现。
+项目内容观察由 `junk::format::ProjectFormatSession` 串行执行，独立于纯规则 VM。Dart profile 使用捕获目录的有界原生完整文件读取，按当前内容识别 pub v2 自声明格式及父项目根引用，不打开配置中的 URI、不解析 pubspec YAML、不运行 SDK。每个命令调用/会话 revision 重建观察器，缓存不保存格式答案；历史和 Base 行是 `not_checked`。默认每个文件最多 256 KiB、最多 128 个不同候选、累计预留 32 MiB 内容，每次尝试包括失败均扣除最坏请求预算；祖先与目录枚举受单次限额约束，因此累计元数据工作也受尝试数限制。5 秒是合作期限，不能打断阻塞内核调用。配置无效、provider/权限/身份变化、超限与取消都显式保留；格式识别成功仍有 `project_ownership_not_verified`，Git 不覆盖它，CLI/TUI/后台回收均拒绝此 profile。SvelteKit legacy profile 复用此流程：观察 `tsconfig.json` 与 `ambient.d.ts` 后完整重读各一次，比较身份、变化指纹和内容；发现文件间变化即 unknown，仍不承诺原子快照或完整 TypeScript 语法有效。每项在首次 I/O 前预留四次读取，因此共享 32 MiB 请求预算最多允许 32 项纯 SvelteKit 观察；累计读取/元数据工作也由最大尝试数乘四约束。声明内容不持久化，不求值 JS 配置或访问其中的 alias/glob。独占所有权、活动及更多真实工具版本证据仍待实现。
 
 ## 导入是明确的信任边界
 

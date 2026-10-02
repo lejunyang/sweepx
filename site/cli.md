@@ -109,7 +109,7 @@ sweepx --format json scan /absolute/path/to/root > scan.json
 sweepx --format ndjson scan /absolute/path/to/root
 ```
 
-Dart `.dart_tool` 候选会有界观察当前 `package_config.json`；JSON 新增 `projectFormat`（`profile`、`status`、`reason`），状态为 `not_checked`、`recognized`、`invalid` 或 `unknown`，字段和值不随语言改变。无内容 profile 的行该字段为 `null`。缓存命中后也重新观察；TUI 显示格式阶段与状态。`recognized` 只表示 pub v2 自声明格式与父根引用被识别，不证明目录独占归属或无活动，所以该 profile 始终仅报告，`junk --trash` 和 TUI 回收均拒绝。SvelteKit 内容解析尚未实现。`junk --timings` 另有 `projectFormats` 阶段；无新命令选项。
+Dart 与 SvelteKit 候选使用有界原生内容观察，JSON 的 `projectFormat` 包含 `profile`、`status`、`reason`；状态为 `not_checked`、`recognized`、`invalid` 或 `unknown`，跨语言稳定。无内容 profile 的行该字段为 `null`。缓存命中也重新观察，TUI 显示格式阶段和结果。Dart 识别 pub v2 自声明格式及父根引用；SvelteKit 检查 legacy JSON 配置和生成声明签名，读取后再复验两个文件，仍明确非原子。它不解析完整 TypeScript、不求值 JS 配置或证明工具版本、独占归属与无活动。两类 profile 均仅报告，`junk --trash`、TUI 与后台回收拒绝。默认单文件 256 KiB、累计最坏请求 32 MiB、最多 128 项、合作期限 5 秒；SvelteKit 每项预留四次完整读取（最多 1 MiB），因此纯 SvelteKit 批次最多 32 项。`junk --timings` 的 `projectFormats` 单独计时；无新命令选项。
 
 ## 状态快照与取消
 
@@ -191,7 +191,7 @@ sweepx --format json junk --system
 
 项目产物规则统一由 catalog 加载、core 的 `JunkService` 使用现有 cleaner VM 评估，CLI 与后续交互界面可共享该入口。规则匹配只形成报告候选。
 
-Dart `.dart_tool` 要求父目录普通文件 `pubspec.yaml` 和自身普通文件 `package_config.json`；SvelteKit 1/2 `.svelte-kit` 要求父目录 `svelte.config.js` 和自身 `tsconfig.json`、`ambient.d.ts` 两个普通文件。缺失、错位、目录或链接标记不能满足要求。两者均为 R3 结构候选：不解析标记内容或证明工具活动，需人工审视；源文件、锁文件、自定义输出路径和 SvelteKit 3 新布局不据此匹配。机器规则 ID 分别是 `dart.tool-state`、`node.sveltekit-output`，跨语言保持一致。
+Dart `.dart_tool` 要求父目录普通文件 `pubspec.yaml` 和自身普通文件 `package_config.json`；SvelteKit 1/2 `.svelte-kit` 要求父目录 `svelte.config.js` 和自身 `tsconfig.json`、`ambient.d.ts` 两个普通文件。缺失、错位、目录或链接标记不能满足结构要求；当前内容观察另由上述 profile 给出。这些 R3 候选未证明独占所有权与工具活动，因此仅报告，不能据此回收。源文件、锁文件、自定义输出路径和 SvelteKit 3 新布局不据此匹配。机器规则 ID 分别是 `dart.tool-state`、`node.sveltekit-output`，跨语言保持一致。
 
 `junk --tui ROOT...` 实时显示扫描阶段、进度及已完整观察子树的基础垃圾候选；`junk --tui --system` 在后台自动发现保守的系统垃圾根，不能同时传显式根。默认按逻辑大小降序，`--sort path` 改为路径顺序；未知大小排在已知零字节之后，不当作零。方向键移动，Space 选择，`a` 全选（最多 256 项），`u` 清空，`r` 刷新所选或当前行（空视图重扫全部），`R` 刷新全部范围，`c` 取消，`d/Delete` 将目录候选移到系统回收站，`q/Esc` 退出。选择按稳定键保留；旧、不完整或回收失败的行标为历史证据，需要完整刷新后才能再次回收。回收在独立工作线程执行，逐项重验 no-follow、对象/filesystem/mount 身份；重要/保护目录拒绝，失败不永久删除。该模式要求终端，不能结合 `--timings`、`--trash`、`--clean-temp`或机器输出。`--quarantine-dir` 可与 Linux `--system --tui` 配合指定异文件系统私有恢复区。macOS 会先显示历史候选缓存（系统模式先发现范围），并在后台核验文件索引、重新遍历目录及解释当前 Git 证据；历史行不能回收，刷新历史行会扫描全部范围，系统全量刷新会重新发现根。其他平台继续现场扫描，不写 operation journal。Linux 临时对象使用独立测量结果展示，逻辑字节与分配字节分开；普通 Trash 拒绝这些行，刷新会重扫系统范围，Linux 可按 `x` 对所选临时对象在后台生成完整隔离计划，输入 `clean <完整摘要>` 再按 Enter 确认；确认框不自动填充摘要。方向键/PageUp/PageDown 滚动计划，左右键查看长行，Esc 取消或关闭；移除中的取消等待结果，可留下部分源和完整恢复副本。界面保留恢复目录和失败原因，确认移动才移除行；父目录旧统计失效为历史，需刷新后才能再次操作。预览、执行与扫描/Trash 互斥，仍可使用独立的 `junk --system --clean-temp` 入口。选中目录刷新只递归所选子树，浅层枚举原生祖先所需的规则与 Git 标记，不进入无关兄弟子树；祖先旧统计标为历史，完整刷新后才能再次操作。局部扫描不覆盖完整根缓存；单个大根中，完整子树在自身和父目录 marker 枚举完毕后即可展示基础候选；Git 解释和完整终态仍继续，扫描中不能据此回收。
 

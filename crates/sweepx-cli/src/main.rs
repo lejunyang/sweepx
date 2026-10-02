@@ -235,7 +235,7 @@ enum Commands {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
         /// macOS shows historical caches first; only freshly verified rows can be moved.
-        /// Dart content-profile candidates remain report-only while ownership is unverified.
+        /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
         #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
         tui: bool,
@@ -257,7 +257,7 @@ enum Commands {
         ///
         /// One explicit confirmation covers the exact plan. Each target is revalidated by
         /// native identity immediately before it is moved. This never falls back to permanent
-        /// deletion. Dart content-profile candidates remain report-only while ownership is unverified.
+        /// deletion. Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         #[arg(long, conflicts_with = "clean_temp")]
         trash: bool,
         /// Absolute quarantine base on a filesystem different from `/tmp`.

@@ -1375,3 +1375,65 @@ fn dart_content_is_current_on_selected_refresh_and_never_trash_authority() {
     );
     assert_eq!(fs::read(&file).unwrap(), body);
 }
+
+#[test]
+fn legacy_svelte_content_changes_are_reobserved_in_selected_and_full_revisions() {
+    use crate::junk::format::ProjectFormatStatus;
+    use sweepx_fixtures::project_junk::{SVELTEKIT_AMBIENT, SVELTEKIT2_CONFIG};
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(target_os = "linux")]
+    let owner = tempfile::tempdir_in("/dev/shm").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let owner = tempfile::tempdir().unwrap();
+    let base = fixture_root(&owner);
+    let root = base.join("project");
+    fs::create_dir_all(root.join(".svelte-kit")).unwrap();
+    fs::write(root.join("svelte.config.js"), "export default {}\n").unwrap();
+    let config = root.join(".svelte-kit/tsconfig.json");
+    let ambient = root.join(".svelte-kit/ambient.d.ts");
+    fs::write(&config, SVELTEKIT2_CONFIG).unwrap();
+    fs::write(&ambient, SVELTEKIT_AMBIENT).unwrap();
+    let mut request = JunkSessionRequest::new(vec![root]);
+    request.include_platform_rules = false;
+    #[cfg(target_os = "macos")]
+    {
+        request.cache_dir = Some(base.join("cache"));
+    }
+    let session = JunkSession::start(request).unwrap();
+    let first = current(&drain(&session, JunkSessionRevision(1)));
+    assert_eq!(first.len(), 1);
+    let key = *first.keys().next().unwrap();
+    assert_eq!(
+        first[&key]
+            .candidate
+            .project_format
+            .as_ref()
+            .unwrap()
+            .status,
+        ProjectFormatStatus::Recognized
+    );
+    assert!(first[&key].candidate.project_execution_blocker().is_some());
+    let changed = SVELTEKIT_AMBIENT.replace("$env/static/private", "$env/static/custom_");
+    assert_eq!(changed.len(), SVELTEKIT_AMBIENT.len());
+    fs::write(&ambient, changed.as_bytes()).unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(rows.len(), 1);
+    assert!(rows[&key].complete());
+    assert_eq!(
+        rows[&key].candidate.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Unknown
+    );
+    assert_eq!(rows[&key].candidate.confidence.as_deref(), Some("low"));
+    fs::write(&ambient, SVELTEKIT_AMBIENT).unwrap();
+    let revision = session.refresh_all().unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(
+        rows[&key].candidate.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Recognized
+    );
+    assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    assert_eq!(fs::read(config).unwrap(), SVELTEKIT2_CONFIG.as_bytes());
+}

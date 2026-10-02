@@ -861,37 +861,42 @@ mod tests {
     fn git_ignore_does_not_promote_required_project_content_or_ownership() {
         use crate::junk::format::{ProjectFormatEvidence, ProjectFormatStatus};
         let (_owner, _base, project) = fixture();
-        for status in [
-            ProjectFormatStatus::NotChecked,
-            ProjectFormatStatus::Unknown,
-            ProjectFormatStatus::Invalid,
-            ProjectFormatStatus::Recognized,
+        for profile in [
+            sweepx_catalog::junk::ProjectContentFormat::DartPubPackageConfigV2,
+            sweepx_catalog::junk::ProjectContentFormat::SvelteKitLegacySync,
         ] {
-            let mut rows = scan(&project);
-            // Exercise the shared Git contract independently of the Dart parser/native reader.
-            rows[0].project_format = Some(ProjectFormatEvidence {
-                profile: sweepx_catalog::junk::ProjectContentFormat::DartPubPackageConfigV2,
-                status,
-                reason: "controlled_test_observation",
-            });
-            session().refresh(&mut rows);
-            assert_eq!(rows[0].git.as_ref().unwrap().status, "ignored");
-            assert_eq!(
-                rows[0].confidence.as_deref(),
-                Some(if status == ProjectFormatStatus::Recognized {
-                    "medium"
-                } else {
-                    "low"
-                })
-            );
-            assert_ne!(
-                rows[0].classification.as_deref(),
-                Some("known_generated_ignored")
-            );
-            assert_eq!(
-                rows[0].project_execution_blocker(),
-                Some("project_ownership_not_verified")
-            );
+            for status in [
+                ProjectFormatStatus::NotChecked,
+                ProjectFormatStatus::Unknown,
+                ProjectFormatStatus::Invalid,
+                ProjectFormatStatus::Recognized,
+            ] {
+                let mut rows = scan(&project);
+                // Exercise the shared Git contract independently of the Dart parser/native reader.
+                rows[0].project_format = Some(ProjectFormatEvidence {
+                    profile,
+                    status,
+                    reason: "controlled_test_observation",
+                });
+                session().refresh(&mut rows);
+                assert_eq!(rows[0].git.as_ref().unwrap().status, "ignored");
+                assert_eq!(
+                    rows[0].confidence.as_deref(),
+                    Some(if status == ProjectFormatStatus::Recognized {
+                        "medium"
+                    } else {
+                        "low"
+                    })
+                );
+                assert_ne!(
+                    rows[0].classification.as_deref(),
+                    Some("known_generated_ignored")
+                );
+                assert_eq!(
+                    rows[0].project_execution_blocker(),
+                    Some("project_ownership_not_verified")
+                );
+            }
         }
     }
 

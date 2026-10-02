@@ -240,6 +240,12 @@ struct CountingBackend {
     inner: HostPlatformScanner,
     reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     provider_failure: bool,
+    action: Option<(usize, StreamAction)>,
+}
+enum StreamAction {
+    FailProvider,
+    Mutate(std::path::PathBuf, Vec<u8>),
+    Cancel,
 }
 impl PlatformScanner for CountingBackend {
     type DirectoryHandle = <HostPlatformScanner as PlatformScanner>::DirectoryHandle;
@@ -299,16 +305,29 @@ impl PlatformScanner for CountingBackend {
         sweepx_platform::RegularFileStreamResult,
         sweepx_platform::BoundedRegularFileReadError,
     > {
-        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.provider_failure {
+        let number = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.provider_failure
+            || matches!(&self.action, Some((at, StreamAction::FailProvider)) if *at == number)
+        {
             return Err(
                 sweepx_platform::BoundedRegularFileReadError::ProviderOrOffline(
                     "controlled provider refusal".into(),
                 ),
             );
         }
-        self.inner
-            .stream_regular_file_relative(parent, request, cancel, consume)
+        let result = self
+            .inner
+            .stream_regular_file_relative(parent, request, cancel, consume)?;
+        if let Some((at, action)) = &self.action
+            && *at == number
+        {
+            match action {
+                StreamAction::Mutate(path, bytes) => std::fs::write(path, bytes).unwrap(),
+                StreamAction::Cancel => cancel.cancel(),
+                StreamAction::FailProvider => unreachable!(),
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -326,6 +345,7 @@ fn provider_failure_and_reserved_work_are_bounded_and_deduplicated() {
                 inner: HostPlatformScanner::new(),
                 reads: reads.clone(),
                 provider_failure,
+                action: None,
             },
             ProjectFormatLimits {
                 max_observations: 1,
@@ -473,4 +493,242 @@ fn json_depth_admission_ignores_brackets_and_escapes_inside_strings() {
         inspect_dart_pub_config(&serde_json::to_vec(&config).unwrap()).status,
         ProjectFormatStatus::Recognized
     );
+}
+
+use sweepx_fixtures::project_junk::{SVELTEKIT_AMBIENT, SVELTEKIT1_CONFIG, SVELTEKIT2_CONFIG};
+
+#[test]
+fn legacy_sync_profiles_distinguish_real_signatures_from_user_and_changed_shapes() {
+    for config in [SVELTEKIT1_CONFIG, SVELTEKIT2_CONFIG] {
+        let result = inspect_sveltekit_sync(config.as_bytes(), SVELTEKIT_AMBIENT.as_bytes());
+        assert_eq!(result.status, ProjectFormatStatus::Recognized);
+        assert!(result.reason.contains("non_atomic"));
+        let mut edited: serde_json::Value = serde_json::from_str(config).unwrap();
+        edited["compilerOptions"]["rootDirs"] = serde_json::json!(["../../outside", "./types"]);
+        assert_eq!(
+            inspect_sveltekit_sync(
+                &serde_json::to_vec(&edited).unwrap(),
+                SVELTEKIT_AMBIENT.as_bytes()
+            )
+            .status,
+            ProjectFormatStatus::Unknown
+        );
+        edited["compilerOptions"]["rootDirs"] = serde_json::json!(true);
+        assert_eq!(
+            inspect_sveltekit_sync(
+                &serde_json::to_vec(&edited).unwrap(),
+                SVELTEKIT_AMBIENT.as_bytes()
+            )
+            .status,
+            ProjectFormatStatus::Invalid
+        );
+    }
+    for ambient in [
+        "/// <reference types=\"@sveltejs/kit\" />",
+        "user source",
+        "\n// this file is generated — do not edit it\n",
+    ] {
+        assert_eq!(
+            inspect_sveltekit_sync(SVELTEKIT2_CONFIG.as_bytes(), ambient.as_bytes()).status,
+            ProjectFormatStatus::Unknown
+        );
+    }
+    let changed = SVELTEKIT_AMBIENT.replace("$env/dynamic/private", "$env/dynamic/other");
+    assert_eq!(
+        inspect_sveltekit_sync(SVELTEKIT2_CONFIG.as_bytes(), changed.as_bytes()).reason,
+        "ambient_signature_not_established"
+    );
+    assert_eq!(
+        inspect_sveltekit_sync(SVELTEKIT2_CONFIG.as_bytes(), &[0xff]).status,
+        ProjectFormatStatus::Invalid
+    );
+    assert_eq!(
+        inspect_sveltekit_sync(
+            br#"{"compilerOptions":{},"compilerOptions":{}}"#,
+            SVELTEKIT_AMBIENT.as_bytes()
+        )
+        .status,
+        ProjectFormatStatus::Invalid
+    );
+    assert_eq!(
+        inspect_sveltekit_sync(
+            br#"{"compilerOptions":{},"include":[]}"#,
+            SVELTEKIT_AMBIENT.as_bytes()
+        )
+        .status,
+        ProjectFormatStatus::Unknown
+    );
+    let windows = SVELTEKIT_AMBIENT.replace('\n', "\r\n");
+    assert_eq!(
+        inspect_sveltekit_sync(SVELTEKIT2_CONFIG.as_bytes(), windows.as_bytes()).status,
+        ProjectFormatStatus::Recognized
+    );
+    assert_eq!(
+        inspect_sveltekit_sync(SVELTEKIT2_CONFIG.as_bytes(), &vec![b'x'; 262145]).reason,
+        "resource_limit"
+    );
+}
+
+fn svelte_fixture() -> (tempfile::TempDir, std::path::PathBuf, JunkCandidate) {
+    let (owner, root, _dart) = fixture();
+    std::fs::create_dir(root.join(".svelte-kit")).unwrap();
+    std::fs::write(root.join("svelte.config.js"), "export default {}\n").unwrap();
+    std::fs::write(root.join(".svelte-kit/tsconfig.json"), SVELTEKIT2_CONFIG).unwrap();
+    std::fs::write(root.join(".svelte-kit/ambient.d.ts"), SVELTEKIT_AMBIENT).unwrap();
+    let summary = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+        .scan(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let service = JunkService::built_in().unwrap();
+    let entry = summary
+        .entries
+        .iter()
+        .find(|e| e.display_path.ends_with(".svelte-kit"))
+        .unwrap();
+    let aggregates = summary
+        .aggregates
+        .iter()
+        .map(|a| (a.directory_identity.as_str(), a))
+        .collect();
+    let candidate = service
+        .interpret(
+            "project:node.sveltekit-output",
+            entry,
+            &aggregates,
+            &[],
+            &PlatformJunkEvidence::default(),
+        )
+        .unwrap();
+    (owner, root, candidate)
+}
+
+#[test]
+fn svelte_native_pair_is_reobserved_budgeted_and_deduplicated_without_display_paths() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (_owner, root, mut row) = svelte_fixture();
+    row.path = "/fabricated/display/path".into();
+    row.source_entry.as_mut().unwrap().display_path = "/fabricated/source/display".into();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut session = ProjectFormatSession::with_platform(
+        CountingBackend {
+            inner: HostPlatformScanner::new(),
+            reads: reads.clone(),
+            provider_failure: false,
+            action: None,
+        },
+        ProjectFormatLimits {
+            max_reserved_file_bytes: 1048576,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    session.refresh(&mut row);
+    assert_eq!(
+        row.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Recognized
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 8); // zero-probe + full read, twice per file
+    assert!(row.project_execution_blocker().is_some());
+    session.refresh(&mut row);
+    assert_eq!(reads.load(Ordering::SeqCst), 8);
+    row.entry_id = ScanEntryId::for_scan_ordinal(&sweepx_model::ScanId::new("next"), 1).unwrap();
+    session.refresh(&mut row);
+    assert_eq!(
+        row.project_format.as_ref().unwrap().reason,
+        "resource_limit"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 8);
+    assert_eq!(
+        std::fs::read(root.join(".svelte-kit/tsconfig.json")).unwrap(),
+        SVELTEKIT2_CONFIG.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(root.join(".svelte-kit/ambient.d.ts")).unwrap(),
+        SVELTEKIT_AMBIENT.as_bytes()
+    );
+}
+
+#[test]
+fn svelte_interfile_changes_provider_refusal_cancel_and_small_budget_stay_unknown() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for (action, reason, expected_reads) in [
+        (StreamAction::FailProvider, "provider_or_offline", 3),
+        (StreamAction::Cancel, "cancelled", 3),
+    ] {
+        let (_owner, _root, mut row) = svelte_fixture();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut session = ProjectFormatSession::with_platform(
+            CountingBackend {
+                inner: HostPlatformScanner::new(),
+                reads: reads.clone(),
+                provider_failure: false,
+                action: Some((2, action)),
+            },
+            Default::default(),
+            CancellationToken::new(),
+        );
+        session.refresh(&mut row);
+        assert_eq!(
+            row.project_format.as_ref().unwrap().status,
+            ProjectFormatStatus::Unknown
+        );
+        assert_eq!(row.project_format.as_ref().unwrap().reason, reason);
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+    }
+    let (_owner, root, mut row) = svelte_fixture();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut changed = ProjectFormatSession::with_platform(
+        CountingBackend {
+            inner: HostPlatformScanner::new(),
+            reads: reads.clone(),
+            provider_failure: false,
+            action: Some((
+                3,
+                StreamAction::Mutate(
+                    root.join(".svelte-kit/tsconfig.json"),
+                    SVELTEKIT1_CONFIG.as_bytes().to_vec(),
+                ),
+            )),
+        },
+        Default::default(),
+        CancellationToken::new(),
+    );
+    changed.refresh(&mut row);
+    assert_eq!(
+        row.project_format.as_ref().unwrap().reason,
+        "content_changed_between_reads"
+    );
+    assert_eq!(
+        row.project_format.as_ref().unwrap().status,
+        ProjectFormatStatus::Unknown
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 6);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut bounded = ProjectFormatSession::with_platform(
+        CountingBackend {
+            inner: HostPlatformScanner::new(),
+            reads: reads.clone(),
+            provider_failure: false,
+            action: None,
+        },
+        ProjectFormatLimits {
+            max_reserved_file_bytes: 1048575,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    bounded.refresh(&mut row);
+    assert_eq!(
+        row.project_format.as_ref().unwrap().reason,
+        "resource_limit"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
