@@ -1436,7 +1436,9 @@ fn map_config_pair_member_read(
             read.observed_bytes()
                 .expect("present config observation carries bytes"),
         ),
-        CargoConfigMemberObservation::AbsentDuringEnumeration => {
+        CargoConfigMemberObservation::AbsentDuringEnumeration
+        | CargoConfigMemberObservation::AbsentDuringLookup => {
+            // Both are time-local observations; neither closes the cleaner's atomic scope.
             CollectedCargoConfigFile::AbsentDuringEnumeration
         }
         CargoConfigMemberObservation::Failed(failure) => match failure {

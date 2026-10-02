@@ -89,7 +89,7 @@ fn fixture() -> (
     let root = owner.path().canonicalize().unwrap();
     #[cfg(windows)]
     let root = owner.path().to_path_buf();
-    let project = root.join("nested/project");
+    let project = root.join("nested").join("project");
     std::fs::create_dir_all(project.join("target")).unwrap();
     std::fs::write(project.join("Cargo.toml"), b"[workspace]\nmembers=['a']\n").unwrap();
     std::fs::write(project.join("target/personal"), b"preserved").unwrap();
@@ -479,4 +479,203 @@ fn native_target_path_declarations_are_reobserved_without_opening_declared_outpu
             );
         }
     }
+}
+
+#[test]
+fn native_output_scope_selects_sources_bases_and_special_environment_without_authorizing_trash() {
+    let (owner, project, mut candidate) = fixture();
+    let nested = project.parent().unwrap();
+    let home = owner.path().join("isolated-cargo-home");
+    std::fs::create_dir(&home).unwrap();
+    #[cfg(unix)]
+    let home = home.canonicalize().unwrap();
+    std::fs::create_dir(project.join(".cargo")).unwrap();
+    std::fs::create_dir(nested.join(".cargo")).unwrap();
+    let target = project.join("target");
+    let absolute = target.to_str().unwrap();
+    let ancestor_target = format!("project{}target", std::path::MAIN_SEPARATOR);
+    let home_target = format!("nested{0}project{0}target", std::path::MAIN_SEPARATOR);
+    let cases = [
+        (
+            Some("target"),
+            None,
+            None,
+            None,
+            None,
+            CargoOutputSource::ProjectConfig,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            None,
+            Some(ancestor_target.as_str()),
+            None,
+            None,
+            None,
+            CargoOutputSource::AncestorConfig,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            None,
+            None,
+            Some(home_target.as_str()),
+            None,
+            None,
+            CargoOutputSource::CargoHomeConfig,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            Some("other"),
+            None,
+            None,
+            Some("target"),
+            None,
+            CargoOutputSource::CargoTargetDir,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            Some("other"),
+            None,
+            None,
+            None,
+            Some("target"),
+            CargoOutputSource::CargoBuildTargetDir,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            Some("target"),
+            None,
+            None,
+            Some("nonexistent-output"),
+            Some("target"),
+            CargoOutputSource::CargoTargetDir,
+            CargoOutputPathComparison::DifferentSpelling,
+        ),
+        (
+            Some(absolute),
+            None,
+            None,
+            None,
+            None,
+            CargoOutputSource::ProjectConfig,
+            CargoOutputPathComparison::SameSpelling,
+        ),
+        (
+            Some("../shared"),
+            None,
+            None,
+            None,
+            None,
+            CargoOutputSource::ProjectConfig,
+            CargoOutputPathComparison::NotChecked,
+        ),
+        (
+            Some("."),
+            None,
+            None,
+            None,
+            None,
+            CargoOutputSource::ProjectConfig,
+            CargoOutputPathComparison::NotChecked,
+        ),
+    ];
+    for (local, ancestor, home_value, target_env, build_env, source, comparison) in cases {
+        for (path, value) in [
+            (project.join(".cargo/config.toml"), local),
+            (nested.join(".cargo/config.toml"), ancestor),
+            (home.join("config.toml"), home_value),
+        ] {
+            if let Some(value) = value {
+                let body = format!(
+                    "[build]\ntarget-dir={}\n",
+                    serde_json::to_string(value).unwrap()
+                );
+                std::fs::write(path, body).unwrap();
+            } else if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let environment = CargoOutputEnvironment::from_values(
+            target_env.map(std::ffi::OsStr::new),
+            build_env.map(std::ffi::OsStr::new),
+            Some(home.as_os_str()),
+            None,
+        );
+        ProjectFormatSession::with_cargo_environment(
+            sweepx_scanner::HostPlatformScanner::new(),
+            Default::default(),
+            CancellationToken::new(),
+            environment,
+        )
+        .refresh(&mut candidate);
+        let context = candidate.project_context.unwrap();
+        assert_eq!(context.status, ProjectContextStatus::Observed);
+        let output = context.cargo_output.unwrap();
+        assert_eq!(output.status, ProjectContextStatus::Observed, "{output:?}");
+        assert_eq!(output.scope, "project_parent_current_env_no_cli");
+        assert!(output.source_locations_observed);
+        assert_eq!(output.source, Some(source));
+        assert_eq!(output.candidate_path, comparison);
+        assert!(!context.cargo_config.unwrap().precedence_complete);
+        assert!(candidate.project_execution_blocker().is_some());
+        // Ordinary reads are an independent no-mutation oracle; no configured output is created.
+        assert_eq!(
+            std::fs::read(target.join("personal")).unwrap(),
+            b"preserved"
+        );
+        assert!(!project.join("nonexistent-output").exists());
+        assert!(!nested.join("shared").exists());
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert!(!encoded.contains(absolute));
+        assert!(!encoded.contains("nonexistent-output"));
+    }
+}
+
+#[test]
+fn output_scope_keeps_missing_workspace_defaults_resource_gaps_and_bad_sources_distinct() {
+    let (owner, project, mut candidate) = fixture();
+    let home = owner.path().join("isolated-home");
+    std::fs::create_dir(&home).unwrap();
+    #[cfg(unix)]
+    let home = home.canonicalize().unwrap();
+    let environment =
+        || CargoOutputEnvironment::from_values(None, None, Some(home.as_os_str()), None);
+    let refresh = |candidate: &mut crate::junk::candidate::JunkCandidate, limits| {
+        ProjectFormatSession::with_cargo_environment(
+            sweepx_scanner::HostPlatformScanner::new(),
+            limits,
+            CancellationToken::new(),
+            environment(),
+        )
+        .refresh(candidate);
+        candidate.project_context.unwrap().cargo_output.unwrap()
+    };
+    let missing = refresh(&mut candidate, Default::default());
+    assert!(missing.source_locations_observed, "{missing:?}");
+    assert_eq!(missing.reason, "workspace_default_not_resolved");
+    assert_eq!(missing.source, None);
+    let limited = refresh(
+        &mut candidate,
+        ProjectFormatLimits {
+            max_reserved_file_bytes: 3 * 256 * 1024,
+            ..Default::default()
+        },
+    );
+    assert_eq!(limited.reason, "resource_limit");
+    assert!(!limited.source_locations_observed);
+    assert_eq!(
+        candidate.project_context.unwrap().status,
+        ProjectContextStatus::Observed
+    );
+    std::fs::write(home.join("config.toml"), b"[build]\ntarget-dir=7").unwrap();
+    let invalid = refresh(&mut candidate, Default::default());
+    assert_eq!(invalid.reason, "unsupported_manifest_shape");
+    std::fs::write(home.join("config.toml"), b"[build").unwrap();
+    let invalid = refresh(&mut candidate, Default::default());
+    assert_eq!(invalid.status, ProjectContextStatus::Invalid);
+    assert_eq!(invalid.reason, "malformed_toml");
+    assert!(candidate.project_execution_blocker().is_some());
+    assert_eq!(
+        std::fs::read(project.join("target/personal")).unwrap(),
+        b"preserved"
+    );
 }

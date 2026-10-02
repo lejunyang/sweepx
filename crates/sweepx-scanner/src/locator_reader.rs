@@ -85,15 +85,18 @@ pub struct LocatorBatchReadResult {
     pub total_bytes: usize,
 }
 
-/// One fixed Cargo configuration member observed during a single, bounded directory walk.
+/// One fixed Cargo configuration member observed during a bounded native lookup or directory walk.
 ///
-/// `AbsentDuringEnumeration` is deliberately weaker than `LocatorFileRead::VerifiedAbsent`:
+/// Both absence variants are deliberately weaker than `LocatorFileRead::VerifiedAbsent`:
 /// without a platform-sealed directory generation it is only a time-local observation and must
 /// never be promoted into an atomic absence claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CargoConfigMemberObservation {
     Present(Box<PresentRegularFileRead>),
     AbsentDuringEnumeration,
+    /// One no-follow fixed-name lookup returned typed NotFound. This time-local observation is
+    /// neither an enumeration nor an atomic absence proof; it may use the host's case semantics.
+    AbsentDuringLookup,
     Failed(LocatorReadFailure),
 }
 
@@ -101,7 +104,7 @@ impl CargoConfigMemberObservation {
     pub fn observed_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Present(read) => Some(read.bytes.as_slice()),
-            Self::AbsentDuringEnumeration | Self::Failed(_) => None,
+            Self::AbsentDuringEnumeration | Self::AbsentDuringLookup | Self::Failed(_) => None,
         }
     }
 }
@@ -188,6 +191,20 @@ pub struct LocatorDirectoryIdentity {
     filesystem_identity: FilesystemIdentity,
     mount_identity: MountIdentity,
     fingerprint: String,
+}
+
+impl LocatorDirectoryIdentity {
+    /// Conservative retained allocation estimate for bounded invocation-local indexes. It exposes
+    /// no native path/authority and is not an allocator RSS measurement.
+    pub fn retained_bytes_estimate(&self) -> usize {
+        let path = match &self.native_absolute_path {
+            NativeAbsolutePath::UnixBytes(bytes) => bytes.capacity(),
+            NativeAbsolutePath::WindowsUtf16(units) => units.capacity().saturating_mul(2),
+        };
+        std::mem::size_of::<Self>()
+            .saturating_add(path)
+            .saturating_add(self.fingerprint.capacity())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +588,139 @@ impl<P: PlatformScanner> LocatorReader<P> {
         Ok(self.observe_cargo_config_member_presence(&mut directory, cancel, &mut budget))
     }
 
+    /// Reads both fixed Cargo config names in an independently captured directory (Cargo home),
+    /// or below its `.cargo` child (an invocation/ancestor directory). Re-admission must match all
+    /// captured native identity, filesystem, mount and fingerprint fields. Reads reuse the same
+    /// provider-safe zero/full streams as project-local observations; no generic file fallback.
+    ///
+    /// This deliberately remains non-atomic, may operate outside a scanned tree, and never grants
+    /// deletion authority. Bound cumulative calls/bytes/deadlines in the invocation that uses it.
+    pub fn read_cargo_config_pair_in_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        nested_cargo: bool,
+        cancel: &CancellationToken,
+    ) -> Result<CargoConfigPairObservation, LocatorReadError> {
+        self.validate_captured_cargo_pair_budget(captured)?;
+        if self.limits.max_requests < if nested_cargo { 5 } else { 4 }
+            || self.limits.max_components_per_request < if nested_cargo { 3 } else { 2 }
+            || self.limits.max_total_components < if nested_cargo { 8 } else { 4 }
+        {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        let mut directory = self
+            .reopen_captured_directory(captured, cancel)
+            .map_err(map_capture_attempt)?;
+        let mut budget = BatchBudget::default();
+        if nested_cargo {
+            // Cargo requests one fixed name. Inspect it relative to the captured parent rather
+            // than enumerating every unrelated child (e.g. a huge system temporary directory).
+            // A typed NotFound is only a time-local lookup result. Existing objects still need
+            // complete native directory/mount evidence, and member reads remain bounded.
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                &directory.path,
+                fixed_native_name(".cargo"),
+            )
+            .map_err(|_| LocatorReadError::InvalidRequest)?;
+            let walked = inspect_bound_child(
+                &self.platform,
+                &directory.handle,
+                &directory.path,
+                &child,
+                cancel,
+            )
+            .map_err(|error| {
+                map_capture_attempt(ReadAttempt::Failed(map_platform_failure(error)))
+            })?;
+            directory = match walked {
+                WalkEntry::Directory(opened) => {
+                    let (Some(filesystem), Some(mount)) = (
+                        &opened.metadata.filesystem_identity,
+                        &opened.metadata.mount_identity,
+                    ) else {
+                        return Ok(pair_failed(LocatorReadFailure::IdentityMismatch));
+                    };
+                    validate_same_scope(&directory.metadata, filesystem, mount)
+                        .map_err(map_capture_attempt)?;
+                    OpenedDirectory {
+                        path: opened.metadata.path.clone(),
+                        metadata: opened.metadata,
+                        handle: opened.handle,
+                    }
+                }
+                WalkEntry::Error(error) if error.kind == sweepx_platform::ErrorKind::NotFound => {
+                    return Ok(CargoConfigPairObservation {
+                        consistency: CargoConfigPairConsistency::NonAtomic,
+                        config: CargoConfigMemberObservation::AbsentDuringLookup,
+                        config_toml: CargoConfigMemberObservation::AbsentDuringLookup,
+                        total_bytes: 0,
+                    });
+                }
+                WalkEntry::Link(_) => return Ok(pair_failed(LocatorReadFailure::SymlinkOrReparse)),
+                WalkEntry::Boundary(boundary) => {
+                    return Ok(pair_failed(map_boundary_failure(boundary.kind)));
+                }
+                WalkEntry::Error(error) => return Ok(pair_failed(map_walk_failure(error.kind))),
+                WalkEntry::File(_) | WalkEntry::CachedFile(_) => {
+                    return Ok(pair_failed(LocatorReadFailure::NotRegular));
+                }
+            };
+        }
+        Ok(self.observe_cargo_config_members(&mut directory, cancel, &mut budget))
+    }
+
+    /// Captures an ancestor only after revalidating the candidate's complete original native
+    /// lineage. The ancestor level cannot cross its scan root; no display path is consulted.
+    /// The returned path stays private and must be revalidated before any subsequent observation.
+    pub fn capture_scanned_ancestor_directory(
+        &self,
+        base: &ScannedEntry,
+        ancestor_levels: usize,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryIdentity, LocatorReadError> {
+        self.validate_scanned_directory(base)?;
+        self.validate_directory_binding_budget(base)?;
+        validate_locator_path_bytes(base)?;
+        let mut budget = BatchBudget::default();
+        let directory = self
+            .reopen_base_ancestor(base, ancestor_levels, cancel, &mut budget)
+            .map_err(map_capture_attempt)?;
+        let locator = base
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let native =
+            native_target_absolute_path(locator).map_err(|_| LocatorReadError::InvalidRequest)?;
+        let mut path = native_absolute_path_buf(&native).map_err(map_capture_attempt)?;
+        for _ in 0..ancestor_levels {
+            if !path.pop() {
+                return Err(LocatorReadError::InvalidRequest);
+            }
+        }
+        capture_metadata(native_path_from_buf(&path)?, directory.metadata)
+    }
+
+    /// Independently admits the lexical parent of a revalidated captured directory. This is
+    /// configuration discovery, not an extension of scan coverage: each parent has its own native
+    /// mount/identity admission. Linked ancestors or uncertain admission fail closed. `None` means
+    /// the host path has no parent, not that an atomic filesystem/config snapshot was obtained.
+    pub fn capture_parent_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<Option<LocatorDirectoryIdentity>, LocatorReadError> {
+        self.validate_captured_cargo_pair_budget(captured)?;
+        let _current = self
+            .reopen_captured_directory(captured, cancel)
+            .map_err(map_capture_attempt)?;
+        let path = native_absolute_path_buf(&captured.native_absolute_path)
+            .map_err(map_capture_attempt)?;
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        self.capture_directory_identity(parent, cancel).map(Some)
+    }
+
     fn observe_cargo_config_members(
         &self,
         directory: &mut OpenedDirectory<P::DirectoryHandle>,
@@ -755,6 +905,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
         if cancel.is_cancelled() {
             return Err(LocatorReadError::Cancelled);
         }
+        if path.as_os_str().as_encoded_bytes().len() > 64 * 1024 {
+            return Err(LocatorReadError::ResourceLimit);
+        }
         let root =
             ScanRoot::new(path.to_path_buf()).map_err(|_| LocatorReadError::InvalidRequest)?;
         let admission = self
@@ -772,24 +925,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
         if cancel.is_cancelled() {
             return Err(LocatorReadError::Cancelled);
         }
-        if metadata.kind != EntryKind::Directory {
-            return Err(LocatorReadError::InvalidRequest);
-        }
-        let (Some(identity), Some(filesystem_identity), Some(mount_identity)) = (
-            metadata.identity,
-            metadata.filesystem_identity,
-            metadata.mount_identity,
-        ) else {
-            return Err(LocatorReadError::InvalidRequest);
-        };
-        Ok(LocatorDirectoryIdentity {
-            native_absolute_path: root_locator,
-            kind: metadata.kind,
-            identity,
-            filesystem_identity,
-            mount_identity,
-            fingerprint: metadata.fingerprint,
-        })
+        capture_metadata(root_locator, metadata)
     }
 
     /// Compares one invocation-time directory snapshot with one live scanned directory. A match
@@ -866,6 +1002,72 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 ))
             }
         }
+    }
+
+    /// Re-admits an opaque captured directory and compares all original native binding fields.
+    /// A successful check is time-local, releases its handle on return, and is not a permit.
+    pub fn revalidate_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<(), LocatorReadError> {
+        self.validate_captured_cargo_pair_budget(captured)?;
+        self.reopen_captured_directory(captured, cancel)
+            .map_err(map_capture_attempt)?;
+        Ok(())
+    }
+
+    /// Compares a configured output spelling with a freshly revalidated scanned directory.
+    /// The origin is independently revalidated. This does not open the configured output, prove
+    /// alias equivalence, normalize parent/dot components, or grant execution authority. Such
+    /// components and Windows drive/root-relative syntax return an unknown (`InvalidRequest`).
+    pub fn compare_scanned_directory_to_configured_path(
+        &self,
+        target: &ScannedEntry,
+        origin: &LocatorDirectoryIdentity,
+        value: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<bool, LocatorReadError> {
+        use std::path::Component;
+        if value.as_os_str().as_encoded_bytes().len() > 4096
+            || value
+                .as_os_str()
+                .as_encoded_bytes()
+                .split(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+                .any(|component| component == b"." || component == b"..")
+            || value
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+            || (value.has_root() && !value.is_absolute())
+            || (!value.is_absolute()
+                && matches!(value.components().next(), Some(Component::Prefix(_))))
+        {
+            return Err(LocatorReadError::InvalidRequest);
+        }
+        self.validate_scanned_directory(target)?;
+        self.validate_directory_binding_budget(target)?;
+        validate_locator_path_bytes(target)?;
+        let _origin = self
+            .reopen_captured_directory(origin, cancel)
+            .map_err(map_capture_attempt)?;
+        let mut budget = BatchBudget::default();
+        let _target = self
+            .reopen_base(target, cancel, &mut budget)
+            .map_err(map_capture_attempt)?;
+        let origin_path =
+            native_absolute_path_buf(&origin.native_absolute_path).map_err(map_capture_attempt)?;
+        let configured = origin_path.join(value);
+        if configured.as_os_str().as_encoded_bytes().len() > 64 * 1024 {
+            return Err(LocatorReadError::ResourceLimit);
+        }
+        let locator = target
+            .executable_native_locator()
+            .map_err(|_| LocatorReadError::InvalidRequest)?
+            .ok_or(LocatorReadError::InvalidRequest)?;
+        let current =
+            native_target_absolute_path(locator).map_err(|_| LocatorReadError::InvalidRequest)?;
+        native_absolute_paths_equal_exact(&current, &native_path_from_buf(&configured)?)
+            .map_err(|_| LocatorReadError::InvalidRequest)
     }
 
     /// Root-only compatibility wrapper for callers that bind an invocation directory to the scan
@@ -1896,6 +2098,95 @@ fn expectation_from_component(
     component: &NativePathComponent,
 ) -> Option<(EntryIdentity, FilesystemIdentity, MountIdentity)> {
     component_identity(component)
+}
+
+fn validate_locator_path_bytes(base: &ScannedEntry) -> Result<(), LocatorReadError> {
+    let locator = base
+        .executable_native_locator()
+        .map_err(|_| LocatorReadError::InvalidRequest)?
+        .ok_or(LocatorReadError::InvalidRequest)?;
+    let root = locator
+        .scan_root_absolute_path
+        .as_ref()
+        .ok_or(LocatorReadError::InvalidRequest)?;
+    let mut bytes = match root {
+        NativeAbsolutePath::UnixBytes(bytes) => bytes.len(),
+        NativeAbsolutePath::WindowsUtf16(units) => units.len().saturating_mul(2),
+    };
+    for component in locator
+        .parent_reopen_recipe
+        .iter()
+        .skip(1)
+        .chain(std::iter::once(&locator.entry))
+    {
+        let size = match &component.native_basename {
+            NativeName::UnixBytes(bytes) => bytes.len(),
+            NativeName::WindowsUtf16(units) => units.len().saturating_mul(2),
+        };
+        bytes = bytes.saturating_add(size).saturating_add(2);
+    }
+    if bytes > 64 * 1024 {
+        Err(LocatorReadError::ResourceLimit)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_capture_attempt(attempt: ReadAttempt) -> LocatorReadError {
+    match attempt {
+        ReadAttempt::Failed(LocatorReadFailure::Cancelled) => LocatorReadError::Cancelled,
+        ReadAttempt::Failed(LocatorReadFailure::ResourceLimit) => LocatorReadError::ResourceLimit,
+        ReadAttempt::Absent | ReadAttempt::Failed(_) => LocatorReadError::InvalidRequest,
+    }
+}
+
+fn capture_metadata(
+    native_absolute_path: NativeAbsolutePath,
+    metadata: sweepx_platform::EntryMetadata,
+) -> Result<LocatorDirectoryIdentity, LocatorReadError> {
+    let (Some(identity), Some(filesystem_identity), Some(mount_identity)) = (
+        metadata.identity,
+        metadata.filesystem_identity,
+        metadata.mount_identity,
+    ) else {
+        return Err(LocatorReadError::InvalidRequest);
+    };
+    if metadata.kind != EntryKind::Directory {
+        return Err(LocatorReadError::InvalidRequest);
+    }
+    if metadata.fingerprint.len() > 16 * 1024 {
+        return Err(LocatorReadError::ResourceLimit);
+    }
+    Ok(LocatorDirectoryIdentity {
+        native_absolute_path,
+        kind: metadata.kind,
+        identity,
+        filesystem_identity,
+        mount_identity,
+        fingerprint: metadata.fingerprint,
+    })
+}
+
+fn native_path_from_buf(path: &Path) -> Result<NativeAbsolutePath, LocatorReadError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(NativeAbsolutePath::unix(
+            path.as_os_str().as_bytes().to_vec(),
+        ))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        Ok(NativeAbsolutePath::windows_utf16(
+            path.as_os_str().encode_wide().collect::<Vec<u16>>(),
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(LocatorReadError::InvalidRequest)
+    }
 }
 
 fn native_absolute_path_buf(path: &NativeAbsolutePath) -> Result<PathBuf, ReadAttempt> {

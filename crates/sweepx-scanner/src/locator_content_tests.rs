@@ -571,3 +571,176 @@ fn captured_content_rejects_changes_links_replaced_parents_and_invalid_requests(
         Err(LocatorReadFailure::IdentityMismatch)
     );
 }
+
+#[test]
+fn independently_captured_cargo_sources_read_contents_and_reject_provider_or_replacement() {
+    let (_owner, directory, _) = fixture();
+    let cargo = directory.join(".cargo");
+    std::fs::create_dir(&cargo).unwrap();
+    let legacy = b"[build]\ntarget-dir='legacy'\n";
+    let modern = b"[build]\ntarget-dir='../shared'\n";
+    std::fs::write(cargo.join("config"), legacy).unwrap();
+    std::fs::write(cargo.join("config.toml"), modern).unwrap();
+    let normal = new_reader(Default::default(), None);
+    let captured = normal
+        .capture_directory_identity(&directory, &CancellationToken::new())
+        .unwrap();
+    let pair = normal
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(pair.config.observed_bytes(), Some(legacy.as_slice()));
+    assert_eq!(pair.config_toml.observed_bytes(), Some(modern.as_slice()));
+    assert_eq!(std::fs::read(cargo.join("config")).unwrap(), legacy);
+    assert_eq!(std::fs::read(cargo.join("config.toml")).unwrap(), modern);
+    let home = normal
+        .capture_directory_identity(&cargo, &CancellationToken::new())
+        .unwrap();
+    let direct = normal
+        .read_cargo_config_pair_in_captured_directory(&home, false, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(direct.config.observed_bytes(), pair.config.observed_bytes());
+    assert_eq!(
+        direct.config_toml.observed_bytes(),
+        pair.config_toml.observed_bytes()
+    );
+    let mut denied = new_reader(Default::default(), None);
+    denied.platform.deny_stream = true;
+    let pair = denied
+        .read_cargo_config_pair_in_captured_directory(&home, false, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        pair.config,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ProviderOrOffline)
+    ));
+    let moved = directory.with_extension("moved");
+    std::fs::rename(&directory, &moved).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    assert_eq!(
+        normal.read_cargo_config_pair_in_captured_directory(
+            &captured,
+            true,
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadError::InvalidRequest)
+    );
+}
+
+#[test]
+fn captured_ancestor_and_configured_spelling_require_native_lineage_and_bounded_inputs() {
+    let (_owner, directory, mut entry) = fixture();
+    entry.display_path = "/forged/report/location".into();
+    let reader = new_reader(Default::default(), None);
+    let captured = reader
+        .capture_scanned_ancestor_directory(&entry, 0, &CancellationToken::new())
+        .unwrap();
+    let parent = reader
+        .capture_scanned_ancestor_directory(&entry, 1, &CancellationToken::new())
+        .unwrap();
+    let independently_admitted = reader
+        .capture_parent_directory(&captured, &CancellationToken::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent, independently_admitted);
+    assert_eq!(
+        reader.capture_scanned_ancestor_directory(&entry, 2, &CancellationToken::new()),
+        Err(LocatorReadError::InvalidRequest)
+    );
+    assert_eq!(
+        reader.compare_scanned_directory_to_configured_path(
+            &entry,
+            &parent,
+            Path::new("captured"),
+            &CancellationToken::new()
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        reader.compare_scanned_directory_to_configured_path(
+            &entry,
+            &parent,
+            Path::new("different"),
+            &CancellationToken::new()
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        reader.compare_scanned_directory_to_configured_path(
+            &entry,
+            &parent,
+            Path::new("../captured"),
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadError::InvalidRequest)
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        reader.capture_parent_directory(&captured, &cancel),
+        Err(LocatorReadError::Cancelled)
+    );
+    let capped = new_reader(
+        LocatorReadLimits {
+            max_requests: 3,
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(
+        capped.read_cargo_config_pair_in_captured_directory(
+            &captured,
+            false,
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadError::ResourceLimit)
+    );
+    let moved = directory.with_extension("moved");
+    std::fs::rename(&directory, &moved).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    assert_eq!(
+        reader.capture_scanned_ancestor_directory(&entry, 1, &CancellationToken::new()),
+        Err(LocatorReadError::InvalidRequest)
+    );
+}
+
+#[test]
+fn fixed_cargo_lookup_does_not_need_unrelated_enumeration_or_convert_a_read_gap_to_absence() {
+    let (_owner, directory, _) = fixture();
+    let reader = new_reader(
+        LocatorReadLimits {
+            max_directory_entries: 0,
+            max_directory_bytes: 0,
+            ..Default::default()
+        },
+        None,
+    );
+    let captured = reader
+        .capture_directory_identity(&directory, &CancellationToken::new())
+        .unwrap();
+    let absent = reader
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        absent.config,
+        CargoConfigMemberObservation::AbsentDuringLookup
+    ));
+    assert!(matches!(
+        absent.config_toml,
+        CargoConfigMemberObservation::AbsentDuringLookup
+    ));
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 0);
+    std::fs::create_dir(directory.join(".cargo")).unwrap();
+    let captured = reader
+        .capture_directory_identity(&directory, &CancellationToken::new())
+        .unwrap();
+    let incomplete = reader
+        .read_cargo_config_pair_in_captured_directory(&captured, true, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        incomplete.config,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    ));
+    assert!(matches!(
+        incomplete.config_toml,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    ));
+}

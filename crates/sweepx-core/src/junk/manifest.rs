@@ -1,5 +1,11 @@
 //! Current project declarations, separate from effective configuration, ownership and activity.
 
+mod scope;
+pub use scope::{
+    CargoOutputEnvironment, CargoOutputEvidence, CargoOutputPathComparison, CargoOutputSource,
+};
+pub(super) use scope::{CargoOutputSession, ScopeBudget};
+
 pub use crate::cargo_cleaner_evidence::{CargoManifestDeclarationKind, CargoManifestDeclarations};
 use serde::Serialize;
 use sweepx_catalog::junk::ProjectContextProfile;
@@ -43,6 +49,8 @@ pub struct ProjectContextEvidence {
     pub cargo_manifest: Option<CargoManifestDeclarations>,
     /// Current project-local config declarations, separate from globally effective configuration.
     pub cargo_config: Option<CargoLocalConfigEvidence>,
+    /// Current bounded project-parent/no-CLI output model; never actual future-build authority.
+    pub cargo_output: Option<CargoOutputEvidence>,
 }
 impl ProjectContextEvidence {
     /// Starts a profile without inheriting prior rules, invocation or cache answers.
@@ -53,6 +61,7 @@ impl ProjectContextEvidence {
             reason: "context_not_checked",
             cargo_manifest: None,
             cargo_config: None,
+            cargo_output: None,
         }
     }
 
@@ -63,6 +72,7 @@ impl ProjectContextEvidence {
             reason,
             cargo_manifest: None,
             cargo_config: None,
+            cargo_output: None,
         }
     }
 }
@@ -78,6 +88,7 @@ pub fn inspect_cargo_manifest_context(bytes: &[u8]) -> ProjectContextEvidence {
             reason: "manifest_declarations_observed",
             cargo_manifest: Some(declarations),
             cargo_config: None,
+            cargo_output: None,
         },
         Err(reason) => ProjectContextEvidence {
             profile,
@@ -89,6 +100,7 @@ pub fn inspect_cargo_manifest_context(bytes: &[u8]) -> ProjectContextEvidence {
             reason,
             cargo_manifest: None,
             cargo_config: None,
+            cargo_output: None,
         },
     }
 }
@@ -121,7 +133,7 @@ impl CargoTargetDirPathKind {
         }
     }
 
-    fn from_value(value: &str) -> Self {
+    pub(super) fn from_value(value: &str) -> Self {
         use std::path::{Component, Path};
         let path = Path::new(value);
         if path.is_absolute() {
@@ -228,25 +240,26 @@ impl CargoLocalConfigEvidence {
         }
     }
 
-    pub(super) fn from_observation(pair: sweepx_scanner::CargoConfigPairObservation) -> Self {
+    pub(super) fn from_observation(pair: &sweepx_scanner::CargoConfigPairObservation) -> Self {
         use sweepx_scanner::CargoConfigMemberObservation;
-        fn inspect(member: CargoConfigMemberObservation) -> CargoTargetDirDeclaration {
+        fn inspect(member: &CargoConfigMemberObservation) -> CargoTargetDirDeclaration {
             match member {
                 CargoConfigMemberObservation::Present(read) => {
                     inspect_cargo_target_dir_declaration(&read.bytes)
                 }
-                CargoConfigMemberObservation::AbsentDuringEnumeration => {
+                CargoConfigMemberObservation::AbsentDuringEnumeration
+                | CargoConfigMemberObservation::AbsentDuringLookup => {
                     CargoTargetDirDeclaration::unknown("config_not_observed_non_atomic")
                 }
                 CargoConfigMemberObservation::Failed(reason) => {
-                    CargoTargetDirDeclaration::unknown(super::format::read_reason(reason))
+                    CargoTargetDirDeclaration::unknown(super::format::read_reason(reason.clone()))
                 }
             }
         }
         Self {
             consistency: CargoConfigConsistency::NonAtomic,
-            config: inspect(pair.config),
-            config_toml: inspect(pair.config_toml),
+            config: inspect(&pair.config),
+            config_toml: inspect(&pair.config_toml),
             precedence_complete: false,
         }
     }

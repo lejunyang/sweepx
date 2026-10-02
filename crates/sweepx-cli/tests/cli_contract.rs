@@ -80,6 +80,11 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
             assert_eq!(config["precedenceComplete"], false);
             assert_eq!(config["config"]["declared"], Value::Null);
             assert_eq!(config["configToml"]["declared"], true);
+            assert_eq!(
+                row["projectContext"]["cargoOutput"]["scope"],
+                "project_parent_current_env_no_cli"
+            );
+            assert!(row["projectContext"]["cargoOutput"].get("value").is_none());
             assert_eq!(config["configToml"]["pathKind"], "relative");
             assert_eq!(config["config"]["pathKind"], Value::Null);
             assert!(!config.to_string().contains("private/output"));

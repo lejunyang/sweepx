@@ -2629,6 +2629,21 @@ fn junk_project_context_label(
             config.precedence_complete
         );
     }
+    if let Some(output) = evidence.cargo_output {
+        use std::fmt::Write;
+        let _ = write!(
+            label,
+            "; output={}/{}; outputScope={}; outputSource={}; candidatePath={}",
+            output.status.code(),
+            output.reason,
+            output.scope,
+            output
+                .source
+                .map(|source| source.code())
+                .unwrap_or("unknown"),
+            output.candidate_path.code()
+        );
+    }
     label
 }
 

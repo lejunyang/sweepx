@@ -9,7 +9,8 @@ pub use sveltekit::inspect_sveltekit_sync;
 
 use super::candidate::JunkCandidate;
 use super::manifest::{
-    CargoLocalConfigEvidence, ProjectContextEvidence, inspect_cargo_manifest_context,
+    CargoLocalConfigEvidence, CargoOutputEnvironment, CargoOutputSession, ProjectContextEvidence,
+    ScopeBudget, inspect_cargo_manifest_context,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,6 +107,7 @@ impl Default for ProjectFormatLimits {
 /// reconstruct this object for every CLI invocation or TUI revision, including validated cache hits.
 pub struct ProjectFormatSession<P: PlatformScanner = HostPlatformScanner> {
     reader: LocatorReader<P>,
+    cargo_output: CargoOutputSession,
     limits: ProjectFormatLimits,
     cancel: CancellationToken,
     started: Instant,
@@ -124,8 +126,19 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
     /// Injects a native scanner implementation while preserving the same bounds and report contract.
     pub fn with_platform(
         platform: P,
+        limits: ProjectFormatLimits,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self::with_cargo_environment(platform, limits, cancel, CargoOutputEnvironment::current())
+    }
+
+    /// Supplies a bounded environment snapshot for the explicit project-parent/no-CLI model.
+    /// It is report data only and cannot supply ownership, activity or execution authority.
+    pub fn with_cargo_environment(
+        platform: P,
         mut limits: ProjectFormatLimits,
         cancel: CancellationToken,
+        environment: CargoOutputEnvironment,
     ) -> Self {
         limits.max_file_bytes = limits
             .max_file_bytes
@@ -141,6 +154,7 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             .min(limits.max_file_bytes.saturating_mul(2));
         Self {
             reader: LocatorReader::new(platform, limits.locator),
+            cargo_output: CargoOutputSession::new(environment),
             limits,
             cancel,
             started: Instant::now(),
@@ -248,7 +262,7 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
     }
 
     fn observe_context(
-        &self,
+        &mut self,
         candidate: &JunkCandidate,
         profile: ProjectContextProfile,
     ) -> ProjectContextEvidence {
@@ -278,7 +292,23 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
                         1,
                         &self.cancel,
                     ) {
-                        Ok(pair) => CargoLocalConfigEvidence::from_observation(pair),
+                        Ok(pair) => {
+                            let local = CargoLocalConfigEvidence::from_observation(&pair);
+                            evidence.cargo_output = Some(self.cargo_output.observe(
+                                &self.reader,
+                                entry,
+                                &pair,
+                                &self.cancel,
+                                ScopeBudget {
+                                    reserved_bytes: &mut self.reserved_bytes,
+                                    max_reserved_bytes: self.limits.max_reserved_file_bytes,
+                                    file_bytes: self.limits.max_file_bytes,
+                                    started: self.started,
+                                    timeout: self.limits.timeout,
+                                },
+                            ));
+                            local
+                        }
                         Err(error) => CargoLocalConfigEvidence::failed(match error {
                             sweepx_scanner::LocatorReadError::Cancelled => "cancelled",
                             sweepx_scanner::LocatorReadError::ResourceLimit => "resource_limit",

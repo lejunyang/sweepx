@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；Cargo 父 manifest 的当前声明观察已接入 CLI/会话/TUI，并复用独立 cleaner 的解析器，并已观察父目录下两个 Cargo 本地配置文件的声明，但尚未求解有效配置或独占关系；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；Cargo 父 manifest 的当前声明观察已接入 CLI/会话/TUI，并复用独立 cleaner 的解析器，并已观察父目录下两个 Cargo 本地配置文件的声明；随后接入项目父目录/当前环境/无 CLI 覆盖这一显式模型的原生祖先与 Cargo home 配置范围，但完整 workspace 默认/自定义 invocation/原生别名关系及独占关系仍未求解；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -882,3 +882,23 @@ CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和�
 交付检查：受影响 core/CLI 原生测试 391 项通过、0 失败（core 266、CLI 单元/契约/relay 58/66/1），1 项 core 原有基准 ignored，已诊断系统 Trash 成功挂起用例仍显式排除。未改包复用 cc16a80 的完整工作区 996 项通过结果，不称为本轮又跑一次完整矩阵。最终 affected/host 工作区以及 Linux GNU、Windows GNU 工作区 all-targets/all-features clippy（含目标测试代码）、fmt/diff、54 份 Markdown 检查及 core/CLI 包清单通过。最后只改一条 Rustdoc，报告 oracle 构建与当前源码摘要分别保留。交叉 lint 不证明原生运行，MSVC、真实 provider、系统 Trash 成功及最终 pathname 竞态缺口保留。
 
 本轮修正的是有效配置求解所需的路径声明输入。cwd/祖先/Cargo home 的完整原生内容范围、特殊环境与 CLI 输入优先级的生产组合、输出目录原生匹配、独占归属及活动观察仍未完成；规则扩展验收不打勾。旧 probe/debug 热缓存 PTY/FSEvents 间歇根因、跨平台缓存及其他发现路径资源审计继续开放。
+
+
+## 原生 Cargo 配置范围与有界输出模型（2026-10-02）
+
+项目上下文新增固定大小 `cargoOutput`，由 core 的 `ProjectFormatSession` 独立提供，CLI/human/TUI 共用原显示入口，没有新增 crate 或解析器。范围固定为 `project_parent_current_env_no_cli`：这是从候选父目录启动、使用本次捕获环境、无 Cargo CLI 覆盖的模型，不宣称获得任意历史/未来构建参数或完整 Cargo 工作区语义。原 `cargoConfig.precedenceComplete` 仍为 false，项目独占归属/活动和回收阻碍保持。
+
+- scanner 通过完整原生 candidate lineage 捕获项目父目录，再独立准入并复验各祖先与 Cargo home；配置范围可位于扫描树外，但每个配置目录都有自身 no-follow、identity/filesystem/mount/fingerprint 绑定，绝不扩大扫描覆盖或删除范围。保留路径是 opaque identity，读者和显示端不能重用配置路径作为执行权。固定 `.cargo` 查询复用 retained-parent 的 bound child API；typed NotFound 新建 `AbsentDuringLookup`，与原枚举缺失分别命名，均只是非原子时间点事实。存在的 `.cargo` 目录仍核对 native mount，成员复用原 provider-safe zero/full stream 及有界枚举。不会打开 `credentials`、声明输出目录或配置 include 路径，也没有普通文件读取 fallback。
+- 环境只捕获 `CARGO_TARGET_DIR`、`CARGO_BUILD_TARGET_DIR`、`CARGO_HOME` 及宿主 home 环境变量；输出值在复制前限制 4096 字节，home 输入 64 KiB。非 Unicode 输出、空/非绝对或缺失 home 保持 unknown，不变更全局环境或调用 SDK。显式输入 API 供独立调用者/隔离测试使用。模型选择 legacy/modern、最近祖先/home 标量和两个环境变量，保留特殊 `CARGO_TARGET_DIR` 优先级；home 的相对输出基点是 home 的父目录，环境输出基点是模型 cwd。坏/未读源不能被高优先级答复隐藏。
+- 同一次会话最多 16 层祖先、64 个不同配置目录，来源索引按 opaque native snapshot 和目录类型去重，8 MiB 保留准入估算包含预分配节点，另有有界环境/单次临时快照；这不是 RSS 精确上限。只私有保留 <=4 KiB 解码路径，不保留完整配置字节或写入文件系统缓存。新来源读取两文件前扣同一 `ProjectFormatLimits` 最坏 payload 预留（默认共用 32 MiB），失败不返还，既有本地对复用已扣预算的当前观察。原生输入/重构路径限制 64 KiB、捕获 fingerprint 16 KiB。合作期限/取消在调用间检查，不中断阻塞内核操作。缺口不抹去已读取的本地 manifest/配置声明，也不证明全局无配置。
+- `sourceLocationsObserved` 只表示本模型的支持位置已进行时间点观察，不是封闭代际或 atomic absence。配置来源在最终比较前再次复验，candidate 也重走完整 lineage。`candidatePath` 仅为 same_spelling / different_spelling / not_checked；别名、大小写或不同分隔符可能使不同拼写仍指向同一对象。原生父级/点及 Windows drive/root-relative 输入不做字符串归一化，不把此类输入或复验失败升级为匹配。不使用该结果建立 cleaner permit。workspace 默认输出、相对/缺失 home、include、自定义 cwd/CLI 和完整原生别名解析继续未完成。
+
+[Cargo 配置范围独立对照](cargo-output-scope-oracle-2026-10-02.json)复用 16 个隔离 fixture，并重新按本模型运行固定 Cargo 1.98.0 offline/no-deps metadata（明确去除旧对照中的 CLI overrides）。32 份中英文 SweepX 报告核对配置来源、环境特殊优先级、路径类型、可比较拼写及两类预期缺口；普通读取/SHA-256 确认 manifest、配置、源码和用户 payload 未变。没有生产 Cargo 执行、编译、Trash 或性能声明。当前配置范围的模型和完整 Cargo 行为不能混称已完成。
+
+原生回归还覆盖数据/provider/链接/替换拒绝、祖先范围和大小预算、空枚举额度下的固定名 negative lookup、存在目录耗尽预算不能变成缺失、显示路径伪造、独立 home/ancestor 的路径基点、环境优先级、输出路径未创建、workspace 默认未解与错误/预算缺口。最初两个新正例因全枚举祖先耗尽预算而失败；普通目录计数确认本机临时目录有 5278 个直接子项，改为固定名原生查询并以零枚举额度回归确认。随后 native home 正例因 macOS temp 的链接祖先被拒绝，只 canonicalize Unix 夹具 home，Windows 不套用此 workaround；没有放宽生产拒绝或正例断言。初次 opaque identity 的整数 identity 被误按字符串计量，以及内部类型 re-export 的可见性编译问题都已修正；可见性只扩大到需要组合它的 junk 模块。
+
+本轮仍保留旧工具间歇失败：首次完整 workspace 在 core 停止，267 项 core 通过、1 项共享缓存 probe 失败、1 项原有基准 ignored；该子进程 launch/setup 约 0.46 ms，2 秒内无 stdout/EOF/退出，另一个新脚本到约 1.24 秒才首次输出。整次尝试共 530 项通过；当时未运行的后续包已单独补验，470 项通过，早期六个库的文档测试另外检查（均无用例），合计 1000 个不同用例通过、1 个失败、2 个原有基准 ignored，已诊断挂起的系统 Trash 成功用例仍显式排除。这不是全绿工作区矩阵；未延长期限、删除断言或将 probe 失败排除重跑至通过。
+
+对同一已核验失败二进制预先固定执行 10 次孤立 exact probe 测试，交替允许/不允许 sample，并每 100 ms 观察本次测试仍存活的直接子进程；只有存活超过 1.20 秒的首个子进程才请求 sample。10 次通过，没有子进程达到取样阈值，实际取得零份调用栈，没有捕获超时当次，不能关闭根因。复制的诊断脚本在 receipt 文字中误留上一实验的“24 次/200 ms”描述；实际 loop/阈值、10 条记录和零 sample 调用独立核对，artifact 同时保留原描述、纠正说明及原始脚本，不将其当作 24 次或取得慢堆栈的证据。
+
+新增 manifest 专项 11 项及完整 scanner 83 项通过；受影响 crate 与 host/Linux GNU 工作区 all-targets/all-features clippy 通过。Windows GNU 首次发现新 UTF-16 转换的集合类型无法推断，明确指定 Vec<u16> 后最终工作区交叉 lint 通过；这处仅 Windows cfg 修复不改变已测 Unix 行为，artifact 保留 oracle 时与最终源码摘要。fmt/diff、54 份 Markdown、scanner/core/CLI 包清单通过。记录与完整范围见本轮 artifact；原生 Linux/Windows、MSVC、真实云 provider、系统 Trash 成功未验收。上述 probe、debug 热缓存 PTY、FSEvents 间歇根因和最终 pathname 竞态继续开放，规则扩展和完整路线图均不打勾。
