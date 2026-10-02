@@ -1319,6 +1319,65 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
     assert_eq!(json["incompleteSizeCount"], 0);
 }
 
+#[test]
+fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
+    let fixture = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let root = resolved_fixture_root(&fixture);
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    let cases = sweepx_fixtures::project_junk::generate(&root).unwrap();
+    for locale in ["en-US", "zh-CN"] {
+        let mut command = cli_command();
+        command
+            .timeout(std::time::Duration::from_secs(20))
+            .args(["--locale", locale, "--format", "json", "junk"]);
+        for (_, path) in &cases {
+            command.arg(path);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let observed = json["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                assert_eq!(candidate["risk"], "R3");
+                assert_eq!(candidate["classification"], "known_generated");
+                assert!(
+                    candidate["evidence"]
+                        .as_str()
+                        .unwrap()
+                        .contains("layout only")
+                );
+                (
+                    PathBuf::from(candidate["path"].as_str().unwrap()),
+                    candidate["ruleId"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = cases
+            .iter()
+            .flat_map(|(case, path)| {
+                case.candidates
+                    .iter()
+                    .map(|(candidate, rule)| (path.join(candidate), (*rule).to_string()))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(observed, expected);
+    }
+    for (case, path) in &cases {
+        for (file, payload) in case.files {
+            assert_eq!(fs::read(path.join(file)).unwrap(), payload.as_bytes());
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn junk_system_reports_incomplete_discovery_without_following_layout_ancestor_links() {

@@ -43,5 +43,25 @@
     "evidence": "Maven documents target as the default build output directory; pom.xml remains outside the selected directory.",
     "sourceReviewedAt": "2026-08-29",
     "references": ["https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html"]
+  },
+  {
+    "id": "dart.tool-state",
+    "names": [".dart_tool"],
+    "risk": "R3",
+    "requiredParentMarkers": ["pubspec.yaml"],
+    "requiredOwnMarkers": ["package_config.json"],
+    "evidence": "Dart documents .dart_tool as regenerable project tool state. A sibling pubspec.yaml and an ordinary package_config.json inside the captured directory establish layout only; contents and activity remain unverified. Review before selecting for Trash; source and lockfiles remain outside this candidate.",
+    "sourceReviewedAt": "2026-10-02",
+    "references": ["https://dart.dev/tools/pub/package-layout", "https://dart.dev/tools/pub/cmd/pub-get", "https://dart.dev/tools/pub/workspaces"]
+  },
+  {
+    "id": "node.sveltekit-output",
+    "names": [".svelte-kit"],
+    "risk": "R3",
+    "requiredParentMarkers": ["svelte.config.js"],
+    "requiredOwnMarkers": ["tsconfig.json", "ambient.d.ts"],
+    "evidence": "SvelteKit 1/2 generate tsconfig.json and ambient.d.ts in the default .svelte-kit output directory beside svelte.config.js. These ordinary-file markers establish layout only; contents and activity remain unverified. Review before selecting for Trash. Custom output paths and SvelteKit 3 layouts are not inferred.",
+    "sourceReviewedAt": "2026-10-02",
+    "references": ["https://svelte.dev/docs/kit/project-structure", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/sync.js", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%401.0.0/packages/kit/src/core/sync/write_tsconfig.js"]
   }
 ]

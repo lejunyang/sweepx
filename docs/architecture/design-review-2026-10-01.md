@@ -47,7 +47,7 @@
 
 ## 大文件、重复文件与垃圾识别
 
-初次审视没有实现大文件榜单、内容重复检测或规则覆盖扩展；大文件榜单和显式重复检测随后已交付，见 2026-10-02 章节。规则扩展仍未完成。
+初次审视没有实现大文件榜单、内容重复检测或规则覆盖扩展；大文件榜单和显式重复检测随后已交付，见 2026-10-02 章节。规则扩展已开始补结构标记与版本/误报测试，内容格式验证仍未完成。
 
 - **大文件**：作为同一次元数据遍历的独立分析器，按阈值与有界 top-K 收集普通文件；保留逻辑大小、分配大小及覆盖状态。不能仅过滤现有截断后的 `ScanSummary.entries`，否则可能漏掉遍历后半段的大文件。大不等于垃圾。
 - **重复文件**：单独显式启动内容读取阶段，先按大小分组、排除同一原生文件身份的硬链接别名，再分阶段读取和完整 hash，最后核验大小、身份与修改指纹。必须限制打开文件数、读取字节和并行度，并避开会主动下载的云占位文件。候选组不自动选择保留者，不自动删除。
@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 本轮统一规则实现，但未扩大识别覆盖；仍需格式/所有权/上下文依据、误报反例和工具版本测试。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；结构不等于内容格式证明，仍需有界原生内容验证及更多所有权/活动依据。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计；8,192 文件 debug 热缓存 PTY 超时的根因定位；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -598,3 +598,14 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 八项 analysis 回归以独立全字节相等及已知 SHA-256 核对分组，覆盖头尾相同中间不同、大小唯一不读取、硬链接/空文件、完整 128 位 ID、错误身份/长度/mount、完整读取失败、最终 stamp 变化、忽略消费者拒绝的异常 source、读取/操作/保留预算、未知元数据、期限和取消。两项原生 scanner 回归覆盖显示路径伪造、同名父目录替换及 inspect/open 间增长拒绝；三项原生 core 回归覆盖截断日志/列表下完整分组、跨原始根比较、真实遍历缺口、取消、预算及准入前选项拒绝。三项 CLI 回归覆盖中英文 JSON、human、完整摘要与 distinct 原生对象、资源 partial/退出码 4、参数要求/冲突、plain scan 不变及 fixture payload 未修改。
 
 交付验证（arm64 macOS，Rust 1.98.0）：工作区 890 项通过、0 失败、2 项原有基准 ignored，仍以 cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations 显式排除已诊断挂起的系统 Trash 成功用例。随后仅增加上述保留/原生覆盖回归，最终 scanner 全量 74 项通过；其余未变代码复用工作区结果，合计覆盖 891 项，不称为再次完整矩阵。受控覆盖夹具最初没有产生保留缺口（classified scan 不保留普通文件行），改为真实链接边界；FakePlatform 初始未按请求上限分批，改用已有单条批次夹具，生产检查与完整断言不变，没有排除新测试。格式、最终 host 工作区 all-targets/all-features clippy 和 Linux GNU/Windows GNU 工作区交叉 clippy（含新目标测试代码）通过。53 份 Markdown 和 23 项文档检查器测试通过；受影响四包 package list 含新增分析/内容流适配及测试模块，没有进行 registry 依赖构建或发布。Linux/Windows 原生运行、Windows MSVC、真实云占位文件及实际系统 Trash 成功的独立缺口仍保留。下一步为有格式/所有权/上下文依据的垃圾规则扩展及其他收尾项；没有本轮性能计时，不宣称端到端提速。
+
+
+## 项目候选自身结构标记与规则扩展（2026-10-02）
+
+项目规则新增可选 requiredOwnMarkers，默认空以兼容现有 JSON；最多 64 个安全的单组件文件名，与原有 32 KiB catalog 输入限制共用准入。自身全部标记与父目录至少一个标记共同匹配，规则优先级保持 catalog 顺序。JunkService 从同一次遍历的 ordinary-file marker map 按当前 ScanEntryId 消费事实，并使用已有 cleaner VM；不新增遍历、分类时文件读取、工具查询或 crate。标记名称从加载后的父/自身列表派生，缓存及分类上下文摘要自动绑定实际规则字节。旧的仅父上下文匹配 API 对需要自身标记的规则返回无匹配，不从显示路径猜目录 ID。
+
+新增 dart.tool-state 和 node.sveltekit-output 两个 R3 结构候选。Dart 要求父 pubspec.yaml、自身 package_config.json，依据 [Dart 项目工具状态](https://dart.dev/tools/pub/package-layout) 与 [workspace 布局](https://dart.dev/tools/pub/workspaces)。SvelteKit 1/2 要求父 svelte.config.js、自身 tsconfig.json 与 ambient.d.ts，依据 [项目结构](https://svelte.dev/docs/kit/project-structure) 及 1.0.0/2.0.0 的 tagged sync 源码。当前 SvelteKit 3 配置/生成文件已变，旧布局规则不推断新版或自定义 outDir。规则 evidence 明确说明结构、内容及活动的区别；名称集合不证明内容格式、实际工具所有权或执行权限，不把新规则提升为 R1/R2。源文件和锁文件不作为候选。垃圾规则扩展验收仍未勾选，后续继续有界原生内容格式验证、所有权及活动依据。
+
+既有 fixtures 新增共享的九组受控布局，core 原生扫描和中英文 CLI 使用同一输入与独立预期集合，覆盖 Dart 2.18 单项目、3.6 workspace、SvelteKit 1.0/2.0、同名用户数据、父/自身/兄弟标记错位、目录冒充文件、缺少多个必需标记之一及新版布局拒绝。夹具表达源码/文档中的布局，不声称实际执行这些工具版本；最小 payload 不作为格式验证证据。核心/CLI 仅扩展已有 fixtures 开发依赖的宿主范围，不增加生产依赖。原生会话回归覆盖普通标记变目录、消失后选中刷新撤下旧键、后续全量刷新拒绝旧缓存事实、恢复标记后稳定键恢复，以及 Unix 链接标记不成立；普通 payload 经独立 fs::read 核对不变。加载准入回归覆盖自身列表默认值、类型、规模及逃逸名称；规则编辑同时改变 marker 选择和摘要。
+
+交付验证（arm64 macOS，Rust 1.98.0）：工作区 896 项通过、0 失败、2 项原有基准 ignored，命令仍为 cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，已诊断系统 Trash 成功用例仍显式排除。首轮新增 core 测试误用不存在的状态字段，按实际 ScanSuccess.output.status 修正；Windows 交叉检查发现 CLI 夹具调用 Unix-only canonicalization helper，改为 Unix 原逻辑、Windows 原生 fixture path，保留目标测试范围。最终 host 工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 lint（含测试）通过；工作区矩阵后修正这项夹具的 cfg 路径，并避免无关名称或旧规则额外查自身 marker；最终 core 六项分类回归及该 CLI 回归单独复验，其他未变测试复用结果，不称为再次完整矩阵。格式、53 份 Markdown 与 23 项文档检查器测试通过，受影响 catalog/fixtures/core/CLI package list 核对资源与源码保留。没有性能计时或提速结论，没有发布。Linux/Windows 原生运行、MSVC、真实云占位及实际系统 Trash 成功的独立验证缺口保留。

@@ -2,6 +2,9 @@
 #[cfg(target_os = "linux")]
 pub mod linux_temp;
 
+/// Source-documented project layouts and user-data counterexamples shared by core/CLI tests.
+pub mod project_junk;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;

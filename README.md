@@ -145,6 +145,8 @@ macOS 垃圾缓存的根记录和文件索引共用一次事件历史验证，�
 
 项目产物规则由 catalog 统一加载，core 的 `JunkService` 使用现有 cleaner VM 评估扫描事实；CLI 与后续交互界面可共享同一入口。匹配只产生报告候选，不能替代删除前的原生身份重验。
 
+新增 Dart `.dart_tool` 与 SvelteKit 1/2 `.svelte-kit` 的 R3 候选。前者要求父目录普通文件 `pubspec.yaml` 和自身普通文件 `package_config.json`；后者要求父目录 `svelte.config.js` 和自身 `tsconfig.json`、`ambient.d.ts` 两个普通文件。缺失、错位或链接标记不匹配。这是目录结构依据，尚不解析文件内容或确认工具活动，需人工审视；源文件、锁文件、自定义输出路径及 SvelteKit 3 新布局不据此纳入。
+
 当显式根中能完整识别 Git 工作区时，`junk` 会通过有界、非交互的 Git 查询给现有
 `target`、`node_modules`、Python cache 与常见 build-output 候选补充 ignore/tracked 证据。
 只有既命中独立项目规则、又未跟踪且被 ignore、同时没有嵌套仓库或不完整扫描证据的

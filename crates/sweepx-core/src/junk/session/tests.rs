@@ -718,6 +718,92 @@ fn project(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     fs::write(target.join("payload"), bytes).unwrap();
     target
 }
+
+#[test]
+fn own_layout_markers_are_reobserved_on_selected_and_full_refresh() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("project");
+    let target = root.join(".dart_tool");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(root.join("pubspec.yaml"), b"name: example\n").unwrap();
+    fs::write(
+        target.join("package_config.json"),
+        b"{\"configVersion\":2,\"packages\":[]}",
+    )
+    .unwrap();
+    fs::write(target.join("payload"), b"retained-user-payload").unwrap();
+    let request = JunkSessionRequest::new(vec![root.clone()]);
+    #[cfg(target_os = "macos")]
+    let request = {
+        let mut request = request;
+        request.cache_dir = Some(base.join("cache"));
+        request
+    };
+    let session = JunkSession::start(request).unwrap();
+    let rows = current(&drain(&session, JunkSessionRevision(1)));
+    assert_eq!(rows.len(), 1);
+    let key = *rows.keys().next().unwrap();
+    assert_eq!(rows[&key].candidate.rule_id, "dart.tool-state");
+    // A directory called package_config.json cannot replace the ordinary-file marker.
+    fs::remove_file(target.join("package_config.json")).unwrap();
+    fs::create_dir(target.join("package_config.json")).unwrap();
+    let revision = session.refresh_selected(&[key]).unwrap();
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    assert!(current(&events).is_empty());
+    assert!(events.iter().any(|event| matches!(event.kind, JunkSessionEventKind::Removed { key: removed } if removed == key)));
+    // A subsequent full scan must invalidate old cached candidate facts, not replay the old row.
+    let revision = session.refresh_all().unwrap();
+    let events = drain(&session, revision);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            ..
+        }
+    ));
+    assert!(current(&events).is_empty());
+    fs::remove_dir(target.join("package_config.json")).unwrap();
+    fs::write(
+        target.join("package_config.json"),
+        b"{\"configVersion\":2,\"packages\":[]}",
+    )
+    .unwrap();
+    let revision = session.refresh_all().unwrap();
+    let rows = current(&drain(&session, revision));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(*rows.keys().next().unwrap(), key);
+    #[cfg(unix)]
+    {
+        fs::remove_file(target.join("package_config.json")).unwrap();
+        fs::write(base.join("external-config.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(
+            base.join("external-config.json"),
+            target.join("package_config.json"),
+        )
+        .unwrap();
+        let revision = session.refresh_selected(&[key]).unwrap();
+        let events = drain(&session, revision);
+        assert!(current(&events).is_empty());
+        assert!(events.iter().any(|event| matches!(event.kind, JunkSessionEventKind::Removed { key: removed } if removed == key)));
+    }
+    assert_eq!(
+        fs::read(target.join("payload")).unwrap(),
+        b"retained-user-payload"
+    );
+    shutdown(&session);
+}
 fn drain(session: &JunkSession, revision: JunkSessionRevision) -> Vec<JunkSessionEvent> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();

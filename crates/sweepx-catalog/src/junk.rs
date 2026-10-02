@@ -21,6 +21,11 @@ pub struct ProjectJunkRule {
     pub risk: String,
     /// At least one must occur among the observed parent's files; empty means no parent filter.
     pub required_parent_markers: Vec<String>,
+    /// All must be ordinary files directly inside this captured directory. These are structural
+    /// layout markers, not parsed contents or proof of exclusive ownership/deletion authority.
+    /// Empty preserves catalogs that only use parent context.
+    #[serde(default)]
+    pub required_own_markers: Vec<String>,
     /// Human-readable explanation of the rebuild/disposability evidence.
     pub evidence: String,
     /// Source review date in YYYY-MM-DD notation.
@@ -63,6 +68,7 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
     for rule in &rules {
         if rule.names.len() > 64
             || rule.required_parent_markers.len() > 64
+            || rule.required_own_markers.len() > 64
             || rule.references.len() > 64
         {
             return Err(ProjectRuleError::ResourceLimit);
@@ -91,6 +97,7 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
                 .names
                 .iter()
                 .chain(&rule.required_parent_markers)
+                .chain(&rule.required_own_markers)
                 .all(|name| is_safe_rule_component(name))
         {
             return Err(ProjectRuleError::InvalidRule(rule.id.clone()));
@@ -132,6 +139,41 @@ mod tests {
         ));
         assert!(matches!(
             load_project_rule_bytes(&vec![b' '; 32769]),
+            Err(ProjectRuleError::ResourceLimit)
+        ));
+    }
+
+    #[test]
+    fn own_markers_are_optional_bounded_file_components() {
+        let original: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        assert!(
+            load_project_rules().unwrap()[0]
+                .required_own_markers
+                .is_empty()
+        );
+        let mut edited = original.clone();
+        edited[0]["requiredOwnMarkers"] = serde_json::json!(["generated.json", "stamp"]);
+        assert_eq!(
+            load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).unwrap()[0]
+                .required_own_markers,
+            ["generated.json", "stamp"]
+        );
+        for value in [
+            serde_json::json!(["../stamp"]),
+            serde_json::json!(["a/b"]),
+            serde_json::json!(["a\\b"]),
+            serde_json::json!([""]),
+            serde_json::json!(["."]),
+            serde_json::json!([".."]),
+            serde_json::json!(["a\u{0000}b"]),
+            serde_json::json!(true),
+        ] {
+            edited[0]["requiredOwnMarkers"] = value;
+            assert!(load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()).is_err());
+        }
+        edited[0]["requiredOwnMarkers"] = serde_json::json!(vec!["marker"; 65]);
+        assert!(matches!(
+            load_project_rule_bytes(&serde_json::to_vec(&edited).unwrap()),
             Err(ProjectRuleError::ResourceLimit)
         ));
     }

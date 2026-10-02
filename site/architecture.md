@@ -40,6 +40,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 规则类型与校验位于 `sweepx-catalog::schema`，纯规则评估位于 `sweepx-catalog::vm`，内置资源与 package 准入由同一个 crate 管理。原独立 schema/VM 包已退出 workspace；机器 schema ID、规则内容和风险值保持不变。
 
+项目规则 JSON 可声明 `requiredOwnMarkers`（默认空、最多 64 个安全文件名），要求捕获目录自身直接包含全部指定普通文件；`requiredParentMarkers` 仍要求父目录至少一个标记。`JunkService` 按本次目录 ID 消费同一次遍历的文件标记，使用现有 VM，分类时无额外 I/O。加载字节摘要自动绑定缓存；结构标记不证明内容格式、活动或删除权限。共享版本/误报夹具放在既有 fixtures 的 `project_junk` 模块，仅供开发测试使用。
+
 | 层 | 代表 crate | 当前职责 |
 |---|---|---|
 | 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |

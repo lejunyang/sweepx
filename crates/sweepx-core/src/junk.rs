@@ -51,6 +51,7 @@ pub struct JunkService {
     // normalization/allocation on every ordinary directory in a large traversal.
     by_name: BTreeMap<String, Vec<usize>>,
     parent_markers: Vec<Vec<String>>,
+    own_markers: Vec<Vec<String>>,
     marker_names: BTreeSet<String>,
 }
 
@@ -113,24 +114,35 @@ impl JunkService {
                         ),
                     ],
                 };
-                if rule.required_parent_markers.is_empty() {
-                    name
-                } else {
-                    Predicate::Call {
-                        op: PredicateOp::And,
-                        args: vec![
-                            PredicateArg::Predicate(Box::new(name)),
-                            PredicateArg::Predicate(Box::new(Predicate::Call {
-                                op: PredicateOp::Eq,
-                                args: vec![
-                                    PredicateArg::FieldRef {
-                                        field: "parent.marker_matches".into(),
-                                    },
-                                    PredicateArg::Bool(true),
-                                ],
-                            })),
-                        ],
+                if rule.required_parent_markers.is_empty() && rule.required_own_markers.is_empty() {
+                    return name;
+                }
+                let mut terms = vec![PredicateArg::Predicate(Box::new(name))];
+                for (required, field) in [
+                    (
+                        !rule.required_parent_markers.is_empty(),
+                        "parent.marker_matches",
+                    ),
+                    (
+                        !rule.required_own_markers.is_empty(),
+                        "entry.marker_matches",
+                    ),
+                ] {
+                    if required {
+                        terms.push(PredicateArg::Predicate(Box::new(Predicate::Call {
+                            op: PredicateOp::Eq,
+                            args: vec![
+                                PredicateArg::FieldRef {
+                                    field: field.into(),
+                                },
+                                PredicateArg::Bool(true),
+                            ],
+                        })));
                     }
+                }
+                Predicate::Call {
+                    op: PredicateOp::And,
+                    args: terms,
                 }
             })
             .collect();
@@ -152,9 +164,22 @@ impl JunkService {
                     .collect()
             })
             .collect();
+        let own_markers = rules
+            .iter()
+            .map(|rule| {
+                rule.required_own_markers
+                    .iter()
+                    .map(|name| normalize_rule_name(name))
+                    .collect()
+            })
+            .collect();
         let marker_names = rules
             .iter()
-            .flat_map(|rule| rule.required_parent_markers.iter())
+            .flat_map(|rule| {
+                rule.required_parent_markers
+                    .iter()
+                    .chain(&rule.required_own_markers)
+            })
             .map(|name| normalize_rule_name(name))
             .collect();
         Ok(Self {
@@ -166,6 +191,7 @@ impl JunkService {
             predicates,
             by_name,
             parent_markers,
+            own_markers,
             marker_names,
         })
     }
@@ -189,15 +215,49 @@ impl JunkService {
     ///
     /// `None` parent evidence cannot satisfy a marker-dependent rule. This method consumes scan
     /// facts only; callers must use directory observations and perform independent execution checks.
+    /// Rules requiring own markers also decline here: use `match_project_entry` with a captured ID.
     pub fn match_project(
         &self,
         name: &NativeName,
         parent: Option<&ScanEntryId>,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<&ProjectJunkRule> {
+        self.match_project_context(name, None, parent, markers)
+    }
+
+    /// Matches an ordinary captured directory's own and parent structural markers by scan ID.
+    /// All own markers and at least one declared parent marker must match. Linked markers,
+    /// filenames from other directories and display paths cannot supply this evidence.
+    /// This observes structural layout only; file contents, tool activity and deletion authority
+    /// need separate evidence. Missing marker observations never satisfy a required predicate.
+    pub fn match_project_entry(
+        &self,
+        entry: &ScannedEntry,
+        markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+    ) -> Option<&ProjectJunkRule> {
+        if entry.object_type != ObjectType::Directory {
+            return None;
+        }
+        let identity = entry.identity.as_ref()?;
+        self.match_project_context(
+            &entry.native_basename,
+            Some(&identity.entry_id),
+            identity.parent_id.as_ref(),
+            markers,
+        )
+    }
+
+    fn match_project_context(
+        &self,
+        name: &NativeName,
+        own: Option<&ScanEntryId>,
+        parent: Option<&ScanEntryId>,
+        markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
+    ) -> Option<&ProjectJunkRule> {
         let name = native_rule_name(name)?;
+        let indices = self.by_name.get(&name)?;
         let observed_parent = parent.and_then(|id| markers.get(id));
-        for &index in self.by_name.get(&name)? {
+        for &index in indices {
             let rule = &self.rules[index];
             let predicate = &self.predicates[index];
             // Only matching names reach the VM. Marker sets stay borrowed and identity-bound;
@@ -211,6 +271,19 @@ impl JunkService {
                 EvaluationContext::new().insert("entry.name", VmValue::String(name.clone()));
             if let Some(matches) = parent_match {
                 context = context.insert("parent.marker_matches", VmValue::Bool(matches));
+            }
+            // Avoid an extra marker-map lookup/context field for the existing parent-only rules.
+            if !self.own_markers[index].is_empty()
+                && let Some(observed) = own.and_then(|id| markers.get(id))
+            {
+                context = context.insert(
+                    "entry.marker_matches",
+                    VmValue::Bool(
+                        self.own_markers[index]
+                            .iter()
+                            .all(|marker| observed.contains(marker)),
+                    ),
+                );
             }
             if evaluate_predicate(predicate, &context).is_ok_and(|result| result.is_true()) {
                 return Some(rule);
@@ -234,11 +307,7 @@ impl crate::JunkClassifier for JunkService {
         entry: &ScannedEntry,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<String> {
-        if entry.object_type != ObjectType::Directory {
-            return None;
-        }
-        let identity = entry.identity.as_ref()?;
-        self.match_project(&entry.native_basename, identity.parent_id.as_ref(), markers)
+        self.match_project_entry(entry, markers)
             .map(|rule| format!("project:{}", rule.id))
     }
 }
@@ -381,5 +450,119 @@ mod tests {
         let service = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
         assert!(service.needs_project_marker(&name("custom.marker")));
         assert!(!service.needs_project_marker(&name("Cargo.toml")));
+        assert!(service.needs_project_marker(&name("package_config.json")));
+        rules[5]["requiredOwnMarkers"] = serde_json::json!(["replacement.json"]);
+        let edited = JunkService::from_rule_bytes(&serde_json::to_vec(&rules).unwrap()).unwrap();
+        assert!(edited.needs_project_marker(&name("replacement.json")));
+        assert!(!edited.needs_project_marker(&name("package_config.json")));
+        assert_ne!(service.rule_bytes_digest, edited.rule_bytes_digest);
+    }
+
+    #[test]
+    fn own_markers_require_captured_id_and_all_declared_files() {
+        let service = JunkService::built_in().unwrap();
+        let scan = sweepx_model::ScanId::new("own-markers");
+        let parent = ScanEntryId::for_scan_ordinal(&scan, 1).unwrap();
+        let own = ScanEntryId::for_scan_ordinal(&scan, 2).unwrap();
+        let other = ScanEntryId::for_scan_ordinal(&scan, 3).unwrap();
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| normalize_rule_name(name))
+                .collect::<BTreeSet<_>>()
+        };
+        let mut markers = BTreeMap::from([
+            (
+                parent.clone(),
+                files(&["svelte.config.js", "tsconfig.json", "ambient.d.ts"]),
+            ),
+            (other, files(&["tsconfig.json", "ambient.d.ts"])),
+        ]);
+        assert!(
+            service
+                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .is_none()
+        );
+        markers.insert(own.clone(), files(&["tsconfig.json"]));
+        assert!(
+            service
+                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .is_none()
+        );
+        markers.insert(own.clone(), files(&["tsconfig.json", "ambient.d.ts"]));
+        assert_eq!(
+            service
+                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .unwrap()
+                .id,
+            "node.sveltekit-output"
+        );
+        assert!(
+            service
+                .match_project(&name(".svelte-kit"), Some(&parent), &markers)
+                .is_none()
+        );
+        assert!(
+            service
+                .match_project_context(&name(".svelte-kit"), Some(&own), None, &markers)
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn native_project_layout_corpus_matches_exact_candidates_without_cli() {
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = fixture.path().canonicalize().unwrap();
+        #[cfg(not(unix))]
+        let root = fixture.path().to_path_buf();
+        let cases = sweepx_fixtures::project_junk::generate(&root).unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let service = JunkService::built_in().unwrap();
+        for (case, case_root) in cases {
+            let result = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+                &context,
+                &crate::ScanRequest {
+                    roots: vec![case_root.clone()],
+                    state_dir: None,
+                },
+                None,
+                &service,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                result.scan.output.status,
+                sweepx_protocol::OutputStatus::Ok,
+                "{}",
+                case.version
+            );
+            let observed = result
+                .scan
+                .summary
+                .roots
+                .iter()
+                .chain(&result.scan.summary.entries)
+                .filter_map(|entry| {
+                    let id = &entry.identity.as_ref()?.entry_id;
+                    let decision = result.decisions.get(id)?;
+                    assert!(entry.validated_native_locator().unwrap().is_some());
+                    Some((
+                        std::path::PathBuf::from(&entry.display_path),
+                        decision.strip_prefix("project:").unwrap().to_string(),
+                    ))
+                })
+                .collect::<BTreeSet<_>>();
+            let expected = case
+                .candidates
+                .iter()
+                .map(|(path, rule)| (case_root.join(path), (*rule).to_string()))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(observed, expected, "{}", case.version);
+        }
     }
 }

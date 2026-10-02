@@ -40,6 +40,8 @@ The workspace has 17 crates. Native implementations live in `sweepx-platform::{l
 
 Cleaner types and validation live in `sweepx-catalog::schema`, deterministic evaluation in `sweepx-catalog::vm`, and built-in resources and package admission in the same crate. The standalone schema/VM packages have left the workspace; machine schema IDs, rule bytes and risk values remain unchanged.
 
+Project-rule JSON supports `requiredOwnMarkers` (empty by default, at most 64 safe filenames): every declared ordinary file must occur directly inside the captured directory. `requiredParentMarkers` still requires at least one parent marker. `JunkService` consumes identity-keyed facts from the same traversal through the existing VM, with no classification I/O. Loaded-byte digests bind cache validity. Structural markers establish neither parsed formats, activity nor mutation permission. Shared version/user-data fixtures live in the existing fixtures crate's development-only `project_junk` module.
+
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
