@@ -14,10 +14,22 @@ use sweepx_platform::{
     BoundedRegularFileReadError, BoundedRegularFileReadRequest, CancellationToken,
     DirectoryEntryRecord, DirectoryHandleAdmission, DirectoryReadLimits, EntryIdentity, EntryKind,
     FilesystemIdentity, MountIdentity, PlatformError, PlatformScanner, PresentRegularFileRead,
-    RootAdmission, ScanRoot, WalkEntry, inspect_bound_child,
-    inspect_bound_child_with_directory_admission, read_bound_regular_file,
+    RegularFileReadExpectation, RegularFileStreamRequest, RootAdmission, ScanRoot, WalkEntry,
+    inspect_bound_child, inspect_bound_child_with_directory_admission, read_bound_regular_file,
+    stream_bound_regular_file,
 };
 use thiserror::Error;
+
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "linux", feature = "platform-linux"),
+        all(target_os = "macos", feature = "platform-macos"),
+        all(target_os = "windows", feature = "platform-windows"),
+    )
+))]
+#[path = "locator_content_tests.rs"]
+mod content_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocatorReadLimits {
@@ -203,6 +215,126 @@ pub struct LocatorReader<P> {
 impl<P: PlatformScanner> LocatorReader<P> {
     pub fn new(platform: P, limits: LocatorReadLimits) -> Self {
         Self { platform, limits }
+    }
+
+    /// Reads one complete ordinary file directly inside a captured live directory.
+    /// Reuses the native root/lineage revalidation and provider-safe content stream, without
+    /// recovering authority from display paths or enumerating the candidate's payload tree.
+    /// A zero-payload probe establishes current file identity, mount, size and change stamp;
+    /// oversized files decline before content delivery. The full read must match that probe,
+    /// so a grown file cannot turn a bounded prefix into a complete observation.
+    ///
+    /// Limits apply to this call, including two stream stages and bounded lineage enumeration.
+    /// Callers must additionally bound cumulative calls/bytes/retention and run off the UI thread.
+    /// Missing, changed, linked, provider/offline or uncertain objects return failure; this API
+    /// makes no atomic absence, cross-file snapshot, tool-ownership or mutation-permission claim.
+    pub fn read_captured_regular_file(
+        &self,
+        directory: &ScannedEntry,
+        name: &NativeName,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
+        self.validate_scanned_directory(directory)
+            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        self.validate_directory_binding_budget(directory)
+            .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+        // Count the final file name as well as the captured root/directory lineage. The probe
+        // and full read reuse one retained parent, so reopening components are charged once.
+        let components = directory
+            .executable_native_locator()
+            .ok()
+            .flatten()
+            .and_then(|locator| locator.parent_reopen_recipe.len().checked_add(2))
+            .ok_or(LocatorReadFailure::ResourceLimit)?;
+        if components > self.limits.max_components_per_request
+            || components > self.limits.max_total_components
+        {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        name.validate_basename_for_current_platform()
+            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        let name_bytes = match name {
+            NativeName::UnixBytes(bytes) => bytes.len(),
+            NativeName::WindowsUtf16(units) => units.len().saturating_mul(2),
+        };
+        if name_bytes
+            > self
+                .limits
+                .max_directory_batch_bytes
+                .min(self.limits.max_directory_bytes)
+        {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        if self.limits.max_requests < 2 {
+            return Err(LocatorReadFailure::ResourceLimit);
+        }
+        let failed = |error| match error {
+            ReadAttempt::Failed(failure) => failure,
+            // Unlike read_batch, no enumeration generation was observed for this fixed name.
+            ReadAttempt::Absent => LocatorReadFailure::ReadFailed,
+        };
+        let parent = self
+            .reopen_base(directory, cancel, &mut BatchBudget::default())
+            .map_err(failed)?;
+        let probe = RegularFileStreamRequest::new(
+            name.clone(),
+            RegularFileReadExpectation::establish_live(),
+            0,
+            0,
+            None,
+        )
+        .map_err(|error| failed(map_file_read_error(error)))?;
+        let observed =
+            stream_bound_regular_file(&self.platform, &parent.handle, &probe, cancel, &mut |_| {
+                Ok(())
+            })
+            .map_err(|error| failed(map_file_read_error(error)))?
+            .observed_after;
+        // EstablishLive identifies this current file, but it must still be in the captured
+        // directory's scope. Check before any payload byte, not after parsing a crossed mount.
+        validate_same_scope(
+            &parent.metadata,
+            &observed.filesystem_identity,
+            &observed.mount_identity,
+        )
+        .map_err(failed)?;
+        let maximum = self.limits.max_file_bytes.min(self.limits.max_total_bytes);
+        let length = usize::try_from(observed.logical_bytes.0)
+            .ok()
+            .filter(|length| *length <= maximum)
+            .ok_or(LocatorReadFailure::ResourceLimit)?;
+        let request = RegularFileStreamRequest::new(
+            name.clone(),
+            RegularFileReadExpectation::previously_observed(
+                observed.identity.clone(),
+                observed.filesystem_identity.clone(),
+                observed.mount_identity.clone(),
+            ),
+            0,
+            length as u64,
+            Some(observed),
+        )
+        .map_err(|error| failed(map_file_read_error(error)))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+        let result = stream_bound_regular_file(
+            &self.platform,
+            &parent.handle,
+            &request,
+            cancel,
+            &mut |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .map_err(|error| failed(map_file_read_error(error)))?;
+        Ok(PresentRegularFileRead {
+            bytes,
+            observed_before: result.observed_before,
+            observed_after: result.observed_after,
+        })
     }
 
     pub fn read_batch(

@@ -609,3 +609,16 @@ JSON data.duplicates 保留选项、完整组、原生事实、别名/对象数�
 既有 fixtures 新增共享的九组受控布局，core 原生扫描和中英文 CLI 使用同一输入与独立预期集合，覆盖 Dart 2.18 单项目、3.6 workspace、SvelteKit 1.0/2.0、同名用户数据、父/自身/兄弟标记错位、目录冒充文件、缺少多个必需标记之一及新版布局拒绝。夹具表达源码/文档中的布局，不声称实际执行这些工具版本；最小 payload 不作为格式验证证据。核心/CLI 仅扩展已有 fixtures 开发依赖的宿主范围，不增加生产依赖。原生会话回归覆盖普通标记变目录、消失后选中刷新撤下旧键、后续全量刷新拒绝旧缓存事实、恢复标记后稳定键恢复，以及 Unix 链接标记不成立；普通 payload 经独立 fs::read 核对不变。加载准入回归覆盖自身列表默认值、类型、规模及逃逸名称；规则编辑同时改变 marker 选择和摘要。
 
 交付验证（arm64 macOS，Rust 1.98.0）：工作区 896 项通过、0 失败、2 项原有基准 ignored，命令仍为 cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，已诊断系统 Trash 成功用例仍显式排除。首轮新增 core 测试误用不存在的状态字段，按实际 ScanSuccess.output.status 修正；Windows 交叉检查发现 CLI 夹具调用 Unix-only canonicalization helper，改为 Unix 原逻辑、Windows 原生 fixture path，保留目标测试范围。最终 host 工作区 all-targets/all-features clippy、Linux GNU/Windows GNU 工作区交叉 lint（含测试）通过；工作区矩阵后修正这项夹具的 cfg 路径，并避免无关名称或旧规则额外查自身 marker；最终 core 六项分类回归及该 CLI 回归单独复验，其他未变测试复用结果，不称为再次完整矩阵。格式、53 份 Markdown 与 23 项文档检查器测试通过，受影响 catalog/fixtures/core/CLI package list 核对资源与源码保留。没有性能计时或提速结论，没有发布。Linux/Windows 原生运行、MSVC、真实云占位及实际系统 Trash 成功的独立验证缺口保留。
+
+
+## 格式验证前置：捕获目录下的有界整文件读取（2026-10-02）
+
+扫描器的 LocatorReader 新增 read_captured_regular_file，接受当前捕获的目录行及一个原生 basename，复用现有 root/lineage no-follow 重验及有界祖先枚举，直接在 retained parent 下读取文件。旧小配置读取接口保持不变；新入口调用已有 provider-safe 原生内容流，无第二套目录遍历/内容读取或新 crate。首次零 payload 观察建立当前普通文件身份、filesystem/mount、逻辑长度和变化指纹；与捕获目录 scope 比较后才允许内容，不能复制父 mount 代替文件证据。文件超过配置的单文件/总字节额度立即拒绝，只有 probe 已执行，无截断 payload。完整读取绑定 probe，文件增长、替换或改变不会把旧长度前缀说成完整内容；错误时丢弃暂存字节。
+
+每次调用需至少两个内容阶段额度；路径分量计入 root/目录链与最终文件名，只重新打开一次 parent，probe/full 共用句柄。名称字节也占已有目录限额，所有原生枚举批次继续使用原限制。保留 Vec 只按已核验长度有界预留，不通过不断增长文件扩大缓冲。缺失、链接、类型错误、provider/offline、挂载/身份不一致或取消是失败，不声明原子缺失或完整工具所有权；范围只是稳定观察区间。API 没有跨调用全局 IO/metadata 预算或强制中断内核 IO 的期限，上层必须累计资源并在工作线程调用。
+
+两个原生回归用普通 fs::read/stat 独立对照完整内容和长度，覆盖伪造显示路径、精确边界/空文件、超限仅 probe、无效及逃逸名称、不足阶段/路径/名称预算、取消、链接与目录类型、缺失、同名父目录替换，以及 probe 后受控增长。计数来自 backend 的实际调用，不制造预期长度；保留旧目录使身份反例不依赖 inode 重用。Linux 新夹具显式使用 /dev/shm 的 tmpfs，缺少宿主能力应报告环境缺口；Windows 没有套用 Unix canonicalization，原生链接分支只在 Unix 运行。
+
+验证（arm64 macOS，Rust 1.98.0）：scanner 全量 76 项通过，最后增加最终文件名的分量计费后两个新增原生回归再次通过；此前 896 项工作区结果中未变测试复用，合计覆盖 898 项，不称为再次完整矩阵。最终 host 与 Linux GNU/Windows GNU 工作区 all-targets/all-features clippy（含目标测试）通过；无 backend 的 scanner 合约检查、格式/diff、53 份 Markdown 与 scanner package list 通过。新目标测试只进行了交叉编译，Linux/Windows 原生运行、MSVC、真实云占位及实际系统 Trash 成功仍未验收；工作区仍保留原两项基准 ignored 和已诊断系统 Trash 成功用例的显式排除。没有新计时或提速结论，没有发布。
+
+垃圾规则扩展验收继续未勾选。本单元闭合有界、provider-safe 整文件读取接缝，尚未解析 Dart/SvelteKit 的内容，也未连接 CLI/会话/缓存动态解释或新的格式回收准入。后续应将内容格式、未知/无效/未检查状态与所有权/活动分开，缓存命中重新观察；格式缺口不能仅靠旧 classification、Git ignore/high 或 native identity 回收资格消失。

@@ -42,6 +42,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 项目规则 JSON 可声明 `requiredOwnMarkers`（默认空、最多 64 个安全文件名），要求捕获目录自身直接包含全部指定普通文件；`requiredParentMarkers` 仍要求父目录至少一个标记。`JunkService` 按本次目录 ID 消费同一次遍历的文件标记，使用现有 VM，分类时无额外 I/O。加载字节摘要自动绑定缓存；结构标记不证明内容格式、活动或删除权限。共享版本/误报夹具放在既有 fixtures 的 `project_junk` 模块，仅供开发测试使用。
 
+`LocatorReader::read_captured_regular_file` 为上层格式验证提供有界整文件读取。它复用捕获目录的 root/lineage 重验与 provider-safe 原生内容流，先用零 payload 观察当前文件身份、挂载、长度及变化指纹；超限不交付内容，完整读取须匹配该观察。不会从显示路径重建权限、接受截断前缀或证明原子缺失；每次调用限制文件字节、名称、路径分量和阶段数，上层仍需累计预算、取消及工作线程。该接缝已可独立调用，垃圾格式解释和回收准入尚未接入它。
+
 | 层 | 代表 crate | 当前职责 |
 |---|---|---|
 | 模型与协议 | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | tagged evidence、稳定 envelope/canonical digest、双语渲染 |

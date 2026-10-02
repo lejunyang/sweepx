@@ -42,6 +42,8 @@ Cleaner types and validation live in `sweepx-catalog::schema`, deterministic eva
 
 Project-rule JSON supports `requiredOwnMarkers` (empty by default, at most 64 safe filenames): every declared ordinary file must occur directly inside the captured directory. `requiredParentMarkers` still requires at least one parent marker. `JunkService` consumes identity-keyed facts from the same traversal through the existing VM, with no classification I/O. Loaded-byte digests bind cache validity. Structural markers establish neither parsed formats, activity nor mutation permission. Shared version/user-data fixtures live in the existing fixtures crate's development-only `project_junk` module.
 
+`LocatorReader::read_captured_regular_file` supplies bounded complete-file reads for format interpretation. It reuses captured root/lineage validation and the provider-safe native content stream. A zero-payload probe establishes current identity, mount, size and change stamp; oversized files deliver no content, and the full read must match that probe. Display paths grant no authority, prefixes are not complete files, and failures prove no atomic absence. Each call bounds file bytes, names, components and stages; consumers still need cumulative budgets, cancellation and worker ownership. The API is independently callable; junk format interpretation and cleanup admission have not yet connected it.
+
 | Layer | Representative crates | Current responsibility |
 |---|---|---|
 | Model and protocol | `sweepx-model`, `sweepx-protocol`, `sweepx-canonical`, `sweepx-i18n` | Tagged evidence, stable envelopes/canonical digests, bilingual rendering |
