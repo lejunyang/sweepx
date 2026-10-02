@@ -151,11 +151,20 @@ struct Provider {
 // A blocked native mutation must retain the process-wide slot; closing its view cannot authorize
 // an unbounded succession of replacement workers. Trash and quarantine share this slot.
 static MUTATION_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
-struct MutationPermit;
+pub(crate) struct MutationPermit;
 impl Drop for MutationPermit {
     fn drop(&mut self) {
         MUTATION_WORKER_ACTIVE.store(false, Ordering::Release);
     }
+}
+
+/// Shares admission across junk, file views and quarantine. A blocked native worker owns the
+/// permit until it actually returns; closing its UI cannot admit another mutation worker.
+pub(crate) fn mutation_permit() -> Result<MutationPermit, String> {
+    MUTATION_WORKER_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "a system mutation worker is still running".to_string())?;
+    Ok(MutationPermit)
 }
 
 impl Provider {
@@ -511,10 +520,7 @@ impl JunkProvider for Provider {
         }) {
             return Err("selection overlaps; select the ancestor or its descendants".into());
         }
-        MUTATION_WORKER_ACTIVE
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "a system Trash worker is still running".to_string())?;
-        let permit = MutationPermit;
+        let permit = mutation_permit()?;
         let (sender, receiver) = sync_channel(1);
         self.trash_cancel = CancellationToken::new();
         let cancel = self.trash_cancel.clone();

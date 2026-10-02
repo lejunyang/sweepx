@@ -46,11 +46,11 @@ sweepx scan --no-state --large-files --min-file-bytes 104857600 --top-files 100 
 sweepx --format json scan --no-state --large-files --min-file-bytes 0 --top-files 20 /absolute/root
 ```
 
-`--large-files` 在现有元数据遍历中独立收集普通文件，默认包含逻辑大小至少 100 MiB 的文件，保留整个调用所有根中最大的 100 个路径。`--min-file-bytes` 接收包含等于的非负整数逻辑字节阈值，`--top-files` 范围为 1..=10000，两者都要求 `--large-files`；这个模式目前不能与 `--tui` 同用。榜单始终按逻辑大小降序，等大文件按本次原生观察顺序取舍，不保证不同卷或扫描之间的 tie 顺序。
+`--large-files` 在现有元数据遍历中独立收集普通文件，默认包含逻辑大小至少 100 MiB 的文件，保留整个调用所有根中最大的 100 个路径。`--min-file-bytes` 接收包含等于的非负整数逻辑字节阈值，`--top-files` 范围为 1..=10000，两者都要求 `--large-files`；加上 `--tui` 可动态查看榜单。榜单始终按逻辑大小降序，等大文件按本次原生观察顺序取舍，不保证不同卷或扫描之间的 tie 顺序。
 
 human 显示独立的逻辑大小/分配大小表，最多 40 行；JSON 新增 `data.largeFiles`，包含 `options`、`files`、`observedFiles`、`qualifyingFiles`、`unknownLogicalFiles`、`topKLimited`、`complete` 和 `incompleteReasons`。机器字段、状态和十进制字节字符串不随 locale 改变。没有启用时，普通 scan 输出不增加此字段。文件观察在普通列表保留之前到达收集器，后半段的大文件仍可替换 top-K 中较小的行；普通列表截断可能使 scan 总状态为 partial，但独立榜单可保持完整覆盖。
 
-收集器最多保留 64 MiB 的 owned-data 准入估算，包括 native lineage；这不是精确 RSS。正常 top-K 截断不表示遍历失败；未知逻辑大小、保留预算不足、取消、权限/挂载或真实遍历截断则留下明确的不完整原因，不能把空列表说成没有大文件。只做 no-follow 元数据观察，不读取内容。硬链接路径仍分别展示，分配证据未知时原样保留（macOS 当前为 unknown），也不求和冒充可回收空间。大文件不是垃圾候选，本模式没有清理操作。
+收集器最多保留 64 MiB 的 owned-data 准入估算，包括 native lineage；这不是精确 RSS。正常 top-K 截断不表示遍历失败；未知逻辑大小、保留预算不足、取消、权限/挂载或真实遍历截断则留下明确的不完整原因，不能把空列表说成没有大文件。只做 no-follow 元数据观察，不读取内容。硬链接路径仍分别展示，分配证据未知时原样保留（macOS 当前为 unknown），也不求和冒充可回收空间。大文件不是垃圾候选；普通 human/JSON 输出仅报告，`--tui` 中的回收来自用户明确的文件选择。
 
 ## 显式重复内容分析
 
@@ -61,11 +61,26 @@ sweepx --format json scan --no-state --duplicates --duplicate-read-bytes 1073741
 
 `--duplicates` 在普通元数据遍历之后显式读取内容，默认包含逻辑大小至少 1 KiB 的普通文件。`--min-duplicate-bytes` 是包含等于的非负整数阈值；设为 0 才比较空文件。先按大小分组，排除同一原生对象的硬链接别名及重叠根观察，再比较最多各 4 KiB 的头尾采样。只有完整 SHA-256 相同、最终原生身份/大小/变化指纹复验成功的至少两个不同对象才进入组；采样相同不是重复证明。
 
-`--duplicate-max-files` 默认 20000、范围 1..=100000；`--duplicate-read-bytes` 默认 8 GiB、范围 1..=9223372036854775807；`--duplicate-deadline-ms` 默认 30000、范围 1..=300000。四个参数都要求 `--duplicates`，该模式与 `--tui`、`--large-files` 互斥。整个调用共享最多 64 MiB 的 owned-data 准入估算（不是精确 RSS）、每个文件最大 8 GiB 和最多 max-files × 4 次内容阶段范围请求，包括最终零字节复验。后端还有有界元数据打开/探测，不计为内容阶段请求。单次只读取一个文件、使用固定 64 KiB 缓冲，没有并行内容读取。总读取预算在每次请求前扣除，包括采样和完整 hash；失败/短读不退还，实际交付字节单独计数。期限及取消在原生调用/chunk 边界合作检查，不能中断阻塞的内核调用。
+`--duplicate-max-files` 默认 20000、范围 1..=100000；`--duplicate-read-bytes` 默认 8 GiB、范围 1..=9223372036854775807；`--duplicate-deadline-ms` 默认 30000、范围 1..=300000。四个参数都要求 `--duplicates`，该模式与 `--large-files` 互斥，可与 `--tui` 同用。整个调用共享最多 64 MiB 的 owned-data 准入估算（不是精确 RSS）、每个文件最大 8 GiB 和最多 max-files × 4 次内容阶段范围请求，包括最终零字节复验。后端还有有界元数据打开/探测，不计为内容阶段请求。单次只读取一个文件、使用固定 64 KiB 缓冲，没有并行内容读取。总读取预算在每次请求前扣除，包括采样和完整 hash；失败/短读不退还，实际交付字节单独计数。期限及取消在原生调用/chunk 边界合作检查，不能中断阻塞的内核调用。
 
 JSON 在 `data.duplicates` 输出 `options`、`groups`、`observedFiles`、`retainedFiles`、`hardLinkAliasesExcluded`、`readBudgetChargedBytes`、`deliveredBytes`、`readOperations`、`complete` 和 `incompleteReasons`。每组包含 `sha256`、`logicalBytes` 和携带原生证据的 `files`；字段、十进制字节字符串及枚举不随 locale 变化。human 显示完整摘要和最多 40 个组内路径。普通扫描未启用分析时不增加此字段；分析不依赖被截断的普通结果列表。覆盖/元数据/保留量/读取预算/期限/取消/变化/provider/读取失败各自保留缺口，空的不完整报告不证明没有重复文件；整体为 partial 时返回 4。
 
 内容读取沿保留的原生根/父目录身份链执行，不从显示路径恢复权限，不跟随链接或跨挂载。macOS 禁止线程内 dataless materialization；Windows 保留 no-recall 并拒绝 offline/recall/reparse 属性；Linux 仅准入 ext4、Btrfs、tmpfs，FUSE、overlay、远程及未知文件系统保持 `provider_or_offline`。未知分配大小不升级为零；结果不选择保留者、不合计可回收空间、不形成垃圾分类或删除授权。当前不持久缓存内容 hash，跨文件结果不是原子快照，实际云服务行为仍需宿主验证。
+
+## 大文件与重复内容的实时界面
+
+```bash
+sweepx scan --no-state --tui --large-files --min-file-bytes 104857600 /absolute/root
+sweepx scan --no-state --tui --duplicates --min-duplicate-bytes 1024 /absolute/root
+```
+
+两种视图都要求 human 输出及终端 stdin/stdout，元数据和内容工作在可取消的后台线程执行。大文件中途榜单只保留最新快照，最终榜单和重复组可靠交付。重复分析按大小分组，完成本组完整哈希和原生复验后再读取后续大小组，因此内容读取期间即可出现已核验组；不复用旧内容 hash，也不自动将文件判成垃圾。
+
+方向键/j/k 移动，Space 选择，a 全选（最多 256 项），u 清空，c 取消，r/R 全量重新扫描分析范围，q/Esc 退出。重复模式按 p 将焦点文件设为该组保留者或取消保留；每组只能有一个保留者，不自动选择。组内文件相邻展示，保留者有明显标记且不能回收。刷新保留原生稳定键对应的选择，但清除全部保留者选择；取消/不完整刷新保留旧行并标明历史状态。
+
+整个范围完整成功结束后，d/Delete 提交所选文件（未选择时为焦点文件）。每个所选重复组必须有未被选中的保留者。有界后台线程先核验原生变化指纹，再按原共享内容字节/文件数/请求预算重新计算所选副本和保留者；合作期限覆盖预检及内容阶段，最多 512 个不同副本/保留者另做零字节元数据预检。内容/指纹变化、硬链接别名、证据缺失、provider/mount/link 边界或不完整验证均在 Trash 前拒绝整个批次。每次移动前再次复验保留者和所选原生绑定；大文件回收只复验原生文件身份/长度，不读载荷。重要/保护路径拒绝，不在后台等待 stdin，也没有永久删除兜底。
+
+分析视图最多保留 16384 行及 64 MiB 准入估算，与收集器/界面模型预算分别计算。可靠通道一个槽加生产者一份有界载荷，中途榜单和进度各一个可替换槽；内容串行读取。回收与 junk/隔离共用进程级 mutation worker 配额，关闭取消待执行工作，不在界面 join 阻塞内核调用。系统 Trash 成功、真实云 provider 和目标宿主仍需运行验证，已有最终 pathname 检查到 Trash 调用之间的竞态仍在。
 
 ## 安装
 

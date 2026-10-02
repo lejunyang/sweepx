@@ -26,6 +26,7 @@ use sweepx_core::junk::JunkService;
 use sweepx_core::junk::ProjectJunkRule as JunkRule;
 #[cfg(test)]
 use sweepx_core::junk::load_project_rules as load_project_junk_rules;
+mod file_tui;
 mod junk_timings;
 mod junk_tui;
 mod trash_command;
@@ -172,14 +173,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Scan {
-        /// Browse directories interactively and scan details on demand.
+        /// Browse directories or show live --large-files/--duplicates results with explicit Trash selection.
         #[arg(long)]
         tui: bool,
-        /// Rank ordinary files by logical size during the same metadata walk; report-only.
-        #[arg(long, conflicts_with = "tui")]
+        /// Rank ordinary files by logical size; report-only unless explicitly selected in --tui.
+        #[arg(long)]
         large_files: bool,
-        /// Explicitly read local file content to report duplicate SHA-256 groups; read-only.
-        #[arg(long, conflicts_with_all = ["tui", "large_files"])]
+        /// Read local content for SHA-256 groups; --tui requires choosing a keeper before Trash.
+        #[arg(long, conflicts_with = "large_files")]
         duplicates: bool,
         /// Inclusive logical-byte threshold for --duplicates (default 1 KiB).
         #[arg(long, requires = "duplicates", default_value_t = 1024)]
@@ -454,6 +455,25 @@ fn main() -> ProcessExitCode {
                     return ProcessExitCode::from(2);
                 }
             };
+            if tui && (large_files || duplicates) {
+                let options = if duplicates {
+                    file_tui::Options::Duplicates(sweepx_core::DuplicateOptions {
+                        minimum_logical_bytes: min_duplicate_bytes.into(),
+                        max_read_bytes: duplicate_read_bytes,
+                        max_files: duplicate_max_files as usize,
+                        max_duration_ms: duplicate_deadline_ms,
+                        max_read_operations: duplicate_max_files as usize * 4,
+                        ..Default::default()
+                    })
+                } else {
+                    file_tui::Options::Large(sweepx_core::LargeFileOptions {
+                        minimum_logical_bytes: min_file_bytes.into(),
+                        max_files: top_files as usize,
+                        ..Default::default()
+                    })
+                };
+                return file_tui::run(context, roots, state_dir, store, options, size_unit, sort);
+            }
             let progress = ScanProgress::start(
                 context.locale(),
                 roots.len(),

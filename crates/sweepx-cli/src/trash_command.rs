@@ -119,6 +119,70 @@ pub(crate) fn trash_session_candidate(
     candidate.submit().map_err(|error| error.to_string())
 }
 
+/// Explicit file selection is independent of junk rules. Worker-only native validation uses
+/// the existing provider-safe metadata-only stream and current OS Trash adapter. Expected
+/// content stamps protect duplicate choices; neither a path label nor file size authorizes IO.
+pub(crate) fn trash_observed_file(
+    entry: &ScannedEntry,
+    stamp: Option<&sweepx_platform::RegularFileObservation>,
+    keeper: Option<(&ScannedEntry, &sweepx_platform::RegularFileObservation)>,
+    cancel: &sweepx_core::CancellationToken,
+) -> Result<(), String> {
+    let reader = sweepx_scanner::DetailRescanner::new(
+        sweepx_scanner::HostPlatformScanner::new(),
+        sweepx_platform::ScanResourceLimits::default(),
+    );
+    let check = |entry, previous| {
+        reader
+            .stream_file(
+                sweepx_scanner::FileContentRequest {
+                    entry,
+                    offset: 0,
+                    max_bytes: 0,
+                    previous,
+                },
+                cancel,
+                &mut |_| unreachable!("metadata-only validation"),
+            )
+            .map_err(|error| error.to_string())
+    };
+    if entry.object_type != ObjectType::File
+        || !entry.coverage.complete
+        || entry.coverage.details_lost
+    {
+        return Err("refresh complete ordinary-file observations first".into());
+    }
+    let live = check(entry, stamp)?;
+    let candidate = TrashCandidate::from_scanned_entry(entry).map_err(|error| error.to_string())?;
+    if candidate.requires_confirmation() {
+        return Err(TrashError::ConfirmationRequired.to_string());
+    }
+    #[cfg(windows)]
+    {
+        let expected = entry
+            .identity
+            .as_ref()
+            .and_then(|identity| match &identity.platform_file_identity {
+                sweepx_model::IdentityEvidence::Known { value } => Some(value),
+                _ => None,
+            })
+            .ok_or_else(|| TrashError::MissingLiveIdentity.to_string())?;
+        if !candidate.identity.as_ref().is_some_and(|actual| {
+            expected.device.0 == u128::from(actual.device()) && expected.inode.0 == actual.inode()
+        }) {
+            return Err(TrashError::Changed.to_string());
+        }
+    }
+    if let Some((keeper, stamp)) = keeper {
+        check(keeper, Some(stamp))?;
+    }
+    check(entry, Some(&live.observed_after))?;
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    candidate.submit().map_err(|error| error.to_string())
+}
+
 /// One candidate in a bulk junk-to-Trash plan.
 pub(crate) struct BulkTrashItem<'a> {
     /// Display path, shown in the plan only.

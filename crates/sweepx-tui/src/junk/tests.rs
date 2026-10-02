@@ -339,8 +339,26 @@ struct Provider {
     previews: Vec<Vec<String>>,
     confirmations: Vec<String>,
     dismissed: Vec<u64>,
+    keepers: Vec<String>,
 }
 impl JunkProvider for Provider {
+    fn toggle_keeper(&mut self, key: &str) -> Result<(), String> {
+        self.keepers.push(key.into());
+        self.events.push_back(JunkEvent::Candidate {
+            revision: 1,
+            current: true,
+            historical: false,
+            row: Arc::new(FixtureRow {
+                key: "a",
+                path: "/a",
+                bytes: EvidenceValue::Known { value: 8.into() },
+                complete: true,
+                report_only: true,
+                cost: 256,
+            }),
+        });
+        Ok(())
+    }
     fn poll(&mut self) -> Option<JunkEvent> {
         self.events.pop_front()
     }
@@ -408,6 +426,149 @@ impl JunkProvider for Provider {
     fn dismiss_quarantine(&mut self, operation: u64) {
         self.dismissed.push(operation);
     }
+}
+
+#[test]
+fn duplicate_keeper_key_updates_the_row_and_prevents_its_trash_selection() {
+    let mut provider = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes)
+        .with_presentation(ResultPresentation::Duplicates);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let keys = VecDeque::from([
+        KeyCode::Char('p'),
+        KeyCode::Char(' '),
+        KeyCode::Char('d'),
+        KeyCode::Char('q'),
+    ]);
+    let exit = run_junk_loop(
+        &mut terminal,
+        &mut model,
+        &mut Events(keys),
+        &mut provider,
+        &NeverTerminate,
+    )
+    .unwrap();
+    assert_eq!(exit, 0);
+    assert_eq!(provider.keepers, ["a"]);
+    assert!(!model.eligible("a"));
+    assert!(provider.trashed.is_empty());
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Duplicate content"));
+}
+
+#[test]
+fn file_views_require_complete_scope_and_preserve_group_adjacency() {
+    struct GroupRow {
+        row: Arc<dyn JunkRow>,
+        group: &'static str,
+    }
+    impl JunkRow for GroupRow {
+        fn key(&self) -> &str {
+            self.row.key()
+        }
+        fn path(&self) -> &str {
+            self.row.path()
+        }
+        fn rule(&self) -> &str {
+            self.group
+        }
+        fn evidence(&self) -> &str {
+            self.row.evidence()
+        }
+        fn context(&self) -> String {
+            self.row.context()
+        }
+        fn logical_bytes(&self) -> &ByteValue {
+            self.row.logical_bytes()
+        }
+        fn complete(&self) -> bool {
+            true
+        }
+        fn retained_bytes(&self) -> usize {
+            512
+        }
+    }
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes)
+        .with_presentation(ResultPresentation::Duplicates);
+    let entries = [
+        ("a", "/a", "digest-1"),
+        ("b", "/b", "digest-2"),
+        ("z", "/z", "digest-1"),
+    ];
+    for (revision, outcome) in [(1, JunkOutcome::Partial), (2, JunkOutcome::Complete)] {
+        model.apply(JunkEvent::Started {
+            revision,
+            keys: None,
+        });
+        for (key, path, group) in entries {
+            model.apply(JunkEvent::Candidate {
+                revision,
+                current: true,
+                historical: false,
+                row: Arc::new(GroupRow {
+                    row: row(key, path),
+                    group,
+                }),
+            });
+        }
+        model.apply(JunkEvent::Completed {
+            revision,
+            outcome,
+            replaced: outcome == JunkOutcome::Complete,
+        });
+        model.reorder();
+        assert_eq!(model.order, ["a", "z", "b"]);
+        assert_eq!(model.eligible("a"), outcome == JunkOutcome::Complete);
+    }
+}
+
+#[test]
+fn long_file_paths_keep_distinct_filenames_visible_with_safe_cell_width() {
+    let first = "/a/very/long/shared/root/中文/duplicate-one";
+    let second = "/a/very/long/shared/root/中文/duplicate-two";
+    for path in [first, second] {
+        let tail = crate::live::tail_with_ellipsis(path, 20);
+        assert!(tail.starts_with('…'));
+        assert!(tail.ends_with(path.rsplit('/').next().unwrap()));
+        assert_eq!(unicode_width::UnicodeWidthStr::width(tail.as_str()), 20);
+    }
+    assert_eq!(crate::live::tail_with_ellipsis(first, 0), "");
+    assert_eq!(crate::live::tail_with_ellipsis(first, 1), "…");
+    assert_eq!(crate::live::tail_with_ellipsis("中文", 3), "…文");
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes)
+        .with_presentation(ResultPresentation::LargeFiles);
+    model.apply(JunkEvent::Started {
+        revision: 1,
+        keys: None,
+    });
+    for (key, path) in [("one", first), ("two", second)] {
+        model.apply(JunkEvent::Candidate {
+            revision: 1,
+            current: true,
+            historical: false,
+            row: row(key, path),
+        });
+    }
+    model.reorder();
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("duplicate-one") && screen.contains("duplicate-two"));
 }
 
 #[test]

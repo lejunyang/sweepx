@@ -454,7 +454,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
-另有两个明确的体验接缝尚未完成：选中刷新已有局部遍历，但没有将片段安全合并到持久缓存代际；独立大文件/重复内容分析已有 core/CLI，尚未接入 TUI 结果视图、重复组保留者选择和交互回收。对应 CLI 选项目前与 TUI 互斥，不能将分析器验收当作这些交互功能已交付。Git 的重复范围查询随后已合并并补等价计时，见文末；上述间歇根因项仍保持开放。
+体验接缝仍有选中刷新缓存合并：已有局部遍历，但没有将片段安全合并到持久缓存代际。独立大文件/重复内容的 TUI 结果视图、明确保留者选择和交互 Trash 随后已接入，CLI 选项不再与 TUI 互斥；复用现有分析器和列表机制，最终验证与原生执行缺口见文末。Git 的重复范围查询已合并并补等价计时；上述间歇根因项仍保持开放。
 
 crate 已从 22 收敛到 17，core 与终端依赖已分离；第二轮未发现进一步合并的明确收益。继续合并不作为独立待办，只有具体契约、所有权或依赖收益成立时再评估。
 
@@ -816,3 +816,20 @@ scanner 的新祖先配置观察先复验原始完整链直到候选自身，再
 这减少一次确定的重复启动，没有定位旧 300 ms/2 秒工具失败、8,192 文件热缓存 PTY 超时或 FSEvents settle 偶发失败，也不关闭有效配置、归属/活动、缓存片段合并、大文件/重复 TUI、跨平台缓存及目标宿主/执行验收缺口。路线图保持进行中。
 
 交付验证：Git 专项实际运行七项通过，完整工作区串行 969 项通过、0 失败、两个原有基准 ignored；仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，实际系统 Trash 成功未验证。受影响 core、host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 与 core 包清单通过；24 个最终计时样本的等价摘要、实际命中状态、中位数及被测源文件摘要独立复核。Linux/Windows 新测试代码只交叉 lint，原生宿主、Windows MSVC、真实 provider 和系统 Trash 成功继续未验收；已通过检查不关闭上述间歇根因项，没有放宽期限或排除额外测试。
+
+
+## 大文件与重复内容的实时 TUI（2026-10-02）
+
+`scan --tui --large-files` 和 `scan --tui --duplicates` 现可直接组合，根/状态/终端准入后先打开已有列表，分析在工作线程完成；普通 JSON/human 分析输出及字段保持不变。core 提供 `scan_file_analysis_with_observer`/`FileAnalysisSink`，analysis 的大文件 preview 和重复 observer 都调用已有收集器，没有第二套扫描/hash 算法或新 crate。大文件中途榜单至少相隔 100 ms 发布一次，只保留最新快照，最终榜单（含不完整榜单）可靠交付。重复大小组不可能再加入其他大小文件，因此完成本组采样、完整 hash 和成员原生复验后即可发布，再处理后续大小组；取消/超限保留已经闭合的组，整体仍 partial/cancelled，结果不是跨文件原子快照。
+
+CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和进度各有一个替换槽；视图 registry 最多 16384 行/64 MiB 准入估算，collector 和已有 TUI model 预算独立，并不宣称总 RSS 为 64 MiB。进度路径按 UTF-8 边界限制为 2048 字节，预算拒绝只保留一个错误，不积累重复诊断；刷新/保留者更新需等待上一有界批次消费。原生扫描 worker 被阻塞时关闭仍保留进程配额，取消是合作式；UI 不做 native IO 或 join。复用稳定键选择、取消、历史标记、刷新和终端恢复；`r/R` 全量刷新分析范围，保留选择但清除保留者选择。列表按组相邻展示，长文件路径保留尾部和省略号，详情仍显示完整路径；逻辑大小不改称可释放量，分配未知不变成零。
+
+重复模式 `p` 明确选择/取消保留者，每组最多一个，不默认选择；保留者不能进入回收批次。完整成功的整体扫描终态是 file view 提供 Trash 的前提，提前组或最终榜单回调不能掩盖之后的状态持久化失败。每批最多 256 个所选文件，最多另含 256 个保留者；worker 先以原 live stamp 做 provider-safe 零字节检查，再复用 DuplicateCollector 在共享原内容/文件/请求预算内重读并计算完整 SHA-256，合作期限覆盖预检及内容阶段。新的摘要、完整原生键和 stamp 都必须匹配，任何预检缺口拒绝整个批次；每项真正提交前再次检查保留者、所选文件和 native root/parent/object/filesystem/mount 绑定。大文件来自用户明确文件选择，仅做 provider-safe 原生/长度复验，不读取载荷。两模式共享 junk/隔离 mutation worker 配额、原 Trash adapter 和重要路径拒绝，不改变项目 junk 规则的所有权/活动限制，没有永久删除兜底。live stamp 不序列化，JSON 恢复的 hash 不提供本次内容证明；最终 pathname 检查到系统 Trash 调用之间的竞态仍保留。
+
+独立回归用普通目录读取/metadata 核对榜单、普通读取/SHA-256 核对内容，并覆盖硬链接排除、同名文件/父目录替换、等长修改保留者、明确保留者/禁止选中保留者、取消、资源缺口、刷新清除保留者、JSON 丢弃 live stamp、合并中途榜单不占可靠终槽、关闭释放背压发送者和状态写入失败。初次新回归发现全尺寸内容读完才关闭重复组，生产改为逐大小组闭合；路径 oracle 的受控 `/fixture` 前缀、格式拒绝的实际 stderr 以及部分结果必须经过新 revision 重观察才能变 current 的测试预期分别纠正，没有放宽原生检查。最初新测试依赖/导入和 lint 问题也已修正。
+
+[真实终端验收记录](file-analysis-tui-pty-2026-10-02.json)来自 arm64 macOS、Rust 1.98.0 debug、三个初始普通文件（两份 1 MiB 相同内容、一份 5 MiB 不同内容），刷新前再加入一份相同内容；关闭 SweepX 状态缓存，不控制 OS cache，不作速度或尾延迟比较。最终固定八个场景覆盖两种分析的英文 q/Ctrl-C/SIGTERM 和中文 q；都核对完整结果、选择/刷新、重复模式明确保留者及刷新清除、退出码 0/130/143、终端属性/alternate screen 恢复、全部文件名称及独立 SHA-256 未变，没有发送删除键。首次 PTY 暴露长路径表格只显示共同前缀，已修复显示尾部并增加终端单元回归；中文脚本初次用错完成文字且未清除覆盖写入的宽字符尾格，修正独立中文覆盖样例和解析器后再固定验收，不把这两项脚本错误归为产品停顿。
+
+交付验证：完整工作区 `cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1` 为 986 项通过、0 失败、2 项原有基准 ignored；随后仅修复路径展示/保留者提示并增加宽字符尾部回归，最终宿主 CLI/TUI 全量 217 项通过，其余未变行为复用工作区结果，合计覆盖 987 项，不称为再次完整工作区。该最终专项首次在沙箱内的旧 cancel JSON 用例收到空 stdout；独立执行确认默认状态目录访问返回 `Operation not permitted`，没有改测试或放宽生产行为，宿主专项通过。真实系统 Trash 成功仍因既有挂起用例显式排除，不能记为通过。host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 及四个受影响包清单通过；Windows 首次交叉编译发现新复验分支使用仅 Unix 导入的 IdentityEvidence，改为完整类型路径后最终工作区交叉 lint 通过，没有扩大 cfg 或 suppress。最后的 Rustdoc/文档补充不改变已测宿主行为。
+
+本条完成大文件/重复内容的动态视图、明确保留者和安全拒绝路径；原生 Linux/Windows、MSVC、真实云 provider、系统 Trash 成功与最终 pathname 竞态仍未验收/关闭，交叉编译和未发送删除键的 PTY 不证明这些行为。此前 probe/热缓存 PTY/FSEvents 间歇问题未由本单元解决。下一步继续选中刷新片段的持久缓存合并、项目有效配置/独占归属/活动证据，以及跨平台缓存与其他原生收尾；完整路线图仍进行中。

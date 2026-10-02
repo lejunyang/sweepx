@@ -48,6 +48,7 @@ fn scan(
         Some(FileAnalysisObservation {
             options: FileAnalysisOptions::Duplicates(options),
             cancel,
+            sink: None,
         }),
     )
     .unwrap()
@@ -59,6 +60,61 @@ fn report(result: &ScanSuccess) -> DuplicateReport {
         group["files"] = decamelize_json_keys(group["files"].take());
     }
     serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn observer_streams_verified_groups_but_cancelled_scope_and_json_have_no_live_authority() {
+    struct Sink {
+        cancel: CancellationToken,
+        groups: Vec<DuplicateGroup>,
+    }
+    impl FileAnalysisSink for Sink {
+        fn on_duplicate_group(&mut self, group: &DuplicateGroup) {
+            self.groups.push(group.clone());
+            self.cancel.cancel();
+        }
+    }
+    let (_fixture, root) = fixture();
+    fs::write(root.join("one"), b"same payload").unwrap();
+    fs::write(root.join("two"), b"same payload").unwrap();
+    let cancel = CancellationToken::new();
+    let mut sink = Sink {
+        cancel: cancel.clone(),
+        groups: Vec::new(),
+    };
+    let result = scan_file_analysis_with_observer(
+        &context(),
+        &ScanRequest {
+            roots: vec![root.clone()],
+            state_dir: None,
+        },
+        Option::<&MemorySnapshotStore>::None,
+        FileAnalysisOptions::Duplicates(&options()),
+        &cancel,
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(result.output.status, OutputStatus::Cancelled);
+    assert_eq!(sink.groups.len(), 1);
+    let group = &sink.groups[0];
+    assert_eq!(group.files.len(), group.live_observations.len());
+    let expected_hash = format!("{:x}", Sha256::digest(fs::read(root.join("one")).unwrap()));
+    assert_eq!(group.sha256, expected_hash);
+    assert!(
+        group
+            .live_observations
+            .iter()
+            .all(|stamp| stamp.logical_bytes.0 == 12)
+    );
+    assert!(
+        result.output.data["duplicates"]["groups"][0]
+            .get("liveObservations")
+            .is_none()
+    );
+    let restored = report(&result);
+    assert!(restored.groups[0].live_observations.is_empty());
+    assert_eq!(restored.groups[0].files, group.files);
+    assert!(!restored.complete);
 }
 
 #[test]

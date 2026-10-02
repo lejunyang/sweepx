@@ -7,7 +7,10 @@ pub mod junk;
 mod large_files;
 pub use duplicates::scan_duplicates_with_store;
 pub mod tools;
-pub use large_files::scan_large_files_with_store;
+pub use large_files::{
+    FileAnalysisOptions, FileAnalysisSink, scan_file_analysis_with_observer,
+    scan_large_files_with_store,
+};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -16,7 +19,10 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub use sweepx_analysis::{DuplicateOptions, DuplicateReport, LargeFileOptions, LargeFileReport};
+pub use sweepx_analysis::{
+    DuplicateCollector, DuplicateGroup, DuplicateOptions, DuplicateReport, LargeFileOptions,
+    LargeFileReport,
+};
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -1078,15 +1084,15 @@ struct JunkScanObservation<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_with_store_options<S: SnapshotStore>(
+fn scan_with_store_options<'a, S: SnapshotStore>(
     context: &CoreContext,
     request: &ScanRequest,
     store: Option<&S>,
     scanner_options: ScannerOptions,
     classifier: Option<&dyn JunkClassifier>,
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
-    live: Option<JunkScanObservation<'_>>,
-    large_files: Option<large_files::FileAnalysisObservation<'_>>,
+    live: Option<JunkScanObservation<'a>>,
+    large_files: Option<large_files::FileAnalysisObservation<'a>>,
 ) -> Result<ScanWorkResult, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
@@ -1167,7 +1173,9 @@ fn scan_with_store_options<S: SnapshotStore>(
         let default_cancel = CancellationToken::new();
         let large_cancel = large_files.as_ref().map(|request| request.cancel);
         let mut large_observer = large_files
-            .map(|request| large_files::FileAnalysisObserver::new(request.options, roots.len()))
+            .map(|request| {
+                large_files::FileAnalysisObserver::new(request.options, roots.len(), request.sink)
+            })
             .transpose()?;
         let mut live = live;
         let cancel = large_cancel

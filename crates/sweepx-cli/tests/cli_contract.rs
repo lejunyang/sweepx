@@ -311,7 +311,6 @@ fn duplicate_options_require_opt_in_and_plain_scan_has_no_content_report() {
         vec!["scan", "--duplicate-read-bytes", "1"],
         vec!["scan", "--duplicate-max-files", "1"],
         vec!["scan", "--duplicate-deadline-ms", "1"],
-        vec!["scan", "--duplicates", "--tui"],
         vec!["scan", "--duplicates", "--large-files"],
         vec!["scan", "--duplicates", "--duplicate-read-bytes", "0"],
         vec!["scan", "--duplicates", "--duplicate-max-files", "100001"],
@@ -439,7 +438,6 @@ fn large_file_options_refuse_conflicts_and_keep_plain_scan_output_unchanged() {
         vec!["scan", "--top-files", "2"],
         vec!["scan", "--large-files", "--top-files", "0"],
         vec!["scan", "--large-files", "--top-files", "10001"],
-        vec!["scan", "--large-files", "--tui"],
     ] {
         cli_command().args(args).assert().code(2);
     }
@@ -456,6 +454,22 @@ fn large_file_options_refuse_conflicts_and_keep_plain_scan_output_unchanged() {
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["data"].get("largeFiles").is_none());
+}
+
+#[test]
+fn interactive_file_analyses_parse_but_require_a_human_terminal() {
+    for mode in ["--large-files", "--duplicates"] {
+        cli_command()
+            .args(["scan", "--tui", mode, "--no-state"])
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("terminal"));
+        cli_command()
+            .args(["--format", "json", "scan", "--tui", mode, "--no-state"])
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("--format json"));
+    }
 }
 
 fn cli_command() -> Command {

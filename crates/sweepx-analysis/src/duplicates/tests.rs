@@ -147,6 +147,103 @@ fn collect(source: &mut Source, inputs: &[(&str, &[u8], u128)]) -> DuplicateColl
 }
 
 #[test]
+fn closed_groups_stream_before_later_io_and_preserve_final_native_stamps() {
+    struct Observer {
+        cancel: CancellationToken,
+        groups: Vec<DuplicateGroup>,
+    }
+    impl DuplicateAnalysisObserver for Observer {
+        fn on_group(&mut self, group: &DuplicateGroup) {
+            self.groups.push(group.clone());
+            self.cancel.cancel();
+        }
+    }
+    let mut source = Source::default();
+    let collector = collect(
+        &mut source,
+        &[
+            ("a", b"abc", 1),
+            ("b", b"abc", 2),
+            ("c", b"later", 3),
+            ("d", b"later", 4),
+        ],
+    );
+    let cancel = CancellationToken::new();
+    let mut observer = Observer {
+        cancel: cancel.clone(),
+        groups: Vec::new(),
+    };
+    let report = collector.analyze_with_observer(&mut source, true, &cancel, &mut observer);
+    assert!(!report.complete);
+    assert!(
+        report
+            .incomplete_reasons
+            .contains(&DuplicateIncompleteReason::Cancelled)
+    );
+    assert_eq!(observer.groups, report.groups);
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(
+        report.groups[0].sha256,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    for (entry, stamp) in report.groups[0]
+        .files
+        .iter()
+        .zip(&report.groups[0].live_observations)
+    {
+        assert_eq!(stamp, &observation(entry));
+    }
+    assert!(
+        source
+            .calls
+            .iter()
+            .all(|(name, _, _)| name == "a" || name == "b")
+    );
+}
+
+#[test]
+fn provisional_chunks_from_a_failed_read_report_progress_without_publishing_a_group() {
+    struct FailedAfterChunks(Source);
+    impl DuplicateContentSource for FailedAfterChunks {
+        fn read(
+            &mut self,
+            request: FileContentRequest<'_>,
+            cancel: &CancellationToken,
+            consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
+        ) -> Result<RegularFileStreamResult, FileContentError> {
+            self.0.read(request, cancel, consume)?;
+            Err(DetailRescanError::IdentityMismatch.into())
+        }
+    }
+    #[derive(Default)]
+    struct Observer {
+        delivered: u64,
+        groups: usize,
+    }
+    impl DuplicateAnalysisObserver for Observer {
+        fn on_read(&mut self, _entry: &ScannedEntry, _charged: u64, delivered: u64) {
+            self.delivered = delivered;
+        }
+        fn on_group(&mut self, _group: &DuplicateGroup) {
+            self.groups += 1;
+        }
+    }
+    let mut source = Source::default();
+    let collector = collect(&mut source, &[("a", b"abc", 1), ("b", b"abc", 2)]);
+    let mut observer = Observer::default();
+    let report = collector.analyze_with_observer(
+        &mut FailedAfterChunks(source),
+        true,
+        &CancellationToken::new(),
+        &mut observer,
+    );
+    assert!(observer.delivered > 0);
+    assert!(!report.complete);
+    assert!(report.groups.is_empty());
+    assert_eq!(observer.groups, 0);
+}
+
+#[test]
 fn full_hash_groups_match_independent_byte_equality_and_exclude_aliases_and_unique_sizes() {
     let mut source = Source::default();
     let inputs: &[(&str, &[u8], u128)] = &[

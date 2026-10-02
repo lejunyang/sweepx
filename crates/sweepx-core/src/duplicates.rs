@@ -26,6 +26,7 @@ pub fn scan_duplicates_with_store<S: SnapshotStore>(
         Some(FileAnalysisObservation {
             options: FileAnalysisOptions::Duplicates(options),
             cancel,
+            sink: None,
         }),
     )
     .map(|result| result.scan)

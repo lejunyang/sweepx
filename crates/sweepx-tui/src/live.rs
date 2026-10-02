@@ -352,6 +352,26 @@ fn truncate_with_ellipsis(value: &str, width: usize) -> String {
         cell_window(value, 0, width.saturating_sub(1)).trim_end()
     )
 }
+
+/// Keeps the filename end of a sanitized path. Reuses cell-based clipping so CJK names cannot
+/// shift the following columns; the leading ellipsis makes omitted ancestors explicit.
+pub(crate) fn tail_with_ellipsis(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if !overflows(value, width) {
+        return value.to_string();
+    }
+    let suffix_width = width - 1;
+    format!(
+        "…{}",
+        cell_window(
+            value,
+            text_cells(value).saturating_sub(suffix_width),
+            suffix_width
+        )
+    )
+}
 /// The fewest trailing path components that still tell every root apart.
 ///
 /// A fixed component count cannot work: `…\Default\IndexedDB` and

@@ -31,18 +31,74 @@ pub fn scan_large_files_with_store<S: SnapshotStore>(
         Some(FileAnalysisObservation {
             options: FileAnalysisOptions::Large(options),
             cancel,
+            sink: None,
         }),
     )
     .map(|result| result.scan)
 }
 
-pub(super) enum FileAnalysisOptions<'a> {
+/// Independent analysis requested for the same metadata traversal.
+#[derive(Clone, Copy)]
+pub enum FileAnalysisOptions<'a> {
+    /// Logical-size ranking, without content IO.
     Large(&'a LargeFileOptions),
+    /// Explicit bounded content reads, without keeper or deletion choices.
     Duplicates(&'a DuplicateOptions),
+}
+/// Synchronous worker callbacks. Consumers bound retained copies/queues and never render or
+/// perform native mutation from these callbacks. Only the enclosing scan return is terminal.
+pub trait FileAnalysisSink {
+    /// Coalescible provisional ranking while metadata traversal remains open.
+    fn on_large_files(&mut self, _report: &LargeFileReport) {}
+    /// Final ranking, possibly incomplete. Deliver reliably before the enclosing return;
+    /// even a complete ranking cannot hide a later state-persistence failure.
+    fn on_large_files_final(&mut self, report: &LargeFileReport) {
+        self.on_large_files(report);
+    }
+    /// Full-hash group with live final stamps; this is not whole-scope completion.
+    fn on_duplicate_group(&mut self, _group: &sweepx_analysis::DuplicateGroup) {}
+    /// Coalescible current metadata/IO progress; path is presentation only.
+    fn on_progress(&mut self, _phase: &'static str, _count: u128, _path: &str) {}
+}
+
+/// Runs the existing analysis with worker-local callbacks. Cancellation, state/output and
+/// resource semantics are identical to the ordinary large-file/duplicate entry points.
+pub fn scan_file_analysis_with_observer<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    options: FileAnalysisOptions<'_>,
+    cancel: &CancellationToken,
+    sink: &mut dyn FileAnalysisSink,
+) -> Result<ScanSuccess, CoreError> {
+    match options {
+        FileAnalysisOptions::Large(options) => {
+            LargeFileCollector::new(options.clone())?;
+        }
+        FileAnalysisOptions::Duplicates(options) => {
+            DuplicateCollector::new(options.clone())?;
+        }
+    }
+    scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        None,
+        None,
+        None,
+        Some(FileAnalysisObservation {
+            options,
+            cancel,
+            sink: Some(sink),
+        }),
+    )
+    .map(|result| result.scan)
 }
 pub(super) struct FileAnalysisObservation<'a> {
     pub options: FileAnalysisOptions<'a>,
     pub cancel: &'a CancellationToken,
+    pub sink: Option<&'a mut dyn FileAnalysisSink>,
 }
 enum FileCollector {
     Large(LargeFileCollector),
@@ -72,19 +128,23 @@ impl FileAnalysisReport {
         }
     }
 }
-pub(super) struct FileAnalysisObserver {
+pub(super) struct FileAnalysisObserver<'a> {
     collector: FileCollector,
     finished: bool,
     incomplete: bool,
     expected_roots: usize,
     completed_roots: usize,
     current_root: Option<PathBuf>,
+    sink: Option<&'a mut dyn FileAnalysisSink>,
+    last_preview: Option<Instant>,
+    observed_files: u128,
 }
 
-impl FileAnalysisObserver {
+impl<'a> FileAnalysisObserver<'a> {
     pub(super) fn new(
         options: FileAnalysisOptions<'_>,
         expected_roots: usize,
+        sink: Option<&'a mut dyn FileAnalysisSink>,
     ) -> Result<Self, CoreError> {
         Ok(Self {
             collector: match options {
@@ -100,11 +160,14 @@ impl FileAnalysisObserver {
             expected_roots,
             completed_roots: 0,
             current_root: None,
+            sink,
+            last_preview: None,
+            observed_files: 0,
         })
     }
 
     pub(super) fn finish(
-        self,
+        mut self,
         cancelled: bool,
         source: &mut dyn DuplicateContentSource,
         cancel: &CancellationToken,
@@ -115,20 +178,64 @@ impl FileAnalysisObserver {
             && self.completed_roots == self.expected_roots;
         match self.collector {
             FileCollector::Large(collector) => {
-                FileAnalysisReport::Large(collector.finish(complete))
+                let report = collector.finish(complete);
+                if let Some(sink) = self.sink.as_deref_mut() {
+                    sink.on_large_files_final(&report);
+                }
+                FileAnalysisReport::Large(report)
             }
             FileCollector::Duplicates(collector) => {
-                FileAnalysisReport::Duplicates(collector.analyze(source, complete, cancel))
+                if let Some(sink) = self.sink {
+                    struct Bridge<'a>(&'a mut dyn FileAnalysisSink);
+                    impl sweepx_analysis::DuplicateAnalysisObserver for Bridge<'_> {
+                        fn on_read(&mut self, entry: &ScannedEntry, _charged: u64, delivered: u64) {
+                            self.0
+                                .on_progress("content", delivered.into(), &entry.display_path);
+                        }
+                        fn on_group(&mut self, group: &sweepx_analysis::DuplicateGroup) {
+                            self.0.on_duplicate_group(group);
+                        }
+                    }
+                    FileAnalysisReport::Duplicates(collector.analyze_with_observer(
+                        source,
+                        complete,
+                        cancel,
+                        &mut Bridge(sink),
+                    ))
+                } else {
+                    FileAnalysisReport::Duplicates(collector.analyze(source, complete, cancel))
+                }
             }
         }
     }
 }
 
-impl ClassifiedScanObserver for FileAnalysisObserver {
+impl ClassifiedScanObserver for FileAnalysisObserver<'_> {
     fn on_entry(&mut self, entry: &ScannedEntry) {
+        if entry.object_type == ObjectType::File {
+            self.observed_files = self.observed_files.saturating_add(1);
+        }
         match &mut self.collector {
             FileCollector::Large(collector) => collector.observe(entry),
             FileCollector::Duplicates(collector) => collector.observe(entry),
+        }
+        if let Some(sink) = self.sink.as_deref_mut() {
+            match &self.collector {
+                FileCollector::Large(collector) => {
+                    if self
+                        .last_preview
+                        .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
+                    {
+                        let preview = collector.preview();
+                        if !preview.files.is_empty() {
+                            self.last_preview = Some(Instant::now());
+                            sink.on_large_files(&preview);
+                        }
+                    }
+                }
+                FileCollector::Duplicates(_) => {}
+            }
+            sink.on_progress("traversal", self.observed_files, &entry.display_path);
         }
     }
 
@@ -252,6 +359,61 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn a_final_ranking_callback_does_not_hide_a_later_state_failure() {
+        struct RejectState;
+        impl SnapshotStore for RejectState {
+            fn save(&self, _snapshot: &OperationSnapshot) -> Result<(), StateError> {
+                Err(StateError::Io(std::io::Error::other(
+                    "controlled state failure",
+                )))
+            }
+            fn load(&self, _operation_id: &str) -> Result<Option<OperationSnapshot>, StateError> {
+                Ok(None)
+            }
+        }
+        #[derive(Default)]
+        struct Sink {
+            final_report: Option<LargeFileReport>,
+            provisional: bool,
+        }
+        impl FileAnalysisSink for Sink {
+            fn on_large_files(&mut self, report: &LargeFileReport) {
+                if report.complete {
+                    self.final_report = Some(report.clone());
+                } else {
+                    self.provisional |= !report.files.is_empty();
+                }
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture_root(&fixture);
+        fs::write(root.join("one"), b"payload").unwrap();
+        let mut sink = Sink::default();
+        let result = scan_file_analysis_with_observer(
+            &context(),
+            &ScanRequest {
+                roots: vec![root.clone()],
+                state_dir: None,
+            },
+            Some(&RejectState),
+            FileAnalysisOptions::Large(&LargeFileOptions {
+                minimum_logical_bytes: 0.into(),
+                ..Default::default()
+            }),
+            &CancellationToken::new(),
+            &mut sink,
+        );
+        assert!(result.is_err());
+        assert!(sink.provisional);
+        let report = sink.final_report.unwrap();
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(
+            report.files[0].logical_bytes,
+            sweepx_platform::known_u128(u128::from(fs::metadata(root.join("one")).unwrap().len()))
+        );
+    }
+
     fn scan(
         root: &Path,
         limits: ScanResourceLimits,
@@ -275,6 +437,7 @@ mod tests {
             Some(FileAnalysisObservation {
                 options: FileAnalysisOptions::Large(options),
                 cancel,
+                sink: None,
             }),
         )
         .unwrap()

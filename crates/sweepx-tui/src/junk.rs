@@ -19,6 +19,17 @@ use sweepx_model::{ByteValue, EvidenceValue, HumanSizeUnit, ScanSort};
 const MAX_ROWS: usize = 16_384;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SELECTION: usize = 256;
+/// Distinct analyses share list mechanics while preserving their user-visible meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResultPresentation {
+    /// Rule-based junk candidates.
+    #[default]
+    Junk,
+    /// Logical-size ranking; size does not establish disposability.
+    LargeFiles,
+    /// Complete content hashes; an explicit keeper is required before Trash.
+    Duplicates,
+}
 mod quarantine;
 use quarantine::QuarantineView;
 
@@ -118,6 +129,10 @@ pub enum JunkEvent {
 
 /// Nonblocking bridge to scanning and Trash workers. Implementations must not do native work here.
 pub trait JunkProvider {
+    /// Meaning of this list, independent of rendering and execution authority.
+    fn presentation(&self) -> ResultPresentation {
+        ResultPresentation::Junk
+    }
     /// Poll at most one event without waiting.
     fn poll(&mut self) -> Option<JunkEvent>;
     /// Request cooperative cancellation.
@@ -130,6 +145,10 @@ pub trait JunkProvider {
     fn prioritize(&mut self, key: &str);
     /// Begin a bounded, explicitly selected Trash batch on a worker.
     fn trash(&mut self, keys: &[String]) -> Result<(), String>;
+    /// Explicitly choose/clear the keeper for a duplicate group. No native work runs here.
+    fn toggle_keeper(&mut self, _key: &str) -> Result<(), String> {
+        Err("keeper selection is available only for duplicate groups".into())
+    }
     /// Begin an independent quarantine preview; return an invocation-local operation ID.
     fn preview_quarantine(&mut self, _keys: &[String]) -> Result<u64, String> {
         Err("temporary-object quarantine is unavailable on this provider".into())
@@ -153,6 +172,7 @@ struct ViewRow {
 
 /// Bounded presentation state. Stable keys retain selection across revisions and reordered rows.
 pub struct JunkModel {
+    presentation: ResultPresentation,
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
@@ -179,6 +199,7 @@ impl JunkModel {
     /// Creates an empty live view; no scan, cache read or default selection is performed.
     pub fn new(locale: Locale, unit: HumanSizeUnit) -> Self {
         Self {
+            presentation: ResultPresentation::Junk,
             locale,
             unit,
             sort: ScanSort::Size,
@@ -206,6 +227,12 @@ impl JunkModel {
     pub fn with_sort(mut self, sort: ScanSort) -> Self {
         self.sort = sort;
         self.dirty = true;
+        self
+    }
+
+    /// Selects the analysis vocabulary without changing safety or queue semantics.
+    pub fn with_presentation(mut self, presentation: ResultPresentation) -> Self {
+        self.presentation = presentation;
         self
     }
 
@@ -383,7 +410,12 @@ impl JunkModel {
                 ScanSort::Size => bytes(&self.rows[b]).cmp(&bytes(&self.rows[a])),
                 ScanSort::Path => std::cmp::Ordering::Equal,
             };
-            size_order.then_with(|| {
+            let group_order = if self.presentation == ResultPresentation::Duplicates {
+                self.rows[a].row.rule().cmp(self.rows[b].row.rule())
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            size_order.then(group_order).then_with(|| {
                 self.rows[a]
                     .row
                     .path()
@@ -407,6 +439,11 @@ impl JunkModel {
     }
 
     fn eligible(&self, key: &str) -> bool {
+        if self.presentation != ResultPresentation::Junk
+            && self.outcome != Some(JunkOutcome::Complete)
+        {
+            return false;
+        }
         !self.busy
             && self.rows.get(key).is_some_and(|row| {
                 !row.historical
@@ -422,6 +459,12 @@ impl JunkModel {
                 .get(key)
                 .is_some_and(|row| !row.row.report_allows_trash())
         }) {
+            if self.presentation == ResultPresentation::Duplicates {
+                return self.text(
+                    "保留者不能回收，请先取消选中保留者",
+                    "Keepers cannot be moved; unselect them before Trash",
+                );
+            }
             self.text(
                 "所选项证据仅供报告，尚不满足回收条件",
                 "Selected evidence is report-only and does not meet Trash requirements",
@@ -442,6 +485,10 @@ impl JunkModel {
             "discovery" => self.text("发现上下文", "Discovering context"),
             "traversal" => self.text("扫描", "Scanning"),
             "formats" => self.text("核验项目文件格式", "Checking project file formats"),
+            "content" => self.text(
+                "读取与核验内容（进度为已读字节）",
+                "Reading and validating content (progress: delivered bytes)",
+            ),
             "temporary_objects" => self.text(
                 "核验临时对象与进程引用",
                 "Checking temporary objects and process references",
@@ -481,7 +528,16 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         Constraint::Length(3),
     ])
     .areas(frame.area());
-    let title = model.text("垃圾候选", "Junk candidates");
+    let title = match model.presentation {
+        ResultPresentation::Junk => model.text("垃圾候选", "Junk candidates"),
+        ResultPresentation::LargeFiles => {
+            model.text("大文件（大小不代表垃圾）", "Large files (size is not junk)")
+        }
+        ResultPresentation::Duplicates => model.text(
+            "重复内容组（明确选择保留者）",
+            "Duplicate content (choose a keeper)",
+        ),
+    };
     frame.render_widget(
         Paragraph::new(format!(
             "{title} · {} · {} {} · {} {} · {} {}\n{}",
@@ -512,6 +568,12 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
             model.text("回收中", "Moving")
         } else if row.historical {
             model.text("历史/不完整", "Historical/partial")
+        } else if model.presentation == ResultPresentation::Duplicates
+            && !row.row.report_allows_trash()
+        {
+            model.text("保留者", "Keeper")
+        } else if model.presentation != ResultPresentation::Junk && !row.row.complete() {
+            model.text("暂定", "Provisional")
         } else if row.current {
             model.text("当前", "Current")
         } else {
@@ -523,7 +585,16 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
             } else {
                 " "
             }),
-            Cell::from(crate::live::sanitize_terminal_text(row.row.path())),
+            Cell::from(if model.presentation == ResultPresentation::Junk {
+                crate::live::sanitize_terminal_text(row.row.path())
+            } else {
+                // Keep a conservative width below the table's path allocation. Details still
+                // show the full sanitized path; this label never changes native row authority.
+                crate::live::tail_with_ellipsis(
+                    &crate::live::sanitize_terminal_text(row.row.path()),
+                    usize::from(list.width.saturating_sub(40) / 2),
+                )
+            }),
             Cell::from(crate::live::sanitize_terminal_text(row.row.rule())),
             Cell::from(crate::byte_value_label_with_unit(
                 row.row.logical_bytes(),
@@ -545,7 +616,11 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
     .header(Row::new([
         "",
         model.text("路径", "Path"),
-        model.text("规则", "Rule"),
+        if model.presentation == ResultPresentation::Junk {
+            model.text("规则", "Rule")
+        } else {
+            model.text("分析", "Analysis")
+        },
         model.text("逻辑大小", "Logical size"),
         model.text("状态", "State"),
     ]))
@@ -578,10 +653,22 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         .block(Block::default().borders(Borders::ALL)),
         details,
     );
-    frame.render_widget(Paragraph::new(model.text(
+    let hint = if model.presentation == ResultPresentation::Duplicates {
+        model.text("↑↓ 移动 · Space 选择 · p 保留/取消保留 · r/R 全量刷新 · c 取消 · d/Delete 回收所选副本 · q 退出", "↑↓ Move · Space Select · p Choose/clear keeper · r/R Refresh all · c Cancel · d/Delete Trash selected copies · q Quit")
+    } else if model.presentation == ResultPresentation::LargeFiles {
+        model.text("↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 全量刷新 · c 取消 · d/Delete 回收所选文件 · q 退出", "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh all · c Cancel · d/Delete Trash selected files · q Quit")
+    } else {
+        model.text(
         "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新 · c 取消 · d/Delete 回收 · x 临时对象隔离 · q 退出",
         "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh · c Cancel · d/Delete Trash · x Quarantine temporary objects · q Quit",
-    )).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL)), help);
+    )
+    };
+    frame.render_widget(
+        Paragraph::new(hint)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
+        help,
+    );
 }
 
 /// Runs with injectable terminal/events for independent rendering and interaction tests.
@@ -672,6 +759,17 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                 }
             }
             KeyCode::Char('u') => model.marked.clear(),
+            KeyCode::Char('p')
+                if model.presentation == ResultPresentation::Duplicates
+                    && !model.busy
+                    && model.trash_pending.is_empty() =>
+            {
+                if let Some(key) = model.order.get(model.cursor)
+                    && let Err(error) = provider.toggle_keeper(key)
+                {
+                    model.diagnostic(error);
+                }
+            }
             KeyCode::Char('r' | 'R') if !model.busy && model.trash_pending.is_empty() => {
                 let keys = if key.code == KeyCode::Char('R') {
                     Vec::new()
@@ -744,7 +842,9 @@ pub fn run_junk_browser<P: JunkProvider>(
         terminal.clear()?;
         let result = run_junk_loop(
             &mut terminal,
-            &mut JunkModel::new(locale, unit).with_sort(sort),
+            &mut JunkModel::new(locale, unit)
+                .with_sort(sort)
+                .with_presentation(provider.presentation()),
             &mut CrosstermEventSource,
             &mut provider,
             &termination,

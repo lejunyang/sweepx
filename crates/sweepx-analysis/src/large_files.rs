@@ -185,6 +185,33 @@ impl LargeFileCollector {
             unknown_logical_files: self.unknown.into(),
         }
     }
+
+    /// Copies the bounded current ranking for a coalesced progress snapshot. It always remains
+    /// incomplete until traversal closes; callers must bound retained snapshots independently.
+    pub fn preview(&self) -> LargeFileReport {
+        let mut incomplete_reasons = vec![LargeFileIncompleteReason::TraversalIncomplete];
+        if self.unknown > 0 {
+            incomplete_reasons.push(LargeFileIncompleteReason::LogicalSizeUnavailable);
+        }
+        if self.retention_limited {
+            incomplete_reasons.push(LargeFileIncompleteReason::RetentionLimit);
+        }
+        LargeFileReport {
+            options: self.options.clone(),
+            files: self
+                .files
+                .values()
+                .rev()
+                .map(|(entry, _)| entry.clone())
+                .collect(),
+            observed_files: self.observed.into(),
+            qualifying_files: self.qualifying.into(),
+            unknown_logical_files: self.unknown.into(),
+            top_k_limited: self.qualifying > self.options.max_files as u128,
+            complete: false,
+            incomplete_reasons,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +258,41 @@ mod tests {
             minimum_logical_bytes: 0.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn preview_reports_observed_gaps_without_claiming_terminal_coverage() {
+        let mut collector = LargeFileCollector::new(options(2)).unwrap();
+        collector.observe(&file("first", 7));
+        collector.observe(&file("later", 13));
+        let mut uncertain = file("uncertain", 0);
+        uncertain.logical_bytes = EvidenceValue::Unknown {
+            reason: ReasonCode::Unknown,
+        };
+        collector.observe(&uncertain);
+        let preview = collector.preview();
+        assert!(!preview.complete);
+        assert_eq!(
+            preview
+                .files
+                .iter()
+                .map(|entry| entry.display_path.as_str())
+                .collect::<Vec<_>>(),
+            ["/fixture/later", "/fixture/first"]
+        );
+        assert_eq!(
+            preview.incomplete_reasons,
+            [
+                LargeFileIncompleteReason::TraversalIncomplete,
+                LargeFileIncompleteReason::LogicalSizeUnavailable
+            ]
+        );
+        let final_report = collector.finish(true);
+        assert_eq!(preview.files, final_report.files);
+        assert_eq!(
+            final_report.incomplete_reasons,
+            [LargeFileIncompleteReason::LogicalSizeUnavailable]
+        );
     }
 
     #[test]

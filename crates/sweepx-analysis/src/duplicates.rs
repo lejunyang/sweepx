@@ -90,7 +90,22 @@ pub struct DuplicateGroup {
     pub logical_bytes: DecimalU128,
     /// Source observations of distinct native objects, with allocation/coverage evidence intact.
     pub files: Vec<ScannedEntry>,
+    /// Live final content stamps aligned with `files`. Not serialized or restored from reports;
+    /// revalidation is required before relying on previously observed contents.
+    #[serde(skip)]
+    pub live_observations: Vec<RegularFileObservation>,
 }
+
+/// Worker-local observations from the existing content stages. Callers bound retained copies;
+/// progress and individual groups cannot establish terminal scan or deletion authority.
+pub trait DuplicateAnalysisObserver {
+    /// Cumulative attempted-range and delivered-byte facts; chunks remain provisional.
+    fn on_read(&mut self, _entry: &ScannedEntry, _charged: u64, _delivered: u64) {}
+    /// A full-hash group whose members passed final checks. Scope may still be incomplete.
+    fn on_group(&mut self, _group: &DuplicateGroup) {}
+}
+struct NoDuplicateObserver;
+impl DuplicateAnalysisObserver for NoDuplicateObserver {}
 /// Read-only duplicate observations, separate from junk candidates and large-file rankings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -235,10 +250,21 @@ impl DuplicateCollector {
     /// Runs staged content reads, preserving gaps rather than treating skipped files as unique.
     /// Cancellation/deadline/limits stop or refuse work; only complete hashes form groups.
     pub fn analyze(
+        self,
+        source: &mut dyn DuplicateContentSource,
+        traversal_complete: bool,
+        cancel: &CancellationToken,
+    ) -> DuplicateReport {
+        self.analyze_with_observer(source, traversal_complete, cancel, &mut NoDuplicateObserver)
+    }
+
+    /// Streams progress and completed groups through the same bounded content algorithm.
+    pub fn analyze_with_observer(
         mut self,
         source: &mut dyn DuplicateContentSource,
         traversal_complete: bool,
         cancel: &CancellationToken,
+        observer: &mut dyn DuplicateAnalysisObserver,
     ) -> DuplicateReport {
         if !traversal_complete {
             self.gaps
@@ -262,8 +288,12 @@ impl DuplicateCollector {
         // A stopped stage discards provisional hashes. Already finalized groups survive, while
         // cancellation/deadline avoids walking all remaining stage indexes and opening more files.
         'content: {
-            let mut full = BTreeMap::<(u64, [u8; 32]), Vec<usize>>::new();
             for (size, indices) in sizes.into_iter().filter(|(_, files)| files.len() > 1) {
+                // Different lengths cannot join this cohort. Close its full hashes and native
+                // checks before touching later sizes, so completed groups can be shown during
+                // content IO and survive an explicitly partial later stage. This remains an
+                // observation interval, not an atomic scope snapshot or mutation authority.
+                let mut full = BTreeMap::<[u8; 32], Vec<usize>>::new();
                 let mut samples = BTreeMap::<[u8; 32], Vec<usize>>::new();
                 for index in indices {
                     let mut hasher = Sha256::new();
@@ -286,6 +316,7 @@ impl DuplicateCollector {
                             previous[index].as_ref(),
                             cancel,
                             &mut hasher,
+                            observer,
                         ) {
                             Ok(observation) => previous[index] = Some(observation),
                             Err(reason) => {
@@ -317,10 +348,11 @@ impl DuplicateCollector {
                             previous[index].as_ref(),
                             cancel,
                             &mut hasher,
+                            observer,
                         ) {
                             Ok(observation) => {
                                 previous[index] = Some(observation);
-                                full.entry((size, hasher.finalize().into()))
+                                full.entry(hasher.finalize().into())
                                     .or_default()
                                     .push(index);
                             }
@@ -334,32 +366,46 @@ impl DuplicateCollector {
                         }
                     }
                 }
-            }
-            for ((size, digest), indices) in full.into_iter().filter(|(_, files)| files.len() > 1) {
-                let mut valid = Vec::new();
-                for index in indices {
-                    // Revalidate earlier hashes after the other files' IO, without reading content.
-                    match budget.read(
-                        source,
-                        &self.files[index],
-                        0,
-                        0,
-                        previous[index].as_ref(),
-                        cancel,
-                        &mut Sha256::new(),
-                    ) {
-                        Ok(_) => valid.push(index),
-                        Err(reason) => {
-                            let stop = reason.stops_content();
-                            self.gaps.insert(reason);
-                            if stop {
-                                break 'content;
+                for (digest, indices) in full.into_iter().filter(|(_, files)| files.len() > 1) {
+                    let mut valid = Vec::new();
+                    for index in indices {
+                        // Revalidate earlier hashes after the other files' IO, without reading content.
+                        match budget.read(
+                            source,
+                            &self.files[index],
+                            0,
+                            0,
+                            previous[index].as_ref(),
+                            cancel,
+                            &mut Sha256::new(),
+                            observer,
+                        ) {
+                            Ok(_) => valid.push(index),
+                            Err(reason) => {
+                                let stop = reason.stops_content();
+                                self.gaps.insert(reason);
+                                if stop {
+                                    break 'content;
+                                }
                             }
                         }
                     }
-                }
-                if valid.len() > 1 {
-                    selected.push((size, digest, valid));
+                    if valid.len() > 1 {
+                        let group = DuplicateGroup {
+                            logical_bytes: u128::from(size).into(),
+                            sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+                            files: valid
+                                .iter()
+                                .map(|index| self.files[*index].clone())
+                                .collect(),
+                            live_observations: valid
+                                .iter()
+                                .map(|index| previous[*index].clone().expect("validated full hash"))
+                                .collect(),
+                        };
+                        observer.on_group(&group);
+                        selected.push(group);
+                    }
                 }
             }
         }
@@ -367,22 +413,7 @@ impl DuplicateCollector {
             self.gaps.insert(DuplicateIncompleteReason::Cancelled);
         }
         let retained = self.files.len();
-        let mut slots: Vec<_> = self.files.into_iter().map(Some).collect();
-        let groups = selected
-            .into_iter()
-            .map(|(size, digest, indices)| DuplicateGroup {
-                logical_bytes: u128::from(size).into(),
-                sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
-                files: indices
-                    .into_iter()
-                    .map(|index| {
-                        slots[index]
-                            .take()
-                            .expect("one content group per distinct object")
-                    })
-                    .collect(),
-            })
-            .collect();
+        let groups = selected;
         DuplicateReport {
             options: self.options.clone(),
             groups,
@@ -416,6 +447,7 @@ impl ReadBudget<'_> {
         previous: Option<&RegularFileObservation>,
         cancel: &CancellationToken,
         hash: &mut Sha256,
+        observer: &mut dyn DuplicateAnalysisObserver,
     ) -> Result<RegularFileObservation, DuplicateIncompleteReason> {
         if cancel.is_cancelled() {
             return Err(DuplicateIncompleteReason::Cancelled);
@@ -431,6 +463,7 @@ impl ReadBudget<'_> {
         }
         self.operations += 1;
         self.charged += count;
+        observer.on_read(entry, self.charged, self.delivered);
         let mut delivered = 0u64;
         let mut timed_out = false;
         let mut exceeded = false;
@@ -459,6 +492,7 @@ impl ReadBudget<'_> {
                 }
                 self.delivered += chunk.len() as u64;
                 hash.update(chunk);
+                observer.on_read(entry, self.charged, self.delivered);
                 Ok(())
             },
         );
