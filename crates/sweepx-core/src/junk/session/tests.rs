@@ -72,12 +72,14 @@ fn native_closed_candidate_reaches_session_mailbox_before_unrelated_subtree() {
     let service = JunkService::built_in().unwrap();
     let platform = PlatformJunkSetup::default();
     let mut pending = Rows::new();
+    let mut presentations = PresentationIndex::default();
     let mut probe = Probe {
         inner: Observer {
             service: &service,
             platform: &platform,
             writer: &mut writer,
             pending: &mut pending,
+            presentations: &mut presentations,
             paths: None,
             limits,
             retained_bytes: 0,
@@ -129,6 +131,441 @@ fn native_closed_candidate_reaches_session_mailbox_before_unrelated_subtree() {
     assert!(row.complete());
     assert!(pending.contains_key(&key));
     session.close();
+}
+
+fn controlled_worker(root: &Path) -> Worker {
+    let mut request = JunkSessionRequest::new(vec![root.to_path_buf()]);
+    request.include_platform_rules = false;
+    Worker {
+        request,
+        session_id: "controlled-presentation-session".into(),
+        current: Rows::new(),
+        presentations: PresentationIndex::default(),
+        scan_roots: Vec::new(),
+    }
+}
+
+fn controlled_revision(
+    worker: &mut Worker,
+    revision: u64,
+    selected: Option<Vec<JunkCandidateKey>>,
+) -> Vec<JunkSessionEvent> {
+    let shared = Arc::new(Shared::new(worker.request.limits));
+    let job = Job {
+        revision: JunkSessionRevision(revision),
+        selected,
+        cancel: shared.cancel_token(),
+    };
+    let session = JunkSession {
+        shared: Arc::clone(&shared),
+    };
+    let events = std::thread::scope(|scope| {
+        let task = scope.spawn(|| {
+            let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+            if let Err(failure) = worker.run_with_discovery(&job, &mut writer, |_| {
+                unreachable!("platform rules disabled")
+            }) {
+                writer.failure(failure);
+                writer.finish(JunkSessionOutcome::Failed, false, 0);
+            }
+        });
+        let events = drain(&session, job.revision);
+        task.join().unwrap();
+        events
+    });
+    session.close();
+    events
+}
+
+#[test]
+fn cancelled_published_base_is_removed_by_a_complete_native_refresh() {
+    use std::sync::mpsc::sync_channel;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let target = project(&root, "project", b"retained personal bytes");
+    let mut worker = controlled_worker(&root);
+    worker.request.limits.max_events = 1;
+    let (sent, received) = sync_channel(1);
+    let (resume, resumed) = sync_channel(1);
+    worker.presentations.after_base_sent = Some(Box::new(move |key| {
+        sent.send(key).unwrap();
+        resumed.recv_timeout(Duration::from_secs(10)).unwrap();
+    }));
+    let shared = Arc::new(Shared::new(worker.request.limits));
+    let job = Job {
+        revision: JunkSessionRevision(1),
+        selected: None,
+        cancel: shared.cancel_token(),
+    };
+    let session = JunkSession {
+        shared: Arc::clone(&shared),
+    };
+    let (mut worker, key) = std::thread::scope(|scope| {
+        let task = scope.spawn(move || {
+            let mut writer = Writer::new(shared, job.revision, job.cancel.clone());
+            worker
+                .run_with_discovery(&job, &mut writer, |_| {
+                    unreachable!("platform rules disabled")
+                })
+                .unwrap();
+            worker
+        });
+        // A single reliable slot plus the publisher hook ensures that this real native Base
+        // reaches the consumer while the worker cannot enter Formats/Current or Replacement.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let key = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "native Base was not published");
+            let Some(event) = session.next_event_timeout(remaining).unwrap() else {
+                continue;
+            };
+            match event.kind {
+                JunkSessionEventKind::Candidate {
+                    key,
+                    state: JunkSessionCandidateState::Base,
+                    row,
+                    ..
+                } => {
+                    assert_eq!(row.observed_native_path(), Some(target.clone()));
+                    assert!(row.candidate.project_execution_blocker().is_some());
+                    break key;
+                }
+                JunkSessionEventKind::Candidate { .. } | JunkSessionEventKind::Completed { .. } => {
+                    panic!("Base boundary was bypassed")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(received.recv_timeout(Duration::from_secs(10)).unwrap(), key);
+        session.cancel();
+        resume.send(()).unwrap();
+        let cancelled = drain(&session, JunkSessionRevision(1));
+        assert!(cancelled.iter().all(|event| !matches!(
+            event.kind,
+            JunkSessionEventKind::Removed { .. } | JunkSessionEventKind::Candidate { .. }
+        )));
+        assert!(matches!(
+            cancelled.last().unwrap().kind,
+            JunkSessionEventKind::Completed {
+                outcome: JunkSessionOutcome::Cancelled,
+                replaced: false,
+                ..
+            }
+        ));
+        (task.join().unwrap(), key)
+    });
+    session.close();
+    worker.presentations.after_base_sent = None;
+    assert!(worker.presentations.contains(&key));
+    assert!(
+        !worker.current.contains_key(&key),
+        "Base is not a current binding"
+    );
+
+    // Losing the marker changes classification, while the native directory and user payload
+    // stay present. Ordinary reads independently prove that a removed row is presentation only.
+    fs::remove_file(target.parent().unwrap().join("Cargo.toml")).unwrap();
+    let refreshed = controlled_revision(&mut worker, 2, None);
+    assert_eq!(
+        refreshed
+            .iter()
+            .filter(|event| matches!(event.kind, JunkSessionEventKind::Removed { key: old } if old == key))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        refreshed.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            candidate_count: 0,
+            ..
+        }
+    ));
+    assert!(current(&refreshed).is_empty());
+    assert!(!worker.presentations.contains(&key));
+    assert!(worker.current.is_empty());
+    assert_eq!(
+        fs::read(target.join("payload")).unwrap(),
+        b"retained personal bytes"
+    );
+}
+
+#[test]
+fn selected_native_replacement_removes_base_and_history_without_erasing_siblings() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let selected = root.join("target");
+    fs::create_dir(&selected).unwrap();
+    let base_target = project(&selected, "base", b"base personal");
+    let history_target = project(&selected, "history", b"history personal");
+    let sibling = project(&root, "sibling", b"sibling personal");
+    // Obtain every row through the actual native scanner. A second worker retains only the
+    // selected parent's current binding and publishes the others strictly as presentation.
+    let mut source = controlled_worker(&root);
+    let rows = current(&controlled_revision(&mut source, 1, None));
+    let row_for = |path: &Path| {
+        rows.iter()
+            .find(|(_, row)| row.observed_native_path().as_deref() == Some(path))
+            .map(|(key, row)| (*key, Arc::clone(row)))
+            .unwrap()
+    };
+    let (selected_key, selected_row) = row_for(&selected);
+    let (base_key, base_row) = row_for(&base_target);
+    let (history_key, history_row) = row_for(&history_target);
+    let (sibling_key, sibling_row) = row_for(&sibling);
+    let mut worker = controlled_worker(&root);
+    worker.scan_roots = vec![root.clone()];
+    let shared = Arc::new(Shared::new(worker.request.limits));
+    let mut writer = Writer::new(
+        Arc::clone(&shared),
+        JunkSessionRevision(1),
+        shared.cancel_token(),
+    );
+    for (key, row, state) in [
+        (
+            selected_key,
+            selected_row.clone(),
+            JunkSessionCandidateState::Current,
+        ),
+        (base_key, base_row, JunkSessionCandidateState::Base),
+        (
+            history_key,
+            history_row,
+            JunkSessionCandidateState::Historical,
+        ),
+        (
+            sibling_key,
+            sibling_row,
+            JunkSessionCandidateState::Historical,
+        ),
+    ] {
+        worker
+            .presentations
+            .send_candidate(&mut writer, worker.request.limits, key, state, [0; 32], row)
+            .unwrap();
+    }
+    worker.current.insert(selected_key, selected_row);
+    assert!(!worker.current.contains_key(&base_key));
+    assert!(!worker.current.contains_key(&history_key));
+    let preview = JunkSession { shared };
+    assert_eq!(std::iter::from_fn(|| preview.try_next_event()).count(), 4);
+    preview.close();
+
+    for path in [&base_target, &history_target] {
+        fs::remove_file(path.parent().unwrap().join("Cargo.toml")).unwrap();
+    }
+    let refreshed = controlled_revision(&mut worker, 2, Some(vec![selected_key]));
+    let removed: BTreeSet<_> = refreshed
+        .iter()
+        .filter_map(|event| match event.kind {
+            JunkSessionEventKind::Removed { key } => Some(key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed, BTreeSet::from([base_key, history_key]));
+    assert!(matches!(
+        refreshed.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    assert!(worker.presentations.contains(&selected_key));
+    assert!(worker.presentations.contains(&sibling_key));
+    assert!(!worker.presentations.contains(&base_key));
+    assert!(!worker.presentations.contains(&history_key));
+    assert_eq!(
+        worker.current.keys().copied().collect::<Vec<_>>(),
+        vec![selected_key]
+    );
+    for (path, payload) in [
+        (&base_target, b"base personal".as_slice()),
+        (&history_target, b"history personal".as_slice()),
+        (&sibling, b"sibling personal".as_slice()),
+    ] {
+        assert_eq!(fs::read(path.join("payload")).unwrap(), payload);
+    }
+}
+
+#[test]
+fn cumulative_presentation_admission_rejects_untracked_native_rows_before_enqueue() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let a = project(&root, "a", b"first personal");
+    let b = project(&root, "b", b"second personal");
+    let mut source = controlled_worker(&root);
+    let rows = current(&controlled_revision(&mut source, 1, None));
+    let row_for = |path: &Path| {
+        rows.iter()
+            .find(|(_, row)| row.observed_native_path().as_deref() == Some(path))
+            .map(|(key, row)| (*key, Arc::clone(row)))
+            .unwrap()
+    };
+    let (a_key, a_row) = row_for(&a);
+    let (b_key, b_row) = row_for(&b);
+    let mut limits = JunkSessionLimits {
+        max_candidates: 1,
+        ..Default::default()
+    };
+    let mut index = PresentationIndex::default();
+    for (revision, state) in [
+        (1, JunkSessionCandidateState::Base),
+        (2, JunkSessionCandidateState::Current),
+    ] {
+        let shared = Arc::new(Shared::new(limits));
+        let mut writer = Writer::new(
+            Arc::clone(&shared),
+            JunkSessionRevision(revision),
+            shared.cancel_token(),
+        );
+        index
+            .send_candidate(
+                &mut writer,
+                limits,
+                a_key,
+                state,
+                [0; 32],
+                Arc::clone(&a_row),
+            )
+            .unwrap();
+        assert!(
+            matches!(index.send_candidate(&mut writer, limits, b_key, JunkSessionCandidateState::Base, [0; 32], Arc::clone(&b_row)), Err(failure) if failure.code == "resource_limit")
+        );
+        let session = JunkSession { shared };
+        let events: Vec<_> = std::iter::from_fn(|| session.try_next_event()).collect();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0].kind, JunkSessionEventKind::Candidate { key, .. } if key == a_key)
+        );
+        assert!(index.contains(&a_key));
+        assert!(!index.contains(&b_key));
+        session.close();
+    }
+    // The path's own bytes independently exceed this limit, regardless of node accounting.
+    let path_bytes = a_row.observed_native_path().unwrap().as_os_str().len();
+    limits.max_candidate_bytes = path_bytes - 1;
+    let shared = Arc::new(Shared::new(limits));
+    let mut writer = Writer::new(
+        Arc::clone(&shared),
+        JunkSessionRevision(3),
+        shared.cancel_token(),
+    );
+    let mut tiny = PresentationIndex::default();
+    assert!(
+        matches!(tiny.send_candidate(&mut writer, limits, a_key, JunkSessionCandidateState::Base, [0; 32], a_row), Err(failure) if failure.code == "resource_limit")
+    );
+    assert!(!tiny.contains(&a_key));
+    let session = JunkSession { shared };
+    assert!(session.try_next_event().is_none());
+    session.close();
+    assert_eq!(fs::read(a.join("payload")).unwrap(), b"first personal");
+    assert_eq!(fs::read(b.join("payload")).unwrap(), b"second personal");
+}
+
+#[test]
+fn presentation_send_failures_preserve_old_scope_and_release_only_unsent_reservations() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let a = project(&root, "a", b"first personal");
+    let b = project(&root, "b", b"second personal");
+    let mut source = controlled_worker(&root);
+    let rows = current(&controlled_revision(&mut source, 1, None));
+    let row_for = |path: &Path| {
+        rows.iter()
+            .find(|(_, row)| row.observed_native_path().as_deref() == Some(path))
+            .map(|(key, row)| (*key, Arc::clone(row)))
+            .unwrap()
+    };
+    let (a_key, a_row) = row_for(&a);
+    let (b_key, b_row) = row_for(&b);
+    let limits = JunkSessionLimits::default();
+    let shared = Arc::new(Shared::new(limits));
+    let mut writer = Writer::new(
+        Arc::clone(&shared),
+        JunkSessionRevision(1),
+        shared.cancel_token(),
+    );
+    let mut index = PresentationIndex::default();
+    index
+        .send_candidate(
+            &mut writer,
+            limits,
+            a_key,
+            JunkSessionCandidateState::Base,
+            [0; 32],
+            Arc::clone(&a_row),
+        )
+        .unwrap();
+    assert!(matches!(shared.pop().unwrap().kind,
+        JunkSessionEventKind::Candidate { key, .. } if key == a_key));
+    shared.close();
+    // A closed reliable mailbox rejects both updates and new keys. A failed new reservation
+    // must be rolled back, while an already published key remains available for replacement.
+    for (key, row) in [(b_key, b_row.clone()), (a_key, a_row.clone())] {
+        assert!(
+            index
+                .send_candidate(
+                    &mut writer,
+                    limits,
+                    key,
+                    JunkSessionCandidateState::Current,
+                    [0; 32],
+                    row,
+                )
+                .is_err()
+        );
+    }
+    assert!(index.contains(&a_key));
+    assert!(!index.contains(&b_key));
+    assert!(matches!(index.send_candidate(
+        &mut writer, limits, a_key, JunkSessionCandidateState::Base, [0; 32], b_row.clone(),
+    ), Err(failure) if failure.code == "presentation_scope_changed"));
+    let mut current = Rows::from([(a_key, a_row.clone())]);
+    assert!(
+        index
+            .replace_complete(&mut writer, None, &Rows::new(), &mut current)
+            .is_err()
+    );
+    assert!(index.contains(&a_key));
+    assert!(Arc::ptr_eq(current.get(&a_key).unwrap(), &a_row));
+
+    let shared = Arc::new(Shared::new(limits));
+    let mut writer = Writer::new(
+        Arc::clone(&shared),
+        JunkSessionRevision(2),
+        shared.cancel_token(),
+    );
+    index
+        .replace_complete(&mut writer, None, &Rows::new(), &mut current)
+        .unwrap();
+    assert!(matches!(shared.pop().unwrap().kind,
+        JunkSessionEventKind::Removed { key } if key == a_key));
+    assert!(!index.contains(&a_key));
+    assert!(current.is_empty());
+    // The old failed reservation cannot consume the only slot after reliable removal.
+    let one_slot = JunkSessionLimits {
+        max_candidates: 1,
+        ..limits
+    };
+    index
+        .send_candidate(
+            &mut writer,
+            one_slot,
+            b_key,
+            JunkSessionCandidateState::Base,
+            [0; 32],
+            b_row,
+        )
+        .unwrap();
+    assert!(matches!(shared.pop().unwrap().kind,
+        JunkSessionEventKind::Candidate { key, .. } if key == b_key));
+    assert!(shared.pop().is_none());
+    shared.close();
+    assert_eq!(fs::read(a.join("payload")).unwrap(), b"first personal");
+    assert_eq!(fs::read(b.join("payload")).unwrap(), b"second personal");
 }
 
 #[test]
@@ -189,7 +626,7 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
         request: request(),
         session_id: "controlled-system-session".into(),
         current: Rows::new(),
-        preview_keys: BTreeSet::new(),
+        presentations: PresentationIndex::default(),
         scan_roots: Vec::new(),
     };
     let run = |worker: &mut Worker, revision, root: PathBuf| {
@@ -1744,7 +2181,7 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
         request,
         session_id: "controlled-incomplete-tool-discovery".into(),
         current: Rows::new(),
-        preview_keys: BTreeSet::new(),
+        presentations: PresentationIndex::default(),
         scan_roots: Vec::new(),
     };
     worker

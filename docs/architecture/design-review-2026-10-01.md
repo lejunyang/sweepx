@@ -922,4 +922,17 @@ CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和�
 
 保留脚本问题：首次 checksum 检查发现 executable 已被此前 all-feature 测试重建，未启动扫描，随后显式构建当前源码并绑定新 checksum；首个直接子进程的终端会话 leader 退出使父检查得到 ENOTTY，改为保留本任务 shell leader 到终端恢复核验之后。最终对信号/取样的目标先检查仍是该 wrapper 的直接子进程，不搜索其他用户进程。独立解码器保留光标/擦除/宽字符覆盖 oracle。共享源码的第一次 fmt 检查发现一处测试格式化差异，逐项检查输出后修正；最终检查使用 set -e，未用末条命令掩盖失败。
 
-另外确认但尚未修补的会话/视图问题：Base 已可靠发出后取消，key 未进入 current 注册表，之后完整刷新可能漏发 Removed，使旧 Base 长期留作历史行；CLI provider 的私有行还缺跨失败刷新累计保留预算。后续在 core 登记有界原生呈现范围并统一完整 replacement，同时补 bridge 准入，不能把 Base 变成刷新或删除权限。其他发现路径审计、跨平台缓存、原生宿主/MSVC/provider/Trash 及规则有效配置/独占归属/活动仍未完成。
+本阶段另确认会话/视图问题：Base 已可靠发出后取消，key 未进入 current 注册表，之后完整刷新可能漏发 Removed，使旧 Base 长期留作历史行；CLI provider 的私有行还缺跨失败刷新累计保留预算。这两项及 Base 选中刷新缺口的后续修复见下一节。其他发现路径审计、跨平台缓存、原生宿主/MSVC/provider/Trash 及规则有效配置/独占归属/活动仍未完成。
+
+## 取消后候选替换与跨刷新呈现预算（2026-10-03）
+
+core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无损原生观察路径及目录/独立临时对象类型。Historical、Base、Current 共用登记入口；该索引没有 locator、完整候选或执行权限，`current` 仍只登记已完成解释的原生刷新绑定。索引跨 revision 累计，独立复用 `max_candidates` / `max_candidate_bytes` 上限，默认 16,384 项和 64 MiB 保留估算，计入路径 capacity 和树节点辅助；它与 old/pending 候选、事件队列及消费者预算分别计量，不是总 RSS 上限。
+
+- 新键必须先准入再可靠入队；发送失败撤回本次新登记，既有登记不丢失。可选缓存预览超限可以省略，现场候选超限可靠报告 `resource_limit`，不能产生未登记的行或完整替换。
+- 完整 All 刷新按统一索引移除未见行，覆盖先前取消留下的 Base；完整 Selected 只替换所选原生路径中的目录分析。Linux 临时对象是独立分析，Selected 不会重新测量它们，所以即使路径重叠也不能据此推断它们消失。取消、失败及 partial 不移除旧行。每个 Removed 可靠发送成功后才释放对应呈现记录和 current 绑定；没有先清空索引或额外全量键副本。
+- CLI 私有行另有默认 16,384 行/64 MiB 准入估算，包含当前候选、key 副本、map/historical 节点和一次待发动作结果的辅助存储；一次待发批次排空前不开始下一扫描或动作。额度只随实际准入、替换或移除增减，Started 不重置累计保留。拒收新行或增长更新时保留相应旧证据，单 revision 只报告一次预算错误并取消；完整 core 观察已可靠提交的 Removed 仍可移除失效行并释放额度；即使 worker 已完成，本视图仍不能发出 Complete/replaced=true 或授权回收。未知键不进入辅助历史集合。
+- 取消留下的 Base 没有 current 绑定，选中 `r` 回退全量刷新；此前已解释、后来被标为历史的目录行仍保留局部刷新能力。Removed、确认 Trash/隔离成功后的子行移除共用扣账；失败、取消和祖先历史统计不提供回收资格。没有第二套范围差分、分类器、新 crate 或永久删除兜底。
+
+五项新增 core 回归覆盖真实原生 Base 可靠发布后同步取消、移除 marker 后只撤下展示而保留个人文件、Selected 隔离兄弟及独立临时事实、跨 revision 准入预算与发送失败回滚；三项新增 CLI 回归覆盖多轮取消/失败累计、增长更新拒绝/缩小释放及 Base 选中刷新回退 All。已有确认移动回归另核对待发通知排空后释放队列容量。测试使用真实扫描来源与普通文件读取/metadata 独立对照；取消边界由单槽队列及发布后的有界同步控制，未借助枚举顺序、延时或实际删除制造结果。
+
+交付验证见[取消后呈现验收记录](cancelled-junk-rows-validation-2026-10-03.json)：首次沙箱会话专项 33 项通过、1 项既有片段缓存失败，独立历史查询明确返回 `FSEventStreamStart failed`；未改变 fallback 或断言，一次宿主专项 34 项全部通过。CLI 专项 6 项通过，随后最终工作区串行 1017 项通过、0 失败、2 项原有基准 ignored，系统 Trash 成功挂起用例仍显式排除。工作区结束后，受影响 lint 指出一处新增测试的默认字段赋值写法，改为相同参数的 struct literal；该用例实际复验 1 项通过，其余未变行为复用工作区结果，不称为第二次完整矩阵。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 与 core/CLI 包清单通过。检查有并行 lint/构建，不作为计时样本；原生 Linux/Windows、MSVC、真实 provider、实际 Trash/隔离成功与最终 pathname 竞态仍未验收/关闭。本条不关闭整份会话/TUI/规则验收或旧探测/热缓存终端/FSEvents 间歇根因，没有新的提速或 RSS 测量结论。

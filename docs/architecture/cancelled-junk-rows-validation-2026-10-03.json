@@ -1,0 +1,251 @@
+{
+  "schema": "sweepx.cancelled-junk-rows-validation/v1",
+  "date": "2026-10-03",
+  "baseCommit": "be7048336992ce21ce9af02e17b5deac0af23e84",
+  "host": {
+    "machine": "arm64",
+    "kernel": "25.5.0",
+    "macOS": "26.5.2",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "sourceSha256": {
+    "crates/sweepx-cli/src/junk_tui/quarantine.rs": "adaa7a1bf029a99672aa54bdf9143967372f51d402c3fb92cdef70fc20a4fde2",
+    "crates/sweepx-cli/src/junk_tui/tests.rs": "2ec32cda42b8f44b900b10d82792898e7afeba0839bda530cf487d8e9d5ba238",
+    "crates/sweepx-cli/src/junk_tui.rs": "04777bb0a40c8879808950ff12721442b4c5af7011befd2c06b25d2e34597ded",
+    "crates/sweepx-core/src/junk/session/cache.rs": "2d5f40806b8c6800aa13337b786f7f348b09a8ac59b12fddcf2c215b0aca30ea",
+    "crates/sweepx-core/src/junk/session/linux_temp.rs": "8c3ee7ce63e583caff07bfcbd662ab264fa73e6b16ca6ab17c4c79e82ff3c01d",
+    "crates/sweepx-core/src/junk/session/mailbox/tests.rs": "66617e7a42f153a9bbab44fa79ae9ce9f57c000b27d8c9d80de712490bd055d5",
+    "crates/sweepx-core/src/junk/session/mailbox.rs": "5d653d7292da16619f9985239c0b383e8bfc451574ca74f51c055ce71a8f8158",
+    "crates/sweepx-core/src/junk/session/presentation.rs": "13acb8df5e1523eb1b72da65b07f778afe0166be6e1f7c954d064069364fba6c",
+    "crates/sweepx-core/src/junk/session/tests.rs": "26bb9ed954ec52f093a72ef709c729f94861b71196ed240710bd4b8cd52c53ec",
+    "crates/sweepx-core/src/junk/session.rs": "7f29ca80541811330c4a156bac692151dbe585fbcfa585c171f9b6bdbebb42de"
+  },
+  "contracts": [
+    "All published candidate states reserve bounded display-only native scope before reliable enqueue; Base/history never enter current bindings",
+    "Incomplete revisions retain presentation; complete All reconciles absent rows; complete Selected reconciles directory facts only",
+    "Reliable send failure rolls back new registration; Removed success releases one presentation/current key at a time",
+    "CLI registry budget persists across failed/cancelled revisions, replacements subtract old cost, unknown historical keys are omitted",
+    "Budget rejection emits one diagnostic and cancels; a complete worker terminal cannot make the incomplete view complete or permit Trash",
+    "Base selected refresh falls back to All; interpreted historical current bindings keep Selected; pending reconciliation batches drain before another operation"
+  ],
+  "sandboxFocused": {
+    "logFile": "/private/tmp/sweepx-core-presentation-focused-2026-10-03.log",
+    "sha256": "c17de3802df18f5515e578ba1c8e228e55de8fa487f841a8ffb49e616d6aeb56",
+    "testResults": [
+      "test result: FAILED. 33 passed; 1 failed; 0 ignored; 0 measured; 242 filtered out; finished in 22.57s"
+    ],
+    "tail": [
+      "",
+      "",
+      "failures:",
+      "    junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts",
+      "",
+      "test result: FAILED. 33 passed; 1 failed; 0 ignored; 0 measured; 242 filtered out; finished in 22.57s",
+      "",
+      "error: test failed, to rerun pass `-p sweepx-core --lib`"
+    ],
+    "exitCode": 101,
+    "failure": "---- junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts stdout ----\n\nthread 'junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts' (22450652) panicked at crates/sweepx-core/src/junk/session/tests.rs:881:5:\nassertion `left == right` failed: independent history diagnosis: Err(Custom { kind: Other, error: \"FSEventStreamStart failed\" })\n  left: Number(6)\n right: Number(22)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts\n\ntest result: FAILED. 33 passed; 1 failed; 0 ignored; 0 measured; 242 filtered out; finished in 22.57s\n\nerror: test failed, to rerun pass `-p sweepx-core --lib`\n",
+    "interpretation": "Existing fragment-cache regression; independent events_since returned FSEventStreamStart failed. Production fallback and assertion preserved."
+  },
+  "hostFocused": {
+    "exitCode": 0,
+    "logFile": "/private/tmp/sweepx-core-presentation-host-focused-2026-10-03.log",
+    "sha256": "437ca397dcf3756fc87027fb1267e6d8fb0361fe4b08be947099b7682223bcb2",
+    "testResults": [
+      "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 242 filtered out; finished in 40.62s"
+    ],
+    "tail": [
+      "test junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts ... ok",
+      "test junk::session::tests::system_admission_rejects_explicit_roots_and_disabled_platform_rules ... ok",
+      "test junk::session::tests::system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history ... ok",
+      "test junk::session::tests::warm_large_directory_finishes_with_fresh_identity_and_independent_logical_total ... ok",
+      "test junk::session::tests::worker_cap_and_closing_an_undrained_session_are_bounded ... ok",
+      "",
+      "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 242 filtered out; finished in 40.62s",
+      ""
+    ]
+  },
+  "cliFocused": {
+    "exitCode": 0,
+    "logFile": "/private/tmp/sweepx-junk-bridge-focused-2026-10-03.log",
+    "sha256": "fd7b9a0bf785bd204e022da8feef9454df36f24620635d54f56ebdb396ebba6e",
+    "testResults": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.23s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s"
+    ],
+    "tail": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.00s",
+      "",
+      "     Running tests/elevation_relay.rs (target/debug/deps/elevation_relay-abc13b3aa7dbfe5b)",
+      "",
+      "running 0 tests",
+      "",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s",
+      ""
+    ],
+    "scope": "Six adapter tests; before final empty-deque capacity release. The later workspace covers that release and assertion."
+  },
+  "workspace": {
+    "logFile": "/private/tmp/sweepx-cancelled-rows-workspace-2026-10-03.log",
+    "sha256": "36eb0044e96d371d570e91f40f7d12c31efd51d3e5d04c8a2ee33b0f9cf39e13",
+    "testResults": [
+      "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.27s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s",
+      "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s",
+      "test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.67s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 275 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 62.46s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.46s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+      "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 97 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 4.58s",
+      "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s",
+      "test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.41s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.96s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "tail": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "",
+      "   Doc-tests sweepx_tui",
+      "",
+      "running 0 tests",
+      "",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      ""
+    ],
+    "counts": {
+      "passed": 1017,
+      "failed": 0,
+      "ignored": 2,
+      "filtered": 1
+    },
+    "exitCode": 0,
+    "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+    "context": "Host native event service access; one prescribed full workspace run. A short tail of the already-running host-focused test overlapped its launch; there are no performance comparisons."
+  },
+  "initializerFocused": {
+    "exitCode": 0,
+    "logFile": "/private/tmp/sweepx-cancelled-rows-initializer-test-2026-10-03.log",
+    "sha256": "f631c7ed5cfabe475e845bf13946743ca1c2bcf8386b4b39cdadd04228730212",
+    "testResults": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 275 filtered out; finished in 0.10s"
+    ],
+    "tail": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.38s",
+      "     Running unittests src/lib.rs (target/debug/deps/sweepx_core-9dd151ea5439482c)",
+      "",
+      "running 1 test",
+      "test junk::session::tests::cumulative_presentation_admission_rejects_untracked_native_rows_before_enqueue ... ok",
+      "",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 275 filtered out; finished in 0.10s",
+      ""
+    ],
+    "scope": "One overlapping test rerun after equivalent struct-literal initialization replaced reassignment to satisfy clippy. No production or test-input change; reuse the workspace results for all other unchanged code."
+  },
+  "firstAffectedLint": {
+    "exitCode": 101,
+    "diagnostic": "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\nerror: field assignment outside of initializer for an instance created with Default::default()\n   --> crates/sweepx-core/src/junk/session/tests.rs:410:5\n    |\n410 |     limits.max_candidates = 1;\n    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\nnote: consider initializing the variable with `junk::session::JunkSessionLimits { max_candidates: 1, ..Default::default() }` and removing relevant reassignments\n   --> crates/sweepx-core/src/junk/session/tests.rs:409:5\n    |\n409 |     let mut limits = JunkSessionLimits::default();\n    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#field_reassign_with_default\n    = note: `-D clippy::field-reassign-with-default` implied by `-D warnings`\n    = help: to override `-D warnings` add `#[allow(clippy::field_reassign_with_default)]`\n\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\nerror: could not compile `sweepx-core` (lib test) due to 1 previous error\nwarning: build failed, waiting for other jobs to finish...\n"
+  },
+  "finalLint": {
+    "affected": {
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cancelled-rows-affected-lint-final-2026-10-03.log",
+      "sha256": "cb484d7ce393ae5cdc8e75a0f28cffb704fc1d830ecbf0677838c45126883869",
+      "testResults": [],
+      "tail": [
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.39s"
+      ],
+      "command": "cargo clippy -p sweepx-core -p sweepx-cli --all-targets --all-features --locked -- -D warnings"
+    },
+    "hostWorkspace": {
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cancelled-rows-host-lint-2026-10-03.log",
+      "sha256": "869dba3c95598e442829b42f5bef0dabd079410e28fc3bb381cec5752ca1d5d9",
+      "testResults": [],
+      "tail": [
+        "    Blocking waiting for file lock on build directory",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.21s"
+      ],
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    "linuxGnuWorkspace": {
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cancelled-rows-linux-lint-2026-10-03.log",
+      "sha256": "83c72bf0ca768f4ee749d626bd690931769d664d079833b8b53d88ce19ec5915",
+      "testResults": [],
+      "tail": [
+        "    Checking rusqlite v0.40.2",
+        "    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)",
+        "    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)",
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.51s"
+      ],
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all"
+    },
+    "windowsGnuWorkspace": {
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cancelled-rows-windows-lint-2026-10-03.log",
+      "sha256": "5ad2ddeab2a7128df124aaf70b1bc02085e452dcf41f0df17397ae7e946c6fda",
+      "testResults": [],
+      "tail": [
+        "    Checking rusqlite v0.40.2",
+        "    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)",
+        "    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)",
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 40.79s"
+      ],
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all"
+    }
+  },
+  "remainingGaps": [
+    "Old 300ms/2s startup, warm-cache PTY and FSEvents intermittent root causes remain open; passing this matrix does not close them",
+    "Known hanging trash_moves_ordinary_paths_without_confirmation_in_machine_invocations still explicitly skipped; no actual Trash or quarantine operations performed",
+    "Linux/Windows native runtime, Windows MSVC and actual cloud-provider behavior not verified by GNU cross lint",
+    "Final pathname-to-Trash race, effective project configuration/ownership/activity, broader rules, other discovery audits and cross-platform caches remain open"
+  ],
+  "claims": "Functional cancellation/refresh and retention verification only; no scan speed, tail latency, total RSS or destructive-operation success claims.",
+  "otherChecks": {
+    "fmt": "cargo fmt --all --check: exit 0",
+    "diff": "git diff --check: exit 0",
+    "docs": "scripts/lint_docs.py: 54 Markdown files, exit 0",
+    "packages": "cargo package --list --allow-dirty for core/CLI: exit 0; new presentation.rs and both adapter test/quarantine modules present",
+    "review": "Independent read-only production diff review; selected-directory versus independent-temporary scope fixed; no remaining actionable findings in this unit."
+  }
+}

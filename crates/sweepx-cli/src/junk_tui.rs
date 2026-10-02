@@ -127,6 +127,31 @@ impl JunkRow for Row {
     }
 }
 
+impl Row {
+    fn registry_cost(&self) -> usize {
+        // In addition to the model's 512-byte allowance, reserve map/set nodes and copies of
+        // the stable key in historical state and one reconciliation event. Poll drains that
+        // bounded batch before another action or revision; shared Arc payloads are counted once.
+        self.retained_bytes()
+            .saturating_add(1536)
+            .saturating_add(self.key.capacity().saturating_mul(6))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RetentionLimits {
+    rows: usize,
+    bytes: usize,
+}
+impl Default for RetentionLimits {
+    fn default() -> Self {
+        Self {
+            rows: 16_384,
+            bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 struct Provider {
     session: JunkSession,
     rows: BTreeMap<String, Arc<Row>>,
@@ -134,6 +159,10 @@ struct Provider {
     revision: u64,
     busy: bool,
     complete: bool,
+    limits: RetentionLimits,
+    // Kept across revisions: cancelled Base rows still occupy this private registry.
+    retained: usize,
+    rejected: bool,
     trash: Option<Receiver<(String, Result<(), String>)>>,
     trash_cancel: CancellationToken,
     pending: VecDeque<JunkEvent>,
@@ -176,6 +205,9 @@ impl Provider {
             revision: 0,
             busy: true,
             complete: false,
+            limits: RetentionLimits::default(),
+            retained: 0,
+            rejected: false,
             trash: None,
             trash_cancel: CancellationToken::new(),
             pending: VecDeque::new(),
@@ -213,6 +245,56 @@ impl Provider {
         self.trash.is_some()
     }
 
+    fn remove_row(&mut self, key: &str) {
+        if let Some(row) = self.rows.remove(key) {
+            self.retained = self.retained.saturating_sub(row.registry_cost());
+        }
+        self.historical.remove(key);
+    }
+
+    fn mark_historical(&mut self, key: &str) {
+        // Unknown/rejected keys cannot grow auxiliary state independently of admitted rows.
+        if self.rows.contains_key(key) {
+            self.historical.insert(key.into());
+        }
+    }
+
+    fn admit(&mut self, row: Arc<Row>) -> Option<JunkEvent> {
+        let old = self.rows.get(&row.key).map_or(0, |old| old.registry_cost());
+        let retained = self
+            .retained
+            .saturating_sub(old)
+            .saturating_add(row.registry_cost());
+        if retained > self.limits.bytes
+            || (!self.rows.contains_key(&row.key) && self.rows.len() >= self.limits.rows)
+        {
+            self.complete = false;
+            self.mark_historical(&row.key);
+            self.session.cancel();
+            if self.rejected {
+                return None;
+            }
+            self.rejected = true;
+            return Some(JunkEvent::Error {
+                revision: self.revision,
+                message: "junk view retention limit; results incomplete".into(),
+            });
+        }
+        self.retained = retained;
+        if row.current {
+            self.historical.remove(&row.key);
+        } else {
+            self.historical.insert(row.key.clone());
+        }
+        self.rows.insert(row.key.clone(), Arc::clone(&row));
+        Some(JunkEvent::Candidate {
+            revision: row.revision,
+            current: row.current,
+            historical: row.preview,
+            row,
+        })
+    }
+
     /// Reconciles presentation only, using captured native paths. A confirmed move invalidates
     /// descendant rows and ancestor accounting; it never grants authority for another move.
     fn confirmed_moves(&mut self, moved: &[String]) {
@@ -234,8 +316,7 @@ impl Provider {
             .map(|(key, _)| key.clone())
             .collect();
         for key in removed {
-            self.rows.remove(&key);
-            self.historical.remove(&key);
+            self.remove_row(&key);
             self.pending.push_back(JunkEvent::Removed {
                 revision: self.revision,
                 key,
@@ -258,11 +339,152 @@ impl Provider {
         }
     }
 
+    /// Translates one already-bounded worker event; no native observation runs here.
+    fn translate_event(&mut self, revision: u64, kind: JunkSessionEventKind) -> Option<JunkEvent> {
+        match kind {
+            JunkSessionEventKind::Started { scope } => {
+                self.revision = revision;
+                self.busy = true;
+                self.complete = false;
+                self.rejected = false;
+                let keys = match scope {
+                    JunkSessionScope::All => None,
+                    JunkSessionScope::Selected(keys) => {
+                        let paths: Vec<_> = keys
+                            .iter()
+                            .filter_map(|native| {
+                                self.rows.values().find(|row| row.native_key == *native)
+                            })
+                            .filter_map(|row| row.row.observed_native_path())
+                            .collect();
+                        Some(
+                            self.rows
+                                .iter()
+                                .filter(|(_, row)| {
+                                    row.row.observed_native_path().is_some_and(|path| {
+                                        paths.iter().any(|parent| path.starts_with(parent))
+                                    })
+                                })
+                                .map(|(key, _)| key.clone())
+                                .collect(),
+                        )
+                    }
+                };
+                self.historical.extend(
+                    keys.as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| self.rows.keys().cloned().collect()),
+                );
+                return Some(JunkEvent::Started { revision, keys });
+            }
+            JunkSessionEventKind::Phase(phase) => {
+                return Some(JunkEvent::Phase {
+                    revision,
+                    phase: match phase {
+                        JunkSessionPhase::Rules => "rules",
+                        JunkSessionPhase::Discovery => "discovery",
+                        JunkSessionPhase::Cache => "cache",
+                        JunkSessionPhase::CacheWrite => "cache_write",
+                        JunkSessionPhase::Traversal => "traversal",
+                        #[cfg(target_os = "linux")]
+                        JunkSessionPhase::TemporaryObjects => "temporary_objects",
+                        JunkSessionPhase::Git => "git",
+                        JunkSessionPhase::Formats => "formats",
+                        JunkSessionPhase::Replacement => "replacement",
+                    },
+                });
+            }
+            JunkSessionEventKind::Progress {
+                observed_entries,
+                path,
+            } => {
+                return Some(JunkEvent::Progress {
+                    revision,
+                    count: observed_entries,
+                    path: path.display().to_string(),
+                });
+            }
+            JunkSessionEventKind::Candidate {
+                key, state, row, ..
+            } => {
+                let current = state == JunkSessionCandidateState::Current;
+                let row = Arc::new(Row {
+                    key: key.to_string(),
+                    native_key: key,
+                    revision,
+                    current,
+                    preview: state == JunkSessionCandidateState::Historical,
+                    row,
+                });
+                return self.admit(row);
+            }
+            JunkSessionEventKind::Removed { key } => {
+                let key = key.to_string();
+                self.remove_row(&key);
+                return Some(JunkEvent::Removed { revision, key });
+            }
+            JunkSessionEventKind::Invalidated { key } => {
+                let key = key.to_string();
+                self.mark_historical(&key);
+                return Some(JunkEvent::Invalidated { revision, key });
+            }
+            JunkSessionEventKind::Boundary(boundary) => {
+                return Some(JunkEvent::Error {
+                    revision,
+                    message: format!("{}: {}", boundary.path.display(), boundary.detail),
+                });
+            }
+            JunkSessionEventKind::Error(error) | JunkSessionEventKind::CacheWarning(error) => {
+                return Some(JunkEvent::Error {
+                    revision,
+                    message: format!("{}: {}", error.code, error.detail),
+                });
+            }
+            JunkSessionEventKind::Completed {
+                mut outcome,
+                mut replaced,
+                ..
+            } => {
+                if self.rejected {
+                    // The worker may have completed before seeing our cooperative cancellation.
+                    // A dropped bridge row still prevents a complete view or mutation authority.
+                    if outcome == JunkSessionOutcome::Complete {
+                        outcome = JunkSessionOutcome::Partial;
+                    }
+                    replaced = false;
+                }
+                self.busy = false;
+                self.complete = outcome == JunkSessionOutcome::Complete && replaced;
+                if !self.complete {
+                    self.historical.extend(
+                        self.rows
+                            .values()
+                            .filter(|row| row.revision == revision)
+                            .map(|row| row.key.clone()),
+                    );
+                }
+                let outcome = match outcome {
+                    JunkSessionOutcome::Complete => JunkOutcome::Complete,
+                    JunkSessionOutcome::Partial => JunkOutcome::Partial,
+                    JunkSessionOutcome::Cancelled => JunkOutcome::Cancelled,
+                    JunkSessionOutcome::Failed => JunkOutcome::Failed,
+                };
+                return Some(JunkEvent::Completed {
+                    revision,
+                    outcome,
+                    replaced,
+                });
+            }
+            JunkSessionEventKind::DirectoryStatistics { .. } => {}
+        }
+        None
+    }
+
     fn poll_trash(&mut self) -> Option<JunkEvent> {
         match self.trash.as_ref()?.try_recv() {
             Ok((key, result)) => {
                 if result.is_err() {
-                    self.historical.insert(key.clone());
+                    self.mark_historical(&key);
                 }
                 if result.is_ok() {
                     self.confirmed_moves(std::slice::from_ref(&key));
@@ -284,6 +506,11 @@ impl Provider {
 impl JunkProvider for Provider {
     fn poll(&mut self) -> Option<JunkEvent> {
         if let Some(event) = self.pending.pop_front() {
+            if self.pending.is_empty() {
+                // The preceding batch may have removed every row whose estimate reserved this
+                // storage. Do not carry its empty allocation into a later admitted revision.
+                self.pending = VecDeque::new();
+            }
             return Some(event);
         }
         #[cfg(target_os = "linux")]
@@ -297,142 +524,8 @@ impl JunkProvider for Provider {
         for _ in 0..32 {
             let event = self.session.try_next_event()?;
             let revision = event.revision.get();
-            match event.kind {
-                JunkSessionEventKind::Started { scope } => {
-                    self.revision = revision;
-                    self.busy = true;
-                    self.complete = false;
-                    let keys = match scope {
-                        JunkSessionScope::All => None,
-                        JunkSessionScope::Selected(keys) => {
-                            let paths: Vec<_> = keys
-                                .iter()
-                                .filter_map(|native| {
-                                    self.rows.values().find(|row| row.native_key == *native)
-                                })
-                                .filter_map(|row| row.row.observed_native_path())
-                                .collect();
-                            Some(
-                                self.rows
-                                    .iter()
-                                    .filter(|(_, row)| {
-                                        row.row.observed_native_path().is_some_and(|path| {
-                                            paths.iter().any(|parent| path.starts_with(parent))
-                                        })
-                                    })
-                                    .map(|(key, _)| key.clone())
-                                    .collect(),
-                            )
-                        }
-                    };
-                    self.historical.extend(
-                        keys.as_ref()
-                            .cloned()
-                            .unwrap_or_else(|| self.rows.keys().cloned().collect()),
-                    );
-                    return Some(JunkEvent::Started { revision, keys });
-                }
-                JunkSessionEventKind::Phase(phase) => {
-                    return Some(JunkEvent::Phase {
-                        revision,
-                        phase: match phase {
-                            JunkSessionPhase::Rules => "rules",
-                            JunkSessionPhase::Discovery => "discovery",
-                            JunkSessionPhase::Cache => "cache",
-                            JunkSessionPhase::CacheWrite => "cache_write",
-                            JunkSessionPhase::Traversal => "traversal",
-                            #[cfg(target_os = "linux")]
-                            JunkSessionPhase::TemporaryObjects => "temporary_objects",
-                            JunkSessionPhase::Git => "git",
-                            JunkSessionPhase::Formats => "formats",
-                            JunkSessionPhase::Replacement => "replacement",
-                        },
-                    });
-                }
-                JunkSessionEventKind::Progress {
-                    observed_entries,
-                    path,
-                } => {
-                    return Some(JunkEvent::Progress {
-                        revision,
-                        count: observed_entries,
-                        path: path.display().to_string(),
-                    });
-                }
-                JunkSessionEventKind::Candidate {
-                    key, state, row, ..
-                } => {
-                    let current = state == JunkSessionCandidateState::Current;
-                    let row = Arc::new(Row {
-                        key: key.to_string(),
-                        native_key: key,
-                        revision,
-                        current,
-                        preview: state == JunkSessionCandidateState::Historical,
-                        row,
-                    });
-                    if current {
-                        self.historical.remove(&row.key);
-                    } else {
-                        self.historical.insert(row.key.clone());
-                    }
-                    self.rows.insert(row.key.clone(), Arc::clone(&row));
-                    return Some(JunkEvent::Candidate {
-                        revision,
-                        current,
-                        historical: state == JunkSessionCandidateState::Historical,
-                        row,
-                    });
-                }
-                JunkSessionEventKind::Removed { key } => {
-                    let key = key.to_string();
-                    self.rows.remove(&key);
-                    self.historical.remove(&key);
-                    return Some(JunkEvent::Removed { revision, key });
-                }
-                JunkSessionEventKind::Invalidated { key } => {
-                    let key = key.to_string();
-                    self.historical.insert(key.clone());
-                    return Some(JunkEvent::Invalidated { revision, key });
-                }
-                JunkSessionEventKind::Boundary(boundary) => {
-                    return Some(JunkEvent::Error {
-                        revision,
-                        message: format!("{}: {}", boundary.path.display(), boundary.detail),
-                    });
-                }
-                JunkSessionEventKind::Error(error) | JunkSessionEventKind::CacheWarning(error) => {
-                    return Some(JunkEvent::Error {
-                        revision,
-                        message: format!("{}: {}", error.code, error.detail),
-                    });
-                }
-                JunkSessionEventKind::Completed {
-                    outcome, replaced, ..
-                } => {
-                    self.busy = false;
-                    self.complete = outcome == JunkSessionOutcome::Complete && replaced;
-                    if !self.complete {
-                        self.historical.extend(
-                            self.rows
-                                .values()
-                                .filter(|row| row.revision == revision)
-                                .map(|row| row.key.clone()),
-                        );
-                    }
-                    let outcome = match outcome {
-                        JunkSessionOutcome::Complete => JunkOutcome::Complete,
-                        JunkSessionOutcome::Partial => JunkOutcome::Partial,
-                        JunkSessionOutcome::Cancelled => JunkOutcome::Cancelled,
-                        JunkSessionOutcome::Failed => JunkOutcome::Failed,
-                    };
-                    return Some(JunkEvent::Completed {
-                        revision,
-                        outcome,
-                        replaced,
-                    });
-                }
-                JunkSessionEventKind::DirectoryStatistics { .. } => {}
+            if let Some(event) = self.translate_event(revision, event.kind) {
+                return Some(event);
             }
         }
         None
@@ -447,7 +540,7 @@ impl JunkProvider for Provider {
         }
     }
     fn refresh(&mut self, keys: &[String]) -> Result<(), String> {
-        if self.busy || self.mutation_busy() {
+        if self.busy || self.mutation_busy() || !self.pending.is_empty() {
             return Err("worker busy".into());
         }
         let rows = if keys.is_empty() {
@@ -458,9 +551,9 @@ impl JunkProvider for Provider {
         if keys.is_empty()
             || rows
                 .iter()
-                .any(|row| row.preview || row.row.directory_aggregate().is_none())
+                .any(|row| !row.current || row.preview || row.row.directory_aggregate().is_none())
         {
-            // Historical preview keys are display state, not the current binding registry.
+            // Historical previews and cancelled Base keys are only display observations.
             // Refresh all original roots so replacement needs fresh complete observations.
             self.session.refresh_all()
         } else {
@@ -480,7 +573,7 @@ impl JunkProvider for Provider {
         let _ = self.session.set_visible_directory(path);
     }
     fn trash(&mut self, keys: &[String]) -> Result<(), String> {
-        if self.busy || !self.complete || self.mutation_busy() {
+        if self.busy || !self.complete || self.mutation_busy() || !self.pending.is_empty() {
             return Err("complete the scan or refresh first".into());
         }
         let rows = self.selected(keys)?;
@@ -548,6 +641,10 @@ impl JunkProvider for Provider {
             self.session.close();
             self.trash_cancel.cancel();
             self.trash = None;
+            self.rows.clear();
+            self.historical.clear();
+            self.pending = VecDeque::new();
+            self.retained = 0;
             #[cfg(target_os = "linux")]
             {
                 self.quarantine = None;
@@ -557,7 +654,12 @@ impl JunkProvider for Provider {
     }
     #[cfg(target_os = "linux")]
     fn preview_quarantine(&mut self, keys: &[String]) -> Result<u64, String> {
-        if self.closed || self.busy || !self.complete || self.mutation_busy() {
+        if self.closed
+            || self.busy
+            || !self.complete
+            || self.mutation_busy()
+            || !self.pending.is_empty()
+        {
             return Err("complete the scan or refresh first; another action may be running".into());
         }
         let rows = self.selected(keys)?;

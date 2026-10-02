@@ -32,11 +32,6 @@ impl Worker {
                 if job.cancel.is_cancelled() {
                     return Ok(());
                 }
-                if self.preview_keys.len() >= self.request.limits.max_candidates {
-                    // Preview omission is not a fresh-scan coverage gap. Leave capacity and
-                    // current native observations independent of optional historical payloads.
-                    return Ok(());
-                }
                 if !service.rules.iter().any(|rule| rule.id == stored.rule_id)
                     && !platform_rules.iter().any(|rule| rule.id == stored.rule_id)
                 {
@@ -70,7 +65,7 @@ impl Worker {
                 let Some(key) = candidate_key(&candidate, &path) else {
                     continue;
                 };
-                if !self.preview_keys.insert(key) {
+                if self.presentations.contains(&key) {
                     continue;
                 }
                 let row = Arc::new(JunkSessionCandidate {
@@ -83,15 +78,23 @@ impl Worker {
                     .saturating_add(256)
                     > self.request.limits.max_event_bytes
                 {
-                    self.preview_keys.remove(&key);
                     continue;
                 }
-                writer.send(JunkSessionEventKind::Candidate {
+                if let Err(failure) = self.presentations.send_candidate(
+                    writer,
+                    self.request.limits,
                     key,
-                    state: JunkSessionCandidateState::Historical,
+                    JunkSessionCandidateState::Historical,
                     rules_digest,
                     row,
-                })?;
+                ) {
+                    if failure.code == "resource_limit" {
+                        // Optional preview omission is not a fresh traversal coverage gap. Its
+                        // native scope index has a separate bound from retained scan payloads.
+                        return Ok(());
+                    }
+                    return Err(failure);
+                }
             }
         }
         Ok(())

@@ -232,7 +232,7 @@ impl Provider {
                 self.historical.extend(
                     self.quarantine_keys
                         .iter()
-                        .filter(|key| !moved.contains(key))
+                        .filter(|key| !moved.contains(key) && self.rows.contains_key(*key))
                         .cloned(),
                 );
                 self.quarantine_keys.clear();
@@ -246,8 +246,11 @@ impl Provider {
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
                 self.quarantine = None;
-                self.historical
-                    .extend(std::mem::take(&mut self.quarantine_keys));
+                self.historical.extend(
+                    std::mem::take(&mut self.quarantine_keys)
+                        .into_iter()
+                        .filter(|key| self.rows.contains_key(key)),
+                );
                 Some(JunkEvent::QuarantineFinished {
                     operation,
                     moved: Vec::new(),

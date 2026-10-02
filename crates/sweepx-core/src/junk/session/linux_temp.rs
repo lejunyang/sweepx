@@ -105,12 +105,14 @@ impl Worker {
                     "temporary-object fingerprints exceed session candidate retention",
                 ));
             }
-            writer.send(JunkSessionEventKind::Candidate {
+            self.presentations.send_candidate(
+                writer,
+                self.request.limits,
                 key,
-                state: JunkSessionCandidateState::Current,
+                JunkSessionCandidateState::Current,
                 rules_digest,
-                row: Arc::clone(&row),
-            })?;
+                Arc::clone(&row),
+            )?;
             self.current.insert(key, Arc::clone(&row));
             pending.insert(key, row);
         }

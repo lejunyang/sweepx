@@ -9,12 +9,14 @@ mod cache;
 #[cfg(target_os = "linux")]
 mod linux_temp;
 mod mailbox;
+mod presentation;
 
 use super::candidate::JunkCandidate;
 use super::git::{GitEvidenceLimits, GitEvidenceSession, native_path, native_root_path};
 use super::platform::{PlatformJunkSetup, default_platform_junk_roots};
 use super::{JunkService, PROJECT_RULES_JSON};
 use mailbox::{Shared, Writer};
+use presentation::PresentationIndex;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -313,9 +315,11 @@ pub struct JunkSessionLimits {
     pub max_events: usize,
     /// Estimated queued payload bytes, including referenced candidate data conservatively.
     pub max_event_bytes: usize,
-    /// Maximum rows across old retained state and the pending revision together.
+    /// Maximum rows across old retained state and the pending revision together. Separately caps
+    /// distinct presentation keys retained across revisions, including cancelled Base previews.
     pub max_candidates: usize,
     /// Estimated bytes across old retained state and the pending revision together; not RSS.
+    /// Also independently caps the display-only native path index, not consumer row payloads.
     pub max_candidate_bytes: usize,
     /// Existing scanner's metadata, handle, frontier and enumeration limits.
     pub scan: ScanResourceLimits,
@@ -456,7 +460,7 @@ impl JunkSession {
                     request,
                     session_id,
                     current: BTreeMap::new(),
-                    preview_keys: BTreeSet::new(),
+                    presentations: PresentationIndex::default(),
                     scan_roots: Vec::new(),
                 };
                 let mut job = Job {
@@ -600,9 +604,9 @@ struct Worker {
     request: JunkSessionRequest,
     session_id: String,
     current: Rows,
-    // Historical display rows live in the bounded consumer queue/view, not the current binding
-    // registry. At most max_candidates fixed-size keys are kept for complete replacement.
-    preview_keys: BTreeSet<JunkCandidateKey>,
+    // Display-only native paths survive cancellation independently of current binding authority.
+    // This separately bounded index covers every reliably published candidate state.
+    presentations: PresentationIndex,
     // Last full discovery scope. Selected refresh preserves original native directory contexts;
     // full system refresh rediscovers roots rather than retaining stale environment answers.
     scan_roots: Vec<PathBuf>,
@@ -825,6 +829,7 @@ impl Worker {
             platform: &platform,
             writer,
             pending: &mut pending,
+            presentations: &mut self.presentations,
             paths: paths.as_deref(),
             limits: self.request.limits,
             retained_bytes: old_bytes,
@@ -930,12 +935,14 @@ impl Worker {
                 writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
                 return Ok(());
             }
-            writer.send(JunkSessionEventKind::Candidate {
-                key: *key,
-                state: JunkSessionCandidateState::Current,
+            self.presentations.send_candidate(
+                writer,
+                self.request.limits,
+                *key,
+                JunkSessionCandidateState::Current,
                 rules_digest,
-                row: Arc::clone(row),
-            })?;
+                Arc::clone(row),
+            )?;
             // A cancelled/partial scope may still deliver useful current rows. Retain those
             // bindings for later refresh, without treating unseen old rows as absent.
             self.current.insert(*key, Arc::clone(row));
@@ -977,33 +984,12 @@ impl Worker {
         writer.phase(JunkSessionPhase::Replacement)?;
         partial |= writer.error_count > 0;
         if !partial {
-            if job.selected.is_none() {
-                for key in std::mem::take(&mut self.preview_keys) {
-                    if !pending.contains_key(&key) && !self.current.contains_key(&key) {
-                        writer.send(JunkSessionEventKind::Removed { key })?;
-                    }
-                }
-            }
-            let old_keys: Vec<_> = self
-                .current
-                .iter()
-                .filter_map(|(key, row)| {
-                    let in_scope = paths.as_ref().is_none_or(|paths| {
-                        row.candidate
-                            .source_entry
-                            .as_ref()
-                            .and_then(native_path)
-                            .is_some_and(|path| {
-                                paths.iter().any(|selected| path.starts_with(selected))
-                            })
-                    });
-                    (in_scope && !pending.contains_key(key)).then_some(*key)
-                })
-                .collect();
-            for key in old_keys {
-                writer.send(JunkSessionEventKind::Removed { key })?;
-                self.current.remove(&key);
-            }
+            self.presentations.replace_complete(
+                writer,
+                paths.as_deref(),
+                &pending,
+                &mut self.current,
+            )?;
         }
         let count = pending.len();
         self.current.extend(pending);
@@ -1025,6 +1011,7 @@ struct Observer<'a> {
     platform: &'a PlatformJunkSetup,
     writer: &'a mut Writer,
     pending: &'a mut Rows,
+    presentations: &'a mut PresentationIndex,
     paths: Option<&'a [PathBuf]>,
     limits: JunkSessionLimits,
     retained_bytes: usize,
@@ -1129,12 +1116,14 @@ impl ClassifiedScanObserver for Observer<'_> {
         }
         self.retained_rows += 1;
         self.retained_bytes = self.retained_bytes.saturating_add(row.cost());
-        if let Err(failure) = self.writer.send(JunkSessionEventKind::Candidate {
+        if let Err(failure) = self.presentations.send_candidate(
+            self.writer,
+            self.limits,
             key,
-            state: JunkSessionCandidateState::Base,
-            rules_digest: self.rules_digest,
-            row: Arc::clone(&row),
-        }) {
+            JunkSessionCandidateState::Base,
+            self.rules_digest,
+            Arc::clone(&row),
+        ) {
             self.writer.abort(failure);
             return;
         }

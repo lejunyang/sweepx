@@ -79,17 +79,17 @@ fn temporary_reports_keep_logical_bytes_and_refuse_generic_trash_then_refresh_al
     complete(&mut provider);
     let native_key = provider.rows.values().next().unwrap().native_key;
     let key = "controlled-temporary-presentation".to_string();
-    provider.rows.insert(
-        key.clone(),
-        Arc::new(Row {
+    assert!(matches!(
+        provider.admit(Arc::new(Row {
             key: key.clone(),
             native_key,
             revision: provider.revision,
             current: true,
             preview: false,
             row,
-        }),
-    );
+        })),
+        Some(JunkEvent::Candidate { .. })
+    ));
     assert!(
         provider
             .trash(std::slice::from_ref(&key))
@@ -130,6 +130,315 @@ fn complete(provider: &mut Provider) -> Vec<JunkEvent> {
     }
 }
 
+fn adapter_fixture() -> (tempfile::TempDir, Provider, Vec<Arc<Row>>) {
+    let fixture = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    for name in ["a", "b", "c"] {
+        let project = root.join(name);
+        fs::create_dir_all(project.join("target")).unwrap();
+        fs::write(project.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+        fs::write(
+            project.join("target").join("payload"),
+            b"preserve adapter payload",
+        )
+        .unwrap();
+    }
+    let mut provider =
+        Provider::new(JunkSession::start(JunkSessionRequest::new(vec![root])).unwrap());
+    complete(&mut provider);
+    let rows: Vec<_> = provider.rows.values().cloned().collect();
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert!(matches!(
+            provider.translate_event(
+                1,
+                JunkSessionEventKind::Removed {
+                    key: row.native_key
+                }
+            ),
+            Some(JunkEvent::Removed { .. })
+        ));
+    }
+    assert!(provider.rows.is_empty() && provider.historical.is_empty());
+    assert_eq!(provider.retained, 0);
+    (fixture, provider, rows)
+}
+
+fn candidate_event(row: &Arc<Row>, state: JunkSessionCandidateState) -> JunkSessionEventKind {
+    JunkSessionEventKind::Candidate {
+        key: row.native_key,
+        state,
+        rules_digest: [0; 32],
+        row: Arc::clone(&row.row),
+    }
+}
+
+fn terminal_event(outcome: JunkSessionOutcome, replaced: bool) -> JunkSessionEventKind {
+    JunkSessionEventKind::Completed {
+        outcome,
+        replaced,
+        candidate_count: 1,
+        error_count: 0,
+    }
+}
+
+fn stop_adapter_fixture(provider: &mut Provider, rows: &[Arc<Row>]) {
+    for row in rows {
+        assert_eq!(
+            fs::read(row.row.observed_native_path().unwrap().join("payload")).unwrap(),
+            b"preserve adapter payload"
+        );
+    }
+    provider.close();
+    assert_eq!(provider.retained, 0);
+    assert!(provider.rows.is_empty() && provider.historical.is_empty());
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
+}
+
+#[test]
+fn private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget() {
+    let (_fixture, mut provider, rows) = adapter_fixture();
+    provider.limits.rows = 1;
+    provider.translate_event(
+        2,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All,
+        },
+    );
+    assert!(matches!(
+        provider.translate_event(
+            2,
+            candidate_event(&rows[0], JunkSessionCandidateState::Base)
+        ),
+        Some(JunkEvent::Candidate { current: false, .. })
+    ));
+    provider.translate_event(2, terminal_event(JunkSessionOutcome::Cancelled, false));
+    let retained = provider.retained;
+    assert!(retained > 0 && provider.historical.contains(&rows[0].key));
+
+    for (revision, row, final_outcome) in [
+        (3, &rows[1], JunkSessionOutcome::Complete),
+        (4, &rows[2], JunkSessionOutcome::Cancelled),
+        (5, &rows[1], JunkSessionOutcome::Failed),
+    ] {
+        provider.translate_event(
+            revision,
+            JunkSessionEventKind::Started {
+                scope: JunkSessionScope::All,
+            },
+        );
+        assert_eq!(
+            provider.retained, retained,
+            "Started cannot renew retained-row capacity"
+        );
+        for attempt in 0..20 {
+            let event = provider.translate_event(
+                revision,
+                candidate_event(row, JunkSessionCandidateState::Base),
+            );
+            assert_eq!(matches!(event, Some(JunkEvent::Error { .. })), attempt == 0);
+            if attempt > 0 {
+                assert!(event.is_none());
+            }
+            provider.translate_event(
+                revision,
+                JunkSessionEventKind::Invalidated {
+                    key: row.native_key,
+                },
+            );
+        }
+        let terminal = provider.translate_event(revision, terminal_event(final_outcome, true));
+        let expected = match final_outcome {
+            JunkSessionOutcome::Complete => JunkOutcome::Partial,
+            JunkSessionOutcome::Cancelled => JunkOutcome::Cancelled,
+            _ => JunkOutcome::Failed,
+        };
+        assert!(
+            matches!(terminal, Some(JunkEvent::Completed { outcome, replaced: false, .. }) if outcome == expected)
+        );
+        assert_eq!(provider.rows.len(), 1);
+        assert_eq!(provider.retained, retained);
+        assert_eq!(provider.historical, BTreeSet::from([rows[0].key.clone()]));
+        assert!(provider.rejected && !provider.complete && !provider.busy);
+        assert_eq!(
+            provider
+                .trash(std::slice::from_ref(&rows[0].key))
+                .unwrap_err(),
+            "complete the scan or refresh first"
+        );
+        assert!(provider.trash.is_none());
+    }
+    stop_adapter_fixture(&mut provider, &rows);
+}
+
+#[test]
+fn replacement_debits_old_bytes_and_rejected_growth_keeps_old_evidence() {
+    let (_fixture, mut provider, rows) = adapter_fixture();
+    provider.translate_event(
+        2,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All,
+        },
+    );
+    let mut bulky = (*rows[0].row).clone();
+    bulky.candidate.evidence = "bounded old evidence".repeat(1024);
+    let key = rows[0].native_key;
+    provider.translate_event(
+        2,
+        JunkSessionEventKind::Candidate {
+            key,
+            state: JunkSessionCandidateState::Current,
+            rules_digest: [0; 32],
+            row: Arc::new(bulky),
+        },
+    );
+    let bulky_bytes = provider.retained;
+    provider.translate_event(
+        2,
+        candidate_event(&rows[0], JunkSessionCandidateState::Current),
+    );
+    let original_bytes = provider.retained;
+    assert!(
+        original_bytes < bulky_bytes,
+        "a smaller replacement must release capacity"
+    );
+    for _ in 0..20 {
+        provider.translate_event(
+            2,
+            candidate_event(&rows[0], JunkSessionCandidateState::Current),
+        );
+        assert_eq!(
+            provider.retained, original_bytes,
+            "same-key replacement is not cumulative"
+        );
+    }
+    provider.translate_event(2, terminal_event(JunkSessionOutcome::Complete, true));
+    assert!(provider.complete);
+    let old = Arc::clone(&provider.rows[&rows[0].key]);
+    provider.limits.bytes = original_bytes + 512;
+    provider.translate_event(
+        3,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All,
+        },
+    );
+    let mut oversized = (*rows[0].row).clone();
+    oversized.candidate.evidence = "new larger evidence".repeat(4096);
+    assert!(matches!(
+        provider.translate_event(
+            3,
+            JunkSessionEventKind::Candidate {
+                key,
+                state: JunkSessionCandidateState::Current,
+                rules_digest: [0; 32],
+                row: Arc::new(oversized),
+            }
+        ),
+        Some(JunkEvent::Error { .. })
+    ));
+    assert!(Arc::ptr_eq(&old, &provider.rows[&rows[0].key]));
+    assert_eq!(provider.retained, original_bytes);
+    assert!(provider.historical.contains(&rows[0].key));
+    assert!(matches!(
+        provider.translate_event(3, terminal_event(JunkSessionOutcome::Complete, true)),
+        Some(JunkEvent::Completed {
+            outcome: JunkOutcome::Partial,
+            replaced: false,
+            ..
+        })
+    ));
+    assert!(!provider.complete && provider.trash(std::slice::from_ref(&rows[0].key)).is_err());
+    provider.translate_event(3, JunkSessionEventKind::Removed { key });
+    assert_eq!(provider.retained, 0);
+    assert!(provider.rows.is_empty() && provider.historical.is_empty());
+    stop_adapter_fixture(&mut provider, &rows);
+}
+
+#[test]
+fn cancelled_base_selection_refreshes_all_without_promoting_its_native_key() {
+    let fixture = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    #[cfg(not(unix))]
+    let root = fixture.path().to_path_buf();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(
+        root.join("target").join("payload"),
+        b"base remains unmodified",
+    )
+    .unwrap();
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.limits.max_events = 1;
+    let mut provider = Provider::new(JunkSession::start(request).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let key = loop {
+        assert!(Instant::now() < deadline, "base observation did not arrive");
+        match provider.poll() {
+            Some(JunkEvent::Candidate {
+                current: false,
+                historical: false,
+                row,
+                ..
+            }) => {
+                break row.key().to_string();
+            }
+            Some(JunkEvent::Completed { .. }) => {
+                panic!("scan finished before its base observation")
+            }
+            _ => std::thread::sleep(Duration::from_millis(1)),
+        }
+    };
+    // One reliable slot holds Formats or Git before Current can be published. Cancel before
+    // draining another phase; no sleep or producer timing is used as completion evidence.
+    provider.cancel();
+    let events = complete(&mut provider);
+    assert!(matches!(
+        events.last(),
+        Some(JunkEvent::Completed {
+            outcome: JunkOutcome::Cancelled,
+            replaced: false,
+            ..
+        })
+    ));
+    assert!(!provider.rows[&key].current && !provider.rows[&key].preview);
+    assert!(provider.trash(std::slice::from_ref(&key)).is_err());
+    provider.refresh(std::slice::from_ref(&key)).unwrap();
+    let events = complete(&mut provider);
+    assert!(matches!(
+        events.first(),
+        Some(JunkEvent::Started { keys: None, .. })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(JunkEvent::Completed {
+            outcome: JunkOutcome::Complete,
+            replaced: true,
+            ..
+        })
+    ));
+    assert!(provider.rows[&key].current);
+    assert_eq!(
+        fs::read(root.join("target").join("payload")).unwrap(),
+        b"base remains unmodified"
+    );
+    provider.close();
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
+}
+
 #[test]
 fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without_native_mutation() {
     let fixture = tempfile::TempDir::new().unwrap();
@@ -159,12 +468,23 @@ fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without
     let ancestor_key = key_for(&outer);
     let selected_key = key_for(&selected);
     let child_key = key_for(&descendant);
+    let ancestor_cost = provider.rows[&ancestor_key].registry_cost();
     provider.confirmed_moves(std::slice::from_ref(&selected_key));
     assert!(!provider.rows.contains_key(&selected_key));
     assert!(!provider.rows.contains_key(&child_key));
     assert!(provider.rows.contains_key(&ancestor_key));
     assert!(provider.historical.contains(&ancestor_key));
+    assert_eq!(provider.retained, ancestor_cost);
+    assert_eq!(provider.pending.len(), 3);
+    assert!(provider.refresh(&[]).is_err(), "drain reconciliation first");
+    assert!(provider.trash(std::slice::from_ref(&ancestor_key)).is_err());
     assert!(provider.pending.iter().any(|event| matches!(event, JunkEvent::Candidate { historical: true, row, .. } if row.key() == ancestor_key)));
+    for _ in 0..3 {
+        assert!(provider.poll().is_some());
+    }
+    assert!(provider.pending.is_empty());
+    assert_eq!(provider.pending.capacity(), 0);
+    assert_eq!(provider.retained, ancestor_cost);
     assert_eq!(
         fs::read(descendant.join("payload")).unwrap(),
         b"native payload retained"
