@@ -1939,6 +1939,17 @@ fn config_failure_reason(
         .unwrap_or(CargoEvidenceReason::ConfigReadFailed)
 }
 
+/// Projects declaration presence for junk context with the existing bounded decoder.
+/// A parsed relative path is redacted and never resolved into effective scope or ownership.
+pub(crate) fn inspect_cargo_target_dir_declaration(bytes: &[u8]) -> Result<bool, &'static str> {
+    match decode_workspace_target_dir_declaration(CargoTargetDirSource::Config, bytes) {
+        CargoWorkspaceTargetDirDeclaration::Known { .. } => Ok(true),
+        CargoWorkspaceTargetDirDeclaration::VerifiedAbsent => Ok(false),
+        CargoWorkspaceTargetDirDeclaration::NotChecked { reason_code }
+        | CargoWorkspaceTargetDirDeclaration::Unknown { reason_code } => Err(reason_code.code()),
+    }
+}
+
 fn decode_workspace_target_dir_declaration(
     source: CargoTargetDirSource,
     bytes: &[u8],
@@ -2780,7 +2791,9 @@ mod linux_real_stack_tests {
         ScanEntryId,
         ScanEntryId,
     ) {
-        let temp = tempfile::TempDir::new().unwrap();
+        // Configuration content observations require a positively known local filesystem.
+        // An overlay/FUSE /tmp is not interchangeable with the supported local-file contract.
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("workspace");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();

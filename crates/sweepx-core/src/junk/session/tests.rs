@@ -1334,6 +1334,9 @@ fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
     let manifest = root.join("Cargo.toml");
     let original = b"[workspace]\nmembers=['a']\n";
     fs::write(&manifest, original).unwrap();
+    fs::create_dir(root.join(".cargo")).unwrap();
+    let config = root.join(".cargo/config.toml");
+    fs::write(&config, b"[build]\ntarget-dir='current'\n").unwrap();
     let mut request = JunkSessionRequest::new(vec![root.clone()]);
     request.include_platform_rules = false;
     #[cfg(target_os = "macos")]
@@ -1356,10 +1359,22 @@ fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
         Some(1)
     );
     assert!(rows[&key].candidate.project_execution_blocker().is_some());
+    assert_eq!(
+        rows[&key]
+            .candidate
+            .project_context
+            .unwrap()
+            .cargo_config
+            .unwrap()
+            .config_toml
+            .declared,
+        Some(true)
+    );
     assert!(events.iter().any(|e| matches!(&e.kind,
         JunkSessionEventKind::Candidate { state: JunkSessionCandidateState::Base, row, .. }
         if row.candidate.project_context.is_some_and(|c| c.status == ProjectContextStatus::NotChecked))));
     fs::write(&manifest, b"[workspace]\nexclude=['a']\n").unwrap();
+    fs::write(&config, b"[build]\njobs=2\n").unwrap();
     let revision = session.refresh_selected(&[key]).unwrap();
     let rows = current(&drain(&session, revision));
     assert_eq!(
@@ -1377,6 +1392,17 @@ fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
         None
     );
     assert!(rows[&key].complete());
+    assert_eq!(
+        rows[&key]
+            .candidate
+            .project_context
+            .unwrap()
+            .cargo_config
+            .unwrap()
+            .config_toml
+            .declared,
+        Some(false)
+    );
     assert!(rows[&key].candidate.project_execution_blocker().is_some());
     fs::write(&manifest, b"[workspace]\nmembers=[").unwrap();
     let revision = session.refresh_all().unwrap();
@@ -1387,6 +1413,7 @@ fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
     );
     assert!(rows[&key].candidate.project_execution_blocker().is_some());
     fs::write(&manifest, original).unwrap();
+    fs::remove_file(&config).unwrap();
     let revision = session.refresh_all().unwrap();
     let rows = current(&drain(&session, revision));
     assert_eq!(
@@ -1404,6 +1431,14 @@ fn cargo_parent_context_is_current_on_selected_and_cached_full_refresh() {
         b"preserved"
     );
     assert_eq!(fs::read(&manifest).unwrap(), original);
+    let config = rows[&key]
+        .candidate
+        .project_context
+        .unwrap()
+        .cargo_config
+        .unwrap();
+    assert_eq!(config.config_toml.declared, None);
+    assert!(!config.precedence_complete);
     shutdown(&session);
 }
 

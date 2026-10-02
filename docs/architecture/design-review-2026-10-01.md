@@ -450,7 +450,7 @@ socket 命名空间只有完整表读取成功后才进入已观察集合，进�
 | 顺序 | 未完成项 | 当前边界 |
 | --- | --- | --- |
 | 1 | 系统垃圾会话与 TUI 收尾 | 系统自动根发现与 Linux 临时对象事件/视图已接入；临时对象的 TUI 后台隔离预览、精确计划确认和结果展示已接入，共用原生服务；Linux 等目标宿主的完整运行验证仍缺失。 |
-| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；Cargo 父 manifest 的当前声明观察已接入 CLI/会话/TUI，并复用独立 cleaner 的解析器，但尚未求解有效配置或独占关系；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
+| 2 | 垃圾规则扩展 | 已加入 Dart 与 SvelteKit 1/2 的自身普通文件结构标记规则及共用版本/误报夹具；Dart 与 legacy SvelteKit 已接入当前有界内容 profile、缓存/会话重观察及 report-only 回收限制；现已将执行约束贯穿所有旧/新项目规则及缓存，名称/ignore 不再提供项目回收准入；SvelteKit 1.0.0/2.0.0 与 Dart 2.18.0/3.6.0 已补实际 SDK 生成文件和字节记录（含 Dart 共享/中文空格 workspace）；Cargo 父 manifest 的当前声明观察已接入 CLI/会话/TUI，并复用独立 cleaner 的解析器，并已观察父目录下两个 Cargo 本地配置文件的声明，但尚未求解有效配置或独占关系；完整语言语义、更广版本/配置采集、独占所有权/活动观察仍缺失。 |
 
 另外保留独立收尾项：其他工具发现路径的资源审计（npm 安装/活动枚举，以及工具缓存根、版本展开与指纹快照已补共享预算；不将这些切片视为全部系统发现路径完成审计）；8,192 文件 debug 热缓存 PTY 超时及工具探测间歇失败的根因定位（含受控共享缓存正例的 ProbeUnavailable；300 ms 超时在无交叉编译的串行本机 core 运行中也已复现，后续通过未证明修复）；Linux/Windows 宿主运行时、Windows MSVC 和实际系统 Trash 成功验证。Linux/Windows 会话目前现场扫描，未获得 macOS 同等的历史缓存首屏和文件索引复用。现有 pathname 检查到系统 Trash 调用之间的竞态也仍是执行能力边界。
 
@@ -777,3 +777,19 @@ CLI 的既有 projectFormats 阶段与 core 的 Formats worker 阶段同时观�
 初次原生取样工具误将 proc_listchildpids 返回的 PID 个数解释成字节数，十次虽通过却没有取样，原始记录单独保留，不充作栈证据。独立单子进程夹具核对返回 1 与唯一实际 PID 后修正工具，再执行上述预定十次；没有修改生产程序或测试来迎合实验。首次沙箱实验无法调用 ps，完成其自建子进程清理后在可访问原生取样接口的环境进行；没有读取其他进程、修改宿主安全设置、延长期限或改用解释器启动生产工具。
 
 此次捕获的是成功但慢的启动，未重现旧 300 ms/2 秒失败当次、debug 热缓存 PTY 超时或 FSEvents settle 失败；这些项继续开放。原生实验期间没有交叉编译，不据此声称扫描提速或问题修复。源码未变，只重新构建当前 core 测试二进制并运行上述 exact 测试；文档和原始记录检查不替代工作区或目标宿主验证。
+
+## Cargo 当前本地输出配置声明（2026-10-02）
+
+rust.target 的当前上下文现同时观察父目录 Cargo.toml 和该目录下 .cargo/config、.cargo/config.toml。core 复用独立 Cargo cleaner 的有界 TOML/target-dir 解码器，不新增解析器、工具进程或 crate；JSON projectContext 增加固定大小的 cargoConfig，逐文件报告 status/reason/declared，CLI human 与 TUI 复用同一显示函数。仅受支持的相对目录声明为 observed，绝对/父级路径、include、错误类型等保持 unknown，坏 TOML 为 invalid；不将窄 decoder 的拒绝解释成完整 Cargo 语法无效。路径值不保留、求解或打开；两个文件各自的声明都展示，枚举未见成员为 config_not_observed_non_atomic，不能升级为全局配置不存在。
+
+来源访问日期为 2026-10-02。Cargo 的[配置文档](https://doc.rust-lang.org/cargo/reference/config.html)规定两个名字共存时使用无扩展名的文件，并列出 target-dir 的环境/CLI 覆盖。此处的联合观察没有封闭快照，cwd、祖先、Cargo home、环境与 CLI 作用域也未求解，因此 consistency=non_atomic、precedenceComplete=false；不以某个已见文件或缺失字段选择实际输出目录，不解除项目所有权/活动回收阻碍。纯解析 API 的结果本身不建立原生来源。
+
+scanner 的新祖先配置观察先复验原始完整链直到候选自身，再从同一个捕获根重新走到所需祖先，取得未消费的枚举游标；第二次观察的类型、身份、filesystem 和 mount 必须与第一次一致。不能把第一次已消费的游标交给 .cargo 搜索，不能从 display path 构造 parent 或伪造 manifest/root 行。两次遍历共用目录条数/字节预算，部件预算保守计入完整链。配置对沿既有单 .cargo 句柄/完整有界枚举路径读取，两成员共用载荷预算。既有整根配置观察同时迁入共享 provider-safe 零字节 probe/完整 stream，文件由原生 mount 详情绑定，完整读取匹配 probe 指纹；未知 provider、链接、身份/挂载变化、取消或超限拒绝且没有普通读取 fallback。原有 Cargo home presence-only 路径继续不读内容。
+
+一次 Cargo context 尝试在任何 I/O 前预留 manifest 加两个配置文件的最坏载荷，失败不返还；默认最多 128 次尝试、每文件 256 KiB、累计 32 MiB，因此最多准入 42 项完整 Cargo context 尝试（与其他格式共享），两配置文件单次合计最多 512 KiB，调用方更小限制保留。配置对要求五个请求额度以覆盖目录与两文件的 probe/full 阶段；内容/上下文仍共享 5 秒合作期限，不承诺内核调用硬实时。固定大小投影计入候选/队列模型预算，观察仅在本次 invocation/revision 去重，缓存不保存答案。
+
+原生回归用普通 fs::read 独立核对两个成员内容；覆盖伪造显示路径、扫描根以上拒绝、候选替换、全链部件与请求限额、provider 拒绝、probe 后变化、超大文件、链接和非原子未见成员。核心/会话/双语 CLI 回归覆盖两名共存、当前调用去重、新调用/选中/完整刷新重观察、缺失字段与未见文件区分、路径不泄漏、预算不足以及回收阻碍保留。最初两项 scanner 正例失败，随后诊断分别补上未消费游标和原生文件 mount 观察；CLI 最初也捕获 null 而不是声明 true。没有改弱正例、复制父 mount 或把失败当 absence。
+
+[独立 Cargo 配置对照](cargo-local-config-oracle-2026-10-02.json)在固定 Cargo 1.98.0、隔离 home/覆盖环境的三个 offline metadata 场景中核对：两个文件均声明、无扩展名文件未声明 target-dir、只有现代文件。实际 Cargo 分别使用 legacy 路径、默认 target、modern 路径；SweepX 分别报告各文件自己的声明而保持 precedenceComplete=false 和项目回收阻碍。普通读取确认配置/manifest/个人载荷未变。生产和普通 Rust 回归不执行 Cargo；这个对照不证明全部有效配置、所有权、活动或删除安全。
+
+交付验证：完整工作区串行 965 项通过、0 失败、2 项原有基准 ignored，仍显式排除已诊断挂起的 trash_moves_ordinary_paths_without_confirmation_in_machine_invocations，实际系统 Trash 成功未验证。之后仅去除重复测试断言、补内部 rustdoc，并将 Linux 配置内容夹具放到已知本地 /dev/shm；最终原生内容/祖先专项 6 项通过，其余未变宿主行为复用工作区结果，不称为第二次完整矩阵。最终受影响 crate 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 和三包清单通过；三个独立 Cargo 对照的投影、状态及保留字节核验通过。Linux 专用测试代码只交叉 lint，原生 Linux/Windows、MSVC、真实云 provider 和系统 Trash 成功仍未验收。没有端到端计时或提速结论；旧 probe/PTY/FSEvents 间歇失败及有效配置、所有权、活动和最终 pathname 竞态继续开放。

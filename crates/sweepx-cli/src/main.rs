@@ -231,7 +231,7 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
-    /// Cargo target candidates report current parent-manifest declarations; these do not prove ownership.
+    /// Cargo target candidates report current parent manifest/local config declarations; these do not prove ownership or effective output scope.
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
@@ -2585,6 +2585,18 @@ fn junk_project_context_label(
             manifest.kind.code(),
             manifest.explicit_workspace,
             manifest.path_dependencies_declared
+        );
+    }
+    if let Some(config) = evidence.cargo_config {
+        use std::fmt::Write;
+        let _ = write!(
+            label,
+            "; config={}/{}; configToml={}/{}; precedenceComplete={}",
+            config.config.status.code(),
+            config.config.reason,
+            config.config_toml.status.code(),
+            config.config_toml.reason,
+            config.precedence_complete
         );
     }
     label

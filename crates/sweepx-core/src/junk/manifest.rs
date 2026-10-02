@@ -41,6 +41,8 @@ pub struct ProjectContextEvidence {
     pub reason: &'static str,
     /// Cargo declarations only; no resolved membership or exclusive-ownership inference.
     pub cargo_manifest: Option<CargoManifestDeclarations>,
+    /// Current project-local config declarations, separate from globally effective configuration.
+    pub cargo_config: Option<CargoLocalConfigEvidence>,
 }
 impl ProjectContextEvidence {
     /// Starts a profile without inheriting prior rules, invocation or cache answers.
@@ -50,6 +52,7 @@ impl ProjectContextEvidence {
             status: ProjectContextStatus::NotChecked,
             reason: "context_not_checked",
             cargo_manifest: None,
+            cargo_config: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl ProjectContextEvidence {
             status: ProjectContextStatus::Unknown,
             reason,
             cargo_manifest: None,
+            cargo_config: None,
         }
     }
 }
@@ -73,6 +77,7 @@ pub fn inspect_cargo_manifest_context(bytes: &[u8]) -> ProjectContextEvidence {
             status: ProjectContextStatus::Observed,
             reason: "manifest_declarations_observed",
             cargo_manifest: Some(declarations),
+            cargo_config: None,
         },
         Err(reason) => ProjectContextEvidence {
             profile,
@@ -83,7 +88,105 @@ pub fn inspect_cargo_manifest_context(bytes: &[u8]) -> ProjectContextEvidence {
             },
             reason,
             cargo_manifest: None,
+            cargo_config: None,
         },
+    }
+}
+
+/// Declaration from one observed config file; no raw target path is retained or opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoTargetDirDeclaration {
+    /// Parsing/read outcome for the current file, never proof of global configuration absence.
+    pub status: ProjectContextStatus,
+    /// Locale-independent explanation, including non-atomic enumeration absence.
+    pub reason: &'static str,
+    /// True/false only for a supported, completely read config; `None` means unknown.
+    pub declared: Option<bool>,
+}
+
+/// Fixed-size local configuration observations. No resolved output directory or selection claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoLocalConfigEvidence {
+    /// Both names are observed under one directory handle, without a sealed snapshot.
+    pub consistency: CargoConfigConsistency,
+    /// Declarations in the legacy `.cargo/config` file; Cargo normally prefers this name.
+    pub config: CargoTargetDirDeclaration,
+    /// Declarations in `.cargo/config.toml`, independently reported even when both names exist.
+    pub config_toml: CargoTargetDirDeclaration,
+    /// Remains false until cwd/ancestor/home/environment/CLI precedence is independently resolved.
+    pub precedence_complete: bool,
+}
+
+/// Consistency of local Cargo configuration observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoConfigConsistency {
+    /// Current observations cannot exclude cross-file or enumeration races.
+    NonAtomic,
+}
+
+/// Inspects only one file's supported target-dir declaration with the existing Cargo decoder.
+/// Pure parsing makes no native provenance, path resolution or exclusive ownership claim.
+pub fn inspect_cargo_target_dir_declaration(bytes: &[u8]) -> CargoTargetDirDeclaration {
+    match crate::cargo_cleaner_evidence::inspect_cargo_target_dir_declaration(bytes) {
+        Ok(declared) => CargoTargetDirDeclaration {
+            status: ProjectContextStatus::Observed,
+            reason: if declared {
+                "target_dir_declared"
+            } else {
+                "target_dir_not_declared_in_file"
+            },
+            declared: Some(declared),
+        },
+        Err(reason) => CargoTargetDirDeclaration::unknown(reason),
+    }
+}
+impl CargoTargetDirDeclaration {
+    fn unknown(reason: &'static str) -> Self {
+        Self {
+            status: if matches!(reason, "malformed_toml" | "duplicate_toml_key") {
+                ProjectContextStatus::Invalid
+            } else {
+                ProjectContextStatus::Unknown
+            },
+            reason,
+            declared: None,
+        }
+    }
+}
+impl CargoLocalConfigEvidence {
+    pub(super) fn failed(reason: &'static str) -> Self {
+        Self {
+            consistency: CargoConfigConsistency::NonAtomic,
+            config: CargoTargetDirDeclaration::unknown(reason),
+            config_toml: CargoTargetDirDeclaration::unknown(reason),
+            precedence_complete: false,
+        }
+    }
+
+    pub(super) fn from_observation(pair: sweepx_scanner::CargoConfigPairObservation) -> Self {
+        use sweepx_scanner::CargoConfigMemberObservation;
+        fn inspect(member: CargoConfigMemberObservation) -> CargoTargetDirDeclaration {
+            match member {
+                CargoConfigMemberObservation::Present(read) => {
+                    inspect_cargo_target_dir_declaration(&read.bytes)
+                }
+                CargoConfigMemberObservation::AbsentDuringEnumeration => {
+                    CargoTargetDirDeclaration::unknown("config_not_observed_non_atomic")
+                }
+                CargoConfigMemberObservation::Failed(reason) => {
+                    CargoTargetDirDeclaration::unknown(super::format::read_reason(reason))
+                }
+            }
+        }
+        Self {
+            consistency: CargoConfigConsistency::NonAtomic,
+            config: inspect(pair.config),
+            config_toml: inspect(pair.config_toml),
+            precedence_complete: false,
+        }
     }
 }
 

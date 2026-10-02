@@ -35,6 +35,9 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
     let manifest = project.join("Cargo.toml");
     let payload = project.join("target/personal");
     fs::write(&payload, b"preserved").unwrap();
+    fs::create_dir(project.join(".cargo")).unwrap();
+    let config_body = b"[build]\ntarget-dir='private/output'\n";
+    fs::write(project.join(".cargo/config.toml"), config_body).unwrap();
     let cases = [
         (
             &b"[workspace]\nmembers=['crates/*']\n"[..],
@@ -72,6 +75,12 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
             assert_eq!(row["ruleId"], "rust.target");
             assert_eq!(row["projectContext"]["profile"], "cargo_manifest");
             assert_eq!(row["projectContext"]["status"], status);
+            let config = &row["projectContext"]["cargoConfig"];
+            assert_eq!(config["consistency"], "non_atomic");
+            assert_eq!(config["precedenceComplete"], false);
+            assert_eq!(config["config"]["declared"], Value::Null);
+            assert_eq!(config["configToml"]["declared"], true);
+            assert!(!config.to_string().contains("private/output"));
             assert_eq!(
                 row["projectContext"]["cargoManifest"]["memberPatterns"],
                 patterns
@@ -105,7 +114,14 @@ fn cargo_context_reports_current_declarations_in_both_locales_without_ownership(
                 "project context"
             }));
             assert!(text.contains(status));
+            assert!(text.contains("target_dir_declared"));
+            assert!(text.contains("precedenceComplete=false"));
+            assert!(!text.contains("private/output"));
         }
+        assert_eq!(
+            fs::read(project.join(".cargo/config.toml")).unwrap(),
+            config_body
+        );
         assert_eq!(contexts[0], contexts[1]);
         assert_eq!(fs::read(&manifest).unwrap(), body);
         assert_eq!(fs::read(&payload).unwrap(), b"preserved");

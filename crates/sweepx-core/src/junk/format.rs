@@ -8,7 +8,9 @@ mod sveltekit;
 pub use sveltekit::inspect_sveltekit_sync;
 
 use super::candidate::JunkCandidate;
-use super::manifest::{ProjectContextEvidence, inspect_cargo_manifest_context};
+use super::manifest::{
+    CargoLocalConfigEvidence, ProjectContextEvidence, inspect_cargo_manifest_context,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -77,7 +79,8 @@ pub struct ProjectFormatLimits {
     /// Cumulative worst-case payload reservations, including all profile rereads. Failed reads
     /// do not refund their allowance; a legacy SvelteKit observation reserves four reads.
     pub max_reserved_file_bytes: usize,
-    /// Native lineage, enumeration and handle-bound read limits per observation.
+    /// Native lineage, enumeration and handle-bound limits per read/pair call. A profile can
+    /// make multiple calls; upfront file reservations and max_observations bound their total.
     pub locator: LocatorReadLimits,
     /// Cooperative deadline for the entire session; cannot interrupt a blocking kernel call.
     pub timeout: Duration,
@@ -89,7 +92,7 @@ impl Default for ProjectFormatLimits {
             max_file_bytes: 256 * 1024,
             max_reserved_file_bytes: 32 * 1024 * 1024,
             locator: LocatorReadLimits {
-                max_requests: 2,
+                max_requests: 5,
                 max_components_per_request: 32,
                 max_total_components: 32,
                 ..LocatorReadLimits::default()
@@ -130,7 +133,12 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             .min(limits.locator.max_file_bytes)
             .min(limits.locator.max_total_bytes);
         limits.locator.max_file_bytes = limits.max_file_bytes;
-        limits.locator.max_total_bytes = limits.max_file_bytes;
+        // The pair can contain two complete files; preserve stricter caller-supplied limits.
+        // Each file stays capped, and the profile reserves manifest + both files before I/O.
+        limits.locator.max_total_bytes = limits
+            .locator
+            .max_total_bytes
+            .min(limits.max_file_bytes.saturating_mul(2));
         Self {
             reader: LocatorReader::new(platform, limits.locator),
             limits,
@@ -228,7 +236,7 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
             let key = (candidate.entry_id.clone(), profile);
             if let Some(current) = self.contexts.get(&key) {
                 *current
-            } else if let Err(reason) = self.reserve_observation(1) {
+            } else if let Err(reason) = self.reserve_observation(3) {
                 ProjectContextEvidence::unknown(profile, reason)
             } else {
                 let current = self.observe_context(candidate, profile);
@@ -260,7 +268,26 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
         };
         match read {
             Ok(read) => {
-                let evidence = inspect_cargo_manifest_context(&read.bytes);
+                let mut evidence = inspect_cargo_manifest_context(&read.bytes);
+                // One manifest plus two possible config files share the upfront reservation.
+                // Config failures do not erase a successfully read manifest declaration.
+                evidence.cargo_config = Some(match self.check_current() {
+                    Err(reason) => CargoLocalConfigEvidence::failed(reason),
+                    Ok(()) => match self.reader.observe_cargo_config_pair_at_captured_ancestor(
+                        entry,
+                        1,
+                        &self.cancel,
+                    ) {
+                        Ok(pair) => CargoLocalConfigEvidence::from_observation(pair),
+                        Err(error) => CargoLocalConfigEvidence::failed(match error {
+                            sweepx_scanner::LocatorReadError::Cancelled => "cancelled",
+                            sweepx_scanner::LocatorReadError::ResourceLimit => "resource_limit",
+                            sweepx_scanner::LocatorReadError::InvalidRequest => {
+                                "native_binding_unavailable"
+                            }
+                        }),
+                    },
+                });
                 if let Err(reason) = self.check_current() {
                     ProjectContextEvidence::unknown(profile, reason)
                 } else {
@@ -356,7 +383,7 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
     }
 }
 
-fn read_reason(failure: LocatorReadFailure) -> &'static str {
+pub(super) fn read_reason(failure: LocatorReadFailure) -> &'static str {
     match failure {
         LocatorReadFailure::InvalidBinding => "invalid_binding",
         LocatorReadFailure::IdentityMismatch => "identity_changed_or_missing",

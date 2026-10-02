@@ -45,6 +45,7 @@ struct ProbeScanner {
     inner: HostPlatformScanner,
     streams: AtomicUsize,
     mutation: Option<PathBuf>,
+    deny_stream: bool,
 }
 
 impl PlatformScanner for ProbeScanner {
@@ -75,6 +76,15 @@ impl PlatformScanner for ProbeScanner {
     ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
         self.inner.inspect_child(parent, child, cancel)
     }
+    fn inspect_child_with_mount_identity(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        self.inner
+            .inspect_child_with_mount_identity(parent, child, cancel)
+    }
     fn inspect_child_with_directory_admission(
         &self,
         parent: &Self::DirectoryHandle,
@@ -100,6 +110,11 @@ impl PlatformScanner for ProbeScanner {
         consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
     ) -> Result<RegularFileStreamResult, BoundedRegularFileReadError> {
         let number = self.streams.fetch_add(1, Ordering::SeqCst);
+        if self.deny_stream {
+            return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                "controlled provider refusal".into(),
+            ));
+        }
         let result = self
             .inner
             .stream_regular_file_relative(parent, request, cancel, consume)?;
@@ -119,9 +134,155 @@ fn new_reader(limits: LocatorReadLimits, mutation: Option<PathBuf>) -> LocatorRe
             inner: HostPlatformScanner::new(),
             streams: AtomicUsize::new(0),
             mutation,
+            deny_stream: false,
         },
         limits,
     )
+}
+
+#[test]
+fn ancestor_cargo_pair_preserves_native_binding_and_reports_both_current_files() {
+    let (_owner, directory, mut captured) = fixture();
+    let cargo = directory.parent().unwrap().join(".cargo");
+    std::fs::create_dir(&cargo).unwrap();
+    std::fs::write(cargo.join("config"), b"[build]\ntarget-dir='legacy'\n").unwrap();
+    std::fs::write(cargo.join("config.toml"), b"[build]\ntarget-dir='modern'\n").unwrap();
+    captured.display_path = "/forged/candidate".into();
+    let reader = new_reader(Default::default(), None);
+    let pair = reader
+        .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(pair.consistency, CargoConfigPairConsistency::NonAtomic);
+    assert!(pair.config.observed_bytes().is_some(), "{pair:?}");
+    assert_eq!(
+        pair.config.observed_bytes().unwrap(),
+        std::fs::read(cargo.join("config")).unwrap()
+    );
+    assert_eq!(
+        pair.config_toml.observed_bytes().unwrap(),
+        std::fs::read(cargo.join("config.toml")).unwrap()
+    );
+    assert_eq!(
+        pair.total_bytes,
+        pair.config.observed_bytes().unwrap().len()
+            + pair.config_toml.observed_bytes().unwrap().len()
+    );
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 4);
+    for limits in [
+        LocatorReadLimits {
+            max_requests: 4,
+            ..Default::default()
+        },
+        // Complete captured root/candidate plus .cargo and two names costs 11 components.
+        LocatorReadLimits {
+            max_total_components: 10,
+            ..Default::default()
+        },
+    ] {
+        let limited = new_reader(limits, None);
+        assert_eq!(
+            limited.observe_cargo_config_pair_at_captured_ancestor(
+                &captured,
+                1,
+                &CancellationToken::new()
+            ),
+            Err(LocatorReadError::ResourceLimit)
+        );
+        assert_eq!(limited.platform.streams.load(Ordering::SeqCst), 0);
+    }
+    assert_eq!(
+        reader.observe_cargo_config_pair_at_captured_ancestor(
+            &captured,
+            2,
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadError::InvalidRequest)
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        reader.observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &cancel),
+        Err(LocatorReadError::Cancelled)
+    );
+    std::fs::rename(&directory, directory.with_file_name("retained-original")).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    let replaced = new_reader(Default::default(), None);
+    assert_eq!(
+        replaced.observe_cargo_config_pair_at_captured_ancestor(
+            &captured,
+            1,
+            &CancellationToken::new()
+        ),
+        Err(LocatorReadError::InvalidRequest)
+    );
+    assert_eq!(replaced.platform.streams.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cargo_pair_streams_refuse_provider_changes_and_oversize_before_payload() {
+    let (_owner, directory, captured) = fixture();
+    let cargo = directory.parent().unwrap().join(".cargo");
+    std::fs::create_dir(&cargo).unwrap();
+    let path = cargo.join("config");
+    std::fs::write(&path, b"[build]\ntarget-dir='private'\n").unwrap();
+    let mut provider = new_reader(Default::default(), None);
+    provider.platform.deny_stream = true;
+    let refused = provider
+        .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+        .unwrap();
+    assert!(
+        matches!(
+            refused.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::ProviderOrOffline)
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(provider.platform.streams.load(Ordering::SeqCst), 1);
+    let limited = new_reader(
+        LocatorReadLimits {
+            max_file_bytes: 1,
+            ..Default::default()
+        },
+        None,
+    );
+    let refused = limited
+        .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        refused.config,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    ));
+    assert_eq!(limited.platform.streams.load(Ordering::SeqCst), 1);
+    let changing = new_reader(Default::default(), Some(path.clone()));
+    let refused = changing
+        .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        refused.config,
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ReadFailed)
+    ));
+    let plain = new_reader(Default::default(), None);
+    std::fs::remove_file(&path).unwrap();
+    let missing = plain
+        .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(missing.consistency, CargoConfigPairConsistency::NonAtomic);
+    assert!(matches!(
+        missing.config,
+        CargoConfigMemberObservation::AbsentDuringEnumeration
+    ));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(directory.join("config.json"), &path).unwrap();
+        let linked = plain
+            .observe_cargo_config_pair_at_captured_ancestor(&captured, 1, &CancellationToken::new())
+            .unwrap();
+        assert!(matches!(
+            linked.config,
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::SymlinkOrReparse)
+        ));
+        assert_eq!(plain.platform.streams.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]

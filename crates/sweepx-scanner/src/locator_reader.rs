@@ -15,8 +15,8 @@ use sweepx_platform::{
     DirectoryEntryRecord, DirectoryHandleAdmission, DirectoryReadLimits, EntryIdentity, EntryKind,
     FilesystemIdentity, MountIdentity, PlatformError, PlatformScanner, PresentRegularFileRead,
     RegularFileReadExpectation, RegularFileStreamRequest, RootAdmission, ScanRoot, WalkEntry,
-    inspect_bound_child, inspect_bound_child_with_directory_admission, read_bound_regular_file,
-    stream_bound_regular_file,
+    inspect_bound_child, inspect_bound_child_with_directory_admission,
+    inspect_bound_child_with_mount_identity, read_bound_regular_file, stream_bound_regular_file,
 };
 use thiserror::Error;
 
@@ -300,14 +300,32 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 &mut BatchBudget::default(),
             )
             .map_err(failed)?;
-        let probe = RegularFileStreamRequest::new(
-            name.clone(),
+        self.read_current_regular_file(
+            &parent,
+            name,
             RegularFileReadExpectation::establish_live(),
-            0,
-            0,
-            None,
+            self.limits.max_file_bytes.min(self.limits.max_total_bytes),
+            cancel,
         )
-        .map_err(|error| failed(map_file_read_error(error)))?;
+    }
+
+    // Both fixed manifest reads and enumerated Cargo config members use the provider-safe
+    // probe/full stream. Enumeration supplies a prior binding; a standalone fixed name first
+    // establishes one. Neither path falls back to ordinary reads that could hydrate a provider.
+    fn read_current_regular_file(
+        &self,
+        parent: &OpenedDirectory<P::DirectoryHandle>,
+        name: &NativeName,
+        expectation: RegularFileReadExpectation,
+        maximum: usize,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
+        let failed = |error| match error {
+            ReadAttempt::Failed(failure) => failure,
+            ReadAttempt::Absent => LocatorReadFailure::ReadFailed,
+        };
+        let probe = RegularFileStreamRequest::new(name.clone(), expectation, 0, 0, None)
+            .map_err(|error| failed(map_file_read_error(error)))?;
         let observed =
             stream_bound_regular_file(&self.platform, &parent.handle, &probe, cancel, &mut |_| {
                 Ok(())
@@ -322,7 +340,6 @@ impl<P: PlatformScanner> LocatorReader<P> {
             &observed.mount_identity,
         )
         .map_err(failed)?;
-        let maximum = self.limits.max_file_bytes.min(self.limits.max_total_bytes);
         let length = usize::try_from(observed.logical_bytes.0)
             .ok()
             .filter(|length| *length <= maximum)
@@ -432,23 +449,72 @@ impl<P: PlatformScanner> LocatorReader<P> {
         cancel: &CancellationToken,
     ) -> Result<CargoConfigPairObservation, LocatorReadError> {
         self.validate_base_directory(base_directory)?;
+        self.observe_cargo_config_pair_at_captured_ancestor(base_directory, 0, cancel)
+    }
+
+    /// Observes fixed Cargo config names below a captured directory's native ancestor.
+    /// Validates the complete original lineage through the candidate before opening `.cargo`;
+    /// levels cannot cross the original scan root. Reads use provider-safe zero/full streams,
+    /// and both members share one retained directory, enumeration and payload budget. The pair
+    /// remains non-atomic: enumeration absence and declarations never prove effective precedence,
+    /// exclusive ownership, inactivity or deletion authority. Run off the UI thread and bound
+    /// cumulative calls as well as these per-call request/component/payload limits.
+    pub fn observe_cargo_config_pair_at_captured_ancestor(
+        &self,
+        base_directory: &ScannedEntry,
+        ancestor_levels: usize,
+        cancel: &CancellationToken,
+    ) -> Result<CargoConfigPairObservation, LocatorReadError> {
+        self.validate_scanned_directory(base_directory)?;
         self.validate_cargo_pair_budget(base_directory)?;
         if cancel.is_cancelled() {
             return Err(LocatorReadError::Cancelled);
         }
         let mut budget = BatchBudget::default();
-        let mut root = match self.reopen_base(base_directory, cancel, &mut budget) {
-            Ok(root) => root,
-            Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
-                return Err(LocatorReadError::Cancelled);
-            }
-            Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
-                return Err(LocatorReadError::ResourceLimit);
-            }
-            Err(ReadAttempt::Absent) | Err(ReadAttempt::Failed(_)) => {
-                return Err(LocatorReadError::InvalidRequest);
-            }
-        };
+        let mut root =
+            match self.reopen_base_ancestor(base_directory, ancestor_levels, cancel, &mut budget) {
+                Ok(root) => root,
+                Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
+                    return Err(LocatorReadError::Cancelled);
+                }
+                Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                    return Err(LocatorReadError::ResourceLimit);
+                }
+                Err(ReadAttempt::Absent) | Err(ReadAttempt::Failed(_)) => {
+                    return Err(LocatorReadError::InvalidRequest);
+                }
+            };
+        if ancestor_levels != 0 {
+            // Lineage validation has consumed the retained ancestor's enumeration cursor. Start
+            // a fresh traversal from the same captured scan root, stopping before enumerating
+            // that ancestor, and compare its current identity/scope with the validated one.
+            // Reusing the consumed cursor would silently miss .cargo in earlier batches.
+            let previous = root.metadata.clone();
+            drop(root);
+            root = match self.reopen_base_ancestor_for_enumeration(
+                base_directory,
+                ancestor_levels,
+                false,
+                cancel,
+                &mut budget,
+            ) {
+                Ok(current)
+                    if current.metadata.kind == previous.kind
+                        && current.metadata.identity == previous.identity
+                        && current.metadata.filesystem_identity == previous.filesystem_identity
+                        && current.metadata.mount_identity == previous.mount_identity =>
+                {
+                    current
+                }
+                Err(ReadAttempt::Failed(LocatorReadFailure::Cancelled)) => {
+                    return Err(LocatorReadError::Cancelled);
+                }
+                Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit)) => {
+                    return Err(LocatorReadError::ResourceLimit);
+                }
+                _ => return Err(LocatorReadError::InvalidRequest),
+            };
+        }
         let mut cargo = match self.find_cargo_directory(&mut root, cancel, &mut budget) {
             Ok(Some(cargo)) => cargo,
             Ok(None) | Err(ReadAttempt::Absent) => {
@@ -949,7 +1015,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
     }
 
     fn validate_cargo_pair_budget(&self, base: &ScannedEntry) -> Result<(), LocatorReadError> {
-        if self.limits.max_requests < 3 {
+        if self.limits.max_requests < 5 {
             return Err(LocatorReadError::ResourceLimit);
         }
         let locator = base
@@ -1115,13 +1181,18 @@ impl<P: PlatformScanner> LocatorReader<P> {
         total_bytes: &mut usize,
         cancel: &CancellationToken,
     ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
-        let walked =
-            match inspect_bound_child(&self.platform, &cargo.handle, &cargo.path, child, cancel) {
-                Ok(walked) => walked,
-                Err(error) => {
-                    return Err(map_platform_failure(error));
-                }
-            };
+        let walked = match inspect_bound_child_with_mount_identity(
+            &self.platform,
+            &cargo.handle,
+            &cargo.path,
+            child,
+            cancel,
+        ) {
+            Ok(walked) => walked,
+            Err(error) => {
+                return Err(map_platform_failure(error));
+            }
+        };
         let metadata = match walked {
             WalkEntry::File(metadata) => metadata,
             WalkEntry::Link(_) => {
@@ -1155,27 +1226,13 @@ impl<P: PlatformScanner> LocatorReader<P> {
         }
         let remaining = self.limits.max_total_bytes.saturating_sub(*total_bytes);
         let max_bytes = self.limits.max_file_bytes.min(remaining);
-        let request = match BoundedRegularFileReadRequest::previously_observed(
-            child.file_name.clone(),
-            identity,
-            filesystem,
-            mount,
+        let read = self.read_current_regular_file(
+            cargo,
+            &child.file_name,
+            RegularFileReadExpectation::previously_observed(identity, filesystem, mount),
             max_bytes,
-        ) {
-            Ok(request) => request,
-            Err(_) => {
-                return Err(LocatorReadFailure::InvalidBinding);
-            }
-        };
-        let read = match read_bound_regular_file(&self.platform, &cargo.handle, &request, cancel) {
-            Ok(read) => read,
-            Err(error) => {
-                return match map_file_read_error(error) {
-                    ReadAttempt::Failed(failure) => Err(failure),
-                    ReadAttempt::Absent => Err(LocatorReadFailure::IdentityMismatch),
-                };
-            }
-        };
+            cancel,
+        )?;
         let Some(next_total) = total_bytes.checked_add(read.bytes.len()) else {
             return Err(LocatorReadFailure::ResourceLimit);
         };
@@ -1377,6 +1434,20 @@ impl<P: PlatformScanner> LocatorReader<P> {
         cancel: &CancellationToken,
         budget: &mut BatchBudget,
     ) -> Result<OpenedDirectory<P::DirectoryHandle>, ReadAttempt> {
+        self.reopen_base_ancestor_for_enumeration(base, ancestor_levels, true, cancel, budget)
+    }
+
+    // Only the config-pair path may request a fresh ancestor cursor without repeating descendants,
+    // after full original-lineage validation and with an identity/scope comparison before use.
+    // Every traversal still starts at the captured root and validates each descended component.
+    fn reopen_base_ancestor_for_enumeration(
+        &self,
+        base: &ScannedEntry,
+        ancestor_levels: usize,
+        validate_descendants: bool,
+        cancel: &CancellationToken,
+        budget: &mut BatchBudget,
+    ) -> Result<OpenedDirectory<P::DirectoryHandle>, ReadAttempt> {
         let locator = base
             .executable_native_locator()
             .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?
@@ -1427,6 +1498,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
             metadata,
             handle: directory,
         };
+        if !validate_descendants && ancestor_depth == 0 {
+            return Ok(current);
+        }
         let mut retained_ancestor = None;
         for (depth, expected) in locator
             .parent_reopen_recipe
@@ -1459,6 +1533,9 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 retained_ancestor = Some(current);
             }
             current = next;
+            if !validate_descendants && depth + 1 == ancestor_depth {
+                return Ok(current);
+            }
         }
         validate_component(&locator.entry, &current.metadata)?;
         let _ = identity;
@@ -2770,7 +2847,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_uses_one_non_atomic_observation_and_ignores_display_path() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(root.join(".cargo/config"), b"[build]\ntarget-dir='one'\n").unwrap();
@@ -2809,7 +2886,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_absence_is_explicitly_non_atomic() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(root.join("other"), b"ignored").unwrap();
@@ -2854,7 +2931,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_rejects_ascii_case_aliases_and_symlinks() {
-        let alias_temp = tempfile::TempDir::new().unwrap();
+        let alias_temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let alias_root = alias_temp.path().join("root");
         fs::create_dir_all(alias_root.join(".cargo")).unwrap();
         fs::write(alias_root.join(".cargo/CONFIG"), b"alias").unwrap();
@@ -2871,7 +2948,7 @@ mod tests {
             CargoConfigMemberObservation::Failed(LocatorReadFailure::AmbiguousAlias)
         ));
 
-        let link_temp = tempfile::TempDir::new().unwrap();
+        let link_temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let link_root = link_temp.path().join("root");
         fs::create_dir_all(link_root.join(".cargo")).unwrap();
         fs::write(link_root.join("real-config"), b"real").unwrap();
@@ -2892,7 +2969,7 @@ mod tests {
 
     #[test]
     fn cargo_directory_alias_is_rejected_instead_of_treated_as_absent() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".CARGO")).unwrap();
         fs::write(root.join(".CARGO/config"), b"alias").unwrap();
@@ -2914,7 +2991,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_continues_to_eof_and_rejects_late_alias() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(root.join(".cargo/config"), b"exact").unwrap();
@@ -2944,7 +3021,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_obeys_cancellation_and_directory_budget() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(root.join(".cargo/config"), b"config").unwrap();
@@ -2975,7 +3052,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_honors_request_and_component_budgets() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         let summary = scan(&root, "cargo-pair-component-budget");
@@ -3318,7 +3395,7 @@ mod tests {
 
     #[test]
     fn cargo_config_pair_rejects_stale_base_provenance() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::tempdir_in("/dev/shm").unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         let mut summary = scan(&root, "cargo-pair-stale-base");

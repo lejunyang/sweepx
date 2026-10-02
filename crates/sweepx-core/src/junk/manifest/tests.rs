@@ -266,3 +266,103 @@ fn content_and_context_share_one_invocation_budget() {
     assert_eq!(format.reason, "resource_limit");
     assert!(candidate.project_execution_blocker().is_some());
 }
+
+#[test]
+fn config_declarations_share_the_cleaner_decoder_without_retaining_paths() {
+    for (bytes, declared) in [
+        (&b"[build]\ntarget-dir='secret/location'\n"[..], Some(true)),
+        (&b"[build]\njobs=2\n"[..], Some(false)),
+        (&b"[build]\ntarget-dir='../shared'\n"[..], None),
+        (&b"[build]\ntarget-dir='/private/absolute'\n"[..], None),
+        (&b"include=['private.toml']\n"[..], None),
+        (&b"[build]\ntarget-dir=7\n"[..], None),
+        (&b"[build]\ntarget-dir='x'\ntarget-dir='y'\n"[..], None),
+        (&b"\xff"[..], None),
+    ] {
+        let evidence = inspect_cargo_target_dir_declaration(bytes);
+        assert_eq!(evidence.declared, declared);
+        assert_eq!(
+            evidence.status == ProjectContextStatus::Observed,
+            declared.is_some()
+        );
+        let json = serde_json::to_string(&evidence).unwrap();
+        for private in [
+            "secret/location",
+            "../shared",
+            "/private/absolute",
+            "private.toml",
+        ] {
+            assert!(!json.contains(private));
+        }
+    }
+}
+
+#[test]
+fn native_config_observations_refresh_and_preserve_ambiguity_and_execution_guards() {
+    let (_owner, project, mut candidate) = fixture();
+    let cargo = project.join(".cargo");
+    std::fs::create_dir(&cargo).unwrap();
+    std::fs::write(
+        cargo.join("config"),
+        b"[build]\ntarget-dir='private/legacy'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cargo.join("config.toml"),
+        b"[build]\ntarget-dir='private/modern'\n",
+    )
+    .unwrap();
+    let mut session = ProjectFormatSession::new(Default::default(), CancellationToken::new());
+    session.refresh(&mut candidate);
+    let config = candidate.project_context.unwrap().cargo_config.unwrap();
+    assert_eq!(config.config.declared, Some(true));
+    assert_eq!(config.config_toml.declared, Some(true));
+    assert_eq!(config.consistency, CargoConfigConsistency::NonAtomic);
+    assert!(!config.precedence_complete);
+    assert!(candidate.project_execution_blocker().is_some());
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(!json.contains("private/legacy"));
+    assert!(!json.contains("private/modern"));
+    std::fs::write(cargo.join("config"), b"[build]\njobs=2\n").unwrap();
+    std::fs::remove_file(cargo.join("config.toml")).unwrap();
+    session.refresh(&mut candidate);
+    assert_eq!(
+        candidate.project_context.unwrap().cargo_config.unwrap(),
+        config
+    );
+    ProjectFormatSession::new(Default::default(), CancellationToken::new()).refresh(&mut candidate);
+    let current = candidate.project_context.unwrap().cargo_config.unwrap();
+    assert_eq!(current.config.declared, Some(false));
+    assert_eq!(current.config_toml.declared, None);
+    assert_eq!(current.config_toml.reason, "config_not_observed_non_atomic");
+    assert!(!current.precedence_complete);
+    assert_eq!(
+        std::fs::read(cargo.join("config")).unwrap(),
+        b"[build]\njobs=2\n"
+    );
+    assert_eq!(
+        std::fs::read(project.join("target/personal")).unwrap(),
+        b"preserved"
+    );
+    assert!(candidate.project_execution_blocker().is_some());
+    let mut limited = candidate.clone();
+    ProjectFormatSession::new(
+        ProjectFormatLimits {
+            max_reserved_file_bytes: 2 * 256 * 1024,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    )
+    .refresh(&mut limited);
+    assert_eq!(limited.project_context.unwrap().reason, "resource_limit");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("config", cargo.join("config.toml")).unwrap();
+        ProjectFormatSession::new(Default::default(), CancellationToken::new())
+            .refresh(&mut candidate);
+        let current = candidate.project_context.unwrap();
+        assert_eq!(current.status, ProjectContextStatus::Observed);
+        assert_eq!(current.cargo_config.unwrap().config.declared, None);
+        assert!(candidate.project_execution_blocker().is_some());
+    }
+}

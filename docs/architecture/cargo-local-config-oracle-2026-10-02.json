@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-02",
+  "baseCommit": "4f87c66ee3ad5efaa2f833814e9e707680a8865b",
+  "sourceState": "Cargo local config changes not yet committed",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64"
+  },
+  "cargoVersion": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "cargoSha256": "1de2e84c15443b70444eecfa959ff9099dd8c1a5606b6d9ef5bc0ea9c25bc7f9",
+  "sweepxSha256": "7c271e6bbbae2c1da3ae579bd54878cc2c9241b93414e4c19ba484372e21d190",
+  "manifestBytes": "[workspace]\nmembers=[]\nresolver='2'\n",
+  "cases": [
+    {
+      "case": "both-declare",
+      "inputs": {
+        ".cargo/config.toml": {
+          "bytes": "[build]\ntarget-dir='private/modern'\n",
+          "sha256": "42e8efee2de47d171fad8243e5cf53044e48db20f49e474f73cc81285764afd8"
+        },
+        ".cargo/config": {
+          "bytes": "[build]\ntarget-dir='private/legacy'\n",
+          "sha256": "0f259d4d0d7834856db75f143dbc017820b8b8255667da773be469134eb958c9"
+        }
+      },
+      "cargoEffectiveTargetDirectoryRelative": "private/legacy",
+      "sweepxLocalDeclarationProjection": {
+        "consistency": "non_atomic",
+        "config": {
+          "status": "observed",
+          "reason": "target_dir_declared",
+          "declared": true
+        },
+        "configToml": {
+          "status": "observed",
+          "reason": "target_dir_declared",
+          "declared": true
+        },
+        "precedenceComplete": false
+      },
+      "projectExecutionBlockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "inputAndPersonalBytesUnchanged": true
+    },
+    {
+      "case": "legacy-has-no-target",
+      "inputs": {
+        ".cargo/config.toml": {
+          "bytes": "[build]\ntarget-dir='private/modern'\n",
+          "sha256": "42e8efee2de47d171fad8243e5cf53044e48db20f49e474f73cc81285764afd8"
+        },
+        ".cargo/config": {
+          "bytes": "[build]\njobs=2\n",
+          "sha256": "4798238739f7a595d7f29d35b76a4b3936ce9020705a62372b42fa194c10c47f"
+        }
+      },
+      "cargoEffectiveTargetDirectoryRelative": "target",
+      "sweepxLocalDeclarationProjection": {
+        "consistency": "non_atomic",
+        "config": {
+          "status": "observed",
+          "reason": "target_dir_not_declared_in_file",
+          "declared": false
+        },
+        "configToml": {
+          "status": "observed",
+          "reason": "target_dir_declared",
+          "declared": true
+        },
+        "precedenceComplete": false
+      },
+      "projectExecutionBlockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "inputAndPersonalBytesUnchanged": true
+    },
+    {
+      "case": "modern-only",
+      "inputs": {
+        ".cargo/config.toml": {
+          "bytes": "[build]\ntarget-dir='private/modern'\n",
+          "sha256": "42e8efee2de47d171fad8243e5cf53044e48db20f49e474f73cc81285764afd8"
+        }
+      },
+      "cargoEffectiveTargetDirectoryRelative": "private/modern",
+      "sweepxLocalDeclarationProjection": {
+        "consistency": "non_atomic",
+        "config": {
+          "status": "unknown",
+          "reason": "config_not_observed_non_atomic",
+          "declared": null
+        },
+        "configToml": {
+          "status": "observed",
+          "reason": "target_dir_declared",
+          "declared": true
+        },
+        "precedenceComplete": false
+      },
+      "projectExecutionBlockers": [
+        "project_ownership_not_verified",
+        "project_activity_not_verified"
+      ],
+      "inputAndPersonalBytesUnchanged": true
+    }
+  ],
+  "scope": "Three controlled offline metadata cases with isolated Cargo home, Cargo override environment removed and explicit pinned rustc; no build scripts or builds. SweepX production does not run Cargo or resolve target paths. Pair observations are non-atomic and precedence/ownership/activity remain unresolved."
+}
