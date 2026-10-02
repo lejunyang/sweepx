@@ -259,17 +259,30 @@ impl ProbeRunner {
                 diagnostics.stage = ProbeStage::Complete;
                 return Ok(ProbeOutput { status, stdout });
             }
-            std::thread::sleep(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(5)),
-            );
+            let pause = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(5));
+            #[cfg(target_os = "macos")]
+            if !eof && process.exit_waiter.is_some() {
+                use std::os::fd::AsFd;
+                // Wake on output/EOF instead of delaying a ready answer until the next tick.
+                // Keep the same bounded slice so cancellation and child-exit polling remain
+                // cooperative. After EOF, polling HUP would spin while a live child runs.
+                wait_for_pipe(pipe.as_fd(), pause)?;
+            } else {
+                process.wait_for_exit(pause);
+            }
+            #[cfg(not(target_os = "macos"))]
+            std::thread::sleep(pause);
         }
     }
 }
 
 struct ProbeProcess {
     child: Child,
+    #[cfg(target_os = "macos")]
+    /// Optional, invocation-local notification with exactly one extra owned descriptor.
+    exit_waiter: Option<macos::ExitWaiter>,
     #[cfg(windows)]
     _job: windows::Job,
 }
@@ -288,11 +301,31 @@ impl ProbeProcess {
         // Keep mutable on Windows for failed-attachment cleanup only.
         #[cfg(not(windows))]
         let _ = &mut child;
+        // Exit notification is optional acceleration. Registration failure retains bounded
+        // polling; it cannot invalidate an otherwise complete tool answer or reap the child.
+        #[cfg(target_os = "macos")]
+        let exit_waiter = macos::ExitWaiter::new(&child).ok();
         Ok(Self {
             child,
+            #[cfg(target_os = "macos")]
+            exit_waiter,
             #[cfg(windows)]
             _job: job,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait_for_exit(&mut self, interval: Duration) {
+        match self
+            .exit_waiter
+            .as_ref()
+            .map(|waiter| waiter.wait(interval))
+        {
+            Some(Ok(())) => return,
+            Some(Err(_)) => self.exit_waiter = None,
+            None => {}
+        }
+        std::thread::sleep(interval);
     }
 }
 
@@ -316,6 +349,34 @@ enum PipeRead {
     Bytes(usize),
     Pending,
     Eof,
+}
+
+/// Waits without consuming output. Readiness remains provisional: the next nonblocking read
+/// handles EOF/errors, and the caller rechecks cancellation/deadlines before accepting bytes.
+#[cfg(target_os = "macos")]
+fn wait_for_pipe(pipe: std::os::fd::BorrowedFd<'_>, interval: Duration) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: pipe.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Round up sub-millisecond intervals to avoid busy waiting at the deadline. The host can
+    // overschedule this cooperative wait; no answer is accepted after the deadline check.
+    let millis = interval
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(i32::MAX as u128) as i32;
+    // SAFETY: a live borrowed descriptor and one initialized pollfd remain valid for the call.
+    // No other reader can consume the pipe or close the worker's exclusively owned handle.
+    if unsafe { libc::poll(&mut descriptor, 1, millis) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        // A signal is just a wakeup; the outer loop checks cancellation, budget and child state.
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -384,6 +445,81 @@ fn read_available(pipe: &mut ChildStdout, buffer: &mut [u8]) -> io::Result<PipeR
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// One private kernel queue watching only the owned, unreaped child's exit. Events wake
+    /// polling, never supply an answer/status; Child::try_wait remains the status authority.
+    pub(super) struct ExitWaiter(OwnedFd);
+
+    impl ExitWaiter {
+        /// Registers one unreaped owned child; registration errors leave the caller free to
+        /// retain its original bounded polling rather than rejecting a valid tool answer.
+        pub(super) fn new(child: &Child) -> io::Result<Self> {
+            // SAFETY: no arguments; success returns one descriptor exclusively owned below.
+            let raw = unsafe { libc::kqueue() };
+            if raw < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let queue = Self(unsafe { OwnedFd::from_raw_fd(raw) });
+            // A kqueue is not inherited across fork; also close it across exec. No other
+            // invocation borrows this descriptor or retains event/PID histories.
+            if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let change = libc::kevent {
+                ident: child.id() as libc::uintptr_t,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ONESHOT,
+                fflags: libc::NOTE_EXIT,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: initialized change and owned queue; this child has not been reaped,
+            // so its PID cannot identify a replacement. Zero events only registers the watch.
+            if unsafe { libc::kevent(raw, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) }
+                < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(queue)
+        }
+
+        /// Waits for a notification or interval expiry without consuming stdout or reaping.
+        /// The caller must recheck its deadline, cancellation and typed child status.
+        pub(super) fn wait(&self, interval: Duration) -> io::Result<()> {
+            let timeout = libc::timespec {
+                tv_sec: interval.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+                tv_nsec: interval.subsec_nanos().into(),
+            };
+            // SAFETY: all-zero integer/pointer fields are a valid empty output kevent.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            // SAFETY: live queue, no changes, one initialized event and a finite timeout.
+            let result = unsafe {
+                libc::kevent(
+                    self.0.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &mut event,
+                    1,
+                    &timeout,
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            } else if result > 0 && event.flags & libc::EV_ERROR != 0 {
+                return Err(io::Error::from_raw_os_error(event.data as i32));
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -430,6 +566,115 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pipe_wait_wakes_on_output_and_eof_without_consuming_the_answer() {
+        use std::io::Write;
+        use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+        use std::sync::{Barrier, mpsc};
+        for close_writer in [false, true] {
+            let mut descriptors = [-1; 2];
+            // SAFETY: storage holds both returned descriptors; success transfers each to one
+            // OwnedFd below, and no raw handle is retained or closed behind its owner.
+            assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+            let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+            let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+            let admitted = Barrier::new(2);
+            let (completed, result) = mpsc::sync_channel(1);
+            std::thread::scope(|scope| {
+                let waiter = scope.spawn(|| {
+                    admitted.wait();
+                    wait_for_pipe(reader.as_fd(), Duration::from_secs(5)).unwrap();
+                    let mut file = std::fs::File::from(reader);
+                    let mut answer = [0; 5];
+                    let count = file.read(&mut answer).unwrap();
+                    completed.send((count, answer)).unwrap();
+                });
+                admitted.wait();
+                if close_writer {
+                    drop(writer);
+                } else {
+                    std::fs::File::from(writer).write_all(b"ready").unwrap();
+                }
+                // A separate, generous synchronization ceiling proves wakeup without relying
+                // on a millisecond scheduling assertion or the production polling constant.
+                let observed = result.recv_timeout(Duration::from_secs(2));
+                waiter.join().unwrap();
+                assert_eq!(
+                    observed.unwrap(),
+                    if close_writer {
+                        (0, [0; 5])
+                    } else {
+                        (5, *b"ready")
+                    }
+                );
+            });
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn child_exit_notification_wakes_without_reaping_its_status() {
+        use std::os::fd::AsFd;
+        use std::os::unix::process::CommandExt;
+        use std::sync::{Barrier, mpsc};
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf ready; read ignored; exit 0"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut process = ProbeProcess::new(command.spawn().unwrap()).unwrap();
+        let mut pipe = process.child.stdout.take().unwrap();
+        prepare_pipe(&pipe).unwrap();
+        // Readiness confirms that the shell has started and is blocked on our stdin, keeping
+        // kernel launch latency out of the independent exit-notification contract.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut ready = Vec::new();
+        while ready.len() < 5 {
+            assert!(
+                Instant::now() < deadline,
+                "controlled child never became ready"
+            );
+            wait_for_pipe(
+                pipe.as_fd(),
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .unwrap();
+            let mut bytes = [0; 5];
+            match read_available(&mut pipe, &mut bytes).unwrap() {
+                PipeRead::Bytes(count) => ready.extend_from_slice(&bytes[..count]),
+                PipeRead::Pending => {}
+                PipeRead::Eof => panic!("child exited before stdin release"),
+            }
+        }
+        assert_eq!(ready, b"ready");
+        let watcher = process
+            .exit_waiter
+            .as_ref()
+            .expect("owned-child watch unavailable");
+        let admitted = Barrier::new(2);
+        let (completed, result) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                admitted.wait();
+                completed
+                    .send(watcher.wait(Duration::from_secs(5)))
+                    .unwrap();
+            });
+            admitted.wait();
+            drop(process.child.stdin.take());
+            let observed = result.recv_timeout(Duration::from_secs(2));
+            waiter.join().unwrap();
+            observed.unwrap().unwrap();
+        });
+        // Only Child::wait reaps the status, independently proving that a kernel notification
+        // cannot be substituted for a complete, successfully interpreted tool result.
+        assert!(process.child.wait().unwrap().success());
+    }
 
     fn child(case: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());

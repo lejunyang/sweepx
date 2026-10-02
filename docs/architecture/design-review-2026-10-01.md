@@ -850,3 +850,21 @@ CLI 的可靠通道一个槽，加生产者一份有界载荷，中途榜单和�
 验证记录及未通过尝试见[缓存片段验收记录](cache-fragment-validation-2026-10-02.json)。规则有效配置、独占所有权/活动、其他发现路径审计、旧 probe/debug PTY/FSEvents 间歇问题、跨平台缓存、原生宿主/MSVC、真实云 provider、系统 Trash 成功与最终 pathname 竞态继续开放。
 
 最终工作区串行原生测试为 994 项通过、0 失败、2 项原有基准 ignored，已诊断挂起的 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 仍显式排除，不能记为成功移动。最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 检查与 core 包清单通过；交叉编译包括正确 cfg 的测试代码，但不证明目标运行时。前一次 core 全量为 260 项通过、1 项旧 probe 失败、1 项 ignored；前一次 workspace 因历史断言错误在 core 阶段停止，后续未运行，修正后才执行上述最终完整矩阵。最终检查有并行构建，不作性能比较，也不以之后通过关闭旧间歇根因。没有发布或实际 Trash 成功验收。
+
+## macOS 工具答复与退出唤醒（2026-10-02）
+
+对缓存交付中再次出现的 2 秒工具失败，以相同已核验二进制预先固定运行 24 次孤立共享缓存测试，交替取样与不取样，只通过存活测试进程的 libproc 子进程接口观察其直接子进程；每 100 ms 保留有界线程事实，超过 200 ms 的第一项子进程才请求一次 sample。24 次全部通过，没有取得超时当次；12 份调用栈仍包含 dyld 启动帧，线程观察延续到约 1.23 秒，也有后续非零用户时间记录。这仍不能区分内核授权、调度或其他宿主原因，不将等待状态或零计数等同从未执行，旧 300 ms/2 秒根因保持开放。
+
+源码另外确认一项确定的答复等待开销：非阻塞 read/try_wait 后每轮固定 sleep 最多 5 ms，即使输出提前就绪仍等待下一轮。首个管道 poll 实验使首次输出提前，却在 EOF 已到、直接子进程尚未可回收时再次触发 sleep，完整阶段反而变慢，负结果保留。最终 macOS 路径同时等待管道就绪及本次拥有、尚未回收子进程的 kqueue NOTE_EXIT 通知；每次最多一个额外独占描述符，关闭执行继承，随 guard 释放，没有后台线程或 PID 历史。通知只唤醒，仍需完整 stdout、直接 Child 状态及本次期限检查；不把退出通知当答案或活动/所有权证明。通知注册或等待失败回退原有有界轮询，避免单独采用管道唤醒的 EOF 延迟；Linux/Windows 保持既有实现。5 ms 合作检查间隔、2 秒单次/10 秒整批预算、输出/进程上限和取消/清理契约保持，原生启动/回收仍受宿主调度。ABI 与语义核对使用本机 SDK 的 sys/event.h、sys/proc_info.h、libproc.h 与 kqueue(2) 手册。
+
+[原始答复/活体记录](probe-wakeup-evidence-2026-10-02.json)来自 arm64 macOS 26.5.2（25F84）、Rust 1.98.0 debug；每阶段固定 32 次孤立 exact 答复/退出测试，每次两个真实子进程，共 64 个完整 probe。三组均核对真实执行一项测试、完整 EOF、相同 stdout 字节数（含测试 harness）和独立预期退出码 0/7；没有同时构建、取样或其他本任务测试，不控制 OS cache、没有 SweepX cache。计时为 ProbeRunner admission 至 cleanup 的完整阶段，不包含父测试程序启动，不代表真实工具清单或全盘扫描。
+
+| 实现 | 完整 probe 中位数 | 结果 |
+| --- | --- | --- |
+| 原有固定 sleep | 8.36 ms | 64/64 答复与退出核对通过 |
+| 仅管道 poll 的中间实验 | 13.80 ms | 64/64 核对通过，完整等待变慢；未交付 |
+| 管道加拥有子进程退出唤醒 | 6.41 ms | 64/64 核对通过 |
+
+最终在这项微负载下完整阶段中位数减少约 23%，不推断端到端倍数或 p95/p99，也不据此解决启动前的旧超时。新增原生低层回归用受控匿名管道验证数据/EOF 唤醒且不消费答案，以已输出 ready、阻塞在本次 stdin 的子进程验证退出唤醒不代替 Child::wait 回收；等待由 barrier/有界通道同步，不使用生产 5 ms 常量制造时间预期。既有 EOF 与子进程独立完成、继承 stdout、超量、取消、期限和整批准入回归均保留。初次测试试图访问队列私有字段的编译错误已修正，没有扩大字段可见性或 cfg；初次脚本传错二进制 checksum 在启动测试之前拒绝，未计入样本。
+
+最终工具专项 26 项通过；完整工作区串行 996 项通过、0 失败、2 项原有基准 ignored，既有系统 Trash 成功挂起用例仍显式排除。受影响 core 及 host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown 与 core 包清单通过。计时之后只新增 Rustdoc，最终矩阵重新编译当前源码；测量及验收二进制/源码 checksum 分别保留。最终矩阵与 lint/交叉构建有重叠，不充作计时样本。旧 probe/debug 热缓存 PTY/FSEvents 间歇根因、有效配置/独占所有权/活动、跨平台缓存及原生/MSVC/provider/Trash 验收和最终 pathname 竞态继续开放。
