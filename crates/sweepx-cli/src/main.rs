@@ -1171,26 +1171,8 @@ use sweepx_core::junk::platform::{
     same_directory, user_home_dir,
 };
 
-/// Index of the deepest canonical root that is an ancestor of `path`, or `None`.
-///
-/// "Deepest" = the longest matching root, so a candidate under `…/Caches/Yarn` attributes to the
-/// Yarn root rather than the wider `…/Caches` root. Matching is by exact path component, with a
-/// trailing separator, so a prefix directory name cannot partially match.
-#[cfg(target_os = "macos")]
-fn deepest_root_for(path: &str, roots: &[PathBuf]) -> Option<usize> {
-    let mut best: Option<(usize, usize)> = None;
-    for (index, root) in roots.iter().enumerate() {
-        let root_text = root.display().to_string();
-        let matches = path == root_text || path.starts_with(&format!("{root_text}/"));
-        if matches && best.is_none_or(|(_, len)| root_text.len() > len) {
-            best = Some((index, root_text.len()));
-        }
-    }
-    best.map(|(index, _)| index)
-}
-
 /// Converts an in-memory candidate into the cache record's owned form.
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunkCandidate {
     junk_cache::StoredJunkCandidate::from_candidate(candidate)
 }
@@ -1508,7 +1490,24 @@ fn run_junk_scan(
     // keep other roots while the bounded cache has space. A root with zero candidates is still
     // written so an empty-but-scanned root stays a hit next time.
     #[cfg(target_os = "macos")]
-    if let Some(cache) = &cache_dir {
+    if let Some(cache) = &cache_dir
+        && let Some(scan) = &scan
+    {
+        let cancel = CancellationToken::new();
+        let grouped_candidates = classification_context.and_then(|_| {
+            match junk_cache::publication::CandidateCacheGroups::prepare(
+                &canonical_roots,
+                &fresh_candidates,
+                &scan.scan.summary.aggregates,
+                &cancel,
+            ) {
+                Ok(groups) => Some(groups),
+                Err(error) => {
+                    eprintln!("could not prepare junk cache: {error}");
+                    None
+                }
+            }
+        });
         for index in &miss_indexes {
             let root = &canonical_roots[*index];
             // Unknown discovery scope or a context digest that exceeds its bound cannot justify
@@ -1517,44 +1516,36 @@ fn run_junk_scan(
                 continue;
             };
             // Incomplete scans (including denied roots) must be retried, never frozen as hits.
-            if !scan.as_ref().is_some_and(|scan| {
-                root.to_str()
-                    .is_some_and(|path| scan.covered_paths.get(path) == Some(&true))
-            }) {
+            if !root
+                .to_str()
+                .is_some_and(|path| scan.covered_paths.get(path) == Some(&true))
+            {
                 continue;
             }
-            let mut stored = Vec::new();
-            for candidate in &fresh_candidates {
-                if deepest_root_for(&candidate.path, &canonical_roots) == Some(*index) {
-                    let mut row = junk_candidate_to_stored(candidate);
-                    row.aggregate = scan
-                        .as_ref()
-                        .and_then(|scan| {
-                            scan.scan.summary.aggregates.iter().find(|aggregate| {
-                                aggregate.directory_identity == candidate.entry_id.as_str()
-                            })
-                        })
-                        .cloned();
-                    stored.push(row);
-                }
-            }
-            match junk_cache::StoredJunkRoot::capture(
-                root,
-                stored,
-                scan_event_id,
-                classification_context,
-            )
-            .and_then(|mut record| {
-                if !scan.as_ref().is_some_and(|scan| {
-                    scan.observed_roots
+            let Some(groups) = &grouped_candidates else {
+                continue;
+            };
+            match groups
+                .project_root(*index, &cancel)
+                .and_then(|stored| {
+                    junk_cache::StoredJunkRoot::capture(
+                        root,
+                        stored,
+                        scan_event_id,
+                        classification_context,
+                    )
+                })
+                .and_then(|mut record| {
+                    if !scan
+                        .observed_roots
                         .iter()
                         .any(|source| record.matches_observed_root(source))
+                    {
+                        return Err(std::io::Error::other("cache root changed after traversal"));
+                    }
+                    record.bind_scope(&canonical_roots);
+                    junk_cache::write(cache, &record)
                 }) {
-                    return Err(std::io::Error::other("cache root changed after traversal"));
-                }
-                record.bind_scope(&canonical_roots);
-                junk_cache::write(cache, &record)
-            }) {
                 Ok(()) => {}
                 // A cache write failure never fails the report; the root simply rescans next run.
                 Err(error) => eprintln!(
@@ -1566,22 +1557,21 @@ fn run_junk_scan(
 
         // Persist file lengths only. Candidate rows cannot reconstruct subtree accounting or
         // current scan identities; directories are always traversed on a root-cache miss.
-        if let Some(scan) = &scan {
-            for source in &scan.observed_roots {
-                if let Err(error) = subtree_provider.store_observed_index(
-                    source,
-                    &canonical_roots,
-                    scan_event_id,
-                    &scan.covered_paths,
-                    &scan.dir_listings,
-                ) {
-                    eprintln!(
-                        "could not update subtree index for {}: {error}",
-                        source.display_path
-                    );
-                }
-            }
-        }
+        drop(grouped_candidates);
+        subtree_provider.store_observed_indexes(
+            &scan.observed_roots,
+            &canonical_roots,
+            scan_event_id,
+            &scan.covered_paths,
+            &scan.dir_listings,
+            &cancel,
+            |root, error| {
+                eprintln!(
+                    "could not update subtree index for {}: {error}",
+                    root.display()
+                );
+            },
+        );
     }
 
     #[cfg(target_os = "macos")]

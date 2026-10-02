@@ -56,6 +56,8 @@ Tool cache roots, browser and known-cache discovery in `junk --system` shares a 
 
 Whole-root candidate records bind the currently enabled rules and discovery scope, triggering fresh classification when they change. File-length caches are validated independently, so an old empty candidate report cannot hide results introduced by newly enabled rules.
 
+On macOS, ordinary junk reports and the junk TUI share one attribution pass for multi-root cache publication. An exhausted auxiliary budget warns and omits the affected cache update while retaining current observations; missing cached facts need fresh observation next time. Nested roots remain separate, and historical previews never authorize Trash.
+
 Candidate-cache hits also rebuild current Git interpretation. Changes to ignore configuration, the index or repository boundaries outside the selected root cannot replay historical confidence. Git queries only enrich existing project-rule candidates; they neither discover junk by themselves nor authorize deletion.
 
 ## Read by question

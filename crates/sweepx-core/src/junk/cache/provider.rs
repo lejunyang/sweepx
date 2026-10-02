@@ -15,6 +15,9 @@ use std::time::Duration;
 use crate::{FsEventId, PlannedEntry, SubtreeReuse, events_since};
 use sweepx_platform::CachedFileEntry;
 
+use super::grouping::{
+    DEFAULT_GROUPING_BYTES, GroupingBudget, RootScope, group_listings, group_sources,
+};
 use super::{self as junk_cache, StoredJunkRoot, StoredSubtreeIndex};
 use sweepx_scanner::ChangeLog;
 
@@ -306,10 +309,142 @@ impl SubtreeCacheProvider {
             .ok_or_else(|| std::io::Error::other("observed cache root path unavailable"))?;
         let index =
             StoredSubtreeIndex::capture(&root, all_roots, since_event_id, covered, listings)?;
+        self.publish_observed_index(source, index)
+    }
+
+    /// Publishes a root's borrowed partition; coverage and ownership were checked once by the
+    /// caller's shared grouping pass, while capture still rechecks the current native root.
+    pub(crate) fn store_observed_index_owned<'a>(
+        &self,
+        source: &sweepx_model::ScannedEntry,
+        since_event_id: FsEventId,
+        listings: impl IntoIterator<Item = (&'a String, &'a sweepx_scanner::DirListing)>,
+    ) -> std::io::Result<()> {
+        let root = crate::junk::git::native_path(source)
+            .ok_or_else(|| std::io::Error::other("observed cache root path unavailable"))?;
+        let index = StoredSubtreeIndex::capture_owned(&root, since_event_id, listings)?;
+        self.publish_observed_index(source, index)
+    }
+
+    fn publish_observed_index(
+        &self,
+        source: &sweepx_model::ScannedEntry,
+        index: StoredSubtreeIndex,
+    ) -> std::io::Result<()> {
         if !index.matches_observed_root(source) {
             return Err(std::io::Error::other("cache root changed after traversal"));
         }
         junk_cache::write_subtree_index(&self.cache_dir, &index)
+    }
+
+    /// Publishes observed roots using direct single-root projection or bounded shared grouping.
+    ///
+    /// The original request scope owns nested facts using its deepest matching root; duplicate
+    /// root spellings publish only their final ordinal. Every publication rechecks the observed
+    /// native root, and each root retains its independent 4 MiB optional projection allowance.
+    /// Auxiliary views share an 8 MiB capacity estimate. Exhaustion/allocation failure reports
+    /// one omission through `on_error`; other write failures report their root individually.
+    /// Cancellation omits remaining cache work. Neither omission nor cache errors change current
+    /// scan facts or classification completeness. This method performs worker-side filesystem I/O.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_observed_indexes(
+        &self,
+        sources: &[sweepx_model::ScannedEntry],
+        all_roots: &[PathBuf],
+        since_event_id: FsEventId,
+        covered: &BTreeMap<String, bool>,
+        listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+        cancel: &sweepx_platform::CancellationToken,
+        on_error: impl FnMut(&Path, std::io::Error),
+    ) {
+        self.store_observed_indexes_with_budget(
+            sources,
+            all_roots,
+            since_event_id,
+            covered,
+            listings,
+            cancel,
+            DEFAULT_GROUPING_BYTES,
+            on_error,
+        );
+    }
+
+    /// Injectable auxiliary allowance for deterministic omission tests of the shipped batch path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_observed_indexes_with_budget(
+        &self,
+        sources: &[sweepx_model::ScannedEntry],
+        all_roots: &[PathBuf],
+        since_event_id: FsEventId,
+        covered: &BTreeMap<String, bool>,
+        listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+        cancel: &sweepx_platform::CancellationToken,
+        auxiliary_bytes: usize,
+        mut on_error: impl FnMut(&Path, std::io::Error),
+    ) {
+        if sources.is_empty() || cancel.is_cancelled() {
+            return;
+        }
+        let mut budget = GroupingBudget::new(auxiliary_bytes);
+        let prepared = (|| {
+            let scope = RootScope::new(all_roots, &mut budget)?;
+            let sources = group_sources(&scope, sources, &mut budget, cancel)?;
+            Some((scope, sources))
+        })();
+        let Some((scope, sources)) = prepared else {
+            if !cancel.is_cancelled() {
+                on_error(
+                    &self.cache_dir,
+                    std::io::Error::other("optional cache index grouping budget unavailable"),
+                );
+            }
+            return;
+        };
+        if sources.is_empty() || cancel.is_cancelled() {
+            return;
+        }
+        if scope.len() == 1 {
+            // Preserve capture's early tail omission: partitioning the entire listing table
+            // cannot help a single root, whose independent wire allowance may fill early.
+            let root = &all_roots[0];
+            let Some(source) = sources.get(0).first() else {
+                return;
+            };
+            if root.to_str().is_some_and(|root| covered.contains_key(root))
+                && let Err(error) =
+                    self.store_observed_index(source, all_roots, since_event_id, covered, listings)
+            {
+                on_error(root, error);
+            }
+            return;
+        }
+        let Some(listings) = group_listings(&scope, covered, listings, &mut budget, cancel) else {
+            if !cancel.is_cancelled() {
+                on_error(
+                    &self.cache_dir,
+                    std::io::Error::other("optional cache index grouping budget unavailable"),
+                );
+            }
+            return;
+        };
+        for (ordinal, root) in all_roots.iter().enumerate() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let Some(source) = sources.get(ordinal).first() else {
+                continue;
+            };
+            if root.to_str().is_none_or(|root| !covered.contains_key(root)) {
+                continue;
+            }
+            if let Err(error) = self.store_observed_index_owned(
+                source,
+                since_event_id,
+                listings.get(ordinal).iter().copied(),
+            ) {
+                on_error(root, error);
+            }
+        }
     }
 
     /// Consumes one validated generation after traversal. Current selected listings take
@@ -326,6 +461,35 @@ impl SubtreeCacheProvider {
         selected: &[PathBuf],
         covered: &BTreeMap<String, bool>,
         listings: &BTreeMap<String, sweepx_scanner::DirListing>,
+        candidates: Vec<junk_cache::StoredJunkCandidate>,
+    ) -> std::io::Result<bool> {
+        let root = crate::junk::git::native_path(source)
+            .ok_or_else(|| std::io::Error::other("observed fragment root unavailable"))?;
+        self.store_observed_fragment_owned(
+            source,
+            all_roots,
+            cursor,
+            selected,
+            covered,
+            listings.iter().filter(|(path, _)| {
+                covered.get(*path) == Some(&true)
+                    && owner(Path::new(path), all_roots) == Some(root.as_path())
+            }),
+            candidates,
+        )
+    }
+
+    /// Same fragment contract as `store_observed_fragment`, using a shared fresh-fact partition.
+    /// The original scope, selected coverage and both old/new native bindings remain mandatory.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_observed_fragment_owned<'a>(
+        &mut self,
+        source: &sweepx_model::ScannedEntry,
+        all_roots: &[PathBuf],
+        cursor: FsEventId,
+        selected: &[PathBuf],
+        covered: &BTreeMap<String, bool>,
+        listings: impl IntoIterator<Item = (&'a String, &'a sweepx_scanner::DirListing)>,
         candidates: Vec<junk_cache::StoredJunkCandidate>,
     ) -> std::io::Result<bool> {
         let root = crate::junk::git::native_path(source)
@@ -361,7 +525,7 @@ impl SubtreeCacheProvider {
                 "fragment original root binding changed",
             ));
         }
-        let mut merged = StoredSubtreeIndex::capture(&root, all_roots, cursor, covered, listings)?;
+        let mut merged = StoredSubtreeIndex::capture_owned(&root, cursor, listings)?;
         if !merged.matches_observed_root(source) {
             return Err(std::io::Error::other(
                 "fragment root changed after traversal",

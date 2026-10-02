@@ -1,0 +1,418 @@
+{
+  "schema": "sweepx.cache-publication-validation/v1",
+  "date": "2026-10-03",
+  "baseCommit": "cfcaaa39a171a8c9d40c319f412db533f293e944",
+  "host": {
+    "machine": "arm64",
+    "kernel": "25.5.0",
+    "macOS": "26.5.2",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "sourceSha256": {
+    "crates/sweepx-cli/src/main.rs": "d6357ded47a23fe06b505432b339d8567c2e47b9a60264ef08c93a0f0ed23f50",
+    "crates/sweepx-core/src/junk/cache.rs": "41495ab92896b9c4a835e81a9d61a42ee3ddd23c1be01d24118f76f591d96720",
+    "crates/sweepx-core/src/junk/cache/grouping.rs": "92f60b061128a58a594b1a3e69cbf34405cbd634d476c520ee6be2986baa40e4",
+    "crates/sweepx-core/src/junk/cache/provider.rs": "1ce300f3425cf10e456092e3eec7e56853c4b81e9163cbe14c45a84cd1faf86a",
+    "crates/sweepx-core/src/junk/cache/publication.rs": "323bc8c69b673348f7f0b39a0428f2aa21828be0d23263031b4211702332196f",
+    "crates/sweepx-core/src/junk/session/cache.rs": "c93cb25e4dd84bd5240550db241f02fa231e505f37abad98e01347cd954c83e7",
+    "crates/sweepx-core/src/junk/session/cache_benchmark.rs": "872e6bcd22c293b14c26ed2800d3871d9236ce7407e1411be6d187b21365b9f2",
+    "crates/sweepx-core/src/junk/cache/grouping_contract_tests.rs": "93123064bc386561e82b3b8a0cf622177e2b09d84985e1d299a6040e612446da"
+  },
+  "contracts": [
+    "One native candidate decoding/ownership pass, deepest original scope, last duplicate root representative",
+    "Missing native evidence, auxiliary exhaustion or cancellation never publish a complete truncated candidate root/fragment",
+    "First aggregate identity matches previous linear lookup; unknown aggregate remains absent",
+    "Single-root listing projection preserves independent 4 MiB early tail stop; batch native source and coverage guards remain",
+    "Native root substitution rejects cache publication; selected fragment keeps prior history/coverage/generation checks",
+    "No observed root publication sources skips optional preparation and cache I/O; cache omissions do not weaken current observations"
+  ],
+  "workspace": {
+    "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+    "exitCode": 0,
+    "logFile": "/private/tmp/sweepx-cache-grouping-workspace-2026-10-03.log",
+    "sha256": "dacf10228689fb244b91a0f3683ee90f052c4893daec3fd9fbedac8bb3cffaea",
+    "testResults": [
+      "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.38s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s",
+      "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s",
+      "test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.03s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 293 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 66.09s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.31s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 97 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 4.26s",
+      "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.65s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+      "test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.53s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.88s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "tail": [
+      "   Doc-tests sweepx_scanner",
+      "",
+      "running 0 tests",
+      "",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "",
+      "   Doc-tests sweepx_tui",
+      "",
+      "running 0 tests",
+      "",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      ""
+    ],
+    "totals": {
+      "passed": 1035,
+      "failed": 0,
+      "ignored": 3
+    },
+    "environment": "approved host environment, native FSEvents enabled",
+    "sessionCacheSourceSha256": "7b56e19a37638944a490d8de96831c4c6b080b59bbb427ff39cfda2744b63520"
+  },
+  "passed": {
+    "groupingContracts": {
+      "command": "cargo test -p sweepx-core --all-features --locked junk::cache::grouping::tests:: -- --test-threads=1",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-single-contract-2026-10-03.log",
+      "sha256": "ad0c93af50129ab87e1684310d8cd015b07e3b71414420b821f23756ee2f3999",
+      "testResults": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 282 filtered out; finished in 0.21s"
+      ],
+      "tail": [
+        "test junk::cache::grouping::tests::deepest_component_root_and_last_equal_root_own_the_path ... ok",
+        "test junk::cache::grouping::tests::grouped_native_facts_do_not_authorize_publication_after_root_replacement ... ok",
+        "test junk::cache::grouping::tests::grouping_declines_uncovered_missing_and_out_of_scope_listings ... ok",
+        "test junk::cache::grouping::tests::native_listing_groups_match_handwritten_ownership_and_ordinary_metadata ... ok",
+        "test junk::cache::grouping::tests::native_non_utf8_aliases_remain_distinct_for_attribution ... ok",
+        "test junk::cache::grouping::tests::observed_sources_require_exact_native_roots_and_fill_only_the_last_duplicate ... ok",
+        "test junk::cache::grouping::tests::optional_grouping_omission_preserves_live_observations ... ok",
+        "test junk::cache::grouping::tests::selected_scan_preserves_original_root_ownership_and_excludes_shallow_ancestors ... ok",
+        "test junk::cache::grouping::tests::single_root_batch_matches_direct_capture_with_a_small_auxiliary_allowance ... ok",
+        "",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 282 filtered out; finished in 0.21s",
+        ""
+      ]
+    },
+    "sessionCache": {
+      "command": "cargo test -p sweepx-core --all-features --locked junk::session::cache:: -- --test-threads=1",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-single-session-2026-10-03.log",
+      "sha256": "1e9ccf92d2c3932d73f2504dc44c73c141d63ac694e48d35e9e34cee0eab1f07",
+      "testResults": [
+        "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 291 filtered out; finished in 0.11s"
+      ],
+      "tail": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s",
+        "     Running unittests src/lib.rs (target/debug/deps/sweepx_core-9dd151ea5439482c)",
+        "",
+        "running 4 tests",
+        "test junk::session::cache::benchmark::benchmark_multi_root_cache_preparation ... ignored, opt-in release cache-preparation microbenchmark; performs no Trash or cache write",
+        "test junk::session::cache::benchmark::cached_roots_without_observed_publication_sources_skip_optional_preparation ... ok",
+        "test junk::session::cache::benchmark::candidate_groups_use_native_scope_and_decline_incomplete_optional_projection ... ok",
+        "test junk::session::cache::tests::legacy_allocation_does_not_turn_into_recursive_logical_size_or_known_counts ... ok",
+        "",
+        "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 291 filtered out; finished in 0.11s",
+        ""
+      ]
+    },
+    "postReviewSession": {
+      "command": "cargo test -p sweepx-core --all-features --locked junk::session:: -- --test-threads=1",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-post-review-session-2026-10-03.log",
+      "sha256": "ec0beca6da5454e2f1216f70973f6a857e776c3aa819fd627f8eec1728aabcc6",
+      "testResults": [
+        "test result: ok. 36 passed; 0 failed; 1 ignored; 0 measured; 258 filtered out; finished in 42.30s"
+      ],
+      "tail": [
+        "test junk::session::tests::progress_log_cap_does_not_make_large_cold_or_cached_directory_partial ... ok",
+        "test junk::session::tests::replacing_a_selected_object_fails_without_removing_old_evidence ... ok",
+        "test junk::session::tests::selected_native_replacement_removes_base_and_history_without_erasing_siblings ... ok",
+        "test junk::session::tests::selected_refresh_keeps_ancestor_history_and_repeated_native_lineage_without_sibling_work ... ok",
+        "test junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts ... ok",
+        "test junk::session::tests::system_admission_rejects_explicit_roots_and_disabled_platform_rules ... ok",
+        "test junk::session::tests::system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history ... ok",
+        "test junk::session::tests::warm_large_directory_finishes_with_fresh_identity_and_independent_logical_total ... ok",
+        "test junk::session::tests::worker_cap_and_closing_an_undrained_session_are_bounded ... ok",
+        "",
+        "test result: ok. 36 passed; 0 failed; 1 ignored; 0 measured; 258 filtered out; finished in 42.30s",
+        ""
+      ]
+    },
+    "affectedClippy": {
+      "command": "cargo clippy -p sweepx-core -p sweepx-cli --all-targets --all-features --locked -- -D warnings",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-final-affected-lint-2026-10-03.log",
+      "sha256": "f207179253b389ab6e6e72e23eeb43c5cf33357c19b60f12b3164f70d656cd7a",
+      "testResults": [],
+      "tail": [
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.08s"
+      ]
+    },
+    "hostClippy": {
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-host-lint-2026-10-03.log",
+      "sha256": "bbaec69154edbf2d8a76b7d963d2a46f4484dcd77c9e06a7676eb8bddb6733e2",
+      "testResults": [],
+      "tail": [
+        "    Blocking waiting for file lock on build directory",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 00s"
+      ]
+    },
+    "linuxGnuClippy": {
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-linux-lint-2026-10-03.log",
+      "sha256": "643ccc86398ca43859d453ae3d211ef09ef7cf05df1b9b3076c0853c778897b6",
+      "testResults": [],
+      "tail": [
+        "    Blocking waiting for file lock on build directory",
+        "   Compiling libsqlite3-sys v0.38.2",
+        "    Checking rusqlite v0.40.2",
+        "    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)",
+        "    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)",
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.93s"
+      ]
+    },
+    "windowsGnuClippy": {
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-windows-lint-2026-10-03.log",
+      "sha256": "9f792d48fac6170a19e81a380446d8d4a4064e4d4c750f4c16fc2cc4a1875e1d",
+      "testResults": [],
+      "tail": [
+        "    Blocking waiting for file lock on build directory",
+        "   Compiling libsqlite3-sys v0.38.2",
+        "    Checking rusqlite v0.40.2",
+        "    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)",
+        "    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)",
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 01s"
+      ]
+    },
+    "fmt": {
+      "command": "cargo fmt --all --check",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-final-fmt-2026-10-03.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "testResults": [],
+      "tail": []
+    },
+    "diff": {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-final-diff-2026-10-03.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "testResults": [],
+      "tail": []
+    },
+    "docs": {
+      "command": "bundled Python 3.12 scripts/lint_docs.py",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-docs-2026-10-03.log",
+      "sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1",
+      "testResults": [],
+      "tail": [
+        "docs lint: checked 54 Markdown file(s)"
+      ]
+    },
+    "docCheckerTests": {
+      "command": "bundled Python 3.12 -m unittest discover -s scripts/tests -p test_lint_docs.py",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-doc-tests-2026-10-03.log",
+      "sha256": "0e33e14e4056305639921e043b6ced15d14cf0e717b5fd6cffe8da78dc51a32d",
+      "testResults": [],
+      "tail": [
+        ".......................",
+        "----------------------------------------------------------------------",
+        "Ran 23 tests in 0.113s",
+        "",
+        "OK"
+      ]
+    },
+    "corePackageList": {
+      "command": "cargo package -p sweepx-core --list --allow-dirty",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-core-package-2026-10-03.log",
+      "sha256": "0e6c22821924dc3ada03df0154313ece87f13bf85b92da4edad0db8f6c045551",
+      "testResults": [],
+      "tail": [
+        "src/junk/session/mailbox/tests.rs",
+        "src/junk/session/mailbox.rs",
+        "src/junk/session/presentation.rs",
+        "src/junk/session/tests.rs",
+        "src/junk/session.rs",
+        "src/junk.rs",
+        "src/large_files.rs",
+        "src/lib.rs",
+        "src/tools/installations/tests.rs",
+        "src/tools/installations.rs",
+        "src/tools/mod.rs",
+        "src/windows_state_security.rs"
+      ]
+    },
+    "cliPackageList": {
+      "command": "cargo package -p sweepx-cli --list --allow-dirty",
+      "exitCode": 0,
+      "logFile": "/private/tmp/sweepx-cache-grouping-cli-package-2026-10-03.log",
+      "sha256": "d19ede730f0b785351700f267250c7991a591fc77bbf893b76a95c95f3d12898",
+      "testResults": [],
+      "tail": [
+        "src/junk_timings.rs",
+        "src/junk_tui/quarantine.rs",
+        "src/junk_tui/tests.rs",
+        "src/junk_tui.rs",
+        "src/main.rs",
+        "src/permanent_delete_command.rs",
+        "src/tcc_access.rs",
+        "src/temp_clean_command.rs",
+        "src/trash_command.rs",
+        "src/tui_adapter.rs",
+        "tests/cli_contract.rs",
+        "tests/elevation_relay.rs"
+      ]
+    }
+  },
+  "earlyFailures": [
+    {
+      "command": "initial focused compile before tests",
+      "exitCode": 101,
+      "logFile": "/private/tmp/sweepx-cache-grouping-initial-compile-2026-10-03.log",
+      "sha256": "8c55bd6b95a815dddc7f704199b791b477c1944629794a30c40179e1a4a249ed",
+      "testResults": [],
+      "tail": [
+        "    |",
+        "205 |         result.listings.insert(path.clone(), saved);",
+        "    |                ^^^^^^^^ private field",
+        "",
+        "error[E0616]: field `queue` of struct `Mailbox` is private",
+        "   --> crates/sweepx-core/src/junk/session/cache_benchmark.rs:449:31",
+        "    |",
+        "449 |         assert!(shared.lock().queue.is_empty());",
+        "    |                               ^^^^^ private field",
+        "",
+        "For more information about this error, try `rustc --explain E0616`.",
+        "error: could not compile `sweepx-core` (lib test) due to 3 previous errors"
+      ],
+      "cause": "Benchmark test tried private index fields and mailbox queue; changed test reference to public constructor and mailbox pop. No production visibility was widened; tests had not run."
+    },
+    {
+      "command": "initial affected all-targets clippy",
+      "exitCode": 101,
+      "logFile": "/private/tmp/sweepx-cache-grouping-initial-lint-2026-10-03.log",
+      "sha256": "704f3c4921472d99cc6bb7391bc9110027dcca3e90e709ee51df27aa02cad525",
+      "testResults": [],
+      "tail": [
+        "462 | |         !cfg!(debug_assertions),",
+        "463 | |         \"measure the release build explicitly\"",
+        "464 | |     );",
+        "    | |_____^",
+        "    |",
+        "    = help: consider moving this into a const block: `const { assert!(..) }`",
+        "    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#assertions_on_constants",
+        "    = note: `-D clippy::assertions-on-constants` implied by `-D warnings`",
+        "    = help: to override `-D warnings` add `#[allow(clippy::assertions_on_constants)]`",
+        "",
+        "error: could not compile `sweepx-core` (lib test) due to 4 previous errors",
+        "warning: build failed, waiting for other jobs to finish..."
+      ],
+      "cause": "New test cloned_ref_to_slice_refs and assertion-on-constant lints; fixed test style without changing behavior. Later steps were not treated as tested."
+    },
+    {
+      "command": "next affected compile after slice lint correction",
+      "exitCode": 101,
+      "logFile": "/private/tmp/sweepx-cache-grouping-slice-compile-2026-10-03.log",
+      "sha256": "ecd852fdd055302c6875bfbaf9b671294bdeb7ac4296e66952b87e6cbd7cdf6b",
+      "testResults": [],
+      "tail": [
+        "              std::cmp::PartialEq<std::borrow::Cow<'_, std::path::Path>>",
+        "              std::cmp::PartialEq<std::ffi::OsStr>",
+        "              std::cmp::PartialEq<std::ffi::OsString>",
+        "              std::cmp::PartialEq<std::path::Path>",
+        "              std::cmp::PartialEq<std::string::String>",
+        "            and 2 others",
+        "    = note: required for `[std::path::PathBuf]` to implement `std::cmp::PartialEq<[&std::path::PathBuf]>`",
+        "    = note: 1 redundant requirement hidden",
+        "    = note: required for `&[std::path::PathBuf]` to implement `std::cmp::PartialEq<&[&std::path::PathBuf]>`",
+        "",
+        "For more information about this error, try `rustc --explain E0277`.",
+        "error: could not compile `sweepx-core` (lib test) due to 1 previous error"
+      ],
+      "cause": "One test slice correction introduced &[&PathBuf] instead of &[PathBuf]; fixed from_ref(parent) when parent already borrowed."
+    }
+  ],
+  "postMatrixChange": "Final review added a cancellation check immediately before optional index capture: a token may arrive during candidate capture in the same root. Only session/cache.rs changed after the workspace matrix. Its entire session test subset (36 passed, one opt-in ignored) and final affected/host/cross lints passed; unchanged other test results are reused, not described as a second full workspace run. This guard is outside measured benchmark helpers.",
+  "ignored": [
+    {
+      "test": "junk::cache::tests::benchmark_batched_root_validation",
+      "reason": "existing opt-in native timing experiment, not run in this unit"
+    },
+    {
+      "test": "macos::tests::native_bulk_enumeration_benchmark_smoke",
+      "reason": "existing opt-in native enumeration benchmark, not run in this unit"
+    },
+    {
+      "test": "junk::session::cache::benchmark::benchmark_multi_root_cache_preparation",
+      "reason": "new release-only opt-in test, ignored in normal matrix; explicitly passed first fixed seven workloads and two supplemental single-root workloads"
+    }
+  ],
+  "excluded": [
+    {
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previously diagnosed host system Trash hang; explicit --skip retained, actual successful system Trash remains unverified"
+    }
+  ],
+  "unverified": [
+    "Linux and Windows native runtime/tests",
+    "Windows MSVC",
+    "Real cloud placeholder/provider behavior",
+    "Actual system Trash and Linux quarantine success",
+    "Final pathname-to-system-Trash race",
+    "Older 300 ms / 2 s tool probe, debug warm-PTY and FSEvents settle intermittent root causes",
+    "End-to-end performance of this cache publication change"
+  ],
+  "crossTargetScope": "Repo script and CI inspected. Local copy retains cross C wrapper and adds Windows GNU, using Zig 0.16.0; host/Linux GNU/Windows GNU all-targets/all-features compilation is not target-host or MSVC runtime evidence.",
+  "crossLintHarness": {
+    "path": "/private/tmp/sweepx-cross-lint.sh",
+    "sha256": "675eedc62dabd335bfc279966b11a4f31cdf9786461a3b97ef6b799f420d1ba8",
+    "zig": "/private/tmp/zig-aarch64-macos-0.16.0/zig"
+  },
+  "concurrency": "Final lints ran concurrently and may wait on Cargo build locks; workspace tests and both timing measurements ran without concurrent task builds/tests. Lint/test elapsed times are not performance samples.",
+  "performanceArtifact": "cache-preparation-benchmark-2026-10-03.json"
+}

@@ -1,0 +1,740 @@
+{
+  "schema": "sweepx.cache-preparation-benchmark/v1",
+  "date": "2026-10-03",
+  "baseCommit": "cfcaaa39a171a8c9d40c319f412db533f293e944",
+  "host": {
+    "machine": "arm64",
+    "kernel": "25.5.0",
+    "macOS": "26.5.2",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+  },
+  "build": "release/all-features pinned Rust 1.98.0",
+  "workload": {
+    "generatedCandidates": 8192,
+    "payloadBytesEach": 8,
+    "layout": "g8/h8/i4/pNNNNN/target/payload with parent Cargo.toml; one generated candidate directory per project",
+    "rootCounts": [
+      1,
+      8,
+      64,
+      256
+    ],
+    "candidateCounts": [
+      128,
+      1024,
+      8192
+    ],
+    "listingCounts": "two retained native listings per selected project; fixed stable-key subsets",
+    "repetitionsPerCase": 3,
+    "ordering": "alternate old/new each repetition; all predeclared samples retained",
+    "maxCooperativeMeasurementSeconds": 900
+  },
+  "cacheState": {
+    "sweepxCache": "not used; no lookup or disk cache publication during benchmark",
+    "osCache": "uncontrolled"
+  },
+  "phase": "candidate attribution and stored-row projection; listing attribution and bounded file-index projection including one root metadata capture per root",
+  "excludedPhases": [
+    "fixture setup",
+    "native traversal and classification",
+    "tool probes",
+    "FSEvents validation",
+    "candidate root source validation and final binding checks",
+    "JSON serialization and disk cache writes",
+    "UI rendering",
+    "result equality and independent payload checks"
+  ],
+  "reference": {
+    "commit": "cfcaaa3",
+    "sessionCandidates": "previous repeated per-root native decoding and deepest-root ownership",
+    "fileIndexes": "previous ordered per-root 4 MiB projection; same single root metadata syscall moved from before to after projection because stored fields are private; fixture remained immutable",
+    "ordinaryCliCandidates": "previous display-prefix and linear aggregate lookup, exercised only on canonical UTF-8 fixtures; production now uses native paths"
+  },
+  "equivalence": "all StoredJunkCandidate fields and serialized StoredSubtreeIndex fields equal before each workload; independent ordinary read/stat validates all 8192 payloads before, and byte equality after; no Trash or cache writes",
+  "firstMeasurement": {
+    "logFile": "/private/tmp/sweepx-cache-grouping-benchmark-2026-10-03.log",
+    "logSha256": "291632f29e3fb20c69826f13279abb04e7ecd24c5e494e6beedc820bc772da7e",
+    "exitCode": 0,
+    "cases": [
+      {
+        "roots": 1,
+        "candidates": 128,
+        "listings": 256,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          613792,
+          466042,
+          482083
+        ],
+        "candidateGroupedNs": [
+          485250,
+          474000,
+          467708
+        ],
+        "indexLegacyNs": [
+          228625,
+          157292,
+          176125
+        ],
+        "indexGroupedNs": [
+          197083,
+          189791,
+          180083
+        ],
+        "cliCandidateLegacyNs": [],
+        "cliCandidateGroupedNs": [],
+        "medianMs": {
+          "candidateLegacyNs": 0.482083,
+          "candidateGroupedNs": 0.474,
+          "indexLegacyNs": 0.176125,
+          "indexGroupedNs": 0.189791
+        }
+      },
+      {
+        "roots": 8,
+        "candidates": 1024,
+        "listings": 2048,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          38866125,
+          36620333,
+          36230375
+        ],
+        "candidateGroupedNs": [
+          5581625,
+          8061583,
+          7625125
+        ],
+        "indexLegacyNs": [
+          24442875,
+          24836292,
+          24374334
+        ],
+        "indexGroupedNs": [
+          3709875,
+          3883167,
+          3650167
+        ],
+        "cliCandidateLegacyNs": [
+          11636000,
+          11023292,
+          11499167
+        ],
+        "cliCandidateGroupedNs": [
+          6219584,
+          7004667,
+          5902666
+        ],
+        "medianMs": {
+          "candidateLegacyNs": 36.620333,
+          "candidateGroupedNs": 7.625125,
+          "indexLegacyNs": 24.442875,
+          "indexGroupedNs": 3.709875,
+          "cliCandidateLegacyNs": 11.499167,
+          "cliCandidateGroupedNs": 6.219584
+        }
+      },
+      {
+        "roots": 64,
+        "candidates": 1024,
+        "listings": 2048,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          854213292,
+          831795834,
+          814749583
+        ],
+        "candidateGroupedNs": [
+          16339750,
+          15150708,
+          13751042
+        ],
+        "indexLegacyNs": [
+          1273032542,
+          1257137958,
+          1248951250
+        ],
+        "indexGroupedNs": [
+          20877667,
+          20461000,
+          20576458
+        ],
+        "cliCandidateLegacyNs": [
+          501090250,
+          493917833,
+          504833667
+        ],
+        "cliCandidateGroupedNs": [
+          15270125,
+          14816708,
+          15165750
+        ],
+        "medianMs": {
+          "candidateLegacyNs": 831.795834,
+          "candidateGroupedNs": 15.150708,
+          "indexLegacyNs": 1257.137958,
+          "indexGroupedNs": 20.576458,
+          "cliCandidateLegacyNs": 501.09025,
+          "cliCandidateGroupedNs": 15.16575
+        }
+      },
+      {
+        "roots": 256,
+        "candidates": 1024,
+        "listings": 2048,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          10569538875,
+          10306238000,
+          10306873959
+        ],
+        "candidateGroupedNs": [
+          43249792,
+          42438792,
+          42534500
+        ],
+        "indexLegacyNs": [
+          19364951583,
+          19326231583,
+          19338934667
+        ],
+        "indexGroupedNs": [
+          76704125,
+          76809750,
+          77298875
+        ],
+        "cliCandidateLegacyNs": [],
+        "cliCandidateGroupedNs": [],
+        "medianMs": {
+          "candidateLegacyNs": 10306.873959,
+          "candidateGroupedNs": 42.5345,
+          "indexLegacyNs": 19338.934667,
+          "indexGroupedNs": 76.80975
+        }
+      },
+      {
+        "roots": 1,
+        "candidates": 8192,
+        "listings": 16384,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          40712375,
+          37599042,
+          37540500
+        ],
+        "candidateGroupedNs": [
+          42716250,
+          44229584,
+          41248709
+        ],
+        "indexLegacyNs": [
+          2155625,
+          1874375,
+          1993542
+        ],
+        "indexGroupedNs": [
+          5514708,
+          5640208,
+          5610541
+        ],
+        "cliCandidateLegacyNs": [
+          92493750,
+          92443541,
+          93281541
+        ],
+        "cliCandidateGroupedNs": [
+          31718042,
+          31390708,
+          33553959
+        ],
+        "medianMs": {
+          "candidateLegacyNs": 37.599042,
+          "candidateGroupedNs": 42.71625,
+          "indexLegacyNs": 1.993542,
+          "indexGroupedNs": 5.610541,
+          "cliCandidateLegacyNs": 92.49375,
+          "cliCandidateGroupedNs": 31.718042
+        }
+      },
+      {
+        "roots": 8,
+        "candidates": 8192,
+        "listings": 16384,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          274214625,
+          278873917,
+          289904375
+        ],
+        "candidateGroupedNs": [
+          47155250,
+          48184500,
+          47622042
+        ],
+        "indexLegacyNs": [
+          179894584,
+          176746500,
+          176559417
+        ],
+        "indexGroupedNs": [
+          28638500,
+          29056292,
+          27306500
+        ],
+        "cliCandidateLegacyNs": [],
+        "cliCandidateGroupedNs": [],
+        "medianMs": {
+          "candidateLegacyNs": 278.873917,
+          "candidateGroupedNs": 47.622042,
+          "indexLegacyNs": 176.7465,
+          "indexGroupedNs": 28.6385
+        }
+      },
+      {
+        "roots": 64,
+        "candidates": 8192,
+        "listings": 16384,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          6556804041,
+          6641368000,
+          6649570042
+        ],
+        "candidateGroupedNs": [
+          116958375,
+          126390792,
+          118910000
+        ],
+        "indexLegacyNs": [
+          10064981000,
+          10185057791,
+          10043536875
+        ],
+        "indexGroupedNs": [
+          183799541,
+          166490375,
+          164456292
+        ],
+        "cliCandidateLegacyNs": [],
+        "cliCandidateGroupedNs": [],
+        "medianMs": {
+          "candidateLegacyNs": 6641.368,
+          "candidateGroupedNs": 118.91,
+          "indexLegacyNs": 10064.981,
+          "indexGroupedNs": 166.490375
+        }
+      }
+    ],
+    "recordedHashes": {
+      "/private/tmp/sweepx-cache-preparation-first-2026-10-03.bin": "dd0389f677d23d294042fd23722f72d10d7c5c7d80ac90b6eec6c7cc2a0de241",
+      "crates/sweepx-core/src/junk/session/cache_benchmark.rs": "f83e73fad42f344b95207eb5292ee3ee92f7163eb50c932d77c07ad998793776",
+      "crates/sweepx-core/src/junk/cache.rs": "41495ab92896b9c4a835e81a9d61a42ee3ddd23c1be01d24118f76f591d96720",
+      "crates/sweepx-core/src/junk/cache/grouping.rs": "92f60b061128a58a594b1a3e69cbf34405cbd634d476c520ee6be2986baa40e4",
+      "crates/sweepx-core/src/junk/cache/publication.rs": "323bc8c69b673348f7f0b39a0428f2aa21828be0d23263031b4211702332196f"
+    }
+  },
+  "singleRootSupplement": {
+    "logFile": "/private/tmp/sweepx-cache-grouping-single-benchmark-2026-10-03.log",
+    "logSha256": "f1530116858b99d6312f0e218b5ba4345e7f295c6a4cbe7569b1776c76e5e546",
+    "exitCode": 0,
+    "cases": [
+      {
+        "roots": 1,
+        "candidates": 128,
+        "listings": 256,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          564000,
+          464334,
+          477625
+        ],
+        "candidateGroupedNs": [
+          474083,
+          483250,
+          457458
+        ],
+        "indexLegacyNs": [
+          191875,
+          160708,
+          161791
+        ],
+        "indexGroupedNs": [
+          197791,
+          199208,
+          188667
+        ],
+        "cliCandidateLegacyNs": [],
+        "cliCandidateGroupedNs": [],
+        "medianMs": {
+          "candidateLegacyNs": 0.477625,
+          "candidateGroupedNs": 0.474083,
+          "indexLegacyNs": 0.161791,
+          "indexGroupedNs": 0.197791
+        }
+      },
+      {
+        "roots": 1,
+        "candidates": 8192,
+        "listings": 16384,
+        "repetitions": 3,
+        "equivalent": true,
+        "candidateLegacyNs": [
+          46779667,
+          43859084,
+          43988416
+        ],
+        "candidateGroupedNs": [
+          54259750,
+          49090875,
+          48532541
+        ],
+        "indexLegacyNs": [
+          2419084,
+          2061833,
+          2213125
+        ],
+        "indexGroupedNs": [
+          3146417,
+          2682292,
+          2561000
+        ],
+        "cliCandidateLegacyNs": [
+          104220709,
+          102093042,
+          101104125
+        ],
+        "cliCandidateGroupedNs": [
+          35676417,
+          34413166,
+          37448208
+        ],
+        "medianMs": {
+          "candidateLegacyNs": 43.988416,
+          "candidateGroupedNs": 49.090875,
+          "indexLegacyNs": 2.213125,
+          "indexGroupedNs": 2.682292,
+          "cliCandidateLegacyNs": 102.093042,
+          "cliCandidateGroupedNs": 35.676417
+        }
+      }
+    ],
+    "recordedHashes": {
+      "target/release/deps/sweepx_core-69f39c36fea95187": "6e79af3db03223a144c4525aac92ee91fb3ca9284c98081b834b7a41d2477d75",
+      "crates/sweepx-core/src/junk/session/cache_benchmark.rs": "872e6bcd22c293b14c26ed2800d3871d9236ce7407e1411be6d187b21365b9f2",
+      "crates/sweepx-core/src/junk/cache.rs": "41495ab92896b9c4a835e81a9d61a42ee3ddd23c1be01d24118f76f591d96720",
+      "crates/sweepx-core/src/junk/cache/grouping.rs": "92f60b061128a58a594b1a3e69cbf34405cbd634d476c520ee6be2986baa40e4",
+      "crates/sweepx-core/src/junk/cache/publication.rs": "323bc8c69b673348f7f0b39a0428f2aa21828be0d23263031b4211702332196f"
+    }
+  },
+  "supplementReason": "First R1/8192 listing grouping visited all optional listings and regressed from median 1.99 ms to 5.61 ms. Restore direct single-root capture with early 4 MiB tail stop; bounded scope/source admission and native binding remain. Multi-root and candidate helpers unchanged. Supplemental adapter uses direct capture only for R1, and a task-specific explicit environment filter selects the same two predeclared single-root cases.",
+  "finalRouteCases": [
+    {
+      "roots": 1,
+      "candidates": 128,
+      "listings": 256,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        564000,
+        464334,
+        477625
+      ],
+      "candidateGroupedNs": [
+        474083,
+        483250,
+        457458
+      ],
+      "indexLegacyNs": [
+        191875,
+        160708,
+        161791
+      ],
+      "indexGroupedNs": [
+        197791,
+        199208,
+        188667
+      ],
+      "cliCandidateLegacyNs": [],
+      "cliCandidateGroupedNs": [],
+      "medianMs": {
+        "candidateLegacyNs": 0.477625,
+        "candidateGroupedNs": 0.474083,
+        "indexLegacyNs": 0.161791,
+        "indexGroupedNs": 0.197791
+      },
+      "measurement": "singleRootSupplement"
+    },
+    {
+      "roots": 8,
+      "candidates": 1024,
+      "listings": 2048,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        38866125,
+        36620333,
+        36230375
+      ],
+      "candidateGroupedNs": [
+        5581625,
+        8061583,
+        7625125
+      ],
+      "indexLegacyNs": [
+        24442875,
+        24836292,
+        24374334
+      ],
+      "indexGroupedNs": [
+        3709875,
+        3883167,
+        3650167
+      ],
+      "cliCandidateLegacyNs": [
+        11636000,
+        11023292,
+        11499167
+      ],
+      "cliCandidateGroupedNs": [
+        6219584,
+        7004667,
+        5902666
+      ],
+      "medianMs": {
+        "candidateLegacyNs": 36.620333,
+        "candidateGroupedNs": 7.625125,
+        "indexLegacyNs": 24.442875,
+        "indexGroupedNs": 3.709875,
+        "cliCandidateLegacyNs": 11.499167,
+        "cliCandidateGroupedNs": 6.219584
+      },
+      "measurement": "firstMeasurement"
+    },
+    {
+      "roots": 64,
+      "candidates": 1024,
+      "listings": 2048,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        854213292,
+        831795834,
+        814749583
+      ],
+      "candidateGroupedNs": [
+        16339750,
+        15150708,
+        13751042
+      ],
+      "indexLegacyNs": [
+        1273032542,
+        1257137958,
+        1248951250
+      ],
+      "indexGroupedNs": [
+        20877667,
+        20461000,
+        20576458
+      ],
+      "cliCandidateLegacyNs": [
+        501090250,
+        493917833,
+        504833667
+      ],
+      "cliCandidateGroupedNs": [
+        15270125,
+        14816708,
+        15165750
+      ],
+      "medianMs": {
+        "candidateLegacyNs": 831.795834,
+        "candidateGroupedNs": 15.150708,
+        "indexLegacyNs": 1257.137958,
+        "indexGroupedNs": 20.576458,
+        "cliCandidateLegacyNs": 501.09025,
+        "cliCandidateGroupedNs": 15.16575
+      },
+      "measurement": "firstMeasurement"
+    },
+    {
+      "roots": 256,
+      "candidates": 1024,
+      "listings": 2048,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        10569538875,
+        10306238000,
+        10306873959
+      ],
+      "candidateGroupedNs": [
+        43249792,
+        42438792,
+        42534500
+      ],
+      "indexLegacyNs": [
+        19364951583,
+        19326231583,
+        19338934667
+      ],
+      "indexGroupedNs": [
+        76704125,
+        76809750,
+        77298875
+      ],
+      "cliCandidateLegacyNs": [],
+      "cliCandidateGroupedNs": [],
+      "medianMs": {
+        "candidateLegacyNs": 10306.873959,
+        "candidateGroupedNs": 42.5345,
+        "indexLegacyNs": 19338.934667,
+        "indexGroupedNs": 76.80975
+      },
+      "measurement": "firstMeasurement"
+    },
+    {
+      "roots": 1,
+      "candidates": 8192,
+      "listings": 16384,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        46779667,
+        43859084,
+        43988416
+      ],
+      "candidateGroupedNs": [
+        54259750,
+        49090875,
+        48532541
+      ],
+      "indexLegacyNs": [
+        2419084,
+        2061833,
+        2213125
+      ],
+      "indexGroupedNs": [
+        3146417,
+        2682292,
+        2561000
+      ],
+      "cliCandidateLegacyNs": [
+        104220709,
+        102093042,
+        101104125
+      ],
+      "cliCandidateGroupedNs": [
+        35676417,
+        34413166,
+        37448208
+      ],
+      "medianMs": {
+        "candidateLegacyNs": 43.988416,
+        "candidateGroupedNs": 49.090875,
+        "indexLegacyNs": 2.213125,
+        "indexGroupedNs": 2.682292,
+        "cliCandidateLegacyNs": 102.093042,
+        "cliCandidateGroupedNs": 35.676417
+      },
+      "measurement": "singleRootSupplement"
+    },
+    {
+      "roots": 8,
+      "candidates": 8192,
+      "listings": 16384,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        274214625,
+        278873917,
+        289904375
+      ],
+      "candidateGroupedNs": [
+        47155250,
+        48184500,
+        47622042
+      ],
+      "indexLegacyNs": [
+        179894584,
+        176746500,
+        176559417
+      ],
+      "indexGroupedNs": [
+        28638500,
+        29056292,
+        27306500
+      ],
+      "cliCandidateLegacyNs": [],
+      "cliCandidateGroupedNs": [],
+      "medianMs": {
+        "candidateLegacyNs": 278.873917,
+        "candidateGroupedNs": 47.622042,
+        "indexLegacyNs": 176.7465,
+        "indexGroupedNs": 28.6385
+      },
+      "measurement": "firstMeasurement"
+    },
+    {
+      "roots": 64,
+      "candidates": 8192,
+      "listings": 16384,
+      "repetitions": 3,
+      "equivalent": true,
+      "candidateLegacyNs": [
+        6556804041,
+        6641368000,
+        6649570042
+      ],
+      "candidateGroupedNs": [
+        116958375,
+        126390792,
+        118910000
+      ],
+      "indexLegacyNs": [
+        10064981000,
+        10185057791,
+        10043536875
+      ],
+      "indexGroupedNs": [
+        183799541,
+        166490375,
+        164456292
+      ],
+      "cliCandidateLegacyNs": [],
+      "cliCandidateGroupedNs": [],
+      "medianMs": {
+        "candidateLegacyNs": 6641.368,
+        "candidateGroupedNs": 118.91,
+        "indexLegacyNs": 10064.981,
+        "indexGroupedNs": 166.490375
+      },
+      "measurement": "firstMeasurement"
+    }
+  ],
+  "limits": [
+    "This is a projection microbenchmark, not scan wall time, throughput, warm-cache UX or p95/p99.",
+    "Supplemental R1/8192 session candidate preparation remains slower: medians about 43.99 -> 49.09 ms. R1 index medians about 2.21 -> 2.68 ms; retain overhead rather than infer zero cost.",
+    "R256/C8192 was not measured.",
+    "This fixture has 8192 target directories with one payload each; the older warm-PTY stall workload has one target directory with 8192 files. No stall root cause is closed.",
+    "Auxiliary 8 MiB capacity/node budget and per-root 4 MiB wire allowance are distinct estimates, not allocator RSS measurements."
+  ],
+  "sourceSha256": {
+    "crates/sweepx-cli/src/main.rs": "d6357ded47a23fe06b505432b339d8567c2e47b9a60264ef08c93a0f0ed23f50",
+    "crates/sweepx-core/src/junk/cache.rs": "41495ab92896b9c4a835e81a9d61a42ee3ddd23c1be01d24118f76f591d96720",
+    "crates/sweepx-core/src/junk/cache/grouping.rs": "92f60b061128a58a594b1a3e69cbf34405cbd634d476c520ee6be2986baa40e4",
+    "crates/sweepx-core/src/junk/cache/provider.rs": "1ce300f3425cf10e456092e3eec7e56853c4b81e9163cbe14c45a84cd1faf86a",
+    "crates/sweepx-core/src/junk/cache/publication.rs": "323bc8c69b673348f7f0b39a0428f2aa21828be0d23263031b4211702332196f",
+    "crates/sweepx-core/src/junk/session/cache.rs": "7b56e19a37638944a490d8de96831c4c6b080b59bbb427ff39cfda2744b63520",
+    "crates/sweepx-core/src/junk/session/cache_benchmark.rs": "872e6bcd22c293b14c26ed2800d3871d9236ce7407e1411be6d187b21365b9f2",
+    "crates/sweepx-core/src/junk/cache/grouping_contract_tests.rs": "93123064bc386561e82b3b8a0cf622177e2b09d84985e1d299a6040e612446da"
+  }
+}

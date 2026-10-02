@@ -40,8 +40,11 @@ use sha2::{Digest, Sha256};
 use sweepx_model::{ByteValue, ScanEntryId};
 use sweepx_scanner::ChangeLog;
 
+pub(crate) mod grouping;
 /// Current directory enumeration with independently validated cached file lengths.
 pub mod provider;
+/// Bounded borrowed candidate views for multi-root cache publication.
+pub mod publication;
 mod storage;
 use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
@@ -781,19 +784,36 @@ impl StoredSubtreeIndex {
         covered: &BTreeMap<String, bool>,
         listings: &BTreeMap<String, sweepx_scanner::DirListing>,
     ) -> io::Result<Self> {
+        Self::capture_owned(
+            root,
+            since,
+            listings.iter().filter(|(path, _)| {
+                covered.get(*path) == Some(&true)
+                    && all_roots
+                        .iter()
+                        .filter(|candidate| Path::new(path).starts_with(candidate))
+                        .max_by_key(|candidate| candidate.components().count())
+                        .map(PathBuf::as_path)
+                        == Some(root)
+            }),
+        )
+    }
+
+    /// Projects already-covered, original-scope-owned listings without revisiting other roots.
+    /// Callers must retain BTree order so the independent per-root allowance omits the same tail.
+    /// Ownership is a presentation/cache partition; root identity is still checked after capture.
+    pub(crate) fn capture_owned<'a>(
+        root: &Path,
+        since: FsEventId,
+        listings: impl IntoIterator<Item = (&'a String, &'a sweepx_scanner::DirListing)>,
+    ) -> io::Result<Self> {
         let mut remaining = Limits::default()
             .entry_bytes
             .saturating_sub(1024 + root.as_os_str().len().saturating_mul(6));
         let mut result = Self::new(root, since, BTreeMap::new(), BTreeMap::new())?;
         for (path, listing) in listings {
-            if covered.get(path) != Some(&true)
-                || all_roots
-                    .iter()
-                    .filter(|candidate| Path::new(path).starts_with(candidate))
-                    .max_by_key(|candidate| candidate.components().count())
-                    .map(PathBuf::as_path)
-                    != Some(root)
-            {
+            // A bad internal view can only omit cache facts, never publish a foreign path.
+            if !Path::new(path).starts_with(root) {
                 continue;
             }
             let cost = path.len().saturating_mul(12).saturating_add(128);
