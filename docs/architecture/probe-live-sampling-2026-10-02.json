@@ -1,0 +1,624 @@
+{
+  "schema": "sweepx.probe-live-sampling/v1",
+  "date": "2026-10-02",
+  "baseCommit": "5dbd7f7",
+  "experiments": [
+    {
+      "case": "independentScripts",
+      "receipt": {
+        "date": "2026-10-02",
+        "host": {
+          "system": "Darwin",
+          "release": "25.5.0",
+          "version": "Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:24 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6020",
+          "machine": "arm64",
+          "processor": "arm"
+        },
+        "head": "5dbd7f74ac5bb1a26465919fae4666d4d39f5855",
+        "workload": "10 fixed repetitions, identical new shell script then repeat; alternating live-sampled and unsampled fresh runs; owned PIDs only; 5 s ceiling; exact stdout and exit verified",
+        "scriptSha256": "1639973df96d58dfeaa125e761bde866d79a0323a146425aaefdeda26845c70f",
+        "scriptBytes": "#!/bin/sh\nprintf 'ready\\n'\n",
+        "scope": "Python independent subprocess oracle; sampling perturbs observed timing; no OS cache control or SweepX cache; not an end-to-end scan benchmark",
+        "records": [
+          {
+            "repetition": 1,
+            "case": "fresh",
+            "pid": 21403,
+            "sampleRequested": true,
+            "launchMs": 2.046000008704141,
+            "sampleStartedMs": 58.012833003886044,
+            "firstStdoutMs": 267.56362500600517,
+            "completeMs": 267.8991249995306,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true,
+            "sampleStatus": 0,
+            "sampleMessage": "2026-10-02 18:33:13.023 sample[21405:19792637] pid_for_task(1e03) failed with error 5: (os/kern) failure\nSampling process 0 for 1 second with 1 millisecond of run time between samples\nSampling completed, processing symbols...\n"
+          },
+          {
+            "repetition": 1,
+            "case": "repeat",
+            "pid": 21406,
+            "sampleRequested": false,
+            "launchMs": 1.7997909744735807,
+            "firstStdoutMs": 8.476666000206023,
+            "completeMs": 8.754707989282906,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 2,
+            "case": "fresh",
+            "pid": 21407,
+            "sampleRequested": false,
+            "launchMs": 1.7362079815939069,
+            "firstStdoutMs": 340.61170800123364,
+            "completeMs": 340.90558299794793,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 2,
+            "case": "repeat",
+            "pid": 21408,
+            "sampleRequested": false,
+            "launchMs": 1.819208002416417,
+            "firstStdoutMs": 7.715917017776519,
+            "completeMs": 7.957458001328632,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 3,
+            "case": "fresh",
+            "pid": 21409,
+            "sampleRequested": true,
+            "launchMs": 1.641125010792166,
+            "sampleStartedMs": 58.56641702121124,
+            "firstStdoutMs": 276.97075001196936,
+            "completeMs": 277.3035840073135,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true,
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 21409 for 1 second with 1 millisecond of run time between samples\nSampling completed, processing symbols...\nSample analysis of process 21409 written to file <controlled-fixture>/sample-2.txt\n",
+            "sampleSha256": "3fb3de17b04d7a2ba6b8b8516e0266c12ac27bb7757273bdec8d1312ad0d8a52",
+            "sampleReport": "Analysis of sampling sh (pid 21409) every 1 millisecond\nProcess:         sh [21409]\nPath:            /bin/sh\nLoad Address:    0x104644000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  python3.12 [21402]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:33:13.476 +0800\nLaunch Time:     2026-10-02 18:33:13.387 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n----\n\nCall graph:\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n\nBinary images description not available\n\n",
+            "usableCallGraph": false
+          },
+          {
+            "repetition": 3,
+            "case": "repeat",
+            "pid": 21423,
+            "sampleRequested": false,
+            "launchMs": 2.014083001995459,
+            "firstStdoutMs": 9.18675001594238,
+            "completeMs": 9.446917014429346,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 4,
+            "case": "fresh",
+            "pid": 21424,
+            "sampleRequested": false,
+            "launchMs": 1.3278750120662153,
+            "firstStdoutMs": 327.7567920158617,
+            "completeMs": 328.03645901731215,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 4,
+            "case": "repeat",
+            "pid": 21425,
+            "sampleRequested": false,
+            "launchMs": 1.6450409893877804,
+            "firstStdoutMs": 7.522208004957065,
+            "completeMs": 7.806040986906737,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 5,
+            "case": "fresh",
+            "pid": 21426,
+            "sampleRequested": true,
+            "launchMs": 1.9830419914796948,
+            "sampleStartedMs": 58.50545899011195,
+            "firstStdoutMs": 855.3212499828078,
+            "completeMs": 855.5842920031864,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true,
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 21426 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 3 tries\nSampling completed, processing symbols...\nSample analysis of process 21426 written to file <controlled-fixture>/sample-4.txt\n",
+            "sampleSha256": "609249e520b4192a11d47e0fd34c3188930572f082e6a3d4378cfe2d01446e58",
+            "sampleReport": "Analysis of sampling sh (pid 21426) every 1 millisecond\nProcess:         sh [21426]\nPath:            /bin/sh\nLoad Address:    0x104bbc000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  python3.12 [21402]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:33:16.194 +0800\nLaunch Time:     2026-10-02 18:33:16.107 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n\nPhysical footprint:         944K\nPhysical footprint (peak):  944K\nIdle exit:                  untracked\n----\n\nCall graph:\n    85 Thread_19792760: Main Thread\n    + 82 _dyld_start  (in dyld) + 0  [0x104f749c0]\n    + 2 start  (in dyld) + 6904  [0x1873afda8]\n    + ! 2 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n    + !   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 1124  [0x1873b08cc]\n    + !   : 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 264  [0x1873ff7e8]\n    + !   :                                                                                     1 dyld4::PrebuiltLoader::map(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&, bool) const  (in dyld) + 1108  [0x1873ff690]\n    + !   :                                                                                       1 dyld4::RuntimeState::add(dyld4::Loader const*)  (in dyld) + 60  [0x1873ba0b8]\n    + !   :                                                                                         1 <deduplicated_symbol>  (in dyld) + 36  [0x1873ac2a0]\n    + !   :                                                                                           1 <deduplicated_symbol>  (in dyld) + 168  [0x1873ac408]\n    + !   :                                                                                             1 lsl::Allocator::realloc(void*, unsigned long long)  (in dyld) + 128  [0x187404d38]\n    + !   :                                                                                               1 lsl::Allocator::AllocationMetadata::consumeFromNext(unsigned long long)  (in dyld) + 184  [0x187404ea4]\n    + !   :                                                                                                 1 lsl::Allocator::AllocationMetadata::AllocationMetadata(lsl::Allocator::AllocationMetadata*, unsigned long long, unsigned long long, unsigned long long)  (in dyld) + 44  [0x187405254]\n    + !   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n    + !     1 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n    + !       1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n    + !         1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n    + !           1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n    + !             1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n    + !               1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n    + !                 1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n    + !                   1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n    + 1 start  (in dyld) + 6008  [0x104f8fa28]\n    +   1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x104fa9390]\n    +     1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x104fa9c60]\n    +       1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x104fe66f4]\n    +         1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x104fe6368]\n    +           1 mach_msg_overwrite  (in dyld) + 244  [0x104fffa40]\n    +             1 mach_msg2_internal  (in dyld) + 76  [0x104fff898]\n    +               1 mach_msg2_trap  (in dyld) + 8  [0x104f7172c]\n    1 Thread_19792760   DispatchQueue_1: com.apple.main-thread  (serial)\n      1 start  (in dyld) + 6904  [0x1873afda8]\n        1 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n          1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3880  [0x1873b1390]\n            1 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 100  [0x1873a4850]\n              1 dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const  (in dyld) + 44  [0x187400fb8]\n                1 dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 528  [0x1873d77d4]\n                  1 dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 516  [0x1873e7c08]\n                    1 mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x18741cc3c]\n                      1 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x18741b394]\n                        1 invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 312  [0x18741e860]\n                          1 invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 320  [0x1873e8114]\n                            1 invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const  (in dyld) + 180  [0x1873dce30]\n                              1 libSystem_initializer  (in libSystem.B.dylib) + 244  [0x1975bd350]\n                                1 libdispatch_init  (in libdispatch.dylib) + 480  [0x1875e8e84]\n                                  1 _os_object_init  (in libdispatch.dylib) + 24  [0x1875b377c]\n                                    1 _objc_init  (in libobjc.A.dylib) + 1796  [0x187309b10]\n                                      1 _dyld_objc_register_callbacks  (in libdyld.dylib) + 360  [0x187366714]\n                                        1 dyld4::APIs::_dyld_objc_register_callbacks(dyld4::ObjCCallbacks const*)  (in dyld) + 116  [0x187399f20]\n                                          1 dyld4::RuntimeState::setObjCNotifiers(dyld4::ReadOnlyCallback<void (*)(char const*, mach_header const*)>, dyld4::ReadOnlyCallback<void (*)(mach_header const*, void*, mach_header const*, void const*)>, dyld4::ReadOnlyCallback<void (*)(_dyld_objc_notify_mapped_info const*)>, dyld4::ReadOnlyCallback<void (*)(unsigned int, _dyld_objc_notify_mapped_info const*, void (unsigned int) block_pointer)>)  (in dyld) + 944  [0x1873c1fa8]\n                                            1 dyld4::RuntimeLocks::withLoadersReadLock(void () block_pointer)  (in dyld) + 84  [0x1873b9a44]\n                                              1 invocation function for block in dyld4::RuntimeState::setObjCNotifiers(dyld4::ReadOnlyCallback<void (*)(char const*, mach_header const*)>, dyld4::ReadOnlyCallback<void (*)(mach_header const*, void*, mach_header const*, void const*)>, dyld4::ReadOnlyCallback<void (*)(_dyld_objc_notify_mapped_info const*)>, dyld4::ReadOnlyCallback<void (*)(unsigned int, _dyld_objc_notify_mapped_info const*, void (unsigned int) block_pointer)>)::$_0::operator()() const  (in dyld) + 1036  [0x1873c6e14]\n                                                1 map_images  (in libobjc.A.dylib) + 112  [0x187309d90]\n                                                  1 map_images_nolock  (in libobjc.A.dylib) + 8008  [0x18730bd68]\n                                                    1 realizeClassWithoutSwift(objc_class*, objc_class*)  (in libobjc.A.dylib) + 528  [0x18730d834]\n                                                      1 realizeClassWithoutSwift(objc_class*, objc_class*)  (in libobjc.A.dylib) + 2108  [0x18730de60]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        41       dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        82\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 5,
+            "case": "repeat",
+            "pid": 21429,
+            "sampleRequested": false,
+            "launchMs": 1.5002089785411954,
+            "firstStdoutMs": 9.164624992990866,
+            "completeMs": 9.55812499159947,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 6,
+            "case": "fresh",
+            "pid": 21430,
+            "sampleRequested": false,
+            "launchMs": 1.6081669891718775,
+            "firstStdoutMs": 308.15695799537934,
+            "completeMs": 308.4358749911189,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 6,
+            "case": "repeat",
+            "pid": 21431,
+            "sampleRequested": false,
+            "launchMs": 2.1853749931324273,
+            "firstStdoutMs": 8.631249977042899,
+            "completeMs": 14.898666995577514,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 7,
+            "case": "fresh",
+            "pid": 21432,
+            "sampleRequested": true,
+            "launchMs": 1.3013750140089542,
+            "sampleStartedMs": 82.26162500795908,
+            "firstStdoutMs": 231.6639169875998,
+            "completeMs": 231.9476249977015,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true,
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 21432 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 3 tries\nsample_remote_thread_with_frame_filter failed to get thread state for pid 21432 thread 19715Sampling completed, processing symbols...\nSample analysis of process 21432 written to file <controlled-fixture>/sample-6.txt\n",
+            "sampleSha256": "af6baa14ca481d49a554725be1056307f012fddc9fb3f2785e87d1731a73b05f",
+            "sampleReport": "Analysis of sampling sh (pid 21432) every 1 millisecond\nProcess:         sh [21432]\nPath:            /bin/sh\nLoad Address:    0x10417c000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  python3.12 [21402]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:33:17.422 +0800\nLaunch Time:     2026-10-02 18:33:17.311 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n\nPhysical footprint:         1200K\nPhysical footprint (peak):  1200K\nIdle exit:                  untracked\n----\n\nCall graph:\n    4 Thread_19792808: Main Thread   DispatchQueue_<multiple>\n      3 start  (in dyld) + 6904  [0x1873afda8]\n      + 2 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n      + ! 1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n      + ! : 1 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n      + ! :   1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n      + ! :     1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n      + ! :       1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n      + ! :         1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n      + ! :           1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n      + ! :             1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n      + ! :               1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n      + ! 1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3752  [0x1873b1310]\n      + !   1 dyld4::RuntimeState::notifyDtrace(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 332  [0x1873c008c]\n      + !     1 dyld4::SyscallDelegate::dtraceRegisterUserProbes(dof_ioctl_data*) const  (in dyld) + 40  [0x1873ad118]\n      + !       1 open  (in dyld) + 40  [0x187392664]\n      + !         1 __open  (in dyld) + 8  [0x187395f50]\n      + 1 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 80  [0x1873b035c]\n      +   1 dyld4::ProcessConfig::ProcessConfig(dyld4::KernelArgs const*, dyld4::SyscallDelegate&, lsl::Allocator&)  (in dyld) + 128  [0x1873b2990]\n      +     1 dyld4::ProcessConfig::DyldCache::DyldCache(dyld4::ProcessConfig::Process&, dyld4::ProcessConfig::Security const&, dyld4::ProcessConfig::Logging const&, dyld4::SyscallDelegate&, lsl::Allocator&, dyld4::ProcessConfig const&)  (in dyld) + 132  [0x1873b55e8]\n      +       1 dyld4::CacheFinder::CacheFinder(dyld4::ProcessConfig::Process const&, dyld4::ProcessConfig::Logging const&, dyld4::SyscallDelegate&)  (in dyld) + 200  [0x1873b51f4]\n      +         1 ignite  (in dyld) + 704  [0x18740c5d0]\n      +           1 boot_boot  (in dyld) + 116  [0x18740ccf0]\n      +             1 stage_fire  (in dyld) + 160  [0x187409afc]\n      +               1 _dylib_cache_fire  (in dyld) + 208  [0x18740e0b0]\n      +                 1 openat  (in dyld) + 40  [0x18741fd40]\n      +                   1 __openat  (in dyld) + 8  [0x187395f7c]\n      1 start  (in dyld) + 6008  [0x10444fa28]\n        1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x104469390]\n          1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x104469c60]\n            1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1044a66f4]\n              1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x1044a6368]\n                1 mach_msg_overwrite  (in dyld) + 244  [0x1044bfa40]\n                  1 mach_msg2_internal  (in dyld) + 76  [0x1044bf898]\n                    1 mach_msg2_trap  (in dyld) + 8  [0x10443172c]\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 7,
+            "case": "repeat",
+            "pid": 21435,
+            "sampleRequested": false,
+            "launchMs": 2.0450839947443455,
+            "firstStdoutMs": 9.482958994340152,
+            "completeMs": 15.751541999634355,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 8,
+            "case": "fresh",
+            "pid": 21436,
+            "sampleRequested": false,
+            "launchMs": 1.3951660075690597,
+            "firstStdoutMs": 255.0402079941705,
+            "completeMs": 255.34329100628383,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 8,
+            "case": "repeat",
+            "pid": 21437,
+            "sampleRequested": false,
+            "launchMs": 2.130708016920835,
+            "firstStdoutMs": 9.990874998038635,
+            "completeMs": 16.26487501198426,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 9,
+            "case": "fresh",
+            "pid": 21438,
+            "sampleRequested": true,
+            "launchMs": 1.6143330140039325,
+            "sampleStartedMs": 59.06304100062698,
+            "firstStdoutMs": 341.9768750027288,
+            "completeMs": 342.3233329958748,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true,
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 21438 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 4 tries\nSampling completed, processing symbols...\nSample analysis of process 21438 written to file <controlled-fixture>/sample-8.txt\n",
+            "sampleSha256": "8e383ab5717c10aba58aed23c28d876a408422808677029b6f8028ed17c7487d",
+            "sampleReport": "Analysis of sampling sh (pid 21438) every 1 millisecond\nProcess:         sh [21438]\nPath:            /bin/sh\nLoad Address:    0x102598000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  python3.12 [21402]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:33:17.924 +0800\nLaunch Time:     2026-10-02 18:33:17.836 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n\nPhysical footprint:         944K\nPhysical footprint (peak):  944K\nIdle exit:                  untracked\n----\n\nCall graph:\n    167 Thread_19792834: Main Thread   DispatchQueue_<multiple>\n      163 _dyld_start  (in dyld) + 0  [0x1028c49c0]\n      2 start  (in dyld) + 6904  [0x1873afda8]\n      + 2 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n      +   ! 1 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n      +   !   1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n      +   !     1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n      +   !       1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n      +   !         1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n      +   !           1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n      +   !             1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n      +   !               1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3752  [0x1873b1310]\n      +     1 dyld4::RuntimeState::notifyDtrace(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 332  [0x1873c008c]\n      +       1 dyld4::SyscallDelegate::dtraceRegisterUserProbes(dof_ioctl_data*) const  (in dyld) + 40  [0x1873ad118]\n      +         1 open  (in dyld) + 40  [0x187392664]\n      +           1 __open  (in dyld) + 8  [0x187395f50]\n      1 start  (in dyld) + 6008  [0x1028dfa28]\n      + 1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1504  [0x1028f912c]\n      +   1 dyld4::ExternallyViewableState::atlasAddImage(PropertyList::Dictionary&, unsigned long long, char const*)  (in dyld) + 356  [0x1028f9b00]\n      +     1 mach_o::UnsafeHeader::forEachSegment(void (mach_o::UnsafeHeader::SegmentInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x10294e460]\n      +       1 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x10294b394]\n      +         1 invocation function for block in mach_o::UnsafeHeader::forEachSegment(void (mach_o::UnsafeHeader::SegmentInfo const&, bool&) block_pointer) const  (in dyld) + 248  [0x10294e6fc]\n      +           1 <deduplicated_symbol>  (in dyld) + 168  [0x1028fb70c]\n      +             1 lsl::Allocator::aligned_alloc(unsigned long long, unsigned long long)  (in dyld) + 160  [0x102934758]\n      +               1 lsl::Allocator::AllocationMetadata::reserve(unsigned long long, bool)  (in dyld) + 116  [0x102935200]\n      1 start  (in dyld) + 4028  [0x1873af26c]\n        1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x1873c9390]\n          1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n            1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n              1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n                1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n                  1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n                    1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        163\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 9,
+            "case": "repeat",
+            "pid": 21441,
+            "sampleRequested": false,
+            "launchMs": 2.28904202231206,
+            "firstStdoutMs": 11.139000009279698,
+            "completeMs": 17.736417008563876,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 10,
+            "case": "fresh",
+            "pid": 21442,
+            "sampleRequested": false,
+            "launchMs": 1.7744590004440397,
+            "firstStdoutMs": 243.86741701164283,
+            "completeMs": 250.14066701987758,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          },
+          {
+            "repetition": 10,
+            "case": "repeat",
+            "pid": 21444,
+            "sampleRequested": false,
+            "launchMs": 1.57966700498946,
+            "firstStdoutMs": 6.759375013643876,
+            "completeMs": 13.268542010337114,
+            "status": 0,
+            "answerMatches": true,
+            "eof": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "initialNativeHarness",
+      "receipt": {
+        "date": "2026-10-02",
+        "host": {
+          "system": "Darwin",
+          "release": "25.5.0",
+          "version": "Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:24 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6020",
+          "machine": "arm64",
+          "processor": "arm"
+        },
+        "head": "5dbd7f74ac5bb1a26465919fae4666d4d39f5855",
+        "binarySha256": "931a782f5f9d7e3709e0ac27143c0ee246ee6e070d754ebd5cd869785ab8fa2e",
+        "test": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "workload": "10 fixed same-binary isolated exact shared-cache tests; alternating sampled/unsampled; first child still live 50ms sampled; bounded libproc direct-owned-child and thread observations only",
+        "scope": "Existing deadlines/assertions unchanged; sampling perturbs timings; no concurrent cross-compilation; not an end-to-end benchmark or claim of cause/fix",
+        "records": [
+          {
+            "repetition": 1,
+            "liveSampling": true,
+            "ownedTestPid": 49529,
+            "completeMs": 6277.19729198725,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.95s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 418.813334ms, launched_after: Some(820.25µs), ready_after: Some(837.5µs), first_stdout_after: Some(418.754584ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=418.961042ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 344.480375ms, launched_after: Some(491.916µs), ready_after: Some(493.5µs), first_stdout_after: Some(344.467458ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=344.512459ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.020292ms, launched_after: Some(497.292µs), ready_after: Some(499.083µs), first_stdout_after: Some(8.012958ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.240625ms, launched_after: Some(452.458µs), ready_after: Some(453.458µs), first_stdout_after: Some(6.234541ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 2,
+            "liveSampling": false,
+            "ownedTestPid": 50097,
+            "completeMs": 1011.0023339802865,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.00s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 484.000875ms, launched_after: Some(830.625µs), ready_after: Some(836.875µs), first_stdout_after: Some(483.970291ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=484.049667ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 286.665708ms, launched_after: Some(458.166µs), ready_after: Some(459.708µs), first_stdout_after: Some(286.655375ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=286.701334ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.786958ms, launched_after: Some(719.458µs), ready_after: Some(720.875µs), first_stdout_after: Some(13.777833ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 37.139458ms, launched_after: Some(3.573583ms), ready_after: Some(3.575208ms), first_stdout_after: Some(37.119166ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 3,
+            "liveSampling": true,
+            "ownedTestPid": 50115,
+            "completeMs": 966.1715000111144,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.95s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 478.053875ms, launched_after: Some(1.735708ms), ready_after: Some(1.740833ms), first_stdout_after: Some(478.025583ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=478.107042ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 285.574625ms, launched_after: Some(510.916µs), ready_after: Some(512.375µs), first_stdout_after: Some(285.558791ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=285.618459ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 15.689042ms, launched_after: Some(656.917µs), ready_after: Some(658.584µs), first_stdout_after: Some(15.675084ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.998583ms, launched_after: Some(480.125µs), ready_after: Some(481.583µs), first_stdout_after: Some(7.990291ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 4,
+            "liveSampling": false,
+            "ownedTestPid": 50131,
+            "completeMs": 1033.6477500095498,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.02s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 426.384917ms, launched_after: Some(832.167µs), ready_after: Some(836.417µs), first_stdout_after: Some(426.35175ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=426.432458ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 259.78025ms, launched_after: Some(1.74625ms), ready_after: Some(1.747875ms), first_stdout_after: Some(259.767125ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=259.813208ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.7765ms, launched_after: Some(658.417µs), ready_after: Some(660.042µs), first_stdout_after: Some(13.77ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.002125ms, launched_after: Some(486.125µs), ready_after: Some(487.042µs), first_stdout_after: Some(7.997792ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 5,
+            "liveSampling": true,
+            "ownedTestPid": 50139,
+            "completeMs": 1033.6973330122419,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.00s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 464.886916ms, launched_after: Some(569.75µs), ready_after: Some(573.833µs), first_stdout_after: Some(464.869708ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=464.952334ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 258.986209ms, launched_after: Some(767µs), ready_after: Some(768.875µs), first_stdout_after: Some(258.959292ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=259.059042ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 23.068ms, launched_after: Some(2.707917ms), ready_after: Some(2.713042ms), first_stdout_after: Some(23.050209ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.984458ms, launched_after: Some(1.175542ms), ready_after: Some(1.179917ms), first_stdout_after: Some(14.976292ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 6,
+            "liveSampling": false,
+            "ownedTestPid": 50152,
+            "completeMs": 1138.7074170052074,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.12s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 462.085209ms, launched_after: Some(1.066417ms), ready_after: Some(1.070334ms), first_stdout_after: Some(462.052084ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=462.138583ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 311.57375ms, launched_after: Some(458.041µs), ready_after: Some(459.916µs), first_stdout_after: Some(311.54375ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=311.6425ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 22.260041ms, launched_after: Some(1.135166ms), ready_after: Some(1.140375ms), first_stdout_after: Some(22.228208ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 15.112666ms, launched_after: Some(1.782916ms), ready_after: Some(1.788291ms), first_stdout_after: Some(15.101916ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 7,
+            "liveSampling": true,
+            "ownedTestPid": 50160,
+            "completeMs": 1073.699000000488,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.06s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 662.900958ms, launched_after: Some(491.375µs), ready_after: Some(496.167µs), first_stdout_after: Some(662.79625ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=663.029917ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 259.908917ms, launched_after: Some(1.428917ms), ready_after: Some(1.43475ms), first_stdout_after: Some(259.896542ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=259.951ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.727291ms, launched_after: Some(444.875µs), ready_after: Some(446.625µs), first_stdout_after: Some(7.719458ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.008834ms, launched_after: Some(486.459µs), ready_after: Some(488.209µs), first_stdout_after: Some(7.999584ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 8,
+            "liveSampling": false,
+            "ownedTestPid": 50166,
+            "completeMs": 950.2670840010978,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.94s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 463.960709ms, launched_after: Some(1.49575ms), ready_after: Some(1.500209ms), first_stdout_after: Some(463.932334ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=464.018167ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 309.445458ms, launched_after: Some(407.916µs), ready_after: Some(409.541µs), first_stdout_after: Some(309.41725ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=309.4995ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 15.058375ms, launched_after: Some(2.204917ms), ready_after: Some(2.211ms), first_stdout_after: Some(15.047417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.267625ms, launched_after: Some(622.75µs), ready_after: Some(625.583µs), first_stdout_after: Some(6.26ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 9,
+            "liveSampling": true,
+            "ownedTestPid": 50186,
+            "completeMs": 933.706916985102,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.92s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 416.074542ms, launched_after: Some(520.333µs), ready_after: Some(526.292µs), first_stdout_after: Some(416.054208ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=416.119042ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 318.540917ms, launched_after: Some(519.5µs), ready_after: Some(521.042µs), first_stdout_after: Some(318.528042ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=318.575792ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.333125ms, launched_after: Some(572.583µs), ready_after: Some(574.708µs), first_stdout_after: Some(6.323583ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 6.925375ms, launched_after: Some(401.333µs), ready_after: Some(402.833µs), first_stdout_after: Some(6.916417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 10,
+            "liveSampling": false,
+            "ownedTestPid": 50494,
+            "completeMs": 958.8488749868702,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.95s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 438.743875ms, launched_after: Some(675.166µs), ready_after: Some(679.791µs), first_stdout_after: Some(438.711833ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=438.794417ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 302.633292ms, launched_after: Some(3.337084ms), ready_after: Some(3.339209ms), first_stdout_after: Some(302.622709ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=302.674209ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.243541ms, launched_after: Some(717.125µs), ready_after: Some(719.208µs), first_stdout_after: Some(8.234166ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.808125ms, launched_after: Some(607.292µs), ready_after: Some(608.375µs), first_stdout_after: Some(13.796542ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          }
+        ],
+        "qualification": "No native child sampled: initial harness incorrectly interpreted proc_listchildpids count as bytes. This run is test-status/timing evidence only. An independent one-child fixture observed return=1 with exactly that child PID; corrected subsequent harness used PID counts."
+      }
+    },
+    {
+      "case": "nativeSharedCache",
+      "receipt": {
+        "date": "2026-10-02",
+        "host": {
+          "system": "Darwin",
+          "release": "25.5.0",
+          "version": "Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:24 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6020",
+          "machine": "arm64",
+          "processor": "arm"
+        },
+        "head": "5dbd7f74ac5bb1a26465919fae4666d4d39f5855",
+        "binarySha256": "931a782f5f9d7e3709e0ac27143c0ee246ee6e070d754ebd5cd869785ab8fa2e",
+        "test": "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence",
+        "workload": "10 fixed same-binary isolated exact shared-cache tests; alternating sampled/unsampled; first child still live 50ms sampled; bounded libproc direct-owned-child and thread observations only",
+        "scope": "Existing deadlines/assertions unchanged; sampling perturbs timings; no concurrent cross-compilation; not an end-to-end benchmark or claim of cause/fix",
+        "records": [
+          {
+            "repetition": 1,
+            "liveSampling": true,
+            "ownedTestPid": 59249,
+            "sampledChildPid": 59304,
+            "sampleStartedMs": 150.16620798269287,
+            "threadStatesBeforeSampling": [
+              {
+                "userTime": 0,
+                "systemTime": 27000,
+                "runState": 3,
+                "flags": 0,
+                "sleepTime": 0
+              }
+            ],
+            "completeMs": 1434.121582977241,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.42s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 878.071958ms, launched_after: Some(565.458µs), ready_after: Some(731.083µs), first_stdout_after: Some(878.02275ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=879.267417ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 247.440458ms, launched_after: Some(553.5µs), ready_after: Some(555.042µs), first_stdout_after: Some(247.414708ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=247.5095ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.232333ms, launched_after: Some(1.071666ms), ready_after: Some(1.076541ms), first_stdout_after: Some(14.217541ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.352834ms, launched_after: Some(436.292µs), ready_after: Some(438.125µs), first_stdout_after: Some(13.34225ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n",
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 59304 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 4 tries\nSampling completed, processing symbols...\nSample analysis of process 59304 written to file <controlled-fixture>/child-0.txt\n",
+            "sampleSha256": "af5800273dfaeaf129a61629f35a0303db7bfc2c52d306ededb0991a8803dfc9",
+            "sampleReport": "Analysis of sampling sh (pid 59304) every 1 millisecond\nProcess:         sh [59304]\nPath:            /bin/sh\nLoad Address:    0x1047d0000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  sweepx_core-9dd151ea5439482c [59249]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:38:55.208 +0800\nLaunch Time:     2026-10-02 18:38:55.111 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n----\n\nCall graph:\n    564 Thread_19865699: Main Thread   DispatchQueue_<multiple>\n      557 _dyld_start  (in dyld) + 0  [0x104bc09c0]\n      3 start  (in dyld) + 6008  [0x104bdba28]\n      + 3 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x104bf5390]\n      +   3 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x104bf5c60]\n      +     3 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x104c326f4]\n      +       3 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x104c32368]\n      +         3 mach_msg_overwrite  (in dyld) + 244  [0x104c4ba40]\n      +           3 mach_msg2_internal  (in dyld) + 76  [0x104c4b898]\n      +             3 mach_msg2_trap  (in dyld) + 8  [0x104bbd72c]\n      3 start  (in dyld) + 6904  [0x1873afda8]\n      + 3 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n      +   2 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n      +   ! 2 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n      +   !   2 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n      +   !     2 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n      +   !       2 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n      +   !         2 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n      +   !           2 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n      +   !             2 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n      +   !               2 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3880  [0x1873b1390]\n      +     1 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 100  [0x1873a4850]\n      +       1 dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const  (in dyld) + 44  [0x187400fb8]\n      +         1 dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 528  [0x1873d77d4]\n      +           1 dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 516  [0x1873e7c08]\n      +             1 mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x18741cc3c]\n      +               1 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x18741b394]\n      +                 1 invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 312  [0x18741e860]\n      +                   1 invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 320  [0x1873e8114]\n      +                     1 invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const  (in dyld) + 180  [0x1873dce30]\n      +                       1 libSystem_initializer  (in libSystem.B.dylib) + 204  [0x1975bd328]\n      +                         1 __malloc_init  (in libsystem_malloc.dylib) + 2508  [0x18756e884]\n      +                           1 xzm_main_malloc_zone_create  (in libsystem_malloc.dylib) + 7484  [0x18758df3c]\n      +                             1 xzm_reclaim_init  (in libsystem_malloc.dylib) + 84  [0x1875726e4]\n      +                               1 mach_vm_reclaim_ring_allocate  (in libsystem_kernel.dylib) + 0  [0x18773ce8c]\n      1 start  (in dyld) + 4028  [0x1873af26c]\n        1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x1873c9390]\n          1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n            1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n              1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n                1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n                  1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n                    1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        557\n        mach_msg2_trap  (in dyld)        6\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 2,
+            "liveSampling": false,
+            "ownedTestPid": 59364,
+            "completeMs": 1192.424208013108,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.17s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 536.611667ms, launched_after: Some(1.560125ms), ready_after: Some(1.565292ms), first_stdout_after: Some(536.550792ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=536.734333ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 385.0445ms, launched_after: Some(1.119417ms), ready_after: Some(1.1245ms), first_stdout_after: Some(385.019708ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=385.102041ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.960625ms, launched_after: Some(961.834µs), ready_after: Some(965.5µs), first_stdout_after: Some(14.938334ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.803583ms, launched_after: Some(1.128125ms), ready_after: Some(1.132ms), first_stdout_after: Some(13.791292ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 3,
+            "liveSampling": true,
+            "ownedTestPid": 59395,
+            "sampledChildPid": 59396,
+            "sampleStartedMs": 101.59241600194946,
+            "threadStatesBeforeSampling": [
+              {
+                "userTime": 0,
+                "systemTime": 27000,
+                "runState": 3,
+                "flags": 0,
+                "sleepTime": 0
+              }
+            ],
+            "completeMs": 1114.1082079848275,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.11s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 570.042334ms, launched_after: Some(582.709µs), ready_after: Some(586.75µs), first_stdout_after: Some(570.017209ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=570.087125ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 255.247417ms, launched_after: Some(918.042µs), ready_after: Some(919.375µs), first_stdout_after: Some(255.221084ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=255.318708ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.649875ms, launched_after: Some(958.542µs), ready_after: Some(962.042µs), first_stdout_after: Some(14.639542ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.061041ms, launched_after: Some(543.125µs), ready_after: Some(544.583µs), first_stdout_after: Some(8.054833ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n",
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 59396 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 6 tries\nSampling completed, processing symbols...\nSample analysis of process 59396 written to file <controlled-fixture>/child-2.txt\n",
+            "sampleSha256": "f32bf22367fc0b07aec09ac0cd768600cdd5319ae7fbfa4caf75ee459f8ebe8f",
+            "sampleReport": "Analysis of sampling sh (pid 59396) every 1 millisecond\nProcess:         sh [59396]\nPath:            /bin/sh\nLoad Address:    0x10247c000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  sweepx_core-9dd151ea5439482c [59395]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:38:57.775 +0800\nLaunch Time:     2026-10-02 18:38:57.692 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n\nPhysical footprint:         1200K\nPhysical footprint (peak):  1200K\nIdle exit:                  untracked\n----\n\nCall graph:\n    336 Thread_19866084: Main Thread\n    + 330 _dyld_start  (in dyld) + 0  [0x1024a89c0]\n    + 2 start  (in dyld) + 6904  [0x1873afda8]\n    + ! 2 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n    + !   2 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n    + !     2 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n    + !       1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 588  [0x1873ca1cc]\n    + !       : 1 dyld4::ExternallyViewableState::generateAtlas(lsl::Allocator&)  (in dyld) + 896  [0x1873c836c]\n    + !       :   1 PropertyList::encode(ByteStream&)  (in dyld) + 204  [0x1873fd84c]\n    + !       :     1 (anonymous namespace)::quickSort<PropertyList::String**>(PropertyList::String**, PropertyList::String**)  (in dyld) + 292  [0x1873fe9c4]\n    + !       :       1 (anonymous namespace)::quickSort<PropertyList::String**>(PropertyList::String**, PropertyList::String**)  (in dyld) + 252  [0x1873fe99c]\n    + !       :         1 _platform_strcmp_noMTE  (in dyld) + 160  [0x187392964]\n    + !       1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n    + !         1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n    + !           1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n    + !             1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n    + !               1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n    + !                 1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n    + !                   1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n    + 1 start  (in dyld) + 4700  [0x1024c350c]\n    + ! 1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 1336  [0x1024dd084]\n    + !   1 dyld4::Atlas::ProcessSnapshot::serialize()  (in dyld) + 56  [0x10250c0c0]\n    + !     1 dyld4::Atlas::ProcessSnapshot::Serializer::serialize()  (in dyld) + 720  [0x10250c488]\n    + !       1 lsl::Vector<lsl::UUID>::Vector<lsl::OrderedSet<lsl::UUID>::const_iterator>(lsl::OrderedSet<lsl::UUID>::const_iterator, lsl::OrderedSet<lsl::UUID>::const_iterator, lsl::Allocator&)  (in dyld) + 180  [0x10250fcfc]\n    + 1 start  (in dyld) + 6008  [0x1024c3a28]\n    + ! 1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2504  [0x1024dd514]\n    + !   1 lsl::Allocator::~Allocator()  (in dyld) + 36  [0x102518590]\n    + !     1 mach_vm_deallocate  (in dyld) + 40  [0x1024a7de4]\n    + !       1 _kernelrpc_mach_vm_deallocate_trap  (in dyld) + 8  [0x1024a55a0]\n    + 1 start  (in dyld) + 4028  [0x1873af26c]\n    + ! 1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x1873c9390]\n    + !   1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 844  [0x1873c9e84]\n    + !     1 dyld4::RemoteNotificationResponder::notifyMonitorOfImageListChanges(bool, unsigned int, mach_header const**, char const**, unsigned long long)  (in dyld) + 484  [0x187406608]\n    + !       1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n    + !         1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n    + !           1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n    + !             1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n    + 1 start  (in dyld) + 4436  [0x1873af404]\n    +   1 __munmap  (in dyld) + 8  [0x18739423c]\n    1 Thread_19866084   DispatchQueue_1: com.apple.main-thread  (serial)\n      1 start  (in dyld) + 6904  [0x1873afda8]\n        1 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n          1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3880  [0x1873b1390]\n            1 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 100  [0x1873a4850]\n              1 dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const  (in dyld) + 44  [0x187400fb8]\n                1 dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 528  [0x1873d77d4]\n                  1 dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 516  [0x1873e7c08]\n                    1 mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x18741cc3c]\n                      1 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x18741b394]\n                        1 invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 312  [0x18741e860]\n                          1 invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 320  [0x1873e8114]\n                            1 invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const  (in dyld) + 180  [0x1873dce30]\n                              1 libSystem_initializer  (in libSystem.B.dylib) + 256  [0x1975bd35c]\n                                1 _libxpc_initializer  (in libxpc.dylib) + 1076  [0x18743c8a4]\n                                  1 _xpc_collect_images  (in libxpc.dylib) + 104  [0x18743d3c4]\n                                    1 xpc_bundle_copy_services  (in libxpc.dylib) + 24  [0x187471524]\n                                      1 _xpc_bundle_resolve  (in libxpc.dylib) + 124  [0x187471400]\n                                        1 _dispatch_once_callout  (in libdispatch.dylib) + 32  [0x1875b5630]\n                                          1 _dispatch_client_callout  (in libdispatch.dylib) + 16  [0x1875cc4b0]\n                                            1 ___xpc_bundle_resolve_block_invoke  (in libxpc.dylib) + 68  [0x18743fc1c]\n                                              1 _xpc_bundle_resolve_sync  (in libxpc.dylib) + 72  [0x18747161c]\n                                                1 _xpc_resolve_real_path  (in libxpc.dylib) + 48  [0x187471a48]\n                                                  1 dyld4::APIs::_dyld_shared_cache_real_path(char const*)  (in dyld) + 40  [0x1873a2454]\n                                                    1 dyld4::ProcessConfig::canonicalDylibPathInCache(char const*) const  (in dyld) + 76  [0x1873b8670]\n                                                      1 dyld4::SyscallDelegate::realpath(char const*, char*) const  (in dyld) + 68  [0x1873ad834]\n                                                        1 dyld3::open(char const*, int, int)  (in dyld) + 52  [0x1873ecbdc]\n                                                          1 open_with_subsystem  (in dyld) + 60  [0x18740903c]\n                                                            1 open  (in dyld) + 40  [0x187392664]\n                                                              1 __open  (in dyld) + 8  [0x187395f50]\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        330\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 4,
+            "liveSampling": false,
+            "ownedTestPid": 59433,
+            "completeMs": 1044.2518329946324,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.02s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 423.528333ms, launched_after: Some(854.666µs), ready_after: Some(861.083µs), first_stdout_after: Some(423.502166ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=423.587084ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 323.584958ms, launched_after: Some(470.041µs), ready_after: Some(471.791µs), first_stdout_after: Some(323.5515ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=323.656ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.1185ms, launched_after: Some(1.380166ms), ready_after: Some(1.385166ms), first_stdout_after: Some(14.107583ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.911292ms, launched_after: Some(419.792µs), ready_after: Some(421.375µs), first_stdout_after: Some(12.90375ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 5,
+            "liveSampling": true,
+            "ownedTestPid": 59449,
+            "sampledChildPid": 59450,
+            "sampleStartedMs": 110.83816600148566,
+            "threadStatesBeforeSampling": [
+              {
+                "userTime": 0,
+                "systemTime": 37000,
+                "runState": 3,
+                "flags": 0,
+                "sleepTime": 0
+              }
+            ],
+            "completeMs": 977.991124993423,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.97s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 452.46975ms, launched_after: Some(1.346042ms), ready_after: Some(1.350125ms), first_stdout_after: Some(452.440333ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=452.518542ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 308.166167ms, launched_after: Some(527.334µs), ready_after: Some(529.125µs), first_stdout_after: Some(302.096792ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=308.231959ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.818042ms, launched_after: Some(1.002125ms), ready_after: Some(1.007084ms), first_stdout_after: Some(13.801375ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 8.376917ms, launched_after: Some(843.125µs), ready_after: Some(845.625µs), first_stdout_after: Some(8.365834ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n",
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 59450 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 3 tries\nSampling completed, processing symbols...\nSample analysis of process 59450 written to file <controlled-fixture>/child-4.txt\n",
+            "sampleSha256": "6f93da8c625a8430762d080ffec43ea66037106b953155fe949062371c9f7711",
+            "sampleReport": "Analysis of sampling sh (pid 59450) every 1 millisecond\nProcess:         sh [59450]\nPath:            /bin/sh\nLoad Address:    0x100fbc000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  sweepx_core-9dd151ea5439482c [59449]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:38:59.949 +0800\nLaunch Time:     2026-10-02 18:38:59.857 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n----\n\nCall graph:\n    212 Thread_19866389: Main Thread\n    + 209 _dyld_start  (in dyld) + 0  [0x1013289c0]\n    + 2 start  (in dyld) + 6904  [0x1873afda8]\n    + ! 2 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n    + !   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 1124  [0x1873b08cc]\n    + !   : 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n    + !   :                                                                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 340  [0x1873ff834]\n    + !   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n    + !     1 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n    + !       1 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n    + !         1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n    + !           1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n    + !             1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n    + !               1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n    + !                 1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n    + !                   1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n    + 1 start  (in dyld) + 6008  [0x101343a28]\n    +   1 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x10135d390]\n    +     1 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x10135dc60]\n    +       1 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x10139a6f4]\n    +         1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x10139a368]\n    +           1 mach_msg_overwrite  (in dyld) + 244  [0x1013b3a40]\n    +             1 mach_msg2_internal  (in dyld) + 76  [0x1013b3898]\n    +               1 mach_msg2_trap  (in dyld) + 8  [0x10132572c]\n    1 Thread_19866389   DispatchQueue_1: com.apple.main-thread  (serial)\n      1 start  (in dyld) + 6904  [0x1873afda8]\n        1 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n          1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3888  [0x1873b1398]\n            1 dyld4::ExternallyViewableState::notifyMonitorOfMainCalled()  (in dyld) + 52  [0x1873cc990]\n              1 dyld4::RemoteNotificationResponder::notifyMonitorOfMainCalled()  (in dyld) + 76  [0x187406698]\n                1 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n                  1 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n                    1 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n                      1 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        41       dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        209\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 6,
+            "liveSampling": false,
+            "ownedTestPid": 59460,
+            "completeMs": 937.5910840171855,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.92s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 443.210334ms, launched_after: Some(2.156917ms), ready_after: Some(2.160875ms), first_stdout_after: Some(443.159875ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=443.270333ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 266.752666ms, launched_after: Some(500.291µs), ready_after: Some(502.208µs), first_stdout_after: Some(266.706166ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=266.832208ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.452416ms, launched_after: Some(1.007916ms), ready_after: Some(1.012541ms), first_stdout_after: Some(13.442333ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.813042ms, launched_after: Some(552.042µs), ready_after: Some(553.875µs), first_stdout_after: Some(13.805833ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 7,
+            "liveSampling": true,
+            "ownedTestPid": 59481,
+            "sampledChildPid": 59484,
+            "sampleStartedMs": 119.97824997524731,
+            "threadStatesBeforeSampling": [
+              {
+                "userTime": 0,
+                "systemTime": 30000,
+                "runState": 3,
+                "flags": 0,
+                "sleepTime": 0
+              }
+            ],
+            "completeMs": 904.5372499967925,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.89s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 455.031917ms, launched_after: Some(706.25µs), ready_after: Some(709.709µs), first_stdout_after: Some(454.996709ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=455.080291ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 253.675375ms, launched_after: Some(470.083µs), ready_after: Some(472µs), first_stdout_after: Some(253.647292ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=253.734875ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.8515ms, launched_after: Some(2.057625ms), ready_after: Some(2.0625ms), first_stdout_after: Some(14.825917ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 14.959375ms, launched_after: Some(1.278917ms), ready_after: Some(1.296542ms), first_stdout_after: Some(14.948459ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n",
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 59484 for 1 second with 1 millisecond of run time between samples\nSampling completed, processing symbols...\nSample analysis of process 59484 written to file <controlled-fixture>/child-6.txt\n",
+            "sampleSha256": "fc918bcd5e324e89abcafa48329cdf36b30fb1bfe591d27bc276ecf7de1351f9",
+            "sampleReport": "Analysis of sampling sh (pid 59484) every 1 millisecond\nProcess:         sh [59484]\nPath:            /bin/sh\nLoad Address:    0x102ce8000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  sweepx_core-9dd151ea5439482c [59481]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:39:02.179 +0800\nLaunch Time:     2026-10-02 18:39:01.781 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n----\n\nCall graph:\n\nTotal number in stack (recursive counted multiple, when >=5):\n\nSort by top of stack, same collapsed (when >= 5):\n\nBinary images description not available\n\n",
+            "usableCallGraph": false
+          },
+          {
+            "repetition": 8,
+            "liveSampling": false,
+            "ownedTestPid": 59503,
+            "completeMs": 887.6447500078939,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.87s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 451.1ms, launched_after: Some(453.208µs), ready_after: Some(457.416µs), first_stdout_after: Some(451.080083ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=451.154792ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 287.256167ms, launched_after: Some(512.584µs), ready_after: Some(514.167µs), first_stdout_after: Some(287.225ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=287.297375ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.92675ms, launched_after: Some(394.75µs), ready_after: Some(409.333µs), first_stdout_after: Some(7.919417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.958042ms, launched_after: Some(433.792µs), ready_after: Some(434.959µs), first_stdout_after: Some(7.948459ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          },
+          {
+            "repetition": 9,
+            "liveSampling": true,
+            "ownedTestPid": 59521,
+            "sampledChildPid": 59523,
+            "sampleStartedMs": 317.03220898634754,
+            "threadStatesBeforeSampling": [
+              {
+                "userTime": 0,
+                "systemTime": 57000,
+                "runState": 3,
+                "flags": 0,
+                "sleepTime": 0
+              }
+            ],
+            "completeMs": 1209.8844999854919,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.20s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 481.7655ms, launched_after: Some(911.625µs), ready_after: Some(921.584µs), first_stdout_after: Some(481.730334ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=481.821541ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 335.347834ms, launched_after: Some(501.542µs), ready_after: Some(506.292µs), first_stdout_after: Some(335.330584ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=335.386583ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.974708ms, launched_after: Some(458.75µs), ready_after: Some(460.5µs), first_stdout_after: Some(7.968667ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 7.999084ms, launched_after: Some(478.459µs), ready_after: Some(479.709µs), first_stdout_after: Some(7.992792ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n",
+            "sampleStatus": 0,
+            "sampleMessage": "Sampling process 59523 for 1 second with 1 millisecond of run time between samples\nCouldn't find _sigtramp symbol in expected dylibs\nFound _sigtramp symbol after 6 tries\nSampling completed, processing symbols...\nSample analysis of process 59523 written to file <controlled-fixture>/child-8.txt\n",
+            "sampleSha256": "30aa7bbb616fde8e6f4dc97d61cbca2711ceb799530190a97fbb3a18d1d3a545",
+            "sampleReport": "Analysis of sampling sh (pid 59523) every 1 millisecond\nProcess:         sh [59523]\nPath:            /bin/sh\nLoad Address:    0x100254000\nIdentifier:      sh\nVersion:         ???\nCode Type:       ARM64\nParent Process:  sweepx_core-9dd151ea5439482c [59521]\nTarget Type:     live task\n\nDate/Time:       2026-10-02 18:39:03.866 +0800\nLaunch Time:     2026-10-02 18:39:03.775 +0800\nOS Version:      macOS 26.5.2 (25F84)\nReport Version:  7\nAnalysis Tool:   /usr/bin/sample\n\nPhysical footprint:         928K\nPhysical footprint (peak):  944K\nIdle exit:                  untracked\n----\n\nCall graph:\n    265 Thread_19866752: Main Thread   DispatchQueue_<multiple>\n      255 _dyld_start  (in dyld) + 0  [0x1003dc9c0]\n      6 start  (in dyld) + 6904  [0x1873afda8]\n      + 6 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x1873b044c]\n      +   3 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3692  [0x1873b12d4]\n      +   ! 3 dyld4::RuntimeState::notifyDebuggerLoad(std::span<dyld4::Loader const*, 18446744073709551615ul> const&)  (in dyld) + 528  [0x1873c043c]\n      +   !   3 dyld4::ExternallyViewableState::addImages(lsl::Allocator&, lsl::Allocator&, std::span<dyld4::ExternallyViewableState::ImageInfo, 18446744073709551615ul> const&)  (in dyld) + 1084  [0x1873ca3bc]\n      +   !     3 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n      +   !       3 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n      +   !         3 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n      +   !           3 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n      +   !             3 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n      +   !               3 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 1124  [0x1873b08cc]\n      +   ! 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                             1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                               1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                 1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                   1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                     1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                       1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                         1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n      +   !                                           1 dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 108  [0x1873ff74c]\n      +   !                                             1 dyld4::PrebuiltLoader::map(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&, bool) const  (in dyld) + 1108  [0x1873ff690]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 2952  [0x1873b0ff0]\n      +   ! 1 dyld4::RuntimeState::partitionDelayLoads(std::span<dyld4::Loader const*, 18446744073709551615ul>, std::span<dyld4::Loader const*, 18446744073709551615ul>, lsl::Vector<dyld4::Loader const*>*)  (in dyld) + 144  [0x1873ba6fc]\n      +   !   1 dyld4::RuntimeState::recursiveMarkNonDelayed(dyld4::Loader const*, dyld4::Loader::LinksWithChain*, dyld4::Loader::LinksWithChain*)  (in dyld) + 388  [0x1873ba558]\n      +   !     1 dyld4::RuntimeState::recursiveMarkNonDelayed(dyld4::Loader const*, dyld4::Loader::LinksWithChain*, dyld4::Loader::LinksWithChain*)  (in dyld) + 388  [0x1873ba558]\n      +   !       1 dyld4::RuntimeState::recursiveMarkNonDelayed(dyld4::Loader const*, dyld4::Loader::LinksWithChain*, dyld4::Loader::LinksWithChain*)  (in dyld) + 388  [0x1873ba558]\n      +   !         1 dyld4::RuntimeState::recursiveMarkNonDelayed(dyld4::Loader const*, dyld4::Loader::LinksWithChain*, dyld4::Loader::LinksWithChain*)  (in dyld) + 604  [0x1873ba630]\n      +   1 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3880  [0x1873b1390]\n      +     1 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 100  [0x1873a4850]\n      +       1 dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const  (in dyld) + 44  [0x187400fb8]\n      +         1 dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 528  [0x1873d77d4]\n      +           1 dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 516  [0x1873e7c08]\n      +             1 mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x18741cc3c]\n      +               1 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x18741b394]\n      +                 1 invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 312  [0x18741e860]\n      +                   1 invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 320  [0x1873e8114]\n      +                     1 invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const  (in dyld) + 180  [0x1873dce30]\n      +                       1 libSystem_initializer  (in libSystem.B.dylib) + 76  [0x1975bd2a8]\n      +                         1 __libkernel_init  (in libsystem_kernel.dylib) + 240  [0x18772fad4]\n      +                           1 _simple_getenv_check  (in libsystem_kernel.dylib) + 16  [0x1877396e8]\n      +                             1 _simple_getenv  (in libsystem_kernel.dylib) + 76  [0x187739790]\n      2 start  (in dyld) + 6008  [0x1003f7a28]\n      + 2 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x100411390]\n      +   2 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x100411c60]\n      +     2 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x10044e6f4]\n      +       2 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x10044e368]\n      +         2 mach_msg_overwrite  (in dyld) + 244  [0x100467a40]\n      +           2 mach_msg2_internal  (in dyld) + 76  [0x100467898]\n      +             2 mach_msg2_trap  (in dyld) + 8  [0x1003d972c]\n      2 start  (in dyld) + 4028  [0x1873af26c]\n        2 dyld4::ExternallyViewableState::createMinimalInfo(lsl::Allocator&, unsigned long long, char const*, unsigned long long, char const*, DyldSharedCache const*)  (in dyld) + 2116  [0x1873c9390]\n          2 dyld4::ExternallyViewableState::triggerNotifications(dyld_image_mode, unsigned int, dyld_image_info const*)  (in dyld) + 296  [0x1873c9c60]\n            2 dyld4::RemoteNotificationResponder::blockOnSynchronousEvent(unsigned int)  (in dyld) + 48  [0x1874066f4]\n              2 dyld4::RemoteNotificationResponder::sendMessage(int, unsigned int, mach_msg_header_t*)  (in dyld) + 244  [0x187406368]\n                2 mach_msg_overwrite  (in dyld) + 244  [0x18741fa40]\n                  2 mach_msg2_internal  (in dyld) + 76  [0x18741f898]\n                    2 mach_msg2_trap  (in dyld) + 8  [0x18739172c]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        21       dyld4::PrebuiltLoader::loadDependents(Diagnostics&, dyld4::RuntimeState&, dyld4::Loader::LoadOptions const&)  (in dyld) + 424  [0x1873ff888]\n\nSort by top of stack, same collapsed (when >= 5):\n        _dyld_start  (in dyld)        255\n        mach_msg2_trap  (in dyld)        7\n\nBinary images description not available\n\n",
+            "usableCallGraph": true
+          },
+          {
+            "repetition": 10,
+            "liveSampling": false,
+            "ownedTestPid": 59559,
+            "completeMs": 1010.6079580145888,
+            "status": 0,
+            "exactTestRan": true,
+            "stdout": "\nrunning 1 test\ntest tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 1.00s\n\n",
+            "stderr": "probe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 457.939917ms, launched_after: Some(1.295083ms), ready_after: Some(1.299167ms), first_stdout_after: Some(457.909042ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=457.988333ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 322.782916ms, launched_after: Some(566.791µs), ready_after: Some(568.875µs), first_stdout_after: Some(322.77025ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-b\"): elapsed=322.830708ms, successful=true, output_bytes=Some(74)\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 12.680542ms, launched_after: Some(522.959µs), ready_after: Some(524.75µs), first_stdout_after: Some(12.632417ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 13.769125ms, launched_after: Some(512.333µs), ready_after: Some(513.708µs), first_stdout_after: Some(13.760416ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\n"
+          }
+        ]
+      }
+    }
+  ],
+  "interpretation": "Live stacks from independent controlled scripts and the actual shared-cache test children repeatedly showed _dyld_start+0 before shell code, with zero observed user CPU in the native thread snapshots. This localizes these captured successful slow starts, not their kernel/policy/scheduler cause. sample can perturb execution and includes debugger notification frames. No original 300ms/2s failure, PTY timeout or FSEvents settle failure was captured; none is claimed fixed. No production deadline, interpreter, security policy or test assertion changed.",
+  "sources": [
+    {
+      "title": "Apple dyld startup implementation",
+      "url": "https://github.com/apple-oss-distributions/dyld/blob/main/dyld/dyldMain.cpp",
+      "accessed": "2026-10-02",
+      "scope": "Symbol interpretation only; not proof of cause on the installed host"
+    }
+  ]
+}
