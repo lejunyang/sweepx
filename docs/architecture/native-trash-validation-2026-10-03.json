@@ -1,0 +1,125 @@
+{
+  "schema": "sweepx.native-trash-validation.v1",
+  "date": "2026-10-03",
+  "baseCommit": "6289e70175d1ddf4100aad1d292d21df384c08f1",
+  "host": {
+    "os": "macOS 26.5.2 25F84",
+    "arch": "arm64",
+    "toolchain": "Rust/Cargo 1.98.0",
+    "build": "debug/all-features",
+    "incremental": false
+  },
+  "tests": {
+    "cliPassed": 132,
+    "cliFailed": 0,
+    "cliIgnored": 0,
+    "oldNativeTrashTest": "Included and passed; adapter changed before rerun, not a repeated unchanged attempt",
+    "initialFailure": "3 passed, 1 fixture setup failed: APFS rejected non-UTF-8 creation with EILSEQ. The corrected fixture supplies a raw native argument and keeps its distinct percent-encoded sibling unchanged.",
+    "sourceScope": "CLI matrix preceded help prose only. Final build, all-target lint and help smoke include the help change."
+  },
+  "reusedWorkspace": {
+    "record": "cargo-include-production-validation-2026-10-03.json",
+    "scope": "All unchanged non-CLI packages reused. Replace the previous 130 CLI passes with 132 current passes.",
+    "assembledPassed": 1074,
+    "failed": 1,
+    "ignored": 3,
+    "excluded": 0,
+    "failure": "Unchanged 2-second tool cache probe timeout; not retried or excluded. This is not a green workspace matrix."
+  },
+  "checks": {
+    "hostLinuxGnuWindowsGnuWorkspaceLint": "passed",
+    "fmtDiff": "passed",
+    "docsMarkdown": 54,
+    "docsCheckerTests": "23 unchanged checker regressions reused",
+    "crossCompilationIsNativeRuntime": false,
+    "msvcVerified": false
+  },
+  "unverified": [
+    "final pathname race",
+    "native Linux/Windows Trash runtime",
+    "MSVC",
+    "real provider behavior",
+    "hard cancellation of synchronous Foundation calls",
+    "exact original cause of the Finder child wait",
+    "general Trash release qualification"
+  ],
+  "sourceSha256": {
+    "crates/sweepx-cli/src/main.rs": "f6b4796a7d19dc712712fe646b7e3e4428584483e91da2bacb7c959c3c946c86",
+    "crates/sweepx-cli/src/trash_command.rs": "2bc3a9bbe366ed389bc6f91eb1873a2192c7091e3539f296deaca2f1ea05a043",
+    "crates/sweepx-cli/tests/cli_contract.rs": "0270e22ffc4001f500a056db059cd9fabb4bf849f3ea654dbb22743756d16a9e"
+  },
+  "records": [
+    {
+      "name": "build",
+      "exitCode": 0,
+      "sha256": "fa23d7562876c6e38fd9ebab5b835175729d36748cefe281cd33537e1a1f08b8",
+      "output": "   Compiling sweepx-platform v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-platform)\n   Compiling sweepx-scanner v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-scanner)\n   Compiling sweepx-analysis v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-analysis)\n   Compiling sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n   Compiling sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.80s\n"
+    },
+    {
+      "name": "contract-tests",
+      "exitCode": 101,
+      "sha256": "58dbeabd65b1240a14c15338add5ae1398a773cfdbbab85bfdedac816523395f",
+      "output": "   Compiling sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.68s\n     Running tests/cli_contract.rs (target/debug/deps/cli_contract-4f3818f797f803e5)\n\nrunning 4 tests\ntest junk_dart_formats_are_visible_and_nonterminal_trash_keeps_its_guard ... ok\ntest trash_moves_ordinary_paths_without_confirmation_in_machine_invocations ... ok\ntest trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings ... FAILED\ntest trash_rejects_relative_paths_without_changing_them ... ok\n\nfailures:\n\n---- trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings stdout ----\n\nthread 'trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings' (25745674) panicked at crates/sweepx-cli/tests/cli_contract.rs:1440:39:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 92, kind: Uncategorized, message: \"Illegal byte sequence\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings\n\ntest result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 66 filtered out; finished in 1.60s\n\nerror: test failed, to rerun pass `-p sweepx-cli --test cli_contract`\n"
+    },
+    {
+      "name": "cli-tests",
+      "exitCode": 0,
+      "sha256": "aa9935e4331e94c162ba6cbe747ba81df71d35661acd11d7f906dab213853d64",
+      "output": "   Compiling sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.22s\n     Running unittests src/main.rs (target/debug/deps/sweepx-81e305a63ca223b1)\n\nrunning 61 tests\ntest file_tui::tests::cancelled_session_reports_terminal_state_and_never_enables_actions ... ok\ntest file_tui::tests::changed_keeper_blocks_content_preflight_and_final_native_trash_validation ... ok\ntest file_tui::tests::closing_releases_a_backpressured_sender_and_progress_keeps_utf8_bounds ... ok\ntest file_tui::tests::duplicate_rows_use_full_content_oracle_exclude_aliases_and_require_explicit_keeper ... ok\ntest file_tui::tests::live_ranking_replaces_preview_and_refresh_removes_obsolete_identity ... ok\ntest file_tui::tests::ranking_snapshots_coalesce_without_occupying_the_reliable_final_result_slot ... ok\ntest file_tui::tests::refresh_preserves_native_keys_but_clears_keeper_authority_and_loaded_stamps ... ok\ntest file_tui::tests::replacing_selected_object_or_parent_refuses_native_action_before_trash ... ok\ntest file_tui::tests::resource_gaps_stay_partial_and_repeated_retention_failures_keep_one_error ... ok\ntest junk_tui::tests::bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_trash ... ok\ntest junk_tui::tests::cancelled_base_selection_refreshes_all_without_promoting_its_native_key ... ok\ntest junk_tui::tests::confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without_native_mutation ... ok\ntest junk_tui::tests::local_refresh_keeps_ancestor_bindings_but_requires_refresh_before_trash ... ok\ntest junk_tui::tests::private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget ... ok\ntest junk_tui::tests::replacement_debits_old_bytes_and_rejected_growth_keeps_old_evidence ... ok\ntest tcc_access::tests::detection_returns_a_defined_answer_on_this_host ... ok\ntest tcc_access::tests::file_sentinel_distinguises_granted_denied_and_missing ... ok\ntest tcc_access::tests::not_opted_in_never_blocks_or_prompts ... ok\ntest tcc_access::tests::timings_are_bounded ... ok\ntest tests::a_cache_name_chosen_by_the_page_is_not_mistaken_for_the_origin ... ok\ntest tests::a_directory_without_a_lock_file_is_not_held ... ok\ntest tests::a_link_inside_a_storage_directory_is_not_counted_as_its_bytes ... ok\ntest tests::a_non_http_scheme_is_still_an_origin ... ok\ntest tests::a_partitioned_key_keeps_both_sites_apart ... ok\ntest tests::an_inherited_relay_destination_is_never_forwarded ... ok\ntest tests::cached_project_facts_do_not_preserve_git_confidence ... ok\ntest tests::cached_tool_activity_uses_current_evidence_without_replaying_old_claims ... ok\ntest tests::cli_parser_accepts_allowed_commands_only ... ok\ntest tests::default_invocation_selects_detect_only_policy ... ok\ntest tests::default_scan_format_remains_human ... ok\ntest tests::elevation_is_off_unless_the_flag_is_given ... ok\ntest tests::embedded_project_junk_rules_are_bounded_and_validated ... ok\ntest tests::every_index_txt_origin_ends_at_its_trailing_slash ... ok\ntest tests::format_arg_maps_to_core_format ... ok\ntest tests::human_size_unit_aliases_parse ... ok\ntest tests::indexed_db_pairs_leveldb_and_blob_under_one_origin ... ok\ntest tests::indexed_db_rejects_a_name_that_is_not_an_origin_directory ... ok\ntest tests::junk_system_rejects_explicit_roots ... ok\ntest tests::no_relay_means_no_relay_flag ... ok\ntest tests::quarantine_location_accepts_system_tui_and_requires_system_scope ... ok\ntest tests::relative_scan_root_resolves_against_current_directory ... ok\ntest tests::scan_without_roots_selects_platform_filesystem_roots ... ok\ntest tests::system_junk_tui_parses_without_explicit_roots ... ok\ntest tests::the_relaunch_request_drops_the_opt_in_flag ... ok\ntest tests::tilde_scan_root_expands_to_home ... ok\ntest tests::tui_exit_preserves_scan_status_except_for_process_signals ... ok\ntest tests::tui_preflight_rejects_machine_formats_and_non_terminals ... ok\ntest tests::unsupported_durable_state_uses_unsupported_exit_code ... ok\ntest tests::validated_disk_candidate_hit_rebuilds_git_from_current_external_configuration ... ok\ntest trash_command::project_format_tests::legacy_and_generic_project_candidates_are_refused_before_bulk_and_worker_trash ... ok\ntest trash_command::project_format_tests::recognized_project_format_is_refused_before_any_bulk_or_worker_trash ... ok\ntest trash_command::tests::important_dirs_are_guarded_but_their_descendants_are_ordinary ... ok\ntest trash_command::tests::ordinary_paths_are_not_confused_with_guarded_roots ... ok\ntest trash_command::tests::protected_roots_include_filesystem_home_state_and_trash ... ok\ntest trash_command::tests::protected_trees_include_descendants ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::cancelled_tui_provider_can_start_a_fresh_followup_query ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::empty_summary_constructs_a_fail_closed_unavailable_provider ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::live_provider_echoes_binding_and_returns_complete_direct_detail ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::progressive_details_observe_files_links_and_nested_bytes_on_macos ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::scanner_error_mapping_is_conservative ... ok\ntest tui_adapter::tui_detail_rescan_provider_tests::tui_provider_cancel_hook_notifies_the_active_token ... ok\n\ntest result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s\n\n     Running tests/cli_contract.rs (target/debug/deps/cli_contract-4f3818f797f803e5)\n\nrunning 70 tests\ntest actual_dart_recordings_keep_locale_stable_formats_and_workspace_notes ... ok\ntest cache_status_does_not_create_explicit_state_or_preview_dirs ... ok\ntest cache_status_human_output_explains_empty_existing_cache ... ok\ntest cache_status_human_output_includes_degraded_reason ... ok\ntest cache_status_human_output_is_localized ... ok\ntest cache_status_json_reports_absent_without_creating_default_state_dir ... ok\ntest cache_status_json_reports_available_for_valid_preview_cache ... ok\ntest cache_status_json_reports_degraded_for_invalid_current_pointer ... ok\ntest cache_status_json_reports_insecure_cache_as_an_integrity_envelope ... ok\ntest cache_status_json_reports_state_path_usage_errors_as_an_envelope ... ok\ntest cache_status_ndjson_is_usage_error_before_state_creation ... ok\ntest cache_status_quarantine_presence_is_degraded_and_read_only ... ok\ntest cancel_json_is_honest_for_missing_operation ... ok\ntest capabilities_does_not_create_explicit_state_dir ... ok\ntest capabilities_json_uses_fixed_machine_keys ... ok\ntest cargo_context_reports_current_declarations_in_both_locales_without_ownership ... ok\ntest cargo_detect_compatibility_gate_does_not_disclose_environment_values ... ok\ntest cargo_detect_rejects_cargo_passthrough_overrides_at_the_cli_boundary ... ok\ntest cargo_include_output_model_is_locale_stable_and_does_not_grant_project_trash ... ok\ntest cleaner_list_json_uses_cleaner_result_contract ... ok\ntest cleaner_show_succeeds_for_the_chromium_builtin ... ok\ntest duplicate_content_scan_reports_full_hashes_and_distinct_objects_in_both_locales ... ok\ntest duplicate_limits_return_explicit_partial_reports_without_hashes ... ok\ntest duplicate_options_require_opt_in_and_plain_scan_has_no_content_report ... ok\ntest experimental_cargo_detect_scans_with_compatible_builtin ... ok\ntest explain_does_not_create_default_state_dir ... ok\ntest explain_human_output_respects_selected_locale ... ok\ntest explain_rejects_oversize_input ... ok\ntest explain_rejects_relative_scan_json_path ... ok\ntest explain_rejects_zero_input_limit ... ok\ntest explain_scan_json_returns_explanation_result ... ok\ntest interactive_file_analyses_parse_but_require_a_human_terminal ... ok\ntest junk_dart_formats_are_visible_and_nonterminal_trash_keeps_its_guard ... ok\ntest junk_git_observes_current_global_configuration_selected_by_environment ... ok\ntest junk_git_queries_do_not_inherit_a_foreign_repository_authority ... ok\ntest junk_gitfile_boundaries_are_retained_in_classified_scans ... ok\ntest junk_legacy_sync_unknown_and_invalid_contents_keep_locale_stable_report_only_status ... ok\ntest junk_project_layout_corpus_keeps_machine_rules_and_source_payloads ... ok\ntest junk_scan_does_not_promote_a_known_directory_containing_a_nested_repository ... ok\ntest junk_scan_does_not_promote_a_pattern_matching_tracked_directory ... ok\ntest junk_scan_keeps_known_candidate_when_git_is_unavailable ... ok\ntest junk_scan_strengthens_known_candidates_with_git_ignore_evidence ... ok\ntest junk_system_rejects_an_explicit_root_before_scanning ... ok\ntest junk_system_reports_bounded_tool_discovery_in_both_locales ... ok\ntest junk_system_reports_incomplete_discovery_without_following_layout_ancestor_links ... ok\ntest junk_temp_cleanup_requires_a_foreground_human_confirmation ... ok\ntest junk_temp_cleanup_requires_system_discovery ... ok\ntest junk_timings_preserve_report_and_account_for_phases ... ok\ntest junk_tui_rejects_nonterminals_machine_formats_and_conflicting_modes_before_scan ... ok\ntest large_file_options_refuse_conflicts_and_keep_plain_scan_output_unchanged ... ok\ntest large_file_scan_reports_independent_ranked_metadata_in_both_locales ... ok\ntest live_tui_rejects_json_before_validating_or_scanning_roots ... ok\ntest live_tui_rejects_ndjson_as_an_invalid_tui_combination ... ok\ntest live_tui_rejects_non_terminal_streams_before_scanning ... ok\ntest locale_override_beats_environment_for_human_output ... ok\ntest missing_default_state_environment_fails_closed_without_explicit_opt_out ... ok\ntest no_state_conflicts_with_explicit_state_directory ... ok\ntest old_public_tui_subcommand_is_removed ... ok\ntest project_execution_policy_is_locale_stable_and_generic_outputs_stay_visible ... ok\ntest project_junk_scan_does_not_launch_npm_inventory ... ok\ntest relative_state_dir_is_rejected ... ok\ntest scan_ndjson_is_rejected_before_state_creation_or_root_validation ... ok\ntest status_watch_after_requires_watch ... ok\ntest status_watch_is_unsupported_off_linux ... ok\ntest status_watch_requires_ndjson ... ok\ntest system_junk_tui_requires_a_terminal_before_discovery_or_state_creation ... ok\ntest trash_moves_ordinary_paths_without_confirmation_in_machine_invocations ... ok\ntest trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings ... ok\ntest trash_rejects_relative_paths_without_changing_them ... ok\ntest workspace_default_output_and_cwd_selection_are_locale_stable_and_report_only ... ok\n\ntest result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.36s\n\n     Running tests/elevation_relay.rs (target/debug/deps/elevation_relay-050334b77e8aa899)\n\nrunning 1 test\ntest the_relay_flag_is_not_advertised_to_users ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n"
+    },
+    {
+      "name": "fmt",
+      "exitCode": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output": ""
+    },
+    {
+      "name": "final-fmt",
+      "exitCode": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output": ""
+    },
+    {
+      "name": "final-build",
+      "exitCode": 0,
+      "sha256": "6cfe2efad3e761334c72ede07d0632686caf5383b186b5797d959975067b8640",
+      "output": "    Blocking waiting for file lock on build directory\n   Compiling sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.73s\n"
+    },
+    {
+      "name": "workspace-lint",
+      "exitCode": 0,
+      "sha256": "5f4c0fadd8b4aec311e520376f49097da0120c5f22f1007dfb5d600380fc2fee",
+      "output": "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.63s\n"
+    },
+    {
+      "name": "linux-lint",
+      "exitCode": 0,
+      "sha256": "b79275359ac6bec905e355ef4af782bdcd9d5a54b5f280b1aec322adba60c65d",
+      "output": "   Compiling libsqlite3-sys v0.38.2\n    Checking rusqlite v0.40.2\n    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)\n    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)\n    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.41s\n"
+    },
+    {
+      "name": "windows-lint",
+      "exitCode": 0,
+      "sha256": "7cfeaff44ddf0c78f7a6c33751384915499d6cebef037cfce554714747230a7c",
+      "output": "   Compiling libsqlite3-sys v0.38.2\n    Checking rusqlite v0.40.2\n    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)\n    Checking sweepx-event-journal v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-event-journal)\n    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)\n    Checking sweepx-safety v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-safety)\n    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)\n    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.35s\n"
+    },
+    {
+      "name": "help",
+      "exitCode": 0,
+      "sha256": "bd6f17fc19cd1731192b25a990adc1369575778034153e40b015cb087b192f54",
+      "output": "Move one file or directory to the operating system Trash/Recycle Bin.\n\nOrdinary paths move directly; important directories require terminal confirmation. macOS uses native Foundation Trash and requires lossless UTF-8 paths. Some systems restore by dragging items out of Trash instead of Put Back. Never permanently deletes.\n\nUsage: sweepx-native-trash-2026-10-03 trash [OPTIONS] <ABSOLUTE_PATH>\n\nArguments:\n  <ABSOLUTE_PATH>\n          \n\nOptions:\n      --format <FORMAT>\n          [default: human]\n          [possible values: human, json, ndjson]\n\n      --locale <LOCALE>\n          \n\n      --state-dir <STATE_DIR>\n          \n\n      --unit <UNIT>\n          Unit used by human-readable byte columns. JSON always keeps exact bytes\n          \n          [default: auto]\n          [possible values: auto, b, kib, mib, gib, tib]\n\n      --sort <SORT>\n          Sort human scan and TUI rows. Machine output keeps scanner order\n          \n          [default: size]\n          [possible values: size, path]\n\n      --elevate\n          Re-run elevated to enable privileged read-only accelerators.\n          \n          Without this flag SweepX only *detects* privilege it was already started with and never prompts. With it, and only when not already elevated, SweepX asks the OS to start one elevated copy and adopts that copy's exit code. Declining leaves the unprivileged scan running. Elevation never widens what deletion may touch.\n\n      --full-disk-access\n          On macOS, open System Settings and wait for Full Disk Access before scanning.\n          \n          Without this flag SweepX only *detects* whether access is already held and never opens settings. macOS has no API to grant access programmatically, so with this flag SweepX opens the Full Disk Access pane, prints guidance, and proceeds automatically once the user enables it (or continues without it if they do not). On non-macOS hosts the flag is accepted for portable scripts but has no effect.\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+    },
+    {
+      "name": "docs-lint",
+      "exitCode": 0,
+      "sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1",
+      "output": "docs lint: checked 54 Markdown file(s)\n"
+    },
+    {
+      "name": "final-docs-lint",
+      "exitCode": 0,
+      "sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1",
+      "output": "docs lint: checked 54 Markdown file(s)\n"
+    }
+  ]
+}

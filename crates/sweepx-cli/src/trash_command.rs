@@ -380,6 +380,12 @@ impl TrashCandidate {
         if !path.is_absolute() || path.parent().is_none() || path.file_name().is_none() {
             return Err(TrashError::InvalidPath);
         }
+        #[cfg(target_os = "macos")]
+        // trash-rs's Foundation adapter percent-encodes non-UTF-8 path bytes as a different
+        // NSString pathname. Refuse that spelling before it can select an unrelated object.
+        if path.to_str().is_none() {
+            return Err(TrashError::UnsupportedPathEncoding);
+        }
         // This is the safety boundary for the zero-confirmation path: system directories are
         // refused outright, while important/common directories are flagged for confirmation.
         let important = match classify_path_safety(&path) {
@@ -435,12 +441,12 @@ impl TrashCandidate {
             return Err(TrashError::Changed);
         }
         // Identity is checked last and closest to the mutation: the window between this check and
-        // `trash::delete` is the only one left, and no cheaper comparison can stand in for it.
+        // the OS Trash call is the only one left, and no cheaper comparison can stand in for it.
         #[cfg(windows)]
         if !same_object(self.identity.as_ref(), &self.path) {
             return Err(TrashError::Changed);
         }
-        trash::delete(&self.path).map_err(|error| TrashError::Backend {
+        move_to_system_trash(&self.path).map_err(|error| TrashError::Backend {
             detail: error.to_string(),
             cross_filesystem_linux: linux_cross_filesystem_trash(&self.path),
         })?;
@@ -451,9 +457,30 @@ impl TrashCandidate {
     }
 }
 
+/// Selects the platform adapter without a permanent-delete or secondary-adapter fallback.
+/// macOS uses Foundation directly: Finder's AppleScript can wait indefinitely for automation
+/// authorization or its service. Foundation's system call is still synchronous and cannot be
+/// hard-cancelled; callers must not claim cancellation proves that a move did not happen.
+/// Some macOS versions omit Finder's Put Back action; recovery by moving out of Trash remains.
+fn move_to_system_trash(path: &Path) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut context = trash::TrashContext::new();
+        context.set_delete_method(DeleteMethod::NsFileManager);
+        context.delete(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete(path)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum TrashError {
     InvalidPath,
+    #[cfg(target_os = "macos")]
+    UnsupportedPathEncoding,
     #[cfg(unix)]
     ElevatedRuntime,
     ProtectedPath,
@@ -473,6 +500,10 @@ impl std::fmt::Display for TrashError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidPath => formatter.write_str("path must be an absolute non-root path"),
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedPathEncoding => formatter.write_str(
+                "the macOS Trash adapter requires a lossless UTF-8 pathname",
+            ),
             #[cfg(unix)]
             Self::ElevatedRuntime => {
                 formatter.write_str("Trash preview is disabled for an elevated/root process")

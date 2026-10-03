@@ -314,6 +314,8 @@ superseded would be wrong. Measured on 2026-09-05: pip's cache held the legacy `
 format nothing writes to any more, inside a root that is otherwise live.
 ## File-manager-style TUI and Trash preview
 
+`trash /absolute/path` moves ordinary files/directories directly; important directories require terminal confirmation and protected roots are refused. macOS uses Foundation's native system Trash interface without waiting for Finder AppleScript. It requires lossless UTF-8 paths and refuses other encodings. Some systems omit Put Back; items can be restored by dragging them out of Trash. Identity is still checked before submission, and failure or an unknown outcome never triggers permanent deletion. The native call remains synchronous; cancellation does not prove that an item was not moved.
+
 ```bash
 cargo run -p sweepx-cli -- --locale en-US \
   scan --tui /absolute/path/to/root [/another/absolute/root]

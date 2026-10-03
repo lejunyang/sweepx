@@ -977,11 +977,11 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 | 项目 | 仍缺的内容 | 当前边界 |
 | --- | --- | --- |
-| 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace、17 场景 home 与 9 场景受控系统 home Cargo oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
+| 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
-| 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、实际系统 Trash 与 Linux 隔离成功 | GNU 交叉 lint 只证明编译；会话/TUI 整体验收仍待目标宿主证据 |
+| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开、指纹及输出投影路径的资源审计 | 用户当前优先项；现有发现快照有界，完整 Value/JSON 导出另有实测膨胀，不能把已审路径推广成全局审计完成 |
+| 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
 大文件/重复内容分析及动态 TUI、选中刷新持久缓存片段合并、取消后 Base 残留修复、跨刷新呈现预算、macOS 普通文件 mount 证据和 22 → 17 crate 收敛已经完成，不再列为实现待办。会话/TUI 的主功能已经具备，未勾选主要体现原生验收与上述明确缺口；继续合并 crate 需要新的实际依赖/契约收益依据。
@@ -1057,3 +1057,24 @@ scanner 新入口复用 manifest 的 provider-safe zero/full stream 和父目录
 工作区在 core 的旧工具缓存探测 2 秒超时停止：585 项通过、1 项失败、2 项既有 ignored；工具启动约 6 ms 返回后没有 stdout/EOF/退出，未捕获失败子进程的实时堆栈，不据此归因。本单元没有修改工具探测，也没有延长期限、排除或重试此失败。补验受中止影响的包和 doctest 后，按不同用例合计 1,072 项通过、1 项失败、3 项 ignored，不称为全绿矩阵。一次受限环境补验出现 FSEvents ID 为零/stream start 失败，改用主机权限后平台 97 项通过；新增扫描器测试的绝对临时路径超出默认 8 组件，改用既有生产 64/129 组件上限后扫描器 94 项与 TUI 95 项通过，没有放宽生产预算。系统 Trash 挂起用例仍由命令显式排除。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试、2 项采集器准入回归与四包清单通过；交叉编译不证明原生目标或 MSVC，包清单不证明 registry 构建。没有本单元端到端性能结论。
 
 按用户本次调序，Dart/SvelteKit 扩展暂缓。完成本单元后先用 SweepX 扫描并尝试将项目 debug 构建产物移入回收站，再优先推进“跨平台缓存与资源审计”；不把回收站移动当作已经释放磁盘块。其余原生宿主、MSVC/provider/实际回收、旧间歇根因、输出对象关系和最终 pathname 竞态仍开放。
+
+## macOS 原生回收与真实 debug 扫描现场（2026-10-03）
+
+用户明确指定先回收本项目 debug 构建产物。完成 include 单元后，以本轮 debug/all-features 的 SweepX 二进制扫描并使用独立的 `trash` 单路径入口回收；没有放宽项目候选的归属/活动 blocker，也没有依据部分扫描自动回收。主机目录与 Linux GNU、Windows GNU 交叉编译 debug 三个目录合计 `du` 估算 43.323 GiB；release 与源码目录保留。移动不会释放被回收站保留的分配块，没有清空回收站。
+
+原 `trash-rs 5.2.6` 默认选择 Finder AppleScript。真实调用 60 秒未返回，源目录仍在；父进程取样停在 `delete_using_finder -> Command::output -> poll`。未取样子进程，不能由此认定权限、Finder 服务或其他根因。macOS 现在选择同一依赖的 Foundation `NSFileManager` 系统回收接口，其他平台适配器保持既有选择。它仍是同步原生调用，不提供硬取消；失败/不明结果没有永久删除或第二适配器兜底。最终 pathname 替换窗口仍开放。
+
+依赖对非 UTF-8 字节的 percent encoding 会生成另一个 NSString 文件名，因此 macOS 在原生回收前拒绝非 UTF-8 路径，避免触碰同名编码别名。最初测试试图在 APFS 创建非法编码文件，得到 EILSEQ；改为直接提供 native argv，独立核对 `%FF` 拼写的既有兄弟文件未变，并要求特定无损编码拒绝。没有扩大生产准入。README、两种语言的 CLI 文档和 help 同步说明：普通路径直接回收，重要路径要求终端确认；Foundation 下部分系统无“放回原处”，可从回收站拖出恢复。
+
+[回收修复验收](native-trash-validation-2026-10-03.json)记录 CLI 132 项通过、0 失败，重新纳入并通过原有系统回收成功用例；不是反复运行未改代码至偶然通过。最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff 和文档检查通过；未改的非 CLI 测试复用 include 记录，替换 CLI 结果后按不同用例合计 1,074 项通过、1 项旧工具探测失败、3 项 ignored，不称为全绿工作区。help 文字在 CLI 矩阵之后补充，最终 build/lint/help smoke 覆盖它。原生 Linux/Windows/MSVC、真实 provider、Linux 隔离与发布级回收资格仍开放。
+
+修复后的 SweepX 对三个真实 debug 目录均返回 `status=ok`，各源路径消失。Finder 废纸篓独立可见 `debug`、`debug 14-27-30-483`、`debug 14-27-36-085`；没有使用清倒操作。通过系统回收接口的成功与 Finder 可见性核对了恢复位置，独立的 inode 枚举因 TCC 拒绝而未完成，未改变隐私权限。[实际操作记录](../development/debug-cleanup-evidence-2026-10-03.json)保留各目录原身份、原失败、二进制摘要与上述验证边界。
+
+此现场也暴露普通 `scan` 的资源问题：没有 SweepX 状态缓存，132,723 条目/4,731 汇总触发保留上限，结果为 partial。envelope 的 finished 时间戳在开始后约 4.3 秒产生；一分钟后的取样已在 `print_output -> serialize_json -> to_string_pretty/to_vec_pretty`，物理 footprint 报告 4.8G。整份 JSON 输出约 1.0 GB，外部轮询监控的 128 MiB 阈值被一次写入突发越过，随后受控停止；该监控不是严格字节上限。仅保留摘要/有限片段及原摘要值，删除了这份任务生成的庞大临时导出。另一次 human 摘要运行返回 partial/退出码 4，耗时 38.88 秒、输出约 4.6 KiB。每种格式各一次、OS 缓存未控制、结果不完整且格式不同，不能作为等价吞吐、release 提速、热缓存或尾延迟基准。
+
+清理后首轮“跨平台缓存与资源审计”确认两个独立切面：
+
+- `junk/cache.rs` 和 session 缓存接线目前仍整体绑定 macOS/FSEvents；Linux/Windows 缺少同等的历史候选首屏与文件索引验证。下一单元先拆开可移植的历史呈现和平台变化历史/文件重用合同；历史行继续禁止回收，无法验证的文件索引回退原生遍历。不得通过扩大 macOS cfg、目录 mtime 或进程启动后的 watcher 把 Linux/Windows 标成已验证缓存。
+- 普通 scan 仍为所有格式先把 typed summary 投影到完整 `serde_json::Value`，递归转换键，再由 human 重新索引/排序全部行；JSON 另分配整份 pretty 字符串。scanner 的记录数/批次估算边界没有覆盖这些投影副本与导出展开。下一资源单元需要按格式直接消费 typed facts、有界 human 选择和 writer 输出，保留稳定机器字段、partial/unknown/下限与最终错误；不能因输出变小而漏报资源缺口或扩大执行权限。
+
+本节记录实际边界和后续次序，没有把上述跨平台缓存或输出资源改造算作已经实现。Dart/SvelteKit 扩展继续暂缓。

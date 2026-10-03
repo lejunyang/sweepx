@@ -1418,6 +1418,7 @@ fn trash_moves_ordinary_paths_without_confirmation_in_machine_invocations() {
     // non-interactive caller. The protection boundary is the protected/important path guards, not
     // a confirmation prompt, and permanent deletion is still never a fallback.
     let mut cmd = cli_command();
+    cmd.timeout(std::time::Duration::from_secs(15));
     cmd.arg("--format").arg("json").arg("trash").arg(&path);
     let output = cmd.assert().code(0).get_output().clone();
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -1425,6 +1426,30 @@ fn trash_moves_ordinary_paths_without_confirmation_in_machine_invocations() {
     assert_eq!(json["recoverable"], true);
     assert_eq!(json["permanentFallback"], false);
     assert!(!path.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_refuses_non_utf8_paths_without_selecting_percent_encoded_siblings() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    let path = root.join(std::ffi::OsStr::from_bytes(b"input-\xff"));
+    let encoded = root.join("input-%FF");
+    // APFS refuses materializing invalid UTF-8 names with EILSEQ. Supply the raw native
+    // argument directly; the adapter must reject it before selecting the existing alias.
+    fs::write(&encoded, b"different object").unwrap();
+
+    let mut cmd = cli_command();
+    cmd.timeout(std::time::Duration::from_secs(5));
+    cmd.args(["--format", "json", "trash"]).arg(&path);
+    let output = cmd.assert().code(8).get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["permanentFallback"], false);
+    assert!(json["error"].as_str().unwrap().contains("lossless UTF-8"));
+    assert_eq!(fs::read(&encoded).unwrap(), b"different object");
 }
 
 #[test]

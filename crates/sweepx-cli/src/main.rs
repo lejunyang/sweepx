@@ -301,6 +301,10 @@ enum Commands {
         browse: bool,
     },
     /// Move one file or directory to the operating system Trash/Recycle Bin.
+    ///
+    /// Ordinary paths move directly; important directories require terminal confirmation.
+    /// macOS uses native Foundation Trash and requires lossless UTF-8 paths. Some systems
+    /// restore by dragging items out of Trash instead of Put Back. Never permanently deletes.
     Trash {
         #[arg(required = true, value_name = "ABSOLUTE_PATH")]
         path: OsString,

@@ -303,6 +303,8 @@ resolver 报告的那个。2026-09-05 实测：位于文档默认位置的 pnpm 
 而当前格式 `http-v2` 为 0 MB —— 99.9% 的字节位于一个不再被写入的格式中，而所在根目录本身是在用的。
 ## 文件管理器式 TUI 与回收站预览
 
+`trash /absolute/path` 直接回收普通文件/真实目录；重要目录要求交互终端确认，保护根拒绝。macOS 使用 Foundation 的原生系统回收接口，不再等待 Finder AppleScript。其路径转换需要无损 UTF-8，其他编码拒绝；部分系统没有“放回原处”菜单，可从回收站拖出恢复。提交前继续重验身份，失败或结果不明不会降级为永久删除。原生系统调用仍是同步调用，取消不能证明文件尚未移动。
+
 ```bash
 cargo run -p sweepx-cli -- --locale zh-CN \
   scan --tui /absolute/path/to/root [/another/absolute/root]
