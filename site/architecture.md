@@ -64,6 +64,8 @@ Git 增强由 core 的 `GitEvidenceSession` 共用于普通报告和垃圾会话
 
 `sweepx-core::tools::ProbeRunner` 在调用方工作线程上有界读取完整工具答复，不创建后台管道读取线程。macOS 同时使用输出就绪与本次未回收子进程的退出通知，避免答复已到达或 EOF 后仍等固定轮询；通知只唤醒检查，不能替代 `Child` 退出状态或证明活动/所有权。每次最多增加一个独占退出观察描述符，失败回退有界轮询；单次/整批期限、输出上限、取消和进程组清理保持原契约，原生启动/回收仍服从宿主调度。Linux/Windows 保持既有轮询。 完整 stdout 和退出状态在最终接受前再次检查取消与期限；已经超期的完整输出仍被拒绝，只保留诊断事实。
 
+Unix 退出状态通过 `waitid(WNOWAIT)` 观察，在尝试清理原进程组后才调用普通 `Child::wait` 回收，并核对两种状态。仍持有 stdout 的后代必须自然完成，才能接受完整答案；失败路径清理不能反过来证明 EOF。启动前只查询 `SIGCHLD` 策略，拒绝已有 `SIG_IGN` / `SA_NOCLDWAIT`，不修改全局信号配置，并在 spawn 前再次检查取消/期限。调用方不得外部回收这些子进程或改变等待策略；无法核验等待权时不发送原编号信号，已经回收后也不重试组信号。原组清理仍是尽力操作，Windows 继续使用独占 Job handle。
+
 大文件分析在既有 `sweepx-analysis` 模块中使用有界 top-K；core 的 `scan_large_files_with_store` 与普通 scan 共享一次 scanner 遍历及输出 envelope。observer 的 `on_entry` 在可选行保留/分类之前传递每个原生观察，`on_directory_coverage` 在可选 aggregate/index 保留之前传递覆盖。所需文件事实使逻辑长度缓存退回当前文件观察，不制造缺失的分配或 mount 证据；普通 junk 路径仍保留原缓存快路径。收集器只复制入榜的原生条目，分类器、垃圾候选和执行授权不参与大小排序。
 
 显式内容分析可通过 platform 的 `stream_bound_regular_file` 在保留父目录下分块读取指定范围，固定 64 KiB 缓冲，并检查跨阶段及读后原生身份、mount、大小和 change stamp；失败时 chunk 仅是临时数据，不能形成完整 hash 证明。macOS 在线程上禁止 dataless 下载，Windows 检查 no-recall/provider/reparse 边界，Linux 仅准入 ext4、Btrfs、tmpfs。调用者仍需工作线程、累计 IO/metadata/并发预算；原生同步读取的取消是协作式。重复分析现由 analysis 的 DuplicateCollector 与 core 的 scan_duplicates_with_store 接入显式 scan --duplicates。它共用本次遍历事实，在有界大小索引内排除硬链接别名，采样筛选后才完整 hash；每阶段及最终复验原生身份、大小与变化指纹。共享累计读取、范围请求、文件数量和保留估算预算，取消/期限停止后续内容阶段。失败 chunk 不形成摘要，未知/provider/资源缺口保持 partial；内容 hash 不持久缓存，结果不授予删除权限。

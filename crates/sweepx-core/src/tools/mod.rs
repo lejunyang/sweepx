@@ -161,6 +161,8 @@ impl ProbeRunner {
     /// The caller supplies executable, arguments, environment and optional cwd. This method owns
     /// stdio and process containment; do not use it for interactive tools or filesystem mutation.
     /// Ordinary process launch and OS process reaping remain subject to the host scheduler.
+    /// On Unix, the hosting process must not externally reap these children or change SIGCHLD wait
+    /// behavior while they are owned; existing auto-reaping modes are rejected before launch.
     pub fn run(&mut self, command: &mut Command) -> Result<ProbeOutput, ProbeError> {
         let started = Instant::now();
         let mut diagnostics = ProbeDiagnostics {
@@ -199,6 +201,8 @@ impl ProbeRunner {
                 .checked_add(self.limits.probe_timeout)
                 .ok_or(ProbeError::BudgetExhausted)?,
         );
+        #[cfg(unix)]
+        require_waitable_children()?;
         command
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -210,7 +214,7 @@ impl ProbeRunner {
             command.process_group(0);
         }
         diagnostics.stage = ProbeStage::Launch;
-        let child = command.spawn()?;
+        let child = self.launch_active(command, deadline)?;
         diagnostics.launched_after = Some(started.elapsed());
         diagnostics.stage = ProbeStage::Setup;
         let mut process = ProbeProcess::new(child)?;
@@ -247,10 +251,13 @@ impl ProbeRunner {
                 }
             }
             if status.is_none() {
-                status = process.child.try_wait()?;
+                status = process.observe_exit()?;
                 diagnostics.exit_status = status;
             }
             if eof && let Some(status) = status {
+                // Keep Unix PID ownership until original-group cleanup has been attempted.
+                #[cfg(unix)]
+                let status = process.cleanup_and_reap(status)?;
                 // A nonblocking host call or scheduling pause can still cross the deadline
                 // after the loop's admission check. Complete bytes/status do not authorize
                 // accepting an answer once this invocation is cancelled or expired.
@@ -293,6 +300,13 @@ impl ProbeRunner {
         }
     }
 
+    /// Native signal-policy queries and host scheduling can cross the initial admission check.
+    /// Recheck directly before spawn without consuming a second launch-count allowance.
+    fn launch_active(&self, command: &mut Command, deadline: Instant) -> Result<Child, ProbeError> {
+        self.check_active_at(deadline, Instant::now())?;
+        Ok(command.spawn()?)
+    }
+
     /// Accepts the already complete pipe and child observations only while execution is active.
     /// Rejection retains Drain diagnostics: cleanup still owns the child, and the observed
     /// status/bytes are diagnostic facts rather than a usable answer.
@@ -312,6 +326,13 @@ impl ProbeRunner {
 
 struct ProbeProcess {
     child: Child,
+    #[cfg(unix)]
+    /// Set only after group cleanup was attempted while the child was unreaped.
+    /// A later drop must never signal this numeric group after the PID has been released.
+    group_cleanup_attempted: bool,
+    #[cfg(unix)]
+    /// Failed wait-ownership validation forbids both raw group and direct-child PID signalling.
+    child_wait_ownership_lost: bool,
     #[cfg(target_os = "macos")]
     /// Optional, invocation-local notification with exactly one extra owned descriptor.
     exit_waiter: Option<macos::ExitWaiter>,
@@ -339,11 +360,75 @@ impl ProbeProcess {
         let exit_waiter = macos::ExitWaiter::new(&child).ok();
         Ok(Self {
             child,
+            #[cfg(unix)]
+            group_cleanup_attempted: false,
+            #[cfg(unix)]
+            child_wait_ownership_lost: false,
             #[cfg(target_os = "macos")]
             exit_waiter,
             #[cfg(windows)]
             _job: job,
         })
+    }
+
+    /// Observes direct-child exit without releasing Unix PID ownership. Stdout completion
+    /// remains independent: a descendant may still own the pipe after the child has exited.
+    fn observe_exit(&mut self) -> io::Result<Option<ExitStatus>> {
+        #[cfg(unix)]
+        {
+            match observe_unreaped_exit(&self.child) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
+                result => result,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows containment uses an owned job handle, independent of PID reuse.
+            self.child.try_wait()
+        }
+    }
+
+    #[cfg(unix)]
+    fn signal_owned_group(&mut self) -> io::Result<()> {
+        if self.group_cleanup_attempted {
+            return Ok(());
+        }
+        if self.child_wait_ownership_lost {
+            return Err(io::Error::other("child wait ownership was lost"));
+        }
+        // Recheck the owned wait identity immediately before signalling. An external reaper
+        // violates the API contract; uncertainty must not become a signal to a recycled PID.
+        if let Err(error) =
+            require_waitable_children().and_then(|()| observe_unreaped_exit(&self.child))
+        {
+            self.child_wait_ownership_lost = true;
+            return Err(error);
+        }
+        self.group_cleanup_attempted = true;
+        // SAFETY: process_group(0) created this group. All status observations use WNOWAIT;
+        // no wait/reap occurs before this signal, so the child PID/group cannot be reassigned.
+        // Preserve best-effort group cleanup: macOS can return EPERM for a zombie-only group
+        // even though the caller owns its wait status. This does not invalidate natural pipe
+        // EOF or a complete answer; errors must not lead to post-reap numeric retries.
+        unsafe {
+            libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        Ok(())
+    }
+
+    /// Reaps only after attempting group cleanup, and cross-checks the observation with Child's
+    /// ordinary wait status. Called only after natural EOF and a terminal exit observation;
+    /// killing a live pipe writer must never manufacture an accepted complete answer.
+    #[cfg(unix)]
+    fn cleanup_and_reap(&mut self, observed: ExitStatus) -> io::Result<ExitStatus> {
+        self.signal_owned_group()?;
+        let reaped = self.child.wait()?;
+        if reaped != observed {
+            return Err(io::Error::other(
+                "non-consuming child status changed at reap",
+            ));
+        }
+        Ok(reaped)
     }
 
     #[cfg(target_os = "macos")]
@@ -365,16 +450,84 @@ impl Drop for ProbeProcess {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            // SAFETY: this group was created for this child, never the caller's process group.
-            // On error, descendants holding stdout must be stopped as well as the direct child.
-            unsafe {
-                libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+            // On incomplete/error paths the child is still unreaped, including when only its
+            // exit (not pipe EOF) was observed. Attempted cleanup suppresses post-reap signals.
+            let _ = self.signal_owned_group();
+            if self.child_wait_ownership_lost {
+                return;
             }
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
         // The Windows job handle closes afterwards, terminating its remaining descendants.
     }
+}
+
+/// WNOWAIT keeps the owned child waitable and its numeric identity reserved until group cleanup.
+/// Initialize the whole record because older WNOHANG implementations may not clear no-event
+/// fields. Interrupted observations return to the bounded outer loop, but cannot validate
+/// cleanup ownership. The caller must retain exclusive wait rights until group signalling.
+#[cfg(unix)]
+fn observe_unreaped_exit(child: &Child) -> io::Result<Option<ExitStatus>> {
+    use std::os::unix::process::ExitStatusExt;
+    // SAFETY: zero is valid for all scalar/pointer fields; waitid initializes its tagged result.
+    let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: only this exclusively owned, unreaped child is selected; WNOWAIT never consumes
+    // its status. The initialized siginfo storage is live and correctly sized for this ABI.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut information,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } < 0
+    {
+        let error = io::Error::last_os_error();
+        return Err(error);
+    }
+    // SAFETY: waitid's successful result is SIGCHLD data; a zero record is the no-event case.
+    let pid = unsafe { information.si_pid() };
+    if pid == 0 {
+        return Ok(None);
+    }
+    if pid != child.id() as libc::pid_t || information.si_signo != libc::SIGCHLD {
+        return Err(io::Error::other("unexpected child exit identity"));
+    }
+    // SAFETY: the owned-child SIGCHLD tag selects the status union used by waitid.
+    let value = unsafe { information.si_status() };
+    let raw = match information.si_code {
+        libc::CLD_EXITED => (value & 0xff) << 8,
+        libc::CLD_KILLED | libc::CLD_DUMPED if (1..=127).contains(&value) => {
+            value
+                | if information.si_code == libc::CLD_DUMPED {
+                    0x80
+                } else {
+                    0
+                }
+        }
+        _ => return Err(io::Error::other("unexpected nonterminal child exit event")),
+    };
+    Ok(Some(ExitStatus::from_raw(raw)))
+}
+
+/// Query only: never change process-global signal policy. Auto-reaping would release child
+/// identities behind the owned guard, so refuse it before creating any process or pipe.
+#[cfg(unix)]
+fn require_waitable_children() -> io::Result<()> {
+    // SAFETY: all-zero scalar/pointer fields form initialized output storage; null action
+    // queries the current disposition and cannot replace the hosting process's handler.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut action) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if action.sa_sigaction == libc::SIG_IGN || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SIGCHLD auto-reaping is incompatible with owned tool probes",
+        ));
+    }
+    Ok(())
 }
 
 enum PipeRead {
@@ -483,7 +636,7 @@ mod macos {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     /// One private kernel queue watching only the owned, unreaped child's exit. Events wake
-    /// polling, never supply an answer/status; Child::try_wait remains the status authority.
+    /// polling, never supply an answer/status; waitid/Child::wait remain the status authority.
     pub(super) struct ExitWaiter(OwnedFd);
 
     impl ExitWaiter {
@@ -703,9 +856,9 @@ mod tests {
             waiter.join().unwrap();
             observed.unwrap().unwrap();
         });
-        // Only Child::wait reaps the status, independently proving that a kernel notification
-        // cannot be substituted for a complete, successfully interpreted tool result.
-        assert!(process.child.wait().unwrap().success());
+        // A kernel notification cannot replace a typed exit observation or cleanup before reap.
+        let observed = process.observe_exit().unwrap().unwrap();
+        assert!(process.cleanup_and_reap(observed).unwrap().success());
     }
 
     fn child(case: &str) -> Command {
@@ -853,7 +1006,46 @@ mod tests {
         let Ok(case) = std::env::var("SWEEPX_PROBE_TEST_CASE") else {
             return;
         };
+        if let Some(sentinel) = std::env::var_os("SWEEPX_PROBE_LAUNCH_SENTINEL") {
+            std::fs::write(sentinel, b"child launched").unwrap();
+        }
         match case.as_str() {
+            #[cfg(unix)]
+            "auto_reap" => {
+                // Process-global policy changes are isolated in this test child, never made
+                // in the parent harness or by the production runner.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                if std::env::var("SWEEPX_AUTOREAP_MODE").unwrap() == "ignore" {
+                    action.sa_sigaction = libc::SIG_IGN;
+                } else {
+                    action.sa_sigaction = libc::SIG_DFL;
+                    action.sa_flags = libc::SA_NOCLDWAIT;
+                }
+                // SAFETY: this private test process installs only constant dispositions using
+                // initialized mask/action storage; the parent harness's policy is untouched.
+                unsafe {
+                    libc::sigemptyset(&mut action.sa_mask);
+                    assert_eq!(
+                        libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()),
+                        0
+                    );
+                }
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", "printf forbidden > \"$1\"", "sh"])
+                    .arg(std::env::var_os("SWEEPX_AUTOREAP_SENTINEL").unwrap());
+                let mut runner = runner();
+                assert!(
+                    matches!(runner.run(&mut command), Err(ProbeError::Io(error))
+                    if error.kind() == io::ErrorKind::InvalidInput)
+                );
+                assert_eq!(
+                    runner.last_diagnostics().unwrap().stage,
+                    ProbeStage::Admission
+                );
+                println!("auto-reap refused before launch");
+                std::process::exit(0);
+            }
             "answer" => {
                 print!("answer");
                 std::process::exit(0);
@@ -881,6 +1073,28 @@ mod tests {
             runner().run(&mut child("failure")).unwrap().status.code(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn late_launch_refusal_prevents_a_command_from_creating_its_sentinel() {
+        let fixture = tempfile::tempdir().unwrap();
+        let sentinel = fixture.path().join("never-created");
+        for cancelled in [false, true] {
+            let cancel = CancellationToken::new();
+            let runner = ProbeRunner::new(Default::default(), cancel.clone());
+            if cancelled {
+                cancel.cancel();
+            }
+            let mut command = child("answer");
+            // A marker written at the first test-child action is an independent launch oracle.
+            command.env("SWEEPX_PROBE_LAUNCH_SENTINEL", &sentinel);
+            let result = runner.launch_active(&mut command, Instant::now());
+            assert!(
+                matches!(result, Err(ProbeError::Cancelled) if cancelled)
+                    || matches!(result, Err(ProbeError::TimedOut) if !cancelled)
+            );
+            assert!(!sentinel.exists());
+        }
     }
 
     #[test]
@@ -1015,5 +1229,151 @@ mod tests {
             Err(ProbeError::TimedOut)
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    fn ready_guard(script: &str) -> (ProbeProcess, std::process::ChildStdin, ChildStdout) {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut process = ProbeProcess::new(command.spawn().unwrap()).unwrap();
+        let gate = process.child.stdin.take().unwrap();
+        let mut pipe = process.child.stdout.take().unwrap();
+        prepare_pipe(&pipe).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut ready = Vec::new();
+        while ready.len() < 5 {
+            assert!(
+                Instant::now() < deadline,
+                "controlled shell did not become ready"
+            );
+            let mut buffer = [0; 5];
+            match read_available(&mut pipe, &mut buffer[..5 - ready.len()]).unwrap() {
+                PipeRead::Bytes(count) => ready.extend_from_slice(&buffer[..count]),
+                PipeRead::Pending => std::thread::sleep(Duration::from_millis(1)),
+                PipeRead::Eof => panic!("controlled shell exited before its ready marker"),
+            }
+        }
+        assert_eq!(ready, b"ready");
+        (process, gate, pipe)
+    }
+
+    #[cfg(unix)]
+    fn await_owned_exit(process: &mut ProbeProcess) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(Instant::now() < deadline, "controlled shell did not exit");
+            if let Some(status) = process.observe_exit().unwrap() {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    fn pipe_tail(pipe: &mut ChildStdout) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut bytes = Vec::new();
+        loop {
+            assert!(Instant::now() < deadline, "controlled pipe did not close");
+            let mut buffer = [0; 32];
+            match read_available(pipe, &mut buffer).unwrap() {
+                PipeRead::Bytes(count) => bytes.extend_from_slice(&buffer[..count]),
+                PipeRead::Pending => std::thread::sleep(Duration::from_millis(1)),
+                PipeRead::Eof => return bytes,
+            }
+            assert!(bytes.len() <= 64);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_consuming_exit_observations_match_ordinary_wait_for_codes_and_signals() {
+        use std::io::Write;
+        use std::os::unix::process::ExitStatusExt;
+        for (action, code, signal) in [
+            ("exit 0", Some(0), None),
+            ("exit 7", Some(7), None),
+            ("exit 255", Some(255), None),
+            ("kill -TERM $$", None, Some(libc::SIGTERM)),
+            ("kill -KILL $$", None, Some(libc::SIGKILL)),
+        ] {
+            let (mut process, mut gate, _) =
+                ready_guard(&format!("printf ready; read ignored; {action}"));
+            assert!(process.observe_exit().unwrap().is_none());
+            gate.write_all(b"release\n").unwrap();
+            let observed = await_owned_exit(&mut process);
+            assert_eq!(process.observe_exit().unwrap(), Some(observed));
+            // This independent ordinary wait proves WNOWAIT really retained the status. It
+            // deliberately violates the guard's exclusive-wait precondition to check that a
+            // subsequent drop refuses raw signals once that authority has been released.
+            let oracle = process.child.wait().unwrap();
+            assert_eq!(observed, oracle, "{action}");
+            assert_eq!(oracle.code(), code);
+            assert_eq!(oracle.signal(), signal);
+            drop(process);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_parent_keeps_wait_identity_until_inherited_stdout_finishes_naturally() {
+        use std::io::Write;
+        let (mut process, mut gate, mut pipe) =
+            ready_guard("exec 3<&0; (read ignored <&3; printf delayed) & printf ready; exit 7");
+        let observed = await_owned_exit(&mut process);
+        assert_eq!(observed.code(), Some(7));
+        let mut byte = [0];
+        assert!(matches!(
+            read_available(&mut pipe, &mut byte).unwrap(),
+            PipeRead::Pending
+        ));
+        assert_eq!(process.observe_exit().unwrap(), Some(observed));
+        gate.write_all(b"release\n").unwrap();
+        assert_eq!(pipe_tail(&mut pipe), b"delayed");
+        assert_eq!(process.cleanup_and_reap(observed).unwrap().code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn released_wait_ownership_cannot_signal_the_former_group_on_drop() {
+        use std::io::Write;
+        let (mut process, mut gate, mut pipe) =
+            ready_guard("exec 3<&0; (read ignored <&3; printf survived) & printf ready; exit 7");
+        await_owned_exit(&mut process);
+        assert_eq!(process.child.wait().unwrap().code(), Some(7));
+        drop(process);
+        // The live inherited writer is an independent oracle: a post-reap group signal would
+        // kill it before it can answer. Release it through an owned pipe, never a numeric PID.
+        gate.write_all(b"release\n").unwrap();
+        assert_eq!(pipe_tail(&mut pipe), b"survived");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch() {
+        let fixture = tempfile::tempdir().unwrap();
+        for mode in ["ignore", "no_wait"] {
+            let sentinel = fixture.path().join(mode);
+            let mut command = child("auto_reap");
+            command
+                .env("SWEEPX_AUTOREAP_MODE", mode)
+                .env("SWEEPX_AUTOREAP_SENTINEL", &sentinel);
+            let output = ProbeRunner::new(Default::default(), CancellationToken::new())
+                .run(&mut command)
+                .unwrap();
+            assert!(output.status.success());
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .contains("auto-reap refused before launch")
+            );
+            assert!(!sentinel.exists());
+        }
     }
 }

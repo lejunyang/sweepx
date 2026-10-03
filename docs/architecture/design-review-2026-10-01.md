@@ -979,7 +979,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | --- | --- | --- |
 | 项目规则的有效上下文 | 无 home 环境时的系统用户目录回退、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace 与 17 场景 home Cargo oracle 已用于独立对照 |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
-| 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
+| 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
 | 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、实际系统 Trash 与 Linux 隔离成功 | GNU 交叉 lint 只证明编译；会话/TUI 整体验收仍待目标宿主证据 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
@@ -1012,3 +1012,15 @@ Cargo 对 home 配置中的相对 `target-dir` 先取原始 home spelling 的 pa
 
 
 [交付验证记录](cargo-home-production-validation-2026-10-03.json)保留初期编译/新 oracle 失败与修正。host、Linux GNU、Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项文档检查器测试、2 项采集拒绝回归与三包清单通过；交叉编译包括测试代码，不证明目标宿主运行，package list 不证明 registry 依赖构建。完整 workspace 在 core 停止：572 项通过、1 项旧 `captures_complete_answer_and_exit_status` 失败、2 项既有 ignored；launch/setup 约 0.77 ms 返回，301.77 ms 内没有 stdout、EOF 或退出，未到最终接受分支。后续未运行包及早期 doctest 单独补验，合计 1,056 个不同用例通过、1 个失败、3 个 ignored，不称为全绿矩阵。保留失败测试，没有延长期限、移除断言、排除或反复重试；clippy 编译曾与部分运行重叠，不据此归因。本单元不改变探测实现，系统 Trash 成功挂起仍显式排除。原生 Linux/Windows、MSVC、真实 provider、实际 Trash/隔离成功、旧稳定性根因及最终 pathname 竞态继续开放，没有性能计时。
+
+## 工具进程清理保留待回收身份（2026-10-03）
+
+旧 Unix probe 在排空 stdout 时使用 `Child::try_wait`，它会提前回收直接子进程；继承管道的后代可能仍活着，而 Drop 随后按已释放的旧编号清理进程组。现在通过 `waitid(WNOWAIT)` 观察终态，清理尝试在普通 `Child::wait` 之前执行，并核对两种状态。只在自然 EOF 和直接子进程终态都齐备后才进入成功收尾；不能通过杀死管道写端制造完整答案。资料快照：2026-10-03；[Linux man-pages 的 waitid 文档](https://man7.org/linux/man-pages/man2/waitpid.2.html)说明 WNOWAIT 保留可再次等待的状态，实际 macOS 行为由下述独立原生对照核验。
+
+启动前只查询 `SIGCHLD`，拒绝已有 `SIG_IGN` / `SA_NOCLDWAIT`，不改变全局信号配置，并在 spawn 前重新检查取消与期限。API 明确要求嵌入进程保留这些子进程的独占等待权；清理前无法核验等待权时，不按旧编号发送组或直接子进程信号，回收后不重试组信号。新增状态只有两个私有 bool，没有后台线程、公开机器字段或新 crate。原进程组清理仍为尽力操作，不能保证控制已经逃离原组的后代；Windows 的独占 Job handle 保持。
+
+首次专项 9 项通过、4 项失败，原因是新收尾把 macOS 的 zombie-only 进程组 SIGKILL 返回 EPERM 误当作答案失败。独立 C 程序使用 fork/setpgid、ready/gate 同步、WNOWAIT 和普通 waitpid；沙箱及宿主各一次均观察到活组信号成功，已退出但未回收组返回 EPERM，随后正常回收 exit 7。依据这项原生反例保留原有尽力清理语义，没有更改答案期限或退出状态预期；失败日志和 C 源码、两次原始记录均保留在[交付证据](probe-process-ownership-validation-2026-10-03.json)。回归另用普通 Child::wait 对照退出码 0/7/255 与 TERM/KILL，用受控继承管道证明自然 EOF 和外部已回收后拒绝旧组信号，用隔离子进程证明自动回收模式在 launch 前被拒绝。
+
+旧 300 ms 启动问题另进行预先限定的一次串行 core 诊断：只在原期限已经失败后，才允许对尚未回收的自有子进程记录原生 task info 和 sample。306 项通过、2 项 ignored，没有触发诊断，取得零份现场记录；临时代码全部移除，原 patch 和完整记录保存在交付证据中。这次通过不能关闭旧启动根因，进程回收修复也没有提供其因果解释。
+
+本轮完整工作区串行 1,061 项通过、0 失败、3 项既有/opt-in ignored，已诊断系统 Trash 挂起用例仍显式排除。之后补充 spawn 前检查和一项 sentinel 回归，最终工具专项 18 项与安装发现专项 15 项通过；新增回归使覆盖合计 1,062 个不同通过用例，其他用例重叠，不称为第二次完整矩阵。affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试与 core 包清单通过；最后仅调整源码注释，复用未变行为的检查。交叉 lint 不证明目标宿主运行或 MSVC，包清单不证明 registry 构建。本轮没有端到端提速或 RSS 测量，旧 probe/热缓存 PTY/FSEvents 根因、真实 provider、实际 Trash/隔离成功及最终 pathname 竞态仍开放，整体路线图不勾选。
