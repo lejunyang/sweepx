@@ -1,4 +1,4 @@
-//! Native preflight and accounting for Linux journals; SQLite's VFS remains a separate boundary.
+//! Native authority and accounting for the Linux journal's retained-descriptor SQLite VFS.
 
 use super::{JournalError, ensure_local_filesystem};
 use std::fs::File;
@@ -36,7 +36,7 @@ impl Root {
             file,
         };
         // Refuse a stale caller capture before creating lock/database names. This does not
-        // make SQLite's later pathname operations atomic with the admitted namespace.
+        // make later relative unlink atomic with a non-cooperating namespace writer.
         root.binding()?;
         Ok(root)
     }
@@ -87,26 +87,52 @@ impl Root {
             .contains_file(name, file)
             .map_err(|error| file_error(&self.display.join(name), error))
     }
+}
 
-    pub(super) fn sqlite_binding(
+impl super::retained_vfs::Storage for Root {
+    fn open(
         &self,
-        filename: &Path,
-        file: &File,
-    ) -> Result<bool, JournalError> {
-        let parent = filename
-            .parent()
-            .ok_or(JournalError::StateIdentityChanged)?;
-        let name = filename
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| *name == super::DATABASE_FILE)
-            .ok_or(JournalError::StateIdentityChanged)?;
-        let parent =
-            Directory::open(parent, false).map_err(|_| JournalError::StateIdentityChanged)?;
-        if !self.directory.same_object(&parent)? {
-            return Err(JournalError::StateIdentityChanged);
+        name: super::retained_vfs::Name,
+        create: bool,
+        exclusive: bool,
+    ) -> io::Result<File> {
+        let (file, created) = self.file(name.text(), create).map_err(io::Error::other)?;
+        if exclusive && !created {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "journal sidecar already exists",
+            ));
         }
-        Ok(parent.contains_file(name, file)?)
+        Ok(file)
+    }
+
+    fn contains(&self, name: super::retained_vfs::Name, file: &File) -> io::Result<bool> {
+        self.directory.contains_file(name.text(), file)
+    }
+
+    fn length(&self, name: super::retained_vfs::Name) -> io::Result<Option<u64>> {
+        match self.directory.metadata(name.text()) {
+            Ok(metadata) => Ok(Some(metadata.bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn remove(&self, name: super::retained_vfs::Name, expected: Option<&File>) -> io::Result<()> {
+        // Metadata first preserves explicit absence and native private/mount/type refusal.
+        self.directory.metadata(name.text())?;
+        if let Some(file) = expected
+            && !self.directory.contains_file(name.text(), file)?
+        {
+            return Err(io::Error::other("journal sidecar changed before removal"));
+        }
+        // Linux unlink has no identity-conditional form: the last check-to-unlink window
+        // remains explicit. Authority is the retained parent, never a SQLite pathname.
+        self.directory.remove(name.text())
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        Root::sync(self).map_err(io::Error::other)
     }
 }
 

@@ -1,0 +1,187 @@
+{
+  "schema": "sweepx.journal-retained-vfs-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "c49dd89",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2802344,
+    "debugDuKiB": 1792476
+  },
+  "scope": [
+    "private retained-descriptor VFS within existing journal crate; no new crate/dependency",
+    "main database uses admitted descriptor; WAL/rollback use retained native parent and file identities; C FILE_POINTER verifies actual owned object",
+    "Linux OFD locks implement SQLite byte protocol without builtin private inode state or global system-call replacement",
+    "one non-default process-lifetime driver, maximum 64 active namespace contexts including retired foreign file objects",
+    "DB/WAL/rollback/legacy SHM length ledger at callback growth boundary; existing wire/schema/cursor unchanged"
+  ],
+  "sources": [
+    {
+      "url": "https://www.sqlite.org/c3ref/c_fcntl_begin_atomic_write.html",
+      "used": "FILE_POINTER returns actual file object, not a public Unix FD; do not cast builtin private Unix layout or use optional FILESTAT diagnostics"
+    },
+    {
+      "url": "https://www.sqlite.org/c3ref/vfs.html",
+      "used": "driver must outlive connections; retained foreign files require process-lifetime registry and owned contexts"
+    },
+    {
+      "url": "https://www.sqlite.org/c3ref/io_methods.html",
+      "used": "short-read zero fill and version-one methods contract"
+    },
+    {
+      "url": "https://www.sqlite.org/wal.html",
+      "used": "EXCLUSIVE before WAL permits no-SHM version-one VFS; process abort recovery is not power loss"
+    },
+    {
+      "url": "https://man7.org/linux/man-pages/man2/fcntl_locking.2.html",
+      "used": "OFD locks conflict with POSIX locks including same process, survive closure of other descriptions, and require l_pid=0"
+    },
+    {
+      "package": "libsqlite3-sys 0.38.2 bundled sqlite3/sqlite3.c",
+      "sha256": "0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d",
+      "used": "pinned SQLite DEFAULT_SECTOR_SIZE=4096, pending/reserved/shared byte protocol, exclusive WAL support; builtin name resolution is not descriptor authority"
+    }
+  ],
+  "semantics": {
+    "authority": "ephemeral numeric namespace token is not a host pathname. Production Storage reuses cache native no-follow/private/ordinary/single-link/mount checks. Retained FD data I/O never reopens main name. Default VFS unchanged; only builtin clock/random/sleep delegated",
+    "sidecars": "only WAL and rollback opened/deleted under retained parent. Legacy SHM accounted without open/delete. Unknown/temp/ATTACH/shared-memory/URI/exclusive-existing requests fail closed. Sidecar slots retain evidence after close; mismatch refuses reopening/deletion",
+    "lifetime": "driver allocated once for process. Owner retirement removes token and fails subsequent file I/O, not already cached SQLite values. Foreign State owns Arc context and quota until close; new owner cannot revive old key. SQLite inherited connections must not be used after fork",
+    "limits": {
+      "databaseBytes": 28311552,
+      "walBytes": 4194304,
+      "rollbackBytes": 29360128,
+      "totalFileLengthBytes": 33554432,
+      "callbackIoBytes": 1048576,
+      "activeContexts": 64,
+      "sidecarSlotsPerContext": 2,
+      "note": "admission/transfer limits, not allocator/RSS, physical allocation, all operation state, or external-writer quota. Explicit NotFound alone represents missing optional files"
+    },
+    "locking": "Linux F_OFD_SETLK/F_OFD_GETLK, zero PID; no unsupported-kernel fallback. Shared/reserved/pending/exclusive retry and downgrade follow SQLite byte protocol. Non-Linux Unix POSIX branch is test-only",
+    "unsafe": "owned Slot/State layout and markers; catches Rust panic at C callback boundary. Valid pointers/serialized file methods are SQLite ABI requirements; no arbitrary pointer safety or OOM containment claim",
+    "durability": "native file/retained parent flush requests; no atomic-write/safe-append/powersafe-overwrite device flags. 4096 sector hint is pinned SQLite default, not hardware measurement. Final check-to-relative-unlink race and post-operation flush uncertainty remain",
+    "tests": "ordinary controlled Unix fixture Storage is independent of production native root. Actual bundled SQLite/default-VFS read/integrity and fresh-process locking/recovery oracles run on macOS; do not qualify Linux native mount/OFD/provider",
+    "resources": "lean build retained; no new end-to-end timing/RSS claims, user payload deletion or Trash emptying"
+  },
+  "initialFailures": [
+    {
+      "check": "initial portable journal tests",
+      "result": "exit101, ten E0308 type errors",
+      "reason": "macOS F_RDLCK/F_WRLCK/F_UNLCK are i16; Linux variants are i32. Accept Into<c_int> then convert to flock short field; preserve platform gating"
+    },
+    {
+      "check": "initial Linux GNU lint",
+      "result": "exit101",
+      "reason": "manual NUL string literals rejected; replace with Rust C-string literals, no lint suppression"
+    }
+  ],
+  "designCorrections": [
+    "per-owner registered VFS drop could free a driver still referenced by an independently opened connection. Replace with one static driver and bounded owned registry contexts; regression covers actual foreign file lifetime and revoked I/O",
+    "retired owner alone must not release context quota while a foreign file still pins descriptors; isolated child confirms rejection at 64 and admission only after close"
+  ],
+  "checks": [
+    {
+      "name": "affected-final-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "note": "12 new host VFS cases plus three existing portable journal cases; six child observations excluded from main count. Linux-only OFD case not run"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1180,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "note": "macOS service-enabled; nine child observations excluded. Full run preceded final sidecar replacement test and comment changes; final 15-case journal run covers that test, unchanged others reuse full results"
+    },
+    {
+      "name": "workspace-host-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "note": "final sidecar test and static registry included; subsequent crate overview comment only"
+    },
+    {
+      "name": "workspace-linux-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "final code/tests, including production Storage and Linux-only OFD tests compiled; local pinned Zig 0.16.0 wrapper. Subsequent overview comment only. Not Linux runtime"
+    },
+    {
+      "name": "workspace-windows-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "note": "correctly excludes Unix VFS/test branches. Not Windows/MSVC runtime"
+    },
+    {
+      "name": "package-file-list",
+      "result": "passed",
+      "command": "cargo package --list --allow-dirty --locked --offline -p sweepx-event-journal -p sweepx-core",
+      "note": "retained_vfs.rs, retained_vfs/tests.rs, native_state.rs included; not registry build qualification"
+    },
+    {
+      "name": "publisher-normal-build-topology",
+      "result": "passed",
+      "command": "cargo metadata --offline --locked --format-version 1 --no-deps; local publish_order comparison",
+      "note": "17 packages, 48 normal/build workspace edges; no release"
+    },
+    {
+      "name": "fmt",
+      "result": "passed",
+      "command": "cargo fmt --all --check"
+    },
+    {
+      "name": "diff",
+      "result": "passed",
+      "command": "git diff --check"
+    },
+    {
+      "name": "markdown-content-links",
+      "result": "passed",
+      "command": "python3 scripts/lint_docs.py",
+      "note": "54 Markdown files; unchanged checker reuses previous 23 self-tests"
+    },
+    {
+      "name": "artifact-content",
+      "result": "passed",
+      "note": "JSON parsed, pinned bundled-source digest matched, result counts exclude child observations; required packaged VFS source/test paths verified"
+    }
+  ],
+  "skipped": [
+    {
+      "name": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previously diagnosed Foundation Trash success hang; explicit exclusion preserved; no new exclusions"
+    }
+  ],
+  "notRun": [
+    {
+      "name": "native Linux journal/OFD tests",
+      "command": "cargo test -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "reason": "macOS host, no Linux runner available; portable C fixture and GNU compile are not native proof"
+    },
+    {
+      "name": "native Linux cache/bind-mount suite",
+      "reason": "target host/user namespace qualification remains open"
+    },
+    {
+      "name": "Windows host/MSVC, real provider, target Trash",
+      "reason": "cross-compilation is not native qualification"
+    },
+    {
+      "name": "power-loss, final conditional unlink, aggregate operation/journal disk retention",
+      "reason": "no qualification/implementation claim from this unit"
+    }
+  ],
+  "changedDocs": [
+    "README.md",
+    "site/cli.md",
+    "site/en/cli.md",
+    "docs/architecture/design-review-2026-10-01.md"
+  ],
+  "remaining": "roadmap stays active; next cross-platform resource/cache slice audits aggregate state accounting/retention; new Dart/SvelteKit work deferred"
+}

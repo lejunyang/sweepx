@@ -1,12 +1,13 @@
-//! Unix-only crash-consistent event journal substrate.
+//! Linux-only bounded event journal substrate.
 //!
 //! The hash chain detects accidental corruption and inconsistent partial state. It is deliberately
 //! unkeyed and therefore is not authentication against a same-user or offline writer. The public
 //! Core exposes Linux-only NDJSON replay for completed persisted streams; live scan NDJSON remains
 //! disabled until a runtime-qualified live event sink exists.
-//! The 32 MiB size value is an admission target backed by SQLite page limits and conservative
-//! pre-append headroom, not a wall-clock or exact post-commit byte guarantee. This foundation uses
-//! replay sessions verify one bounded snapshot up front and page only over that immutable snapshot.
+//! The 32 MiB length allowance uses SQLite page limits, retained-descriptor growth checks and
+//! conservative pre-append headroom. It does not bound external writers or physical allocation,
+//! and native flush requests are not power-loss qualification. Replay sessions verify one bounded
+//! snapshot up front and page only over that immutable snapshot.
 //! They do not follow later appends and therefore do not expose live streaming. Other journal
 //! operations still verify the durable state before acting, and this crate does not yet claim the
 //! design's one-second runtime gate.
@@ -17,17 +18,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 #[cfg(target_os = "linux")]
 mod native_state;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod retained_vfs;
 #[cfg(all(test, target_os = "linux"))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
 use std::path::Path;
-#[cfg(any(target_os = "linux", all(test, target_os = "linux")))]
+#[cfg(all(test, target_os = "linux"))]
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
@@ -60,16 +61,18 @@ const SCHEMA_VERSION: &str = "sweepx.event_journal.sqlite.v1";
 const APPLICATION_ID: i64 = 0x5357_584a;
 #[cfg(target_os = "linux")]
 const USER_VERSION: i64 = 1;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 const PAGE_SIZE: i64 = 4096;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_PAGE_COUNT: i64 = 6912;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_DATABASE_BYTES: u64 = PAGE_SIZE as u64 * MAX_PAGE_COUNT as u64;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const MAX_ROLLBACK_BYTES: u64 = MAX_DATABASE_BYTES + 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_APPEND_RESERVE_BYTES: u64 = 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -506,13 +509,14 @@ impl DurableCursor {
 #[derive(Debug)]
 pub struct EventJournal {
     // Drop SQLite first: its close may checkpoint/delete sidecars, so retained evidence and
-    // stream exclusion must outlive it. The default VFS still has a separate pathname boundary.
+    // stream exclusion and the registered VFS must outlive it. Final relative unlink still has
+    // a check-to-operation race; closing SQLite never reopens the displayed root.
     #[cfg(target_os = "linux")]
     connection: Mutex<Connection>,
     #[cfg(target_os = "linux")]
-    root: native_state::Root,
+    root: Arc<native_state::Root>,
     #[cfg(target_os = "linux")]
-    _database_file: File,
+    vfs: retained_vfs::Registered,
     #[cfg(target_os = "linux")]
     _lock: ExclusiveLock,
 }
@@ -654,7 +658,8 @@ impl EventJournal {
 
     /// Opens a journal beneath already admitted Linux directory authority. `display` is a
     /// binding/rejection diagnostic, never the root used for native creation or file checks.
-    /// SQLite VFS operations still have a separate pathname audit boundary.
+    /// SQLite uses the journal's retained-descriptor VFS; final relative unlink still has a
+    /// check-to-operation race against a non-cooperating namespace writer.
     #[cfg(target_os = "linux")]
     pub fn open_in(
         directory: sweepx_cache::native::Directory,
@@ -738,9 +743,13 @@ impl EventJournal {
             .map_err(|_| JournalError::ConcurrentWriterDenied)?;
         let (database_file, database_created) = root.file(DATABASE_FILE, create_if_missing)?;
         check_size_budget(&root)?;
-        let sqlite_path = PathBuf::from(format!("/proc/self/fd/{}", database_file.as_raw_fd()));
-        let mut connection = open_connection(&sqlite_path)?;
-        if !sqlite_database_matches(&connection, &root, &database_file)? {
+        let root = Arc::new(root);
+        let vfs = retained_vfs::Registered::new(
+            Arc::clone(&root) as Arc<dyn retained_vfs::Storage>,
+            database_file,
+        )?;
+        let mut connection = open_connection(&vfs)?;
+        if !vfs.owns_connection(&connection)? {
             return Err(JournalError::StateIdentityChanged);
         }
         root.binding()?;
@@ -752,7 +761,7 @@ impl EventJournal {
         }
         let journal = Self {
             root,
-            _database_file: database_file,
+            vfs,
             connection: Mutex::new(connection),
             _lock: ExclusiveLock { file: lock_file },
         };
@@ -1342,9 +1351,9 @@ impl EventJournal {
             .map_err(|_| JournalError::ConnectionPoisoned)?;
         self.root.binding()?;
         check_size_budget(&self.root)?;
-        if !self.root.contains(DATABASE_FILE, &self._database_file)?
+        if !self.root.contains(DATABASE_FILE, self.vfs.database())?
             || !self.root.contains(LOCK_FILE, &self._lock.file)?
-            || !sqlite_database_matches(&connection, &self.root, &self._database_file)?
+            || !self.vfs.owns_connection(&connection)?
         {
             return Err(JournalError::StateIdentityChanged);
         }
@@ -1918,11 +1927,17 @@ fn check_size_budget(root: &native_state::Root) -> Result<(), JournalError> {
     let db = root.length(DATABASE_FILE)?;
     let wal = root.length("journal.db-wal")?;
     let shm = root.length("journal.db-shm")?;
+    let rollback = root.length("journal.db-journal")?;
     let total = db
         .checked_add(wal)
         .and_then(|value| value.checked_add(shm))
+        .and_then(|value| value.checked_add(rollback))
         .ok_or(JournalError::QuotaExceeded)?;
-    if db > MAX_DATABASE_BYTES || wal > MAX_WAL_BYTES || total > MAX_TOTAL_BYTES {
+    if db > MAX_DATABASE_BYTES
+        || wal > MAX_WAL_BYTES
+        || rollback > MAX_ROLLBACK_BYTES
+        || total > MAX_TOTAL_BYTES
+    {
         return Err(JournalError::QuotaExceeded);
     }
     Ok(())
@@ -1946,29 +1961,18 @@ fn ensure_append_budget(root: &native_state::Root, event_bytes: usize) -> Result
 
 #[cfg(target_os = "linux")]
 fn current_size_bytes(root: &native_state::Root) -> Result<u64, JournalError> {
-    [DATABASE_FILE, "journal.db-wal", "journal.db-shm"]
-        .into_iter()
-        .try_fold(0_u64, |total, name| {
-            total
-                .checked_add(root.length(name)?)
-                .ok_or(JournalError::QuotaExceeded)
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn sqlite_database_matches(
-    connection: &Connection,
-    root: &native_state::Root,
-    file: &File,
-) -> Result<bool, JournalError> {
-    // This validates SQLite's reported name against retained authority. It does not inspect
-    // the C VFS's opened descriptor or close its later pathname/sidecar races.
-    let filename: String = connection.query_row(
-        "SELECT file FROM pragma_database_list WHERE name='main'",
-        [],
-        |row| row.get(0),
-    )?;
-    root.sqlite_binding(Path::new(&filename), file)
+    [
+        DATABASE_FILE,
+        "journal.db-wal",
+        "journal.db-shm",
+        "journal.db-journal",
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, name| {
+        total
+            .checked_add(root.length(name)?)
+            .ok_or(JournalError::QuotaExceeded)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1988,11 +1992,15 @@ fn ensure_local_filesystem(file: &File) -> Result<(), JournalError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_connection(path: &Path) -> Result<Connection, JournalError> {
+fn open_connection(vfs: &retained_vfs::Registered) -> Result<Connection, JournalError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-    let connection = Connection::open_with_flags(path, flags)?;
+    let connection = Connection::open_with_flags_and_vfs(
+        vfs.filename().to_str().expect("ASCII namespace"),
+        flags,
+        vfs.name(),
+    )?;
     Ok(connection)
 }
 

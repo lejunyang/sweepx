@@ -207,7 +207,7 @@ P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只�
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前运行平台的两个 Trash cell 以 `degraded` preview 报告，Linux 上 file/directory Permanent 也报告 `degraded`；link 与其他平台 Permanent 仍为 `disabled`。preview 不等于发布资格。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。
 
-`status` / `cancel` 查询缺失状态不会创建根或 `operations/`，也不会修补权限。legacy snapshot 读写复用保留原生目录句柄及 no-follow/private/provider/mount 边界；每份快照最多 8 MiB 编码、65,536 次解码前 JSON 值/键访问尝试，写入拒绝保留旧文件。它不是全进程内存或全部状态的磁盘配额。Linux journal 的目录、锁与数据库预检现在复用保留句柄和 mount 证据；查询缺失 journal 不创建文件，已有公共权限直接拒绝。大小与身份重查只读相对元数据，避免关闭第二个数据库句柄而释放 SQLite 的进程锁。SQLite 实际 VFS 句柄与旁文件的绑定、全局状态保留和目标宿主验收仍开放。发布前后请求原生刷新，提交后刷新失败不删除已发布文件，也不据此承诺断电恢复。
+`status` / `cancel` 查询缺失状态不会创建根或 `operations/`，也不会修补权限。legacy snapshot 读写复用保留原生目录句柄及 no-follow/private/provider/mount 边界；每份快照最多 8 MiB 编码、65,536 次解码前 JSON 值/键访问尝试，写入拒绝保留旧文件。它不是全进程内存或全部状态的磁盘配额。Linux journal 的目录、锁与数据库共用保留句柄和 mount 证据；查询缺失 journal 不创建文件，已有公共权限直接拒绝。私有 SQLite VFS 直接读写准入的数据库句柄，WAL/rollback 文件沿保留父目录获取并重验；实际 C 文件对象参与连接绑定，默认 VFS 不变。Linux 使用 OFD 锁，大小与身份检查不额外打开数据库。每 journal 的 32 MiB 编码长度额度包含 DB、WAL、rollback 和遗留 SHM；最多 64 个活动 VFS 上下文，不等于全部状态磁盘或进程 RSS 上限。原生 Linux/OFD 验收、最终相对 unlink 竞态、全局状态保留和目标宿主/provider 验收仍开放。发布前后请求原生刷新，提交后刷新失败不删除已发布文件，也不据此承诺断电恢复。
 
 ## Agent 权限边界
 
