@@ -2,17 +2,17 @@
 //!
 //! # What is stored
 //!
-//! For every scan root we persist its filesystem and rule-match facts (without tool activity or
-//! Git confidence) together with the
-//! optional macOS FSEvents event id captured *before* the scan. On macOS the root is only reused when
-//! FSEvents reports no change at or below it since that id; any event under the root, a
-//! dropped/lost-history signal, or a root identity change invalidates it and it is rescanned.
+//! Root records persist original filesystem/rule facts without tool activity or Git confidence.
+//! They are historical presentation only. Optional pre-scan cursors do not authorize whole-root
+//! replay. Independently stored macOS file indexes use event history for invalidation, but each
+//! proposed regular-file length must also match current native enumeration; directories and
+//! rule markers remain freshly traversed.
 //!
 //! # Observation limits
 //!
 //! FSEvents includes content changes, but asynchronous delivery means HistoryDone alone does
-//! not prove a recent write has reached the journal. The macOS observation barrier remains an
-//! open validity issue; see the current design review. Historical display never claims current
+//! not prove a recent write has reached the journal. Whole-root replay is therefore refused;
+//! no fixed wait is used as a substitute for tree evidence. Historical display never claims current
 //! observations. Candidates retain native locators; Trash revalidates independently, so a cached
 //! report grants no mutation authority on its own.
 //!
@@ -33,15 +33,11 @@ use std::io;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(all(test, target_os = "macos"))]
-use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use crate::FsEventId;
 #[cfg(all(test, target_os = "macos"))]
 use crate::current_event_id;
-#[cfg(all(test, target_os = "macos"))]
-use crate::events_since;
 use sha2::{Digest, Sha256};
 use sweepx_model::{ByteValue, ScanEntryId};
 #[cfg(target_os = "macos")]
@@ -68,17 +64,14 @@ pub(crate) use storage::{Limits, ReadBudget};
 // its source platform and mount. v9 readers reject it; new readers miss v9 rather than invent evidence.
 // Independent macOS file indexes retain their existing schema and validity contract.
 const STORED_SCHEMA: &str = "sweepx.junk-cache/v10";
-/// Bounded wall time for one FSEvents drain; a drain that cannot finish fails the cache.
-#[cfg(all(test, target_os = "macos"))]
-const FSEVENTS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One root's cached result.
+/// One root's original observations, retained only for historical presentation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredJunkRoot {
     schema: String,
-    /// Classification data changes invalidate a report even when the filesystem is unchanged.
+    /// Loaded rule bytes bind historical interpretation even when filesystem identity matches.
     rules_digest: String,
-    /// Current enabled rules and discovery scope, independent of filesystem history.
+    /// Enabled rules and discovery scope at capture, independent of filesystem history.
     classification_context: Option<[u8; 32]>,
     /// Lossless absolute root spelling at capture; native identity is verified before reuse.
     root: String,
@@ -89,17 +82,17 @@ pub struct StoredJunkRoot {
     root_inode: String,
     /// Mount/volume identity is independent of device/inode, including Linux bind mounts.
     root_mount: String,
-    /// macOS FSEvents id captured before the scan; absent for historical-only records.
-    /// Absence cannot be converted to zero or used to qualify filesystem reuse.
+    /// Optional macOS FSEvents id captured before the original scan; absent on Linux.
+    /// Neither presence nor absence qualifies this historical record as current coverage.
     since_event_id: Option<u64>,
-    /// Mixed fragment records are historical presentation only, regardless of event history.
+    /// Distinguishes mixed fragments from complete original observations; both are historical.
     preview_only: bool,
     candidates: Vec<StoredJunkCandidate>,
     /// Nested requested roots own their candidates; a different request scope must rescan.
     excluded_root_keys: Vec<String>,
 }
 
-/// Validated filesystem and rule-match facts, excluding transient tool and Git interpretations.
+/// Original filesystem and rule-match facts, excluding transient tool and Git interpretations.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredJunkCandidate {
     /// Display-only path; never filesystem authority.
@@ -296,7 +289,7 @@ impl StoredJunkRoot {
         self.excluded_root_keys = excluded_root_keys(Path::new(&self.root), roots);
     }
 
-    /// Earliest change cursor required to validate this record.
+    /// Original pre-scan cursor; this alone cannot qualify current tree coverage.
     #[cfg(target_os = "macos")]
     pub fn since_event_id(&self) -> Option<FsEventId> {
         self.since_event_id
@@ -396,8 +389,9 @@ fn digest_rule_bytes(project_bytes: &[u8], platform_bytes: &[u8]) -> String {
     format!("{:x}", hash.finalize())
 }
 
-/// Loads only records whose root identity and loaded rules still match.
-/// History is validated separately against the same drain used by the file index.
+/// Loads historical records with matching native root identity, rule bytes and request scope.
+/// These bindings do not establish freshness. File indexes independently consume the same
+/// bounded reader, with event invalidation and live type/length confirmation before reuse.
 pub struct CacheReader {
     directory: Option<Directory>,
     budget: ReadBudget,
@@ -431,8 +425,9 @@ impl CacheReader {
         self.budget.remaining_retained_bytes()
     }
 
-    /// Root identity, loaded rule bytes and current classification context must match before
-    /// history is consulted. Unknown context skips candidate reads; file indexes remain independent.
+    /// Legacy candidate-record loader. Matching identity/rules/context is not current coverage.
+    /// Callers must use historical state; even empty change logs cannot authorize replay as current.
+    /// Unknown context skips reads, while file indexes remain independent.
     #[cfg(target_os = "macos")]
     pub fn roots(
         &mut self,
@@ -523,34 +518,19 @@ impl CacheReader {
     }
 }
 
-/// Checks each root against its own pre-scan cursor and rechecks its native binding.
-/// Input records must already have their loaded rule/context binding admitted by CacheReader.
-/// Missing/incomplete history makes every record a miss, never a partial cache hit.
+/// Legacy whole-root validation entry point. Every candidate slot misses.
+///
+/// FSEvents HistoryDone covers delivered historical notifications, not necessarily recently
+/// completed writes. Root identity, rule/context digests and an empty log do not provide fresh
+/// tree coverage. Preserve aligned slots for existing callers, but require fresh traversal to
+/// produce current candidates. File-index plans independently require live type/length evidence.
 #[cfg(target_os = "macos")]
 pub fn validate_records_with_log(
-    roots: &[PathBuf],
+    _roots: &[PathBuf],
     mut records: Vec<Option<StoredJunkRoot>>,
-    log: Option<&ChangeLog>,
+    _log: Option<&ChangeLog>,
 ) -> Vec<Option<StoredJunkRoot>> {
-    for (root, record) in roots.iter().zip(&mut records) {
-        let valid = match (log, record.as_ref()) {
-            (Some(log), Some(stored))
-                if !stored.preview_only
-                    && !log.must_rescan
-                    && stored.matches_root_with_rules(root, &stored.rules_digest) =>
-            {
-                stored.since_event_id.is_some_and(|since| {
-                    !log.events.iter().any(|event| {
-                        event.id > since && paths_overlap(Path::new(&event.path), root)
-                    })
-                })
-            }
-            _ => false,
-        };
-        if !valid {
-            *record = None;
-        }
-    }
+    records.fill(None);
     records
 }
 
@@ -559,20 +539,7 @@ fn validate_records(
     roots: &[PathBuf],
     records: Vec<Option<StoredJunkRoot>>,
 ) -> Vec<Option<StoredJunkRoot>> {
-    let since = records
-        .iter()
-        .flatten()
-        .filter_map(StoredJunkRoot::since_event_id)
-        .min();
-    let paths: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-    let log = since.and_then(|since| events_since(&paths, since, FSEVENTS_TIMEOUT).ok());
-    validate_records_with_log(roots, records, log.as_ref())
-}
-
-/// Ancestor events cannot be discarded: a parent change may rename or replace a cached root.
-#[cfg(target_os = "macos")]
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    validate_records_with_log(roots, records, None)
 }
 
 fn observed_root_binding(
@@ -1044,102 +1011,76 @@ mod tests {
         assert!(CacheReader::new(&cache).roots(&roots, Some(&[0; 32]))[0].is_some());
     }
 
+    // Optional native IO comparison, with equal historical rows verified before timing.
     #[test]
-    fn invalidation_uses_path_components_and_includes_ancestors() {
-        assert!(paths_overlap(Path::new("/root"), Path::new("/root/cache")));
-        assert!(paths_overlap(
-            Path::new("/root/cache/file"),
-            Path::new("/root/cache")
-        ));
-        assert!(!paths_overlap(
-            Path::new("/root/cache-other"),
-            Path::new("/root/cache")
-        ));
-    }
-
-    // A manual native microbenchmark; excluded from normal CI because event daemon latency is
-    // host-dependent. Both paths validate exactly the same roots and assert identical hits.
-    #[test]
-    #[ignore = "native FSEvents timing experiment; run explicitly with --nocapture"]
-    fn benchmark_batched_root_validation() {
+    #[ignore = "native historical cache-read timing experiment; run explicitly with --nocapture"]
+    fn benchmark_batched_historical_root_reads() {
         let (_guard, fixture) = temp_cache();
         let roots: Vec<_> = (0..24)
             .map(|index| {
                 let root = fixture.join(format!("root-{index}"));
                 fs::create_dir(&root).unwrap();
+                write(
+                    &fixture,
+                    &StoredJunkRoot::capture(&root, vec![], 12, [0; 32]).unwrap(),
+                )
+                .unwrap();
                 root
             })
             .collect();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let records = loop {
-            let cursor = current_event_id();
-            let records: Vec<_> = roots
-                .iter()
-                .map(|root| Some(StoredJunkRoot::capture(root, vec![], cursor, [0; 32]).unwrap()))
-                .collect();
-            if validate_records(&roots, records.clone())
-                .iter()
-                .all(Option::is_some)
-            {
-                break records;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fixture history did not settle"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        };
         for _ in 0..3 {
             let started = std::time::Instant::now();
             let serial: Vec<_> = roots
                 .iter()
-                .zip(&records)
-                .map(|(root, record)| record.as_ref().unwrap().is_current(root))
+                .map(|root| {
+                    CacheReader::new(&fixture)
+                        .historical_roots(std::slice::from_ref(root))
+                        .pop()
+                        .flatten()
+                })
                 .collect();
             let serial_elapsed = started.elapsed();
             let started = std::time::Instant::now();
-            let batch: Vec<_> = validate_records(&roots, records.clone())
-                .iter()
-                .map(Option::is_some)
-                .collect();
+            let batch = CacheReader::new(&fixture).historical_roots(&roots);
             let batch_elapsed = started.elapsed();
             assert_eq!(serial, batch);
-            assert!(batch.iter().all(|hit| *hit));
-            eprintln!("24 unchanged roots: serial={serial_elapsed:?}, batch={batch_elapsed:?}");
+            assert!(batch.iter().all(Option::is_some));
+            eprintln!("24 historical roots: serial={serial_elapsed:?}, batch={batch_elapsed:?}");
         }
-        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]
-    fn an_untouched_root_round_trips_as_current() {
+    fn an_untouched_root_round_trips_as_history_without_current_authority() {
         let (_fixture, cache) = temp_cache();
         let root = cache.join("root");
         fs::create_dir(&root).unwrap();
-        let canonical = fs::canonicalize(&root).unwrap();
-        // Creation events are asynchronous and can be coalesced after HistoryDone. Wait for
-        // a quiet fixture instead of incorrectly requiring immediate cache acceptance.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let stored = StoredJunkRoot::capture(
-                &canonical,
-                vec![sample_candidate("a")],
-                current_event_id(),
-                [0; 32],
-            )
+        let record = StoredJunkRoot::capture(
+            &root,
+            vec![sample_candidate("a")],
+            current_event_id(),
+            [0; 32],
+        )
+        .unwrap();
+        write(&cache, &record).unwrap();
+        let loaded = CacheReader::new(&cache)
+            .historical_roots(std::slice::from_ref(&root))
+            .pop()
+            .flatten()
             .unwrap();
-            write(&cache, &stored).unwrap();
-            let loaded = load(&cache, &canonical).expect("stored");
-            assert_eq!(loaded.candidates_len(), 1);
-            if loaded.is_current(&canonical) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fixture history did not settle"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        fs::remove_dir_all(cache).unwrap();
+        assert_eq!(loaded.candidates_len(), 1);
+        assert_eq!(loaded, record);
+        assert!(
+            validate_records_with_log(
+                &[root],
+                vec![Some(loaded)],
+                Some(&ChangeLog {
+                    events: vec![],
+                    must_rescan: false
+                })
+            )[0]
+            .is_none(),
+            "no delivered events cannot prove current tree coverage"
+        );
     }
 
     #[test]

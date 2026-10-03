@@ -1,16 +1,16 @@
 //! Minimal, read-only bindings to the macOS FSEvents change log.
 //!
-//! FSEvents records a persistent, per-volume, monotonically increasing event for every change
-//! the filesystem notices, including file content modifications. That is the missing input for a
-//! reusable scan cache: at scan time we capture the current event id, and on the next scan we ask
-//! FSEvents for every event *since* that id under a root. No event under the root means its stored
-//! result is still true; any event (or a dropped/history-lost flag) invalidates it.
+//! FSEvents records persistent change notifications, including content modifications. Capture
+//! a cursor before observations so subsequently delivered changes remain relevant to the next
+//! validation. Notifications are advisory: a recently completed write can be delivered after
+//! HistoryDone, so an empty historical drain cannot prove current tree facts. Consumers need
+//! independent current evidence before reusing filesystem values.
 //!
 //! FSEvents is a notification daemon delivered on a `CFRunLoop`, so a one-shot historical query
 //! means creating a stream, briefly spinning a run loop to drain it, and tearing everything down.
 //! All pointers are released and nothing outlives the function that created them. Failures always
-//! degrade to "rescan" in the caller; this module never claims a root is unchanged unless the
-//! change log itself says the history is complete and empty for it.
+//! degrade to "rescan" in the caller. Completeness here describes the delivered historical
+//! batch, not an atomic observation barrier or a guarantee that the tree is unchanged now.
 
 #![cfg(target_os = "macos")]
 
@@ -84,7 +84,8 @@ pub fn current_event_id() -> EventId {
 /// `timeout`.
 ///
 /// The drain is honest about coverage. Any must-scan/dropped/root-changed event sets
-/// [`ChangeLog::must_rescan`]; a clean, fully drained history yields the exact event list. A
+/// [`ChangeLog::must_rescan`]; a clean drain yields the delivered historical event list.
+/// Recently completed writes can arrive later; this is not a current-tree freshness oracle. A
 /// timeout leaves the result unusable (treated by callers as a rescan) rather than partially read.
 /// Query inputs are limited to 256 absolute UTF-8 roots and 1 MiB of path bytes. Owned history
 /// is limited to 65,536 events and a 16 MiB estimate including path and Vec capacities. Exhaustion

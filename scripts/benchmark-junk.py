@@ -182,7 +182,7 @@ def measure(args):
             label = sample["requestedState"]
             if label == "warm-attempt":
                 label = ("root-cache-hit" if timing["rootCacheHits"] == len(roots) else
-                         "warm-os-cache-root-miss")
+                         "warm-attempt-root-miss")
             groups.setdefault(label, []).append(sample)
         summary = {label: {
             "samples": len(group),

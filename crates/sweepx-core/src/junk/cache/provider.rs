@@ -46,14 +46,12 @@ pub struct SubtreeCacheProvider {
 }
 
 impl SubtreeCacheProvider {
-    /// Loads both cache layers and validates them with one complete history drain.
+    /// Compatibility entry point for file-index preparation. Candidate slots always miss.
     ///
-    /// The query covers every cached consumer from the oldest root/index cursor. Each consumer
-    /// filters events by its own cursor, so older index events cannot invalidate newer root
-    /// records. Both caches are loaded before querying: a subsequently loaded older index
-    /// could otherwise require history that the shared observation did not cover.
-    /// Candidate records additionally require the current classification context. A changed or
-    /// unknown context does not invalidate file facts or require a second history query.
+    /// A one-shot event history cannot qualify current whole-root facts: recently completed
+    /// writes can arrive after HistoryDone. Callers must freshly traverse roots, while cached
+    /// file lengths still require live type/length confirmation in the scanner. The context
+    /// argument and aligned slots remain for callers migrating from whole-root replay.
     pub fn prepare(
         cache_dir: &Path,
         roots: &[PathBuf],
@@ -88,16 +86,11 @@ impl SubtreeCacheProvider {
         change_count: usize,
         change_bytes: usize,
     ) -> (Self, Vec<Option<StoredJunkRoot>>) {
-        let mut reader = junk_cache::CacheReader::new(cache_dir);
-        let records = reader.roots(roots, context);
-        Self::prepare_loaded(
-            cache_dir,
-            roots,
-            reader,
-            records,
-            query,
-            change_count,
-            change_bytes,
+        let _ = context;
+        let reader = junk_cache::CacheReader::new(cache_dir);
+        (
+            Self::prepare_loaded(cache_dir, roots, reader, query, change_count, change_bytes),
+            vec![None; roots.len()],
         )
     }
 
@@ -112,12 +105,10 @@ impl SubtreeCacheProvider {
             cache_dir,
             roots,
             reader,
-            vec![None; roots.len()],
             |paths, since| events_since(paths, since, DRAIN_TIMEOUT),
             MAX_CHANGE_PATHS,
             MAX_CHANGE_BYTES,
         )
-        .0
     }
 
     /// Loads original-scope historical candidates and file indexes under the same shared read
@@ -145,12 +136,10 @@ impl SubtreeCacheProvider {
             cache_dir,
             roots,
             reader,
-            vec![None; roots.len()],
             query,
             MAX_CHANGE_PATHS,
             MAX_CHANGE_BYTES,
-        )
-        .0;
+        );
         for (root, preview) in roots.iter().zip(previews) {
             if let Some(state) = provider.roots.get_mut(root) {
                 state.preview = preview;
@@ -163,11 +152,10 @@ impl SubtreeCacheProvider {
         cache_dir: &Path,
         roots: &[PathBuf],
         mut reader: junk_cache::CacheReader,
-        records: Vec<Option<StoredJunkRoot>>,
         query: impl FnOnce(&[&Path], FsEventId) -> std::io::Result<ChangeLog>,
         change_count: usize,
         change_bytes: usize,
-    ) -> (Self, Vec<Option<StoredJunkRoot>>) {
+    ) -> Self {
         let max_roots = junk_cache::Limits::default().roots;
         let bindings: BTreeMap<_, _> = roots
             .iter()
@@ -184,25 +172,19 @@ impl SubtreeCacheProvider {
             .take(max_roots)
             .filter_map(|root| Some((root.clone(), reader.index(root)?)))
             .collect();
-        let since = records
-            .iter()
-            .flatten()
-            .filter_map(StoredJunkRoot::since_event_id)
-            .chain(indexes.values().map(StoredSubtreeIndex::since_event_id))
+        let since = indexes
+            .values()
+            .map(StoredSubtreeIndex::since_event_id)
             .min();
         let paths: Vec<&Path> = roots
             .iter()
             .take(max_roots)
-            .enumerate()
-            .filter(|(ordinal, root)| {
-                records[*ordinal].is_some() || indexes.contains_key(root.as_path())
-            })
-            .map(|(_, root)| root.as_path())
+            .filter(|root| indexes.contains_key(root.as_path()))
+            .map(|root| root.as_path())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let log = since.and_then(|since| query(&paths, since).ok());
-        let mut records = junk_cache::validate_records_with_log(roots, records, log.as_ref());
         // A root replaced while history was draining cannot lend its old listing to the
         // replacement tree, even if that change is delivered only in the next event batch.
         let rebound: BTreeSet<_> = roots
@@ -216,16 +198,6 @@ impl SubtreeCacheProvider {
             })
             .cloned()
             .collect();
-        // Binding observations are newer than the history validation above. They may expose a
-        // replacement before its event is delivered; complete root facts must also be rejected.
-        for (root, record) in roots.iter().zip(&mut records) {
-            if rebound
-                .iter()
-                .any(|changed| changed.starts_with(root) || root.starts_with(changed))
-            {
-                *record = None;
-            }
-        }
         // Charge provider root keys/nodes before admitting the shared change map. Root count
         // is bounded independently; this estimate is conservative rather than allocator RSS.
         let auxiliary = roots.iter().take(max_roots).fold(0usize, |bytes, root| {
@@ -240,9 +212,6 @@ impl SubtreeCacheProvider {
         } else {
             None
         };
-        if changes.is_none() {
-            records.fill(None);
-        }
         let root_states = if changes.is_some() {
             indexes
                 .into_iter()
@@ -270,14 +239,11 @@ impl SubtreeCacheProvider {
         } else {
             BTreeMap::new()
         };
-        (
-            Self {
-                cache_dir: cache_dir.to_path_buf(),
-                roots: root_states,
-                changes,
-            },
-            records,
-        )
+        Self {
+            cache_dir: cache_dir.to_path_buf(),
+            roots: root_states,
+            changes,
+        }
     }
 
     /// Persists a bounded optional index for this root without copying other roots' listings.
@@ -1139,11 +1105,10 @@ mod tests {
         reader.limits = limits;
         reader.budget = junk_cache::ReadBudget::new(limits);
         assert!(reader.historical_roots(&roots)[0].is_some());
-        let (provider, _) = SubtreeCacheProvider::prepare_loaded(
+        let provider = SubtreeCacheProvider::prepare_loaded(
             &cache,
             &roots,
             reader,
-            vec![None],
             |_, _| panic!("no index was admitted, so history is unnecessary"),
             MAX_CHANGE_PATHS,
             MAX_CHANGE_BYTES,
@@ -1243,8 +1208,8 @@ mod tests {
             empty_log,
         );
         assert!(
-            old_records[0].is_some(),
-            "unchanged context admits the warm empty report"
+            old_records[0].is_none(),
+            "even unchanged context cannot prove current tree coverage"
         );
         for current in [Some(&new_context), None] {
             let (provider, records) = SubtreeCacheProvider::prepare_with_query(
@@ -1342,8 +1307,8 @@ mod tests {
         );
         assert_eq!(calls.get(), 1);
         assert!(
-            records[0].is_some(),
-            "old event must not invalidate newer root record"
+            records[0].is_none(),
+            "an event cursor cannot qualify whole-root replay"
         );
         assert!(records[1].is_none(), "new event must invalidate its root");
         let device = &provider.roots[&roots[0]];
@@ -1406,7 +1371,11 @@ mod tests {
                 })
             });
         assert!(records[0].is_none());
-        assert!(records[1].is_some());
+        assert!(records[1].is_none());
+        assert!(
+            !provider.roots[&roots[1]].unusable,
+            "unchanged native binding keeps independent file facts"
+        );
         let state = &provider.roots[&roots[0]];
         assert!(state.unusable);
         assert!(
@@ -1638,7 +1607,7 @@ mod tests {
                 Ok(log_of(&[]))
             },
         );
-        assert!(records[0].is_some() && records[1].is_some());
+        assert!(records.iter().all(Option::is_none));
         assert!(records[2..].iter().all(Option::is_none));
         assert_eq!(provider.roots.len(), 2);
         assert!(provider.changes.unwrap().paths.is_empty());
@@ -1663,3 +1632,7 @@ mod tests {
         assert!(provider.plan_entries(&parent, &[child]).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "freshness_tests.rs"]
+mod freshness_tests;

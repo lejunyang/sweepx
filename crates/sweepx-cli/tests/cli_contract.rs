@@ -1650,6 +1650,80 @@ fn junk_timings_preserve_report_and_account_for_phases() {
     assert!(accounted <= timing["totalNs"].as_u64().unwrap());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn warm_junk_reports_fresh_changes_without_waiting_for_events() {
+    let fixture = TempDir::new().unwrap();
+    let root = git_fixture_root(&fixture);
+    let state = TempDir::new().unwrap();
+    let state_root = git_fixture_root(&state);
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::create_dir_all(root.join("target/deep")).unwrap();
+    let artifact = root.join("target/deep/artifact");
+    fs::write(&artifact, b"old").unwrap();
+    let report = || {
+        let output = cli_command()
+            .args(["--format", "json", "--state-dir"])
+            .arg(&state_root)
+            .args(["junk", "--timings"])
+            .arg(&root)
+            .timeout(std::time::Duration::from_secs(20))
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let timings = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|value| value["schema"] == "sweepx.junk.timings/v1")
+            .unwrap();
+        assert_eq!(timings["rootCacheHits"], 0);
+        assert_eq!(timings["rootCacheMisses"], 1);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(report()["candidateCount"], 1);
+    // No event-settling delay: a cached report must observe both changed length and new rules.
+    fs::write(&artifact, b"a changed artifact with a different length").unwrap();
+    fs::create_dir_all(root.join("nested/target")).unwrap();
+    fs::write(root.join("nested/Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let nested_artifact = root.join("nested/target/output");
+    fs::write(&nested_artifact, b"new nested output").unwrap();
+    let changed = report();
+    let rows = changed["candidates"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for (path, payload) in [
+        (root.join("target"), &artifact),
+        (root.join("nested/target"), &nested_artifact),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row["path"] == path.display().to_string())
+            .unwrap();
+        assert_eq!(row["ruleId"], "rust.target");
+        assert_eq!(row["sizeIsLogical"], true);
+        assert_eq!(row["reclaimable"]["state"], "known");
+        // Ordinary metadata is independent of the scanner and its stored file index.
+        assert_eq!(
+            row["reclaimable"]["value"],
+            fs::metadata(payload).unwrap().len().to_string()
+        );
+    }
+    fs::remove_file(root.join("Cargo.toml")).unwrap();
+    let removed = report();
+    let rows = removed["candidates"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["path"],
+        root.join("nested/target").display().to_string()
+    );
+    assert_eq!(fs::read(&nested_artifact).unwrap(), b"new nested output");
+    assert_eq!(
+        fs::read(&artifact).unwrap(),
+        b"a changed artifact with a different length"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn junk_scan_reports_only_marker_bound_project_artifacts() {

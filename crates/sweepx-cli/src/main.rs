@@ -20,7 +20,7 @@ mod tcc_access;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
 use sweepx_core::junk::JunkService;
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::ProjectJunkRule as JunkRule;
 #[cfg(test)]
 use sweepx_core::junk::load_project_rules as load_project_junk_rules;
@@ -1140,15 +1140,15 @@ struct JunkCleanOptions<'a> {
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::candidate::GitIgnoreEvidence;
 use sweepx_core::junk::candidate::JunkCandidate;
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::candidate::refresh_candidate_interpretation;
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::candidate::{assemble_platform_candidate, assemble_project_candidate};
 use sweepx_core::junk::git::{GitEvidenceLimits, GitEvidenceSession};
 
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::platform::PlatformJunkEvidence;
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::platform::PlatformJunkRule;
 #[cfg(all(test, target_os = "macos"))]
 use sweepx_core::junk::platform::load_platform_junk_rules;
@@ -1168,7 +1168,7 @@ fn junk_candidate_to_stored(candidate: &JunkCandidate) -> junk_cache::StoredJunk
 /// Tool interpretation is rebuilt from this invocation. Git metadata is not retained in the
 /// root facts, so project candidates first revert to base confidence with an explicit blocker;
 /// the current Git session then independently refreshes them using validated traversal facts.
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn stored_candidate_to_junk(
     stored: junk_cache::StoredJunkCandidate,
     project_rules: &[JunkRule],
@@ -1235,8 +1235,6 @@ fn run_junk_scan(
             return ProcessExitCode::from(12);
         }
     };
-    #[cfg(target_os = "macos")]
-    let rules = project_service.project_rules();
     let PlatformJunkSetup {
         rules: platform_rules,
         evidence,
@@ -1320,45 +1318,16 @@ fn run_junk_scan(
 
     timings.phase("setup");
 
-    // Load both cache generations before the single history observation. The pre-scan cursor
-    // above remains the next generation's cursor, preserving changes racing with validation.
+    // Only file indexes participate in acceleration. Their lengths must match live native
+    // enumeration; an advisory event history cannot authorize skipping a whole root.
     #[cfg(target_os = "macos")]
-    let (subtree_provider, cache_records) = subtree_provider::SubtreeCacheProvider::prepare(
+    let subtree_provider = subtree_provider::SubtreeCacheProvider::prepare_files(
         cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
         &canonical_roots,
-        classification_context.as_ref(),
+        junk_cache::CacheReader::new(cache_dir.as_deref().unwrap_or(Path::new("/nonexistent"))),
     );
-
-    // Split roots into FSEvents-validated cache hits and the indexes that still need scanning.
-    #[cfg(target_os = "macos")]
-    let (hit_records, miss_indexes): (Vec<junk_cache::StoredJunkRoot>, Vec<usize>) =
-        match &cache_dir {
-            Some(_) => {
-                let mut hits = Vec::new();
-                let mut misses = Vec::new();
-                for (index, record) in cache_records.into_iter().enumerate() {
-                    match record {
-                        Some(record) => hits.push(record),
-                        _ => misses.push(index),
-                    }
-                }
-                (hits, misses)
-            }
-            None => (Vec::new(), (0..canonical_roots.len()).collect()),
-        };
-    // Off macOS there is no FSEvents validity source; every root is scanned.
-    #[cfg(not(target_os = "macos"))]
     let miss_indexes: Vec<usize> = (0..canonical_roots.len()).collect();
 
-    #[cfg(target_os = "macos")]
-    let mut cached_candidates: Vec<JunkCandidate> = hit_records
-        .into_iter()
-        .flat_map(junk_cache::StoredJunkRoot::into_candidates)
-        .filter_map(|stored| stored_candidate_to_junk(stored, rules, &platform_rules, &evidence))
-        .collect();
-    // Caching is macOS-only; other platforms have no restored candidates.
-    #[cfg(not(target_os = "macos"))]
-    let mut cached_candidates: Vec<JunkCandidate> = Vec::new();
     let miss_roots: Vec<PathBuf> = miss_indexes
         .iter()
         .map(|index| canonical_roots[*index].clone())
@@ -1464,17 +1433,15 @@ fn run_junk_scan(
         sweepx_core::junk::format::ProjectFormatLimits::default(),
         CancellationToken::new(),
     );
-    for candidate in fresh_candidates.iter_mut().chain(&mut cached_candidates) {
+    for candidate in &mut fresh_candidates {
         formats.refresh(candidate);
     }
     timings.phase("projectFormats");
     git_session.refresh(&mut fresh_candidates);
-    git_session.refresh(&mut cached_candidates);
     timings.phase("gitEvidence");
 
-    // Persist every scanned (miss) root with the candidates attributed to its deepest root, then
-    // keep other roots while the bounded cache has space. A root with zero candidates is still
-    // written so an empty-but-scanned root stays a hit next time.
+    // Persist original observations for historical TUI presentation. Every root is freshly
+    // traversed on the next report; these rows never qualify a whole-root scan shortcut.
     #[cfg(target_os = "macos")]
     if let Some(cache) = &cache_dir
         && let Some(scan) = &scan
@@ -1568,8 +1535,7 @@ fn run_junk_scan(
     }
 
     timings.phase("cacheWrite");
-    let mut candidates = cached_candidates;
-    candidates.append(&mut fresh_candidates);
+    let mut candidates = fresh_candidates;
     candidates.sort_by(|left, right| {
         left.ancestor_ids
             .len()
@@ -3288,19 +3254,12 @@ mod tests {
         junk_cache::write(&cache, &record).unwrap();
         let restore = || {
             let roots = vec![root.clone()];
-            let read = junk_cache::CacheReader::new(&cache).roots(&roots, Some(&digest));
-            // Controlled complete history: only Git inputs outside this root are mutated below.
-            let mut valid = junk_cache::validate_records_with_log(
-                &roots,
-                read,
-                Some(&sweepx_scanner::ChangeLog {
-                    events: vec![],
-                    must_rescan: false,
-                }),
-            );
-            valid
+            // Test persistent facts independently of the retired whole-root current replay.
+            // This checks fresh Git interpretation, not freshness of the historical tree.
+            junk_cache::CacheReader::new(&cache)
+                .historical_roots(&roots)
                 .remove(0)
-                .expect("the filesystem and classification cache must actually hit")
+                .expect("historical filesystem facts round trip")
                 .into_candidates()
                 .into_iter()
                 .map(|stored| {

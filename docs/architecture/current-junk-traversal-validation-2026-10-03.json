@@ -1,0 +1,309 @@
+{
+  "schema": "sweepx.current-junk-traversal-validation/v1",
+  "date": "2026-10-03",
+  "base_commit": "7d2044b",
+  "host": {
+    "platform": "aarch64-apple-darwin",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "build": "unoptimized dev/test; debug symbols=0; incremental=0"
+  },
+  "scope": [
+    "Current junk candidates always derive from fresh native traversal; historical rows never skip a whole root",
+    "MacOS file-index lengths remain eligible only with native regular-file type and equal logical length confirmation",
+    "Ordinary reports no longer read whole-root candidate JSON or consume that shared read budget",
+    "Compatibility candidate slots always miss; rootCacheHits=0, rootCacheMisses=rootCount; rootCacheValidation remains a stable field for index preparation",
+    "Original complete history may keep original coverage but restores stale provenance, Historical state and no transient execution authority",
+    "FSEvents implementation and deadlines unchanged; documentation distinguishes delivered history from recursive tree freshness"
+  ],
+  "independent_oracles": [
+    "Three native tests use a controlled empty event history despite completed changes: changed nested lengths/new candidates, removed parent rule marker, regular-to-symlink replacement",
+    "Ordinary recursive read_dir/symlink_metadata checks logical quantities; outside link target remains unchanged and excluded",
+    "Current candidates belong to the fresh scan ID; an unchanged file retains an index reuse plan",
+    "Actual CLI creates a cache, immediately changes length/adds a project/removes a marker, verifies current paths/rules/exact decimal-string logical bytes with ordinary metadata, and preserves payloads; no settle delay",
+    "End-to-end benchmark verifies candidate paths, rule/risk and logical bytes with ordinary walk/stat before comparing cold/warm static facts"
+  ],
+  "not_delivered": [
+    "A synchronous universal FSEvents tree observation barrier or closure of all event-delivery races",
+    "Windows private historical storage; Linux/Windows validated file-index acceleration",
+    "Native Linux/Windows runtime or Windows MSVC checks",
+    "Complete discovery/analysis/legacy public API retained-container and request admission audit",
+    "Root-skip acceleration, release/RSS results, a paired pre-fix benchmark or p95/p99",
+    "Root causes of previous debug warm PTY/probe intermittent delays",
+    "Final pathname race between revalidation and operating-system Trash"
+  ],
+  "checks": {
+    "native_provider_tests": {
+      "command": "cargo test -p sweepx-core --all-features junk::cache::provider -- --test-threads=1",
+      "exit_code": 0,
+      "log_sha256": "0a1bd63f64a17812a4daaf3bcc6a279e23c288b2cbcc72c0a07810b49084ef17",
+      "counts": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0
+      },
+      "summaries": [
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 314 filtered out; finished in 0.39s"
+      ],
+      "note": "22 passed; overlaps affected core matrix"
+    },
+    "affected_core_cli_tests": {
+      "command": "cargo test -p sweepx-core -p sweepx-cli --all-features -- --test-threads=1",
+      "exit_code": 0,
+      "log_sha256": "c500c8cadd365233369963907f25c15d74877a8e2d47458ac2f62788c20b8674",
+      "counts": {
+        "passed": 465,
+        "failed": 0,
+        "ignored": 2
+      },
+      "summaries": [
+        "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s",
+        "test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.38s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 333 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 38.04s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    "new_cli_immediate_mutation": {
+      "command": "cargo test -p sweepx-cli --all-features --test cli_contract warm_junk_reports_fresh_changes_without_waiting_for_events -- --exact",
+      "exit_code": 0,
+      "log_sha256": "60d2e2d31209777e353752ffb09ae805c0c322303da619ed8aa1befd5ca8f05f",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.98s"
+      ]
+    },
+    "reused_unchanged_packages": {
+      "command": "cargo test --workspace --exclude sweepx-core --exclude sweepx-cli --all-features -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "exit_code": 0,
+      "log_sha256": "7e1943374784f3b5ef13764f88063b3271a96a8ebc758f6d48c6b54e7f47c6c2",
+      "counts": {
+        "passed": 625,
+        "failed": 0,
+        "ignored": 1
+      },
+      "summaries": [
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.41s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s",
+        "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.06s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s",
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 97 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.23s",
+        "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+        "test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.58s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "note": "Reused unchanged implementation results from portable-junk-history-validation-2026-10-03.json; skip filter matched no case in those packages. Platform change in this slice is rustdoc only"
+    },
+    "affected_lint": {
+      "command": "cargo clippy -p sweepx-core -p sweepx-cli -p sweepx-platform --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "8fe74d0cced0bb70a9bd1a8431ded248814b927d90e65aea83b5b73bf38ab6a6"
+    },
+    "host_workspace_lint": {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "0c88d68eeb3849ec44e2ab97f6694efc29320308c440d968bc9582364baf38fe"
+    },
+    "linux_workspace_lint": {
+      "command": "workspace all-targets/all-features clippy --target x86_64-unknown-linux-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "a2e9b98db1b2e463e8bee85c67c601a0cd0fc2855054c0f7f9b01747f99ba5ae"
+    },
+    "windows_workspace_lint": {
+      "command": "workspace all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "a33fdc78bfcea0f7c91108441cfff7e41bb5df9eb46171ac2288115d9ff4cc5c"
+    },
+    "final_cli_host_lint": {
+      "command": "cargo clippy -p sweepx-cli --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "a8c58b8d9c65ca54430776743a6a6f9a164146aca0ea38a45c9a56a704ee96a1"
+    },
+    "final_cli_linux_lint": {
+      "command": "CLI all-targets/all-features clippy --target x86_64-unknown-linux-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "c19f1b6c9e16c2f4eebb35085517224e6c6e37e46a2f460efe5809f20b03b737"
+    },
+    "final_cli_windows_lint": {
+      "command": "CLI all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "9f5e2a7c68544ae0057268454260314a931091f633f54ef8c3c742fb9e579673"
+    },
+    "build": {
+      "command": "cargo build -p sweepx-cli --all-features",
+      "exit_code": 0,
+      "log_sha256": "aa46968106ef7c8eefa0beb7462e8bde32dde5e6854727d9f8e6cc2ba35afd6e"
+    },
+    "benchmark_script_tests": {
+      "command": "python -m unittest discover -s scripts/tests -p test_benchmark_junk.py",
+      "exit_code": 0,
+      "log_sha256": "f945a8240ca4cf76be06b8803c11ed2e7564bed9546c5aee8b5c93b9f07d9592",
+      "passed": 5
+    },
+    "fmt": {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "docs": {
+      "command": "python scripts/lint_docs.py",
+      "exit_code": 0,
+      "markdown_files": 54,
+      "log_sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1"
+    },
+    "docs_checker_tests": {
+      "command": "python -m unittest discover -s scripts/tests -p test_lint_docs.py",
+      "exit_code": 0,
+      "passed": 23,
+      "log_sha256": "507b70d86e6ec5f33bbb33998e9731960aedaf434d46690f4d995215d5439dec"
+    },
+    "core_package_list": {
+      "command": "cargo package -p sweepx-core --list --allow-dirty",
+      "exit_code": 0,
+      "contains": [
+        "src/junk/cache.rs",
+        "src/junk/cache/provider.rs",
+        "src/junk/cache/freshness_tests.rs"
+      ],
+      "log_sha256": "30439905863139ca31f2bb0ea26e5a48dbc9bede76402bd26455df58594ff82b",
+      "note": "Package inventory only, not registry dependency compilation or publication"
+    },
+    "cli_package_list": {
+      "command": "cargo package -p sweepx-cli --list --allow-dirty",
+      "exit_code": 0,
+      "contains": [
+        "src/main.rs",
+        "tests/cli_contract.rs"
+      ],
+      "log_sha256": "d19ede730f0b785351700f267250c7991a591fc77bbf893b76a95c95f3d12898",
+      "note": "Package inventory only, not registry dependency compilation or publication"
+    },
+    "artifact_content": {
+      "source_hashes_match": true,
+      "benchmark_hash_matches": true,
+      "complete_samples": 9,
+      "root_cache_hits_each": 0,
+      "root_cache_misses_each": 4
+    },
+    "final_core_host_lint": {
+      "command": "cargo clippy -p sweepx-core --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "3161aa185770499053696ba827f915eb0664993250cd4d97884172975309f3f2"
+    },
+    "diff": {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "reuse_note": "After the runtime/test checks, only core rustdoc was clarified; final host core lint, fmt and diff passed. Runtime and cross-platform behavior results are reused for unchanged implementation."
+  },
+  "distinct_test_coverage": {
+    "passed": 1091,
+    "failed": 0,
+    "ignored": "2 core existing/opt-in tests, including the renamed historical-read timing experiment; 1 platform existing/opt-in test. No ignored test was counted as passed",
+    "composition": "465 complete affected core/CLI tests + 1 later new CLI regression + 625 unchanged-package results reused from the base commit; not a second full workspace command",
+    "system_trash": "The ordinary CLI macOS system Trash integration ran and passed in the affected matrix; no exclusion applied there"
+  },
+  "benchmark": {
+    "artifact": "fresh-junk-traversal-benchmark-2026-10-03.json",
+    "sha256": "a880d1bd49781324e090d6d8d51f2ff3abf3b9a628ada67bf485928c3b5c62ed",
+    "workload": "4 generated project roots; 512 payload files each; 3 cold, 3 warm attempts, 3 immediate mutations; settleSeconds=0",
+    "cache_state": "Cold means empty SweepX state only. OS caches are uncontrolled. Root hits are 0 in all samples; file-index eligibility is checked separately by the native regression, not counted by this diagnostic",
+    "verification": "All reports complete; ordinary walk/stat oracle passes; cold/warm static facts hashes equal; dynamic Git/tool interpretation not compared",
+    "median_ms": {
+      "cold_wall": 113.694,
+      "warm_wall": 115.271584,
+      "changed_wall": 101.210583,
+      "cold_traversal": 50.009958,
+      "warm_traversal": 35.548834,
+      "cold_index_preparation": 2.179416,
+      "warm_index_preparation": 13.715583
+    },
+    "conclusion": "Traversal is about 29 percent lower on this workload; end-to-end wall time does not improve. No causal pre-fix speedup or tail-latency claim"
+  },
+  "initial_failures": [
+    {
+      "log_sha256": "99850d263bec06ba650073cd0c663b2d302f7ec9d99e25241bf4be1256b635f1",
+      "reason": "Old test call sites still expected the provider tuple signature",
+      "repair": "Adapted tests to Self return; production signature transition explicit"
+    },
+    {
+      "log_sha256": "99850d263bec06ba650073cd0c663b2d302f7ec9d99e25241bf4be1256b635f1",
+      "reason": "Same old test call-site compile errors",
+      "repair": "No product retry; same compile correction"
+    },
+    {
+      "log_sha256": "537a34f543aabeeb4d6c6d574191355c7ef7d85900d2765b7d981161c1b33637",
+      "reason": "Four tests pinned whole-root current replay",
+      "repair": "Updated retired current assertions; preserved cursor/native-binding/file-index and fresh-candidate contracts"
+    },
+    {
+      "log_sha256": "f46ed75736c9c33e33e8f5bbbdaf91ee26f93dad2cbe8fea4019ce5a70bc18e2",
+      "reason": "New fixture lacked StoredJunkCandidate import and used a nonexistent summary scan_id field",
+      "repair": "Fixed test import and used observed root scan_id"
+    },
+    {
+      "log_sha256": "4591b91255e671110581b9bc89fb7c9c5af93a5c8933a1e3f4a8475d30ba6929",
+      "reason": "Obsolete paths_overlap helper became unused",
+      "repair": "Removed duplicate retired-root-validator helper/test; change-index ancestor/component tests remain"
+    },
+    {
+      "log_sha256": "3e3334c6f995e4e13dda3b509a30cd6046da87fbcc1bf254453a8c6642247c76",
+      "reason": "CLI restored-row imports and local rules no longer used in production",
+      "repair": "Gated test-only imports/helpers narrowly and removed unused local; no suppression"
+    },
+    {
+      "log_sha256": "b24e0c1d6d94bf78527610cb619558e28139ad3d054d0e8e9bb18d4f41ea02a5",
+      "reason": "CLI fixture compared decimal-string ByteValue with a number: string 42 vs numeric 42",
+      "repair": "Corrected the protocol type assertion; production output unchanged"
+    },
+    {
+      "log_sha256": "7215a2d3c873445d91b37c8ed9e421f4468727f1426f6b00c2226559fb3edc39",
+      "reason": "Documentation checker flagged the word unused in a negative sentence about file-index usage",
+      "repair": "Rephrased the description affirmatively; no safety suppression added"
+    }
+  ],
+  "source_sha256": {
+    "crates/sweepx-core/src/junk/cache.rs": "38997b3a0301fcced9eb89c1aa9e199038a8ae17b2530ff92861c0aa4aaa99e9",
+    "crates/sweepx-core/src/junk/cache/provider.rs": "2044d41b6a0834c6f3374dac31bfd319cd5f702f788147420bd98085d7aba4a5",
+    "crates/sweepx-core/src/junk/cache/freshness_tests.rs": "b258a32c37bfa89c3524a3eec1bf6fecbdbb68bc699c44d77599f82ed674796c",
+    "crates/sweepx-cli/src/main.rs": "84374d4a47b2f0a67bec9dc9d6b447b7097f900eadf4c0db2db30ced70679fa6",
+    "crates/sweepx-cli/tests/cli_contract.rs": "eff82b1c31f6f9f1fc981d64ed545bd6a3f94a8a99fc5c00b80c276bdbf5b440",
+    "crates/sweepx-platform/src/macos/fsevents.rs": "39ba858057f34e8ba71c4aea5b9c69e01e880cef62ae2c80ebe98a0bd9afb81d",
+    "scripts/benchmark-junk.py": "7a38173d38aaced41b0c382feb5b2d29c4a4b5d58e313628e0639f86c48081dd"
+  },
+  "build_storage": {
+    "target_approximate_gib": 1.8,
+    "available_volume_gib": 42,
+    "note": "Lean settings retained after previous native Trash cleanup; no Empty Trash or permanent deletion this slice"
+  }
+}

@@ -12,10 +12,10 @@
 
 | 问题 | 修改 | 边界 |
 | --- | --- | --- |
-| 每个 junk 根串行创建 FSEvents 流 | 所有已有根记录从最早游标批量校验，各根按自己的游标判断 | 任意历史缺失或查询失败仍退回扫描 |
+| 每个 junk 根串行创建 FSEvents 流 | 已读文件索引从最早游标批量查询，各根按自己的游标判断 | 当前结果始终现场遍历；文件复用另需原生类型和长度确认 |
 | 每个目录重复构建变更集合、甚至执行事件间两两比较 | 每设备建立一次有序路径集合，按路径分量检查祖先与后代 | 父事件不能因同时存在子事件而被丢弃 |
 | 游标在扫描后捕获，隐藏扫描期间变化 | 在缓存校验及遍历之前捕获 | 不声称扫描获得文件系统原子快照 |
-| 不完整扫描也保存成整根命中 | 仅保存完整覆盖的根 | 拒绝访问等情况会重试 |
+| 不完整扫描也保存成整根命中 | 完整根记录仅作历史展示，不接受当前整根回放 | 不完整扫描保留旧记录，后续重新观察 |
 | 规则改变而文件系统没变时继续接受旧分类 | 根记录绑定内嵌规则内容摘要 | 运行时工具环境仍需本次探测 |
 | 根发现和分类重复调用相同工具 | 两者共用本次调用的探测快照 | 不持久缓存工具配置或活动状态 |
 | npm 缓存发现执行无关版本查询 | 缓存与安装清单共享有界探测快照，不再扫描后重复查询 | 多安装副本的发现范围不缩减，预算不足的答案为 unknown |
@@ -30,7 +30,7 @@
 1. **规则系统统一（继续下沉）。** 项目与平台规则 JSON 现在都在 `sweepx-catalog::junk`，平台类型与准入放在其 `platform` 模块。`sweepx-core::junk::JunkService` 继续调用已有 cleaner VM，现通过 `with_platform` 组合平台分类，并通过 `interpret` 输出候选、依据、风险及 blockers；发现、通用候选和缓存动态解释已经移出 CLI。规则字节、机器 ID、风险保持一致，输入规模有界；名称索引及预规范化父标记保留。Linux `/tmp` 的专用原生发现及报告解释随后也已迁入 core，报告和清理预览共用测量；浏览器/known-root 发现快照和路径绑定已落地，整根候选缓存现也绑定本次启用规则与发现范围；Git 增强证据随后也已迁入 core，并在缓存命中后重新查询当前上下文。先完成具体业务边界，不新增插件框架。
 2. **缓存不止一种（预算后续已落地）。** preview cache、整根 junk 缓存和逐文件 listing 的目标不同，原设计文档中的“只存稀疏预览”已经不能描述现状。逐文件 listing 的名称、路径与多个 marker map 随文件量增长，现已补齐共享估算预算、逐根淘汰、有界持久化和原生历史/批次保留；具体范围见后续交付章节。不能因为结果行少就认为内存也少，也不能将估算预算说成 allocator RSS 的精确上限。
 3. **工具调用边界（后续已落地）。** `sweepx-core::tools` 提供共享 `ProbeRunner`，工具答案有整批预算、单次时限、输出上限和取消；安装探测与报告共享快照。由工作线程调用，无后台管道读取线程。限制覆盖子进程执行与管道读取，不承诺文件系统操作或操作系统进程创建调用具有相同的硬实时上限。Windows Job 在启动后附加，不能保证捕获附加前主动逃逸的后代；读取期限不依赖这些后代关闭 stdout。
-4. **缓存的活动状态解释（已分层）。** 整根缓存不持久保存 activity、staleFormats、Git 查询结果、classification、confidence 和 blockers。命中后按本次工具快照重新解释，证据不足为 unknown；项目规则先恢复基础 known_generated/medium，再用共享 Git 会话重新观察当前仓库、tracked 与 ignore 证据，不回放历史 ignored/high。遍历覆盖及候选内仓库边界作为文件系统事实独立保存，不能代替当前 Git 查询。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
+4. **缓存的活动状态解释（已分层）。** 历史根记录不持久保存 activity、staleFormats、Git 查询结果、classification、confidence 和 blockers。历史回放清空瞬态解释，当前候选由本次遍历、工具快照及共享 Git 会话重建；证据不足为 unknown，不回放历史 ignored/high。原遍历覆盖及候选内仓库边界作为历史文件系统事实独立保存，不能代替当前观察。工具所谓 live/stale 仅指当前报告的缓存位置，不证明没有进程持有文件。
 5. **分类扫描与交互扫描分开。** `scan --tui` 已有根准入后进入浏览、按需详情扫描的基础；普通 junk CLI 仍是收集完再拼报告。后续已加入共享 classified observer、显式目录根的工作线程会话与 `junk --tui`，见文末；垃圾 TUI 实时消费有界事件，提供取消、稳定键选择、刷新及后台回收，macOS 历史缓存与文件索引复用随后已接入；系统自动发现与 Linux 临时对象展示也已接入，临时对象的 TUI 隔离预览、完整摘要确认和结果展示随后已接入；单大根的完整子树基础候选随后已支持提前输出，目标宿主运行验证仍待完成。
 
 ## 支撑后续 TUI 的目标接口
@@ -60,6 +60,8 @@
 工作区使用固定 Rust 1.98.0。执行格式检查、workspace clippy 和本机 workspace 测试；原有 macOS 移入废纸篓集成测试 `trash_moves_ordinary_paths_without_confirmation_in_machine_invocations` 卡在系统调用，已单独排除，不能将其记为通过。后续交付已补齐 Linux/Windows 的工作区交叉 lint；对应宿主运行时仍未复验。
 
 原生缓存微基准可运行：
+
+以下是 2026-10-01 的旧整根验证微基准记录；其入口已在 2026-10-03 移除。历史计时不代表当前实现，当前候选不再整根回放，见文末修复与端到端测量。
 
 ```sh
 cargo test -p sweepx-core benchmark_batched_root_validation -- --ignored --nocapture
@@ -1104,3 +1106,17 @@ Linux 选中刷新只替换所选原生子树的候选，保留范围/规则/根
 [验证记录](portable-junk-history-validation-2026-10-03.json)区分原生 Unix 策略检查与 Linux cfg 编译：新历史/发布策略测试及已有身份、私有存储、片段刷新、TUI 门禁检查使用本机 macOS；组合检查 1,087 项通过、1 项失败、3 项既有/opt-in ignored，未排除 CLI 普通系统 Trash 集成用例且本轮通过；core doctest 0 项单独检查通过，其他包在 core 失败后补验，不称全绿工作区；Linux GNU、Windows GNU 和 host 工作区 lint 编译包含测试分支。没有原生 Linux/Windows 或 MSVC 运行结论，不把 Windows 历史缓存、Linux 文件索引或跨平台整体验收标为完成。构建继续关闭 debug symbols 和 incremental，最终 target 约 1.8 GiB，无提速/RSS 计时。
 
 本轮 core/CLI 检查有一项既有 macOS `a_change_under_the_root_invalidates_the_record` 失败：刚创建文件后，根记录被判为 current。未排除/反复重试/改变生产事件逻辑来获得通过。独立受控写入直接查询 FSEvents：约 0.7 ms 发起的查询到约 299 ms 返回空历史，约 299 ms 发起的下一次查询到约 313 ms 返回根与该文件的事件；后续观测也包含它们。这个样本证实 HistoryDone 与刚发生写入的可见性之间有缺口，未证明所有旧 settle/热缓存故障的根因都已关闭。[Apple 的事件指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)也说明通知投递存在不确定延迟。下一项先处理 macOS 当前根记录的有效性门槛，再推进 Windows 原生私有存储；不能仅加固定等待就宣称正确。此交付保留一个验证失败，不能称全绿。
+
+## 当前垃圾结果统一现场遍历（2026-10-03）
+
+上节的即时写入失败暴露实际合同缺口：原生根身份、规则/范围摘要和空 FSEvents 历史，不能证明整棵树仍与旧候选一致。[Apple 事件指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)将事件列表描述为辅助信息，并指出通知延迟不确定；SDK 的 flush 契约仅排空已缓冲事件，没有提供本次有界递归快照证明。本轮不以固定等待替代证据，移除普通 `junk` 的整根当前候选回放，每个根重新枚举目录、marker 和候选，使用本次扫描 ID、覆盖及祖先累计。根记录继续供 Linux/macOS TUI 历史首屏；上次完整覆盖不能升级成当前或删除授权。
+
+macOS 文件索引保留：集中查询变更历史后，缓存逻辑长度还须与本次原生批量枚举的普通文件类型及长度一致。新项、长度变化、链接替换和目录均回到相应现场观察；缺失分配、硬链接唯一量及可释放量不升级为零。普通报告不再读取/反序列化整根候选 JSON，避免占用共享读取预算；局部刷新仍独立读取历史片段。公开兼容入口 `prepare` / `validate_records_with_log` 保留对齐槽位，但全部返回当前候选 miss。机器字段及 schema 保持：`rootCacheHits=0`，所有根计入 `rootCacheMisses`，并不表示文件索引未使用；`rootCacheValidation` 现计量文件索引准备。
+
+[验证记录](current-junk-traversal-validation-2026-10-03.json)保留失败与修正范围。三项原生回归冻结为空事件历史，分别验证嵌套文件变大/新候选、规则 marker 删除和普通文件替换成链接；用普通目录枚举/stat 对照逻辑字节，并确认未变文件仍有复用计划、当前 ID 属于本次扫描、外部链接目标不计入。新增实际 CLI 回归在建立缓存后立即修改文件、增加嵌套项目、删除旧 marker，无 settle 等待，核对当前候选和精确逻辑长度。四项旧测试原来要求整根 current，改为检查保留的文件索引和现场候选合同；原即时写入失败通过修正准入门槛解决，没有延长事件期限或把失败重试称为修复。
+
+[完整阶段原始测量](fresh-junk-traversal-benchmark-2026-10-03.json)：2026-10-03，arm64 macOS Darwin 25.5.0、固定 Rust 1.98.0，未优化 dev/all-features 构建，关闭 symbols/incremental。4 个受控项目根、2,048 个普通产物文件，空 SweepX 缓存、热扫尝试、即时单文件变化各三次，settle=0；OS cache 未控制。脚本先普通 walk/stat 核对候选路径、规则及逻辑字节，再核对冷/热静态事实完全相同，不比较动态 Git/工具解释。冷/热端到端中位数约 113.7/115.3 ms，遍历约 50.0/35.5 ms，缓存准备约 2.2/13.7 ms；变化扫描端到端约 101.2 ms。该负载遍历阶段减少约 29%，总耗时没有改善，不宣称端到端提速。没有旧实现的配对基线、release、RSS 或 p95/p99 结论。
+
+本轮 core/CLI 完整串行检查 465 项通过、0 失败、2 项既有/opt-in ignored；随后新增实际 CLI 回归 1 项通过，未变包复用上一单元 625 项通过、1 项 ignored，共覆盖 1,091 个不同通过用例，不称第二次完整 workspace 测试。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint 通过，追加 CLI 测试的相关分支另验；fmt/diff、54 份 Markdown、23 项文档检查器和 5 项基准检查器测试及包清单检查记录在 artifact。初期签名迁移编译失败、四项旧 current 断言失败、未用代码 lint 及新增 CLI 字节字段的字符串类型断言错误分别保留；没有压制 warning 或放宽生产 cfg。交叉 lint 不证明 Linux/Windows 原生运行或 MSVC。
+
+本条关闭整根缓存虚假 current 的准入路径，未关闭所有 FSEvents 投递/旧热缓存 PTY/probe 间歇根因。接下来仍优先 Windows 私有历史存储、跨平台缓存合同及可增长容器/发现路径资源审计；Linux/Windows 验证过的文件索引、目标宿主/provider/MSVC 与最终 Trash pathname 竞态保持未完成。构建目录仍约 1.8 GiB，继续使用低占用构建；Dart/SvelteKit 扩展暂缓，整体路线图不勾选。

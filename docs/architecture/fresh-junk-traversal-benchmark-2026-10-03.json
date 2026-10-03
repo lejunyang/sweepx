@@ -1,0 +1,350 @@
+{
+  "schema": "sweepx.junk.benchmark/v1",
+  "dateUtc": "2026-10-03T09:57:30.121025+00:00",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.12.14"
+  },
+  "binary": {
+    "path": "/Users/bytedance/Desktop/Projects/lejunyang/sweepx/target/debug/sweepx",
+    "version": "sweepx 0.0.1",
+    "sha256": "b643cd464a7d1b43dd7ae12da2e92f751993460d1b54cda05d8d110d3d60dd4b",
+    "buildLabel": "dev-no-debug-no-incremental"
+  },
+  "workload": {
+    "generated": true,
+    "roots": [
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-gfbe5tp8/project-000",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-gfbe5tp8/project-001",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-gfbe5tp8/project-002",
+      "/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/sweepx-junk-benchmark-gfbe5tp8/project-003"
+    ],
+    "filesPerRoot": 512,
+    "repetitions": 3,
+    "settleSeconds": 0.0
+  },
+  "verification": {
+    "coldWarmFilesystemFactsEqual": true,
+    "independentFixtureWalk": true,
+    "dynamicGitToolInterpretationsCompared": false
+  },
+  "osCache": "uncontrolled; cold means empty SweepX cache only",
+  "summary": {
+    "cold": {
+      "samples": 3,
+      "medianWallNs": 113694000,
+      "medianPhasesNs": {
+        "cacheWrite": 20606667,
+        "classification": 70667,
+        "discovery": 23125,
+        "gitEvidence": 5507959,
+        "projectFormats": 23245791,
+        "report": 481292,
+        "rootCacheValidation": 2179416,
+        "setup": 555334,
+        "subtreeCacheValidation": 42,
+        "tail": 987750,
+        "traversal": 50009958
+      }
+    },
+    "warm-attempt-root-miss": {
+      "samples": 3,
+      "medianWallNs": 115271584,
+      "medianPhasesNs": {
+        "cacheWrite": 17098958,
+        "classification": 77333,
+        "discovery": 21250,
+        "gitEvidence": 6018542,
+        "projectFormats": 24833083,
+        "report": 498500,
+        "rootCacheValidation": 13715583,
+        "setup": 553208,
+        "subtreeCacheValidation": 375,
+        "tail": 1347500,
+        "traversal": 35548834
+      }
+    },
+    "changed": {
+      "samples": 3,
+      "medianWallNs": 101210583,
+      "medianPhasesNs": {
+        "cacheWrite": 15343666,
+        "classification": 57917,
+        "discovery": 23375,
+        "gitEvidence": 4561459,
+        "projectFormats": 20627208,
+        "report": 488000,
+        "rootCacheValidation": 13269916,
+        "setup": 547000,
+        "subtreeCacheValidation": 167,
+        "tail": 1234000,
+        "traversal": 33507500
+      }
+    }
+  },
+  "samples": [
+    {
+      "wallNs": 135050625,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 124047292,
+        "phasesNs": {
+          "discovery": 176334,
+          "setup": 1744708,
+          "rootCacheValidation": 2648750,
+          "subtreeCacheValidation": 0,
+          "traversal": 50009958,
+          "classification": 141709,
+          "projectFormats": 37180750,
+          "gitEvidence": 10002541,
+          "cacheWrite": 20606667,
+          "report": 510167,
+          "tail": 1015416
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 1,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 113694000,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 101850875,
+        "phasesNs": {
+          "discovery": 23125,
+          "setup": 555334,
+          "rootCacheValidation": 2179416,
+          "subtreeCacheValidation": 84,
+          "traversal": 53860541,
+          "classification": 70667,
+          "projectFormats": 23180583,
+          "gitEvidence": 5127417,
+          "cacheWrite": 15374083,
+          "report": 481292,
+          "tail": 987750
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 2,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 111517125,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 100584667,
+        "phasesNs": {
+          "discovery": 21125,
+          "setup": 545375,
+          "rootCacheValidation": 1285583,
+          "subtreeCacheValidation": 42,
+          "traversal": 46988708,
+          "classification": 62209,
+          "projectFormats": 23245791,
+          "gitEvidence": 5507959,
+          "cacheWrite": 21500541,
+          "report": 474750,
+          "tail": 941792
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "cold",
+      "repetition": 3,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 136895167,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 125395666,
+        "phasesNs": {
+          "discovery": 20708,
+          "setup": 514250,
+          "rootCacheValidation": 38930667,
+          "subtreeCacheValidation": 416,
+          "traversal": 35548834,
+          "classification": 67583,
+          "projectFormats": 24833083,
+          "gitEvidence": 6194500,
+          "cacheWrite": 17592167,
+          "report": 522917,
+          "tail": 1156041
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 1,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 107685917,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 96212208,
+        "phasesNs": {
+          "discovery": 21250,
+          "setup": 553208,
+          "rootCacheValidation": 13632042,
+          "subtreeCacheValidation": 375,
+          "traversal": 35466375,
+          "classification": 77333,
+          "projectFormats": 22942042,
+          "gitEvidence": 5696833,
+          "cacheWrite": 15965500,
+          "report": 494250,
+          "tail": 1347500
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 2,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 115271584,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 102981291,
+        "phasesNs": {
+          "discovery": 23541,
+          "setup": 577334,
+          "rootCacheValidation": 13715583,
+          "subtreeCacheValidation": 250,
+          "traversal": 37734917,
+          "classification": 83875,
+          "projectFormats": 25829833,
+          "gitEvidence": 6018542,
+          "cacheWrite": 17098958,
+          "report": 498500,
+          "tail": 1384167
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "warm-attempt",
+      "repetition": 3,
+      "factsSha256": "7ccf905eba81d8ab8b233c6f5103ff3c9b885303e6516e9974eedd36953e820d"
+    },
+    {
+      "wallNs": 102413334,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 91707500,
+        "phasesNs": {
+          "discovery": 24333,
+          "setup": 550250,
+          "rootCacheValidation": 12860583,
+          "subtreeCacheValidation": 167,
+          "traversal": 34202958,
+          "classification": 56000,
+          "projectFormats": 21213250,
+          "gitEvidence": 5589209,
+          "cacheWrite": 15465833,
+          "report": 499625,
+          "tail": 1234000
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 1,
+      "factsSha256": "54e7cb22fe6284728d5495f3be82b51cf44ad6ae25e355d1084d1911e8c62722"
+    },
+    {
+      "wallNs": 101210583,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 90928042,
+        "phasesNs": {
+          "discovery": 23375,
+          "setup": 547000,
+          "rootCacheValidation": 15235500,
+          "subtreeCacheValidation": 250,
+          "traversal": 33381875,
+          "classification": 61792,
+          "projectFormats": 20627208,
+          "gitEvidence": 4192625,
+          "cacheWrite": 15116292,
+          "report": 485125,
+          "tail": 1246791
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 2,
+      "factsSha256": "15874c515c066ef85790b4cec3e3f83d01976378865f98f121fd293a7743a3bb"
+    },
+    {
+      "wallNs": 98530875,
+      "timings": {
+        "schema": "sweepx.junk.timings/v1",
+        "complete": true,
+        "totalNs": 87920333,
+        "phasesNs": {
+          "discovery": 23125,
+          "setup": 542292,
+          "rootCacheValidation": 13269916,
+          "subtreeCacheValidation": 167,
+          "traversal": 33507500,
+          "classification": 57917,
+          "projectFormats": 18929291,
+          "gitEvidence": 4561459,
+          "cacheWrite": 15343666,
+          "report": 488000,
+          "tail": 1186292
+        },
+        "rootCount": 4,
+        "rootCacheHits": 0,
+        "rootCacheMisses": 4,
+        "candidateCount": 4
+      },
+      "stderr": [],
+      "requestedState": "changed",
+      "repetition": 3,
+      "factsSha256": "0e1486561c2505e96ac55a8db59aaeadab5d834aa558039b71885ab040536f1f"
+    }
+  ]
+}
