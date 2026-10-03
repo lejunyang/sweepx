@@ -982,7 +982,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Windows 私有历史存储、Linux/Windows 文件索引有效性；其余发现、候选展开、指纹、持久化及分析 TUI/legacy API 投影的资源审计 | 用户当前优先项；Linux 垃圾 TUI 已接通历史首屏，随后仍全量观察文件，共用 Unix 私有存储/恢复策略；普通 CLI scan 已改为 typed facts 筛选摘要及逐行 JSON 导出；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹、持久化及 legacy API 投影的资源审计 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已改为 typed facts 筛选摘要及逐行 JSON 导出，大文件/重复内容 TUI 已省去结束时的整份 JSON 投影；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1149,3 +1149,19 @@ Windows 垃圾会话现接入与 Linux 共用的历史读取/发布策略：显�
 Windows 原生新增四项 storage 回归已编译：保留父目录重命名/旧路径替换与重复枚举（普通 read_dir 为独立名字 oracle）、锁竞争/不继承、失败发布保留旧字节/临时清理/读取分享、真实 hard-link/Everyone DACL 拒绝及原生 basename 额度。既有 history、片段刷新及两项 session 历史首屏/系统重发现合同现在也纳入 Windows cfg；Unix symlink/非 UTF-8 夹具正确留在 Unix，未将 canonicalize workaround 应用到 Windows。两项 pure directory-page 字面 ABI/额度回归在 macOS 实际运行；不把它们当作 Windows kernel 运行。初次 Windows 编译缺少 descriptor pointer cast 和 presentation contains 的实际 Windows cfg，下一次 lint 指出定长 chunks API，均修正并记录，未压制 warning。
 
 仍未关闭 Windows/MSVC 真机、Linux 原生历史运行、云 provider、Linux/Windows 已验证文件索引、全局可增长容器/其他发现路径的资源审计、旧间歇 probe/cache/PTY 根因及最终 Trash pathname 竞态。没有本轮性能/RSS 基准；target 仍约 1.9 GiB，持续关闭 debug symbols/incremental。Dart/SvelteKit 扩展暂缓，整体路线图不勾选完成。
+
+## 大文件/重复内容 TUI 终态投影收敛（2026-10-03）
+
+原 file-analysis worker 已从同步回调收到 typed 榜单和带 live stamp 的内容组，收尾却继续生成全部 scan rows、完整分析报告和 post-scan events 的 JSON，再只取其中的状态及缺口。新增 `FileAnalysisCompletion` 和 `scan_file_analysis_completion_with_observer`，沿同一个扫描/分析流程交付回调，直接返回 operation/scan identity、最终 enclosing status 和至多九个原有限定 enum 的 snake_case 缺口。CLI 大文件/重复内容 TUI 已接入；没有第二套扫描、分类、内容校验或新 crate。
+
+该路径在原生阶段后不构建 scan/analysis JSON，已可靠交付的报告随后释放。没有持久 journal 的 observer-only 客户端也不构建未消费的 post-scan events；Linux 指定 state directory 时仍构建并保存原 journal/terminal snapshot，保存失败继续返回错误。完整 ranking/group 回调不等于成功终态：最终回调中的取消、后续状态写入失败、普通列表截断或收集器缺口都不能被空 reason list 覆盖。未知证据、原生边界、队列/行保留、刷新与 Trash 准入保持原合同。
+
+scanner/collector 的原 typed 元数据保留、cache preview 持久化和普通报告分析 JSON 仍按既有路径执行；旧 `ScanSuccess`/observer API 保留 materialized export 兼容。此次切面只消除 file TUI 的重复投影，没有宣称全局 RSS 上限、内容读取提速、持久化审计完成或目标宿主运行通过。
+
+可复现的只读比较入口见 [core example](../../crates/sweepx-core/examples/analysis_completion_bench.rs)：使用普通 walk/stat/完整内容 hash 核对结果，在计时之外校验本次 scan/native locator 的绑定，规范化仅用于比较的本次 scan/entry identities 和观察时间，保留 native identity、basename、coverage、指纹与全部大小/分配证据；重复组另比较 live stamp。该入口不授权任何回收，state 禁用，计时覆盖同一构建的 core 调用及结果释放，不代表完整 TUI/CLI 端到端体验。
+
+[逐次测量与验证记录](analysis-completion-validation-2026-10-03.json)保留 4 次独立等价调用和 12 次测量：本机 arm64 macOS 26.5.2/25F84、Rust 1.98.0、all-features 未优化 dev，关闭 debug symbols/incremental。两份受控夹具各有 32 个子目录；大文件夹具 8,192 个普通文件、33,558,528 payload 字节、大小依次 1..=8192，top-K 20；重复夹具 2,048 个普通文件、1,024 对不同对象、131,072 payload 字节，显式阈值 0。无 SweepX 缓存；每次 core 调用前的独立 oracle 会读取目录及内容，OS cache 未清空或作确定性保证。每种模式/夹具各三轮，第二轮反转先后顺序，扫描 status 必须 OK，所有回调签名必须等价。
+
+大文件 core 阶段 legacy 1.34–1.37 秒、completion 0.09–0.11 秒；整个 benchmark 进程的最大 RSS legacy 242–243 MB、completion 42–43 MB。重复内容 core 阶段 legacy 12.90–16.24 秒、completion 13.58–15.95 秒，区间重叠，不声称稳定提速；进程最大 RSS 由 152–154 MB 降至 126–127 MB。MB 为十进制，RSS 含计时之外的 oracle/验证/签名导出，不是该阶段单独的内存测量。whole-process real 与逐次原始系统统计也保留，没有用这些样本推导 p95/p99、release、TUI 端到端或 Linux/Windows 性能。
+
+本单元完整 affected 运行：core 346、CLI 61 unit/71 contracts/1 relay 共 479 项通过、0 失败、2 项既有 opt-in benchmark ignored，包含动态 file TUI 和 macOS 实际临时文件 Trash 用例。其后仅修正新断言的 `Option::as_deref` 写法，3 项相关 core 回归再次通过；Linux-only journal 回归的多余 borrow 由 target lint 指出并修正。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown/23 项检查器及 core package list 通过，清单包含新 example/测试源码。未改包复用前次运行结果，不称为新完整 workspace 测试；旧 probe 用例本次通过不关闭其间歇根因。新增 journal 回归只取得 Linux 编译证据，没有原生 Linux/Windows/MSVC、实际云 provider 或目标宿主性能验收。全局资源审计与路线图仍继续，Dart/SvelteKit 扩展暂缓；target 仍约 1.9 GiB。

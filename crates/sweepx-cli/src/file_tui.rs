@@ -393,7 +393,7 @@ impl Provider {
                     locale: context.locale(),
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sweepx_core::scan_file_analysis_with_observer(
+                    sweepx_core::scan_file_analysis_completion_with_observer(
                         &context,
                         &request,
                         store.as_ref(),
@@ -404,19 +404,13 @@ impl Provider {
                 }));
                 let (outcome, message) = match result {
                     Ok(Ok(scan)) => {
-                        let outcome = match scan.output.status {
+                        let outcome = match scan.status {
                             OutputStatus::Ok if !sink.rejected => JunkOutcome::Complete,
                             OutputStatus::Cancelled => JunkOutcome::Cancelled,
                             _ => JunkOutcome::Partial,
                         };
-                        let reasons = scan
-                            .output
-                            .data
-                            .get("duplicates")
-                            .or_else(|| scan.output.data.get("largeFiles"))
-                            .and_then(|value| value.get("incompleteReasons"))
-                            .map(|value| value.to_string())
-                            .unwrap_or_default();
+                        let reasons = serde_json::to_string(&scan.incomplete_reasons)
+                            .expect("finite analysis reason names");
                         (
                             outcome,
                             if outcome == JunkOutcome::Complete {

@@ -1,0 +1,278 @@
+{
+  "binarySha256": "1b92f98a021051d022e397d01a41e207f562db653045088a99479b684107d973",
+  "equivalence": [
+    {
+      "mode": "legacy",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "1415367166",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e"
+    },
+    {
+      "mode": "completion",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "104443375",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e"
+    },
+    {
+      "mode": "legacy",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "15699007833",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51"
+    },
+    {
+      "mode": "completion",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "16181970292",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51"
+    }
+  ],
+  "runs": [
+    {
+      "mode": "legacy",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "1343909042",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 1,
+      "rawTimeStats": "       17.85 real         6.51 user         2.47 sys\n           242827264  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               15068  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               15391  involuntary context switches\n         32746564555  instructions retired\n         16236399354  cycles elapsed\n           235143744  peak memory footprint\n",
+      "maxRssBytes": 242827264,
+      "wallSeconds": 17.85
+    },
+    {
+      "mode": "completion",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "99800584",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 1,
+      "rawTimeStats": "       14.35 real         4.29 user         2.07 sys\n            43352064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2900  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               14294  involuntary context switches\n         16575801968  instructions retired\n         10458308092  cycles elapsed\n            35750320  peak memory footprint\n",
+      "maxRssBytes": 43352064,
+      "wallSeconds": 14.35
+    },
+    {
+      "mode": "completion",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "108554000",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 2,
+      "rawTimeStats": "       16.18 real         5.14 user         2.55 sys\n            42500096  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2858  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               16641  involuntary context switches\n         16813327528  instructions retired\n         12835971464  cycles elapsed\n            34898352  peak memory footprint\n",
+      "maxRssBytes": 42500096,
+      "wallSeconds": 16.18
+    },
+    {
+      "mode": "legacy",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "1363130500",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 2,
+      "rawTimeStats": "       15.83 real         5.42 user         2.44 sys\n           242499584  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               15053  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                2883  voluntary context switches\n               14300  involuntary context switches\n         33514845743  instructions retired\n         15338001351  cycles elapsed\n           234816064  peak memory footprint\n",
+      "maxRssBytes": 242499584,
+      "wallSeconds": 15.83
+    },
+    {
+      "mode": "legacy",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "1372669250",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 3,
+      "rawTimeStats": "       18.27 real         6.66 user         2.82 sys\n           242532352  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               15043  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 449  voluntary context switches\n               16030  involuntary context switches\n         33497075068  instructions retired\n         17181374623  cycles elapsed\n           234848832  peak memory footprint\n",
+      "maxRssBytes": 242532352,
+      "wallSeconds": 18.27
+    },
+    {
+      "mode": "completion",
+      "analysis": "large",
+      "oracleFiles": 8192,
+      "coreElapsedNanos": "90440667",
+      "factsSha256": "20d559f89126438221404475f70ae16715135f72c9b745d3d86300af2a56d77e",
+      "repetition": 3,
+      "rawTimeStats": "       17.35 real         5.05 user         3.23 sys\n            43352064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                2897  page reclaims\n                   2  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                4265  voluntary context switches\n               17229  involuntary context switches\n         17491101332  instructions retired\n         13855632532  cycles elapsed\n            35766728  peak memory footprint\n",
+      "maxRssBytes": 43352064,
+      "wallSeconds": 17.35
+    },
+    {
+      "mode": "legacy",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "12895618875",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 1,
+      "rawTimeStats": "       16.40 real         2.80 user         4.26 sys\n           154173440  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               10024  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               26437  involuntary context switches\n         32844154575  instructions retired\n         15110261742  cycles elapsed\n           125501944  peak memory footprint\n",
+      "maxRssBytes": 154173440,
+      "wallSeconds": 16.4
+    },
+    {
+      "mode": "completion",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "15945477958",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 1,
+      "rawTimeStats": "       19.85 real         2.79 user         6.05 sys\n           126255104  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                8341  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               29101  involuntary context switches\n         24871049935  instructions retired\n         15726850216  cycles elapsed\n           111968784  peak memory footprint\n",
+      "maxRssBytes": 126255104,
+      "wallSeconds": 19.85
+    },
+    {
+      "mode": "completion",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "13575295041",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 2,
+      "rawTimeStats": "       17.15 real         2.35 user         4.72 sys\n           127205376  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                8430  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               26760  involuntary context switches\n         24843068550  instructions retired\n         13373859484  cycles elapsed\n           111968760  peak memory footprint\n",
+      "maxRssBytes": 127205376,
+      "wallSeconds": 17.15
+    },
+    {
+      "mode": "legacy",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "16124969708",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 2,
+      "rawTimeStats": "       19.97 real         3.37 user         5.84 sys\n           153042944  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                9985  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               29284  involuntary context switches\n         32916590803  instructions retired\n         18174208905  cycles elapsed\n           125223440  peak memory footprint\n",
+      "maxRssBytes": 153042944,
+      "wallSeconds": 19.97
+    },
+    {
+      "mode": "legacy",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "16235359542",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 3,
+      "rawTimeStats": "       20.29 real         3.34 user         5.90 sys\n           151666688  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                9900  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               28792  involuntary context switches\n         32866175724  instructions retired\n         17469757797  cycles elapsed\n           125141496  peak memory footprint\n",
+      "maxRssBytes": 151666688,
+      "wallSeconds": 20.29
+    },
+    {
+      "mode": "completion",
+      "analysis": "duplicates",
+      "oracleFiles": 2048,
+      "coreElapsedNanos": "14407878000",
+      "factsSha256": "8eae039457a41b94e25b8f655fe1a8566fa540eb8f89d9e053af13d71afa0e51",
+      "repetition": 3,
+      "rawTimeStats": "       18.05 real         2.45 user         5.05 sys\n           126500864  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                8350  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n               27367  involuntary context switches\n         24752282540  instructions retired\n         14186810502  cycles elapsed\n           111575544  peak memory footprint\n",
+      "maxRssBytes": 126500864,
+      "wallSeconds": 18.05
+    }
+  ],
+  "schema": "sweepx.analysis_completion.validation/v1",
+  "date": "2026-10-03",
+  "baseCommit": "ac1a528",
+  "host": {
+    "architecture": "arm64",
+    "os": "macOS 26.5.2",
+    "build": "25F84"
+  },
+  "build": {
+    "rust": "1.98.0 (88d9e12ae 2026-08-18)",
+    "profile": "unoptimized dev, all features",
+    "incremental": false,
+    "debugSymbols": false
+  },
+  "workloads": {
+    "large": {
+      "directories": 32,
+      "files": 8192,
+      "payloadBytes": 33558528,
+      "layout": "d-{i%32:02}/f-{i:05}, i=0..8191, payload x repeated i+1"
+    },
+    "duplicates": {
+      "directories": 32,
+      "files": 2048,
+      "pairs": 1024,
+      "payloadBytes": 131072,
+      "layout": "d-{i%32:02}/f-{i:05}, i=0..2047, pair-{i//2:05} padded with x to 64 bytes; no hard links"
+    }
+  },
+  "cacheState": {
+    "sweepx": "disabled: request.state_dir=None",
+    "os": "ordinary oracle reads precede each core call; no OS-cache reset or guarantee"
+  },
+  "phase": {
+    "coreElapsedNanos": "native metadata traversal, analysis, callbacks, projection and result drop; excludes oracle, result verification and signature export",
+    "maximumResidentSetSize": "whole benchmark process including oracle/verification/export; bytes reported by macOS time -l",
+    "real": "whole process; not an interactive CLI/TUI measurement"
+  },
+  "order": "legacy/completion in repetitions 1 and 3, completion/legacy in repetition 2; separate equivalence calls outside repetitions",
+  "driver": "../../crates/sweepx-core/examples/analysis_completion_bench.rs",
+  "equivalenceContract": "ordinary walk/stat and full content hash oracle; callback facts keep native identities, locators, fingerprint, coverage and evidence; scan/entry identities and observation times normalized after native binding validation; duplicate live stamps compared",
+  "limitations": [
+    "three repetitions per mode and workload; no p95/p99 inference",
+    "single macOS host and debug build; no release or target-host performance claim",
+    "duplicate latency ranges overlap; no stable duplicate speedup claim",
+    "scanner/collector metadata and cache-preview persistence retain existing budgets; not a global RSS bound",
+    "legacy export remains materialized; Linux durable journal still required",
+    "no concurrent fixture mutation, symlinks, hard-link aliases or real provider in benchmark"
+  ],
+  "earlyFailures": [
+    {
+      "kind": "new test compilation",
+      "reason": "used absent identity.seen_in and non-existent Id::as_str; corrected to ScannedEntry.scan_id and str dereference"
+    },
+    {
+      "kind": "new representation regression",
+      "reason": "expected null data; OutputEnvelope::new uses an empty object; corrected assertion after inspecting independent protocol constructor"
+    },
+    {
+      "kind": "new test host lint",
+      "reason": "Option::as_ref/map dereference replaced with as_deref; no warning suppression"
+    },
+    {
+      "kind": "new Linux-only test lint",
+      "reason": "removed unnecessary borrow in generic EventJournal::open; final Linux workspace lint passed"
+    }
+  ],
+  "driverSourceSha256": "071a19befbc4c380c6fc4516cbef6b2a697e9ded63170cdb5fbb38ba27c14d38",
+  "checks": {
+    "affectedTests": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p sweepx-core -p sweepx-cli --all-features --locked -- --test-threads=1",
+      "core": {
+        "passed": 346,
+        "failed": 0,
+        "ignored": 2,
+        "ignoredTests": [
+          "junk::cache::tests::benchmark_batched_historical_root_reads",
+          "junk::session::cache::benchmark::benchmark_multi_root_cache_preparation"
+        ]
+      },
+      "cli": {
+        "unitPassed": 61,
+        "contractPassed": 71,
+        "relayPassed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "coreDoctests": 0,
+      "laterChanges": "only new test Option::as_deref assertions and Linux-only unnecessary borrow; 3 host completion regressions passed again; production/example unchanged"
+    },
+    "lint": {
+      "hostWorkspaceAllTargetsAllFeatures": "passed",
+      "linuxGnuWorkspaceAllTargetsAllFeatures": "passed",
+      "windowsGnuWorkspaceAllTargetsAllFeatures": "passed",
+      "linuxJournalRegression": "compiled only, not executed"
+    },
+    "fmt": "passed",
+    "diff": "passed",
+    "docs": {
+      "markdownFiles": 54,
+      "checkerTestsPassed": 23
+    },
+    "corePackageList": "passed, includes example and new test sources; not registry dependency validation",
+    "unchangedPackages": "reuse prior windows-junk-history-validation-2026-10-03.json checks; no new full workspace runtime matrix",
+    "nativePlatformGaps": [
+      "Linux host runtime including new journal test",
+      "Windows/MSVC host runtime",
+      "real cloud providers"
+    ],
+    "targetBytesApprox": "1.9 GiB"
+  }
+}

@@ -62,6 +62,75 @@ pub trait FileAnalysisSink {
     fn on_progress(&mut self, _phase: &'static str, _count: u128, _path: &str) {}
 }
 
+/// Terminal metadata for an analysis whose native rows have already reached its sink.
+///
+/// This is not a scan JSON export or deletion permit. The enclosing status includes traversal
+/// gaps and cancellation; a callback can precede a later persistence error. All required state
+/// writes finish before this value is returned, and errors still return `CoreError` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAnalysisCompletion {
+    /// Final enclosing scan/analysis status, independent of provisional row completeness.
+    pub status: OutputStatus,
+    /// Operation identity retained for status/evidence correlation without a full envelope.
+    pub operation_id: OperationId,
+    /// Native scan identity, absent only when no supported traversal could run.
+    pub scan_id: Option<ScanId>,
+    /// Stable snake_case names from the finite analysis reason enums (at most nine).
+    /// These describe the collector; an empty list does not override a non-OK enclosing status.
+    pub incomplete_reasons: Vec<String>,
+}
+
+/// Runs the same metadata/content stages and reliable callbacks without projecting all scan
+/// rows, analysis files or unused post-scan events into JSON. Use this worker seam when the sink
+/// already owns bounded live results. Legacy observer/export entry points remain unchanged.
+///
+/// Scanner/collector retention and optional preview persistence keep their existing bounds.
+/// Required Linux journal events are still built and persisted when `state_dir` is supplied.
+/// Cancellation and state errors cannot become successful completion or mutation authority.
+pub fn scan_file_analysis_completion_with_observer<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    options: FileAnalysisOptions<'_>,
+    cancel: &CancellationToken,
+    sink: &mut dyn FileAnalysisSink,
+) -> Result<FileAnalysisCompletion, CoreError> {
+    validate_options(options)?;
+    scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        None,
+        None,
+        None,
+        Some(FileAnalysisObservation {
+            options,
+            cancel,
+            sink: Some(sink),
+        }),
+        ScanProjection::AnalysisObserver,
+    )
+    .map(|result| FileAnalysisCompletion {
+        status: result.scan.output.status,
+        operation_id: result.scan.output.operation_id,
+        scan_id: result.scan.snapshot.scan_id.map(ScanId::new),
+        incomplete_reasons: result.analysis_incomplete_reasons.unwrap_or_default(),
+    })
+}
+
+fn validate_options(options: FileAnalysisOptions<'_>) -> Result<(), CoreError> {
+    match options {
+        FileAnalysisOptions::Large(options) => {
+            LargeFileCollector::new(options.clone())?;
+        }
+        FileAnalysisOptions::Duplicates(options) => {
+            DuplicateCollector::new(options.clone())?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs the existing analysis with worker-local callbacks. Cancellation, state/output and
 /// resource semantics are identical to the ordinary large-file/duplicate entry points.
 pub fn scan_file_analysis_with_observer<S: SnapshotStore>(
@@ -72,14 +141,7 @@ pub fn scan_file_analysis_with_observer<S: SnapshotStore>(
     cancel: &CancellationToken,
     sink: &mut dyn FileAnalysisSink,
 ) -> Result<ScanSuccess, CoreError> {
-    match options {
-        FileAnalysisOptions::Large(options) => {
-            LargeFileCollector::new(options.clone())?;
-        }
-        FileAnalysisOptions::Duplicates(options) => {
-            DuplicateCollector::new(options.clone())?;
-        }
-    }
+    validate_options(options)?;
     scan_with_store_options(
         context,
         request,
@@ -128,6 +190,17 @@ impl FileAnalysisReport {
                 camelize_json_keys(serde_json::to_value(report).expect("duplicate report")),
             ),
         }
+    }
+
+    pub(super) fn into_reason_names(self) -> Vec<String> {
+        // Only the finite reason enums are serialized, never file/native-locator payloads.
+        // Moving these vectors releases the final report rows before state persistence/return.
+        let reasons = match self {
+            Self::Large(report) => serde_json::to_value(report.incomplete_reasons),
+            Self::Duplicates(report) => serde_json::to_value(report.incomplete_reasons),
+        }
+        .expect("analysis reason enums are serializable");
+        serde_json::from_value(reasons).expect("analysis reason enums serialize as string names")
     }
 }
 pub(super) struct FileAnalysisObserver<'a> {
@@ -391,29 +464,272 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture_root(&fixture);
         fs::write(root.join("one"), b"payload").unwrap();
-        let mut sink = Sink::default();
-        let result = scan_file_analysis_with_observer(
-            &context(),
-            &ScanRequest {
+        for completion_only in [false, true] {
+            let mut sink = Sink::default();
+            let request = ScanRequest {
                 roots: vec![root.clone()],
                 state_dir: None,
+            };
+            let options = LargeFileOptions {
+                minimum_logical_bytes: 0.into(),
+                ..Default::default()
+            };
+            let cancel = CancellationToken::new();
+            let result = if completion_only {
+                scan_file_analysis_completion_with_observer(
+                    &context(),
+                    &request,
+                    Some(&RejectState),
+                    FileAnalysisOptions::Large(&options),
+                    &cancel,
+                    &mut sink,
+                )
+                .map(|result| result.status)
+            } else {
+                scan_file_analysis_with_observer(
+                    &context(),
+                    &request,
+                    Some(&RejectState),
+                    FileAnalysisOptions::Large(&options),
+                    &cancel,
+                    &mut sink,
+                )
+                .map(|result| result.output.status)
+            };
+            assert!(matches!(result, Err(CoreError::State(StateError::Io(_)))));
+            assert!(sink.provisional);
+            let report = sink.final_report.unwrap();
+            assert_eq!(report.files.len(), 1);
+            assert_eq!(
+                report.files[0].logical_bytes,
+                sweepx_platform::known_u128(u128::from(
+                    fs::metadata(root.join("one")).unwrap().len()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn completion_observer_preserves_ranking_and_snapshot_without_json_row_copies() {
+        #[derive(Default)]
+        struct Sink(Option<LargeFileReport>);
+        impl FileAnalysisSink for Sink {
+            fn on_large_files_final(&mut self, report: &LargeFileReport) {
+                self.0 = Some(report.clone());
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture_root(&fixture);
+        for index in 1..=40 {
+            fs::write(root.join(format!("file-{index}")), vec![b'x'; index]).unwrap();
+        }
+        let request = ScanRequest {
+            roots: vec![root.clone()],
+            state_dir: None,
+        };
+        let options = LargeFileOptions {
+            minimum_logical_bytes: 0.into(),
+            max_files: 3,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let mut legacy_sink = Sink::default();
+        let legacy = scan_file_analysis_with_observer(
+            &context(),
+            &request,
+            Option::<&MemorySnapshotStore>::None,
+            FileAnalysisOptions::Large(&options),
+            &cancel,
+            &mut legacy_sink,
+        )
+        .unwrap();
+        let store = MemorySnapshotStore::default();
+        let mut sink = Sink::default();
+        let work = scan_with_store_options(
+            &context(),
+            &request,
+            Some(&store),
+            ScannerOptions::default(),
+            None,
+            None,
+            None,
+            Some(FileAnalysisObservation {
+                options: FileAnalysisOptions::Large(&options),
+                cancel: &cancel,
+                sink: Some(&mut sink),
+            }),
+            ScanProjection::AnalysisObserver,
+        )
+        .unwrap();
+        // Check the internal representation, not just the small value returned after dropping
+        // a materialized export. Legacy output is still available to export consumers.
+        assert_eq!(work.scan.output.data, json!({}));
+        assert!(work.scan.events.is_empty());
+        assert!(!work.scan.summary.entries.is_empty());
+        assert!(!legacy.output.data["entries"].as_array().unwrap().is_empty());
+        assert!(!legacy.events.is_empty());
+        assert_eq!(work.analysis_incomplete_reasons, Some(Vec::new()));
+        assert_eq!(work.scan.output.status, OutputStatus::Ok);
+        assert_eq!(work.scan.snapshot.status, legacy.snapshot.status);
+        assert_eq!(work.scan.snapshot.state, legacy.snapshot.state);
+        assert_eq!(work.scan.snapshot.entry_count, legacy.snapshot.entry_count);
+        assert_eq!(work.scan.snapshot.error_count, legacy.snapshot.error_count);
+        assert_eq!(
+            work.scan.snapshot.boundary_count,
+            legacy.snapshot.boundary_count
+        );
+        assert_eq!(
+            store.load(&work.scan.snapshot.operation_id).unwrap(),
+            Some(work.scan.snapshot)
+        );
+
+        let report = sink.0.unwrap();
+        let legacy_report = legacy_sink.0.unwrap();
+        assert!(report.complete && legacy_report.complete);
+        // An ordinary walk/stat is independent of both native scanner projections.
+        let mut oracle: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (path.clone(), fs::symlink_metadata(path).unwrap())
+            })
+            .filter(|(_, metadata)| metadata.is_file())
+            .collect();
+        assert_eq!(report.observed_files.0, oracle.len() as u128);
+        oracle.sort_unstable_by_key(|(_, metadata)| std::cmp::Reverse(metadata.len()));
+        oracle.truncate(3);
+        assert_eq!(report.files.len(), oracle.len());
+        for ((entry, legacy_entry), (path, metadata)) in
+            report.files.iter().zip(&legacy_report.files).zip(oracle)
+        {
+            assert_eq!(Path::new(&entry.display_path), path);
+            assert_eq!(
+                entry.logical_bytes,
+                sweepx_platform::known_u128(u128::from(metadata.len()))
+            );
+            assert_eq!(entry.display_path, legacy_entry.display_path);
+            assert_eq!(entry.logical_bytes, legacy_entry.logical_bytes);
+            assert_eq!(entry.allocated_bytes, legacy_entry.allocated_bytes);
+            assert_eq!(
+                entry.identity.as_ref().unwrap().platform_file_identity,
+                legacy_entry
+                    .identity
+                    .as_ref()
+                    .unwrap()
+                    .platform_file_identity
+            );
+            assert!(entry.native_locator.is_some());
+        }
+    }
+
+    #[test]
+    fn completion_observer_keeps_final_callback_cancellation_and_collector_gaps_explicit() {
+        struct Sink(CancellationToken);
+        impl FileAnalysisSink for Sink {
+            fn on_large_files_final(&mut self, report: &LargeFileReport) {
+                assert!(report.complete);
+                self.0.cancel();
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture_root(&fixture);
+        fs::write(root.join("one"), b"payload").unwrap();
+        let request = ScanRequest {
+            roots: vec![root],
+            state_dir: None,
+        };
+        let options = LargeFileOptions {
+            minimum_logical_bytes: 0.into(),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let store = MemorySnapshotStore::default();
+        let completion = scan_file_analysis_completion_with_observer(
+            &context(),
+            &request,
+            Some(&store),
+            FileAnalysisOptions::Large(&options),
+            &cancel,
+            &mut Sink(cancel.clone()),
+        )
+        .unwrap();
+        assert_eq!(completion.status, OutputStatus::Cancelled);
+        // The final callback had complete collector coverage. That does not overrule enclosing
+        // cancellation or allow the TUI to interpret an empty reason list as successful.
+        assert!(completion.incomplete_reasons.is_empty());
+        let snapshot = store.load(&completion.operation_id).unwrap().unwrap();
+        assert_eq!(snapshot.status, completion.status);
+        assert_eq!(snapshot.scan_id.as_deref(), completion.scan_id.as_deref());
+
+        struct Quiet;
+        impl FileAnalysisSink for Quiet {}
+        let limited = scan_file_analysis_completion_with_observer(
+            &context(),
+            &request,
+            Option::<&MemorySnapshotStore>::None,
+            FileAnalysisOptions::Large(&LargeFileOptions {
+                max_retained_bytes: 1,
+                ..options
+            }),
+            &CancellationToken::new(),
+            &mut Quiet,
+        )
+        .unwrap();
+        assert_eq!(limited.status, OutputStatus::Partial);
+        assert_eq!(limited.incomplete_reasons, ["retention_limit"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completion_observer_still_persists_the_required_linux_journal() {
+        struct Sink;
+        impl FileAnalysisSink for Sink {}
+        let fixture = tempfile::tempdir_in("/dev/shm").unwrap();
+        let root = fixture_root(&fixture);
+        fs::write(root.join("one"), b"payload").unwrap();
+        let state_fixture = tempfile::tempdir().unwrap();
+        let state_dir = state_fixture.path().join("state");
+        let store = DurableSnapshotStore::new(&state_dir).unwrap();
+        let context = context();
+        let completion = scan_file_analysis_completion_with_observer(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(state_dir.clone()),
             },
-            Some(&RejectState),
+            Some(&store),
             FileAnalysisOptions::Large(&LargeFileOptions {
                 minimum_logical_bytes: 0.into(),
                 ..Default::default()
             }),
             &CancellationToken::new(),
-            &mut sink,
-        );
-        assert!(result.is_err());
-        assert!(sink.provisional);
-        let report = sink.final_report.unwrap();
-        assert_eq!(report.files.len(), 1);
+            &mut Sink,
+        )
+        .unwrap();
+        assert_eq!(completion.status, OutputStatus::Ok);
+        let operation_id = ValidatedOperationId::parse(&completion.operation_id).unwrap();
+        let journal = EventJournal::open(store.journal_dir(&operation_id)).unwrap();
+        let stored = journal.read_final_snapshot().unwrap().unwrap();
+        let snapshot: OperationSnapshot =
+            serde_json::from_slice(stored.canonical_snapshot()).unwrap();
+        assert_eq!(snapshot.status, completion.status);
+        assert_eq!(snapshot.scan_id.as_deref(), completion.scan_id.as_deref());
         assert_eq!(
-            report.files[0].logical_bytes,
-            sweepx_platform::known_u128(u128::from(fs::metadata(root.join("one")).unwrap().len()))
+            snapshot.terminal_event_type.as_deref(),
+            Some("operation.terminal")
         );
+        assert!(!state_dir.join("operations").exists());
+        drop(journal);
+        let status = status_with_store(
+            &context,
+            &StatusRequest {
+                operation_id: completion.operation_id.to_string(),
+                state_dir: Some(state_dir),
+            },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(status.snapshot, Some(snapshot));
     }
 
     fn scan(
@@ -689,6 +1005,23 @@ mod tests {
                 ..Default::default()
             },
             &CancellationToken::new(),
+        );
+        assert!(matches!(result, Err(CoreError::InvalidLargeFileOptions(_))));
+        struct Sink;
+        impl FileAnalysisSink for Sink {}
+        let result = scan_file_analysis_completion_with_observer(
+            &context(),
+            &ScanRequest {
+                roots: vec![PathBuf::from("not-absolute")],
+                state_dir: None,
+            },
+            Option::<&MemorySnapshotStore>::None,
+            FileAnalysisOptions::Large(&LargeFileOptions {
+                max_files: 0,
+                ..Default::default()
+            }),
+            &CancellationToken::new(),
+            &mut Sink,
         );
         assert!(matches!(result, Err(CoreError::InvalidLargeFileOptions(_))));
     }

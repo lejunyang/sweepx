@@ -10,7 +10,8 @@ pub use duplicates::scan_duplicates_with_store;
 pub use scan_output::ScanOutput;
 pub mod tools;
 pub use large_files::{
-    FileAnalysisOptions, FileAnalysisSink, scan_file_analysis_with_observer,
+    FileAnalysisCompletion, FileAnalysisOptions, FileAnalysisSink,
+    scan_file_analysis_completion_with_observer, scan_file_analysis_with_observer,
     scan_large_files_with_store,
 };
 use std::collections::BTreeMap;
@@ -1099,6 +1100,8 @@ type DirListingMap = std::collections::BTreeMap<String, sweepx_scanner::DirListi
 /// Internal scan facts, including optional roots kept outside the candidate envelope.
 struct ScanWorkResult {
     scan: ScanSuccess,
+    // Only observer-only analysis keeps finite gap names; full report rows have reached the sink.
+    analysis_incomplete_reasons: Option<Vec<String>>,
     decisions: JunkDecisions,
     directory_markers: DirectoryMarkers,
     coverages: DirectoryCoverageMap,
@@ -1132,6 +1135,9 @@ struct JunkScanObservation<'a> {
 enum ScanProjection<'a> {
     Materialized,
     Borrowed(&'a CancellationToken),
+    // The caller already consumes analysis callbacks; no full JSON/report/event copy is needed.
+    // Required state/journal persistence still runs before a terminal result can be returned.
+    AnalysisObserver,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1197,6 +1203,7 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
                     progress: Vec::new(),
                 },
             },
+            analysis_incomplete_reasons: None,
             decisions: std::collections::BTreeMap::new(),
             directory_markers: std::collections::BTreeMap::new(),
             coverages: std::collections::BTreeMap::new(),
@@ -1232,7 +1239,7 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
         let mut live = live;
         let cancel = large_cancel.unwrap_or_else(|| match &projection {
             ScanProjection::Borrowed(cancel) => cancel,
-            ScanProjection::Materialized => {
+            ScanProjection::Materialized | ScanProjection::AnalysisObserver => {
                 live.as_ref().map_or(&default_cancel, |live| live.cancel)
             }
         });
@@ -1345,10 +1352,15 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
             })).collect::<Vec<_>>()
             }));
         }
-        if let Some(report) = large_report {
-            let (key, data) = report.into_data();
-            output.data[key] = data;
-        }
+        let analysis_incomplete_reasons = large_report.and_then(|report| {
+            if matches!(projection, ScanProjection::AnalysisObserver) {
+                Some(report.into_reason_names())
+            } else {
+                let (key, data) = report.into_data();
+                output.data[key] = data;
+                None
+            }
+        });
 
         if status == OutputStatus::Partial {
             output.warnings.push(protocol_error(
@@ -1370,16 +1382,24 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
         }
 
         let snapshot = snapshot_from_output(&output, "scan", context.locale(), &normalized_roots);
-        let events = build_scan_events(
-            &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
-            &ids.operation_id,
-            &compat,
-            &normalized_roots,
-            Some(&summary),
-            &output,
-            &started_at,
-            monotonic.elapsed(),
-        );
+        // Observer clients do not consume the post-scan protocol stream. Linux's durable
+        // journal is an independent contract and still needs those events before completion.
+        let events = if matches!(projection, ScanProjection::AnalysisObserver)
+            && !(cfg!(target_os = "linux") && request.state_dir.is_some())
+        {
+            Vec::new()
+        } else {
+            build_scan_events(
+                &format!("{STREAM_ID_PREFIX}-{}", digest_hex(ids.operation_id_str())),
+                &ids.operation_id,
+                &compat,
+                &normalized_roots,
+                Some(&summary),
+                &output,
+                &started_at,
+                monotonic.elapsed(),
+            )
+        };
         #[cfg(target_os = "linux")]
         let events = {
             let mut events = events;
@@ -1404,6 +1424,7 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
                 snapshot,
                 summary,
             },
+            analysis_incomplete_reasons,
             decisions,
             directory_markers,
             coverages,

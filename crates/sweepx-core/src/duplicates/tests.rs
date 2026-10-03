@@ -116,6 +116,69 @@ fn observer_streams_verified_groups_but_cancelled_scope_and_json_have_no_live_au
     assert!(restored.groups[0].live_observations.is_empty());
     assert_eq!(restored.groups[0].files, group.files);
     assert!(!restored.complete);
+
+    let cancel = CancellationToken::new();
+    let mut sink = Sink {
+        cancel: cancel.clone(),
+        groups: Vec::new(),
+    };
+    let completion = scan_file_analysis_completion_with_observer(
+        &context(),
+        &ScanRequest {
+            roots: vec![root.clone()],
+            state_dir: None,
+        },
+        Option::<&MemorySnapshotStore>::None,
+        FileAnalysisOptions::Duplicates(&options()),
+        &cancel,
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(completion.status, OutputStatus::Cancelled);
+    assert_eq!(sink.groups.len(), 1);
+    let group = &sink.groups[0];
+    assert_eq!(group.sha256, expected_hash);
+    assert_eq!(group.files.len(), group.live_observations.len());
+    for (file, stamp) in group.files.iter().zip(&group.live_observations) {
+        assert_eq!(file.scan_id, *completion.scan_id.as_ref().unwrap());
+        assert_eq!(
+            stamp.logical_bytes.0,
+            fs::metadata(&file.display_path).unwrap().len() as u128
+        );
+        assert_eq!(fs::read(&file.display_path).unwrap(), b"same payload");
+    }
+}
+
+#[test]
+fn completion_observer_keeps_duplicate_read_limits_and_reason_names() {
+    struct Sink(usize);
+    impl FileAnalysisSink for Sink {
+        fn on_duplicate_group(&mut self, _group: &DuplicateGroup) {
+            self.0 += 1;
+        }
+    }
+    let (_fixture, root) = fixture();
+    fs::write(root.join("one"), b"abc").unwrap();
+    fs::write(root.join("two"), b"abc").unwrap();
+    let mut sink = Sink(0);
+    let completion = scan_file_analysis_completion_with_observer(
+        &context(),
+        &ScanRequest {
+            roots: vec![root],
+            state_dir: None,
+        },
+        Option::<&MemorySnapshotStore>::None,
+        FileAnalysisOptions::Duplicates(&DuplicateOptions {
+            max_read_bytes: 1,
+            ..options()
+        }),
+        &CancellationToken::new(),
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(completion.status, OutputStatus::Partial);
+    assert_eq!(completion.incomplete_reasons, ["read_limit"]);
+    assert_eq!(sink.0, 0);
 }
 
 #[test]
