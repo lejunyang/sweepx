@@ -389,40 +389,18 @@ Measured on this host on 2026-09-02 against `E:\Projects\sweepx` (14.5 GB, 36,53
 
 Preview output is verified against an ordinary directory walk, which reaches the filesystem through a completely different code path; the path set and the summed bytes must match exactly.
 
-### Reusing a preview across runs
+### Historical previews across runs
 
-A stored preview is only useful if something can say it is still true. When a scan writes a preview
-it also records, inside the same generation, the position of each covered volume's NTFS change
-journal. The next run re-reads that position: if the volume has not moved, the preview describes
-the filesystem as it is now and the scan reports `loadStatus: "verified_preview"` instead of
-`stale_preview`.
+A generation loaded by ordinary `scan` always reports `loadStatus: "stale_preview"`. It supplies historical record counts; current file facts still come from this run's native traversal. Historical previews grant no deletion authority. The former `verified_preview` upgrade has been withdrawn.
 
-Verification only ever upgrades a load. No recorded evidence, an unreadable journal, or a volume
-that did move all keep the previous behavior and add a warning naming the reason:
+[NTFS coalesces repeated changes of the same reason while a file remains open](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records). An unchanged journal position therefore does not prove unchanged file facts, even with a cursor captured before traversal and full volume coverage. Ordinary previews no longer perform extra journal probes or require elevation to load historical cache data.
 
 | Warning | Meaning |
 |---|---|
-| `cache.preview.unverified.no_evidence` | The stored generation carries no evidence, so there is nothing to re-check. An unelevated run records none. |
-| `cache.preview.unverified.read_failed (N)` | Re-reading the journal failed with OS error `N`. A `5` means run elevated; an `87` means SweepX passed malformed input and is a defect to report. |
-| `cache.preview.unverified.journal_must_rescan` | The journal answered that the stored range is no longer covered. Nothing failed; the evidence simply aged out. |
-| `cache.preview.unverified.malformed_evidence` | The stored evidence is structurally unusable. |
-| `cache.preview.unverified.unknown_kind (K)` | The evidence names mechanism `K`, which this build does not understand — typically a newer SweepX wrote it. |
-| `cache.preview.unverified.no_mechanism` | This build has no change-detection mechanism for the host. |
-| `cache.preview.unverified.changed` | The volume demonstrably changed since capture. |
+| `cache.preview.unverified.no_evidence` | The generation has no validity tokens and remains historical; newly written generations use an empty list. |
+| `cache.preview.unverified.legacy_unbound` | The old generation contains journal hints without complete scan scope, native volume identity or capture ordering. It remains historical without token parsing or volume probes. |
 
-The code after the prefix is stable and safe to match on; any detail is appended in parentheses and
-is not part of it. Reuse also requires *every* covered volume to be unchanged,
-because a half-valid preview would show correct sizes for one part of a tree and stale sizes for
-another while looking correct.
-
-Two conditions must hold for a preview to verify. Reading the journal needs the same elevated
-volume handle acceleration needs, so an unelevated run records no evidence and behaves exactly as it
-did before this existed. And the state directory must be on a *different* volume from the trees being
-scanned: the cache's own write is journalled on the volume it records, which advances that volume's
-change position and leaves the stored evidence stale on arrival. Since the default state directory
-lives on `C:`, scanning `C:` verifies nothing today and reports `stale_preview` as before. Evidence is stored inside the
-checksummed generation payload, so editing a token on disk invalidates the whole generation rather
-than buying a false "unchanged".
+The old `validity` field and checksum remain compatible, so existing tokens can still be read and preserved. A checksum proves storage consistency, not correspondence to the current filesystem. This change does not affect the independent NTFS bulk preview or its `authoritative: false` contract.
 
 ## Commands that do not exist today
 

@@ -1,4 +1,3 @@
-mod cache_validity;
 mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;
@@ -99,7 +98,6 @@ const CACHE_LOAD_MODE_HIT: &str = "stale_preview";
 /// hint that must be re-derived before it is trusted, while a verified one has been shown to match
 /// the current filesystem. Collapsing them would either discard the benefit of verification or
 /// silently present unverified sizes as exact.
-const CACHE_LOAD_MODE_VERIFIED: &str = "verified_preview";
 const CACHE_LOAD_MODE_QUARANTINED: &str = "quarantined";
 const CACHE_STORE_MODE_WRITTEN: &str = "written";
 const CACHE_STORE_MODE_SKIPPED: &str = "skipped";
@@ -1289,8 +1287,7 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
                 Vec::new(),
             ),
         };
-        let stored_preview =
-            store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary, &roots);
+        let stored_preview = store_stale_preview(request.state_dir.as_deref(), &scan_id, &summary);
         // A bounded progress log is not a reliable cancellation flag: its final marker can
         // replace earlier observations. Caller-owned cancellation is the authoritative signal.
         let mut status = if cancel.is_cancelled() {
@@ -3230,21 +3227,14 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     format!("…{}", value.chars().skip(count - keep).collect::<String>())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-/// Renders a reuse refusal as the warning a caller sees.
-///
-/// The stable prefix and code come first so a consumer can keep matching on
-/// `cache.preview.unverified.<code>`; any detail is appended in parentheses. Without the detail an
-/// operator cannot tell "run elevated" (`5`) from "SweepX passed malformed input" (`87`) — the
-/// second is a defect report, not a configuration issue, and conflating them already cost one
-/// diagnostic round trip.
-///
-/// A free function so the exact format is defined once and can be asserted directly; the caller
-/// that produces it sits behind a private cache load path.
-fn unverified_warning(refusal: &cache_validity::ReuseRefusal) -> String {
-    match refusal.detail() {
-        Some(detail) => format!("cache.preview.unverified.{} ({detail})", refusal.code()),
-        None => format!("cache.preview.unverified.{}", refusal.code()),
+/// Legacy journal hints lack scope/capture binding and cannot prove current facts. Even
+/// matching NTFS positions can hide repeated writes before close. Historical previews are
+/// still useful, but no OS probe or token parser here can upgrade them into live authority.
+fn historical_preview_warning(generation: &StoredGeneration) -> &'static str {
+    if generation.validity.is_empty() {
+        "cache.preview.unverified.no_evidence"
+    } else {
+        "cache.preview.unverified.legacy_unbound"
     }
 }
 
@@ -3260,18 +3250,12 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
 
     match store.load_current() {
         Ok(LoadResult::Hit(generation)) => {
-            // Verification only ever upgrades the status. A preview that cannot be verified stays
-            // exactly as useful as it was before validity existed, so a denied volume handle costs
-            // nothing beyond the upgrade it could not earn.
-            let (status, warnings) = match cache_validity::evaluate_reuse(&generation.validity) {
-                Ok(()) => (CACHE_LOAD_MODE_VERIFIED, Vec::new()),
-                Err(refusal) => (CACHE_LOAD_MODE_HIT, vec![unverified_warning(&refusal)]),
-            };
+            let warning = historical_preview_warning(&generation);
             CachePreviewLoad {
-                status,
+                status: CACHE_LOAD_MODE_HIT,
                 generation: Some(generation.generation),
                 preview: Some(generation.preview),
-                warnings,
+                warnings: vec![warning.to_string()],
             }
         }
         Ok(LoadResult::Miss) => {
@@ -3317,7 +3301,6 @@ fn store_stale_preview(
     state_dir: Option<&Path>,
     scan_id: &ScanId,
     summary: &ScanSummary,
-    roots: &[ScanRoot],
 ) -> CachePreviewStoreResult {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
         return CachePreviewStoreResult {
@@ -3382,11 +3365,9 @@ fn store_stale_preview(
         schema: STORED_PREVIEW_SCHEMA.to_string(),
         created_at: timestamp_now(),
         preview: admission.compacted,
-        // Legacy preview validity is still captured after traversal and may omit uncaptured
-        // volumes. It does not close writes racing earlier observations. Move capture before
-        // traversal and bind full scope in the pending freshness audit; do not interpret this
-        // position alone as authority to skip observations or perform mutation.
-        validity: cache_validity::capture_validity(roots),
+        // Keep the legacy wire field/checksum domain. A historical generation does not
+        // require privileged volume probes, and advisory cursors are not current-fact proof.
+        validity: Vec::new(),
     };
     match store.write_generation(&stored) {
         Ok(()) => CachePreviewStoreResult {
@@ -6788,6 +6769,193 @@ mod tests {
         assert!(!store.root().join("quarantine").exists());
     }
 
+    #[test]
+    fn legacy_preview_hints_remain_opaque_historical_data() {
+        use sweepx_cache::VolumeValidityRecord;
+
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = fixture.path().to_path_buf();
+        let state = base.join("state");
+        let store = preview_generation_store(Some(&state)).unwrap().unwrap();
+        let preview = CompactedPreview {
+            parents: BTreeMap::new(),
+            total_estimated_bytes: 0,
+            total_records: 0,
+            visible_resource_limit: false,
+        };
+        // These are legacy wire inputs, not an NTFS runtime simulation. Even a plausible
+        // token or unknown future kind must stay readable without asking an OS to verify it.
+        for (index, (kind, sequence_id, position)) in [
+            ("ntfs_usn", "7", "500"),
+            ("ntfs_usn", "not-a-number", "500"),
+            ("ntfs_usn", "7", "-1"),
+            ("future_mechanism", "arbitrary", "opaque"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let generation = StoredGeneration {
+                generation: format!("legacy_{index}"),
+                schema: STORED_PREVIEW_SCHEMA.to_string(),
+                created_at: timestamp_now(),
+                preview: preview.clone(),
+                validity: vec![VolumeValidityRecord {
+                    kind: kind.to_string(),
+                    volume: "Z:\\".to_string(),
+                    sequence_id: sequence_id.to_string(),
+                    position: position.to_string(),
+                }],
+            };
+            store.write_generation(&generation).unwrap();
+            let loaded = load_stale_preview(Some(&state));
+            assert_eq!(loaded.status, "stale_preview");
+            assert_eq!(loaded.warnings, ["cache.preview.unverified.legacy_unbound"]);
+            assert_eq!(loaded.preview.as_ref(), Some(&preview));
+            assert_eq!(loaded.generation.as_ref(), Some(&generation.generation));
+            assert_eq!(store.load_current().unwrap(), LoadResult::Hit(generation));
+        }
+        assert!(!store.root().join("quarantine").exists());
+    }
+
+    #[test]
+    fn legacy_partial_scope_preview_cannot_hide_mutations_or_new_roots() {
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = fixture.path().to_path_buf();
+        let first_root = base.join("first");
+        let new_root = base.join("new");
+        let state = base.join("state");
+        fs::create_dir(&first_root).unwrap();
+        fs::create_dir(&new_root).unwrap();
+        fs::write(first_root.join("first.bin"), b"old").unwrap();
+        fs::write(new_root.join("new.bin"), b"new root").unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let first = scan_with_store::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![first_root.clone()],
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .unwrap();
+        let store = preview_generation_store(Some(&state)).unwrap().unwrap();
+        let LoadResult::Hit(mut legacy) = store.load_current().unwrap() else {
+            panic!("first scan must publish a preview");
+        };
+        assert!(legacy.validity.is_empty());
+        legacy.validity = vec![sweepx_cache::VolumeValidityRecord {
+            kind: "ntfs_usn".into(),
+            volume: "Z:\\".into(),
+            sequence_id: "7".into(),
+            position: "500".into(),
+        }];
+        store.write_generation(&legacy).unwrap();
+        fs::write(first_root.join("first.bin"), b"changed contents").unwrap();
+        let current = scan_with_store::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![first_root.clone(), new_root.clone()],
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            current.output.summary["cachePreview"]["loadStatus"],
+            "stale_preview"
+        );
+        assert!(
+            current
+                .output
+                .warnings
+                .iter()
+                .any(|warning| { warning.code == "cache.preview.unverified.legacy_unbound" })
+        );
+        assert_eq!(current.summary.roots.len(), 2);
+        assert_ne!(
+            first.summary.roots[0].scan_id,
+            current.summary.roots[0].scan_id
+        );
+        // Ordinary enumeration and metadata are independent of the native scanner and old
+        // preview. Compare sets to tolerate host enumeration order and account for all files.
+        let ordinary_files = [&first_root, &new_root]
+            .into_iter()
+            .flat_map(|root| fs::read_dir(root).unwrap().map(Result::unwrap))
+            .filter_map(|entry| {
+                let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                metadata
+                    .is_file()
+                    .then(|| (entry.path().display().to_string(), metadata.len()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let live_files = current
+            .summary
+            .entries
+            .iter()
+            .filter(|entry| entry.object_type == ObjectType::File)
+            .map(|entry| {
+                assert!(matches!(
+                    entry.provenance,
+                    FieldProvenance::LiveObservation { .. }
+                ));
+                let EvidenceValue::Known { value } = &entry.logical_bytes else {
+                    panic!("controlled regular files must have known logical lengths");
+                };
+                assert!(
+                    entry
+                        .identity
+                        .as_ref()
+                        .unwrap()
+                        .entry_id
+                        .belongs_to(&entry.scan_id)
+                );
+                (entry.display_path.clone(), u64::try_from(value.0).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(live_files, ordinary_files);
+        for root in [&first_root, &new_root] {
+            let root_entry = current
+                .summary
+                .roots
+                .iter()
+                .find(|entry| entry.display_path == root.display().to_string())
+                .unwrap();
+            let root_id = &root_entry.identity.as_ref().unwrap().entry_id;
+            let aggregate = current
+                .summary
+                .aggregates
+                .iter()
+                .find(|aggregate| aggregate.scan_entry_id().as_ref() == Ok(root_id))
+                .unwrap();
+            let expected = fs::read_dir(root)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter_map(|entry| {
+                    let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                    metadata.is_file().then_some(metadata.len() as u128)
+                })
+                .sum();
+            assert_eq!(
+                aggregate.apparent_logical_bytes,
+                sweepx_platform::known_u128(expected)
+            );
+        }
+        let LoadResult::Hit(next) = store.load_current().unwrap() else {
+            panic!("current scan must publish a new historical preview");
+        };
+        assert!(next.validity.is_empty());
+        assert_ne!(next.generation, legacy.generation);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn scan_persists_then_loads_stale_preview_without_replacing_live_authority() {
@@ -7798,50 +7966,5 @@ mod tests {
             "errors": []
         }))
         .unwrap()
-    }
-    /// The reported warning names the cause and carries the OS error behind it.
-    ///
-    /// Pins the exact string measured on this host: seeding evidence elevated and reading it back
-    /// unelevated produced `cache.preview.unverified.read_failed (5)`. Before the split that same
-    /// situation reported only `unverified.unverifiable`, which cannot distinguish "run elevated"
-    /// from "SweepX passed malformed input" -- an `87` in that position is a defect here, and reading
-    /// it as a platform limitation is exactly the mistake this repository has already made once.
-    #[test]
-    fn an_unverified_warning_carries_the_reason_and_its_detail() {
-        use cache_validity::ReuseRefusal;
-
-        assert_eq!(
-            unverified_warning(&ReuseRefusal::ReadFailed { code: 5 }),
-            "cache.preview.unverified.read_failed (5)"
-        );
-        assert_eq!(
-            unverified_warning(&ReuseRefusal::ReadFailed { code: 87 }),
-            "cache.preview.unverified.read_failed (87)"
-        );
-        // Refusals with nothing numeric behind them must not grow empty parentheses.
-        assert_eq!(
-            unverified_warning(&ReuseRefusal::NoEvidence),
-            "cache.preview.unverified.no_evidence"
-        );
-        assert_eq!(
-            unverified_warning(&ReuseRefusal::JournalMustRescan),
-            "cache.preview.unverified.journal_must_rescan"
-        );
-        // The documented prefix is a compatibility surface: a consumer matching on it must keep
-        // working, which is why the detail is appended rather than folded into the code.
-        for refusal in [
-            ReuseRefusal::NoEvidence,
-            ReuseRefusal::MalformedEvidence,
-            ReuseRefusal::ReadFailed { code: 5 },
-            ReuseRefusal::JournalMustRescan,
-            ReuseRefusal::NoMechanism,
-            ReuseRefusal::Changed,
-        ] {
-            let warning = unverified_warning(&refusal);
-            assert!(
-                warning.starts_with(&format!("cache.preview.unverified.{}", refusal.code())),
-                "the stable code must lead the warning: {warning}"
-            );
-        }
     }
 }

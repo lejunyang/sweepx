@@ -315,3 +315,5 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限。测量与边界见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
 
 普通预览与垃圾历史缓存现在共用原生目录句柄，读取、发布、损坏数据隔离和只读诊断不再逐次从显示路径打开文件。加载前限制 current 指针为 64 KiB、generation 为 65 MiB，超大输入不读取内容、不复制到隔离区，并报告缓存资源缺口；当前扫描结果仍保留。Unix 检查 owner、私有权限、普通文件与单硬链接，Windows 使用相对句柄、显式私有 DACL 和 reparse/offline/recall 拒绝。旧 JSON/checksum 兼容，原生缓存 backend 对权限不合格的对象直接拒绝；core state 入口的旧权限整备仍需独立审计。此改造没有删除权限，也未闭合完整预览 freshness、provider 宿主行为或整体内存预算。
+
+普通扫描加载的缓存始终为 `stale_preview`，当前事实仍由本次原生遍历提供；已撤回旧 `verified_preview` 升级及额外卷日志探测。NTFS 对未关闭文件的重复同类变化可能合并记录，日志位置未变不能证明文件事实未变。旧 `validity` 字段和校验摘要兼容，新 generation 写入空 token 列表；历史加载不需要额外提权。详见 [历史预览说明](site/cli.md#跨运行的历史预览)。

@@ -61,10 +61,10 @@ pub use change_tracking::{ChangeVerdict, VolumeChangeToken, compare_to_current};
 
 /// Reads the current USN journal bounds for the volume containing `root`.
 ///
-/// Separate from [`read_volume_layout_records`] because this is the cheap half: it reads a single
-/// fixed-size structure rather than the whole volume's metadata, which is what makes validating a
-/// cached result worthwhile. Returns the raw Win32 error so callers can distinguish a volume that
-/// has no journal from one they may not read.
+/// Separate from [`read_volume_layout_records`]: it reads one fixed-size structure rather than
+/// the whole volume's metadata. This is an advisory history position, not a proof that cached
+/// file facts remain current. Returns the raw Win32 error so callers can distinguish a volume
+/// that has no journal from one they may not read.
 #[cfg(windows)]
 pub fn read_volume_change_token(root: &std::path::Path) -> Result<VolumeChangeToken, u32> {
     ntfs_acceleration::native::read_journal_bounds(root).map(VolumeChangeToken::capture)
@@ -74,7 +74,7 @@ pub fn read_volume_change_token(root: &std::path::Path) -> Result<VolumeChangeTo
 ///
 /// Exposed alongside [`read_volume_change_token`] because comparing a stored token needs the
 /// current bounds, not a second token: [`compare_to_current`] deliberately takes bounds so the
-/// asymmetry between "what was recorded" and "what is true now" stays visible in the types.
+/// asymmetry between "captured journal position" and "current journal bounds" stays visible.
 #[cfg(windows)]
 pub fn read_volume_journal_bounds(root: &std::path::Path) -> Result<UsnJournalBounds, u32> {
     ntfs_acceleration::native::read_journal_bounds(root)

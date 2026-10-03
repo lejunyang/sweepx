@@ -24,6 +24,11 @@ repository.
 Status as of 2026-09-03. "Landed" means wired into a user-visible path on Windows, not merely
 implemented.
 
+The USN cache-validity row below is historical and was withdrawn on 2026-10-03. Equal journal
+positions do not prove current file facts because NTFS can coalesce repeated changes before
+close. Ordinary previews now remain `stale_preview`; the layout preview remains independent.
+See the [current review](../architecture/design-review-2026-10-01.md).
+
 | Technique | MangoDisk evidence | SweepX status |
 |---|---|---|
 | NTFS volume layout enumeration | `FSCTL_QUERY_FILE_LAYOUT`, 8 MiB pages, bounded fallback | **Landed** as a non-authoritative preview source, elevation-gated, cross-checked against a directory walk. Measured 1.06 s vs 133 s on this repo (~126×), 36531 paths agreeing exactly. |

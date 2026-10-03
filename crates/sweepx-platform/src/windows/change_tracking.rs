@@ -1,23 +1,16 @@
 //! Volume change detection built on the NTFS USN change journal.
 //!
-//! This is the validity half of an incremental scan: it answers "has anything under this volume
-//! changed since I last looked?" without walking the tree. A scan result can only be reused when
-//! the answer is a confident no, so every ambiguous outcome here resolves to "assume it changed".
+//! A cursor comparison describes delivered journal records, not current filesystem facts.
+//! Journal replacement, wrap or malformed bounds refuse history use. Matching positions only
+//! say the journal has not advanced; they are not permission to skip native observations.
 //!
-//! # Why this is separate from the accelerated reader
+//! NTFS coalesces repeated changes of the same reason while a file remains open. A later write
+//! can therefore change file contents or allocation without advancing these bounds until close.
+//! Capturing before a walk and covering every volume still does not eliminate this case.
+//! See Microsoft's [change journal contract](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records).
 //!
-//! [`crate::windows::read_volume_layout_records`] answers "what is on the volume right now" and needs
-//! elevation. Change detection answers "is what I already have still true", and the bounds query
-//! it depends on is far cheaper. Keeping them apart means a caller can validate a cached result
-//! without paying for a whole-volume metadata read, which is the entire point of the layer.
-//!
-//! # What a token does and does not prove
-//!
-//! A [`VolumeChangeToken`] is evidence about a **volume**, not about a subtree. Two tokens being
-//! equal proves no journal activity anywhere on the volume, which is a sufficient condition for a
-//! subtree to be unchanged but a much stronger one than necessary. That imprecision is deliberate:
-//! narrowing it to a subtree requires resolving every changed record's parent chain, and a wrong
-//! answer would serve stale sizes for a directory the user just modified.
+//! Bounds queries are independent of the expensive volume-layout preview. They retain useful
+//! history diagnostics without supplying a second filesystem-fact validity implementation.
 
 use crate::windows::ntfs_acceleration::{UsnCacheMissReason, UsnCursorDecision, UsnJournalBounds};
 
@@ -32,8 +25,8 @@ pub struct VolumeChangeToken {
     pub journal_id: u64,
     /// The USN the volume had reached when this token was captured.
     ///
-    /// Every record with a smaller USN is already reflected in whatever result the token
-    /// accompanies.
+    /// This records the journal position only. Capture ordering and the scope/identity of
+    /// any accompanying observations must be established separately.
     pub next_usn: i64,
 }
 
@@ -48,15 +41,15 @@ impl VolumeChangeToken {
     }
 }
 
-/// Whether a previously captured token still describes the volume.
+/// Comparison of a captured token with the current journal bounds, not file-fact validity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeVerdict {
-    /// The journal has not advanced: nothing on the volume changed.
+    /// The journal has not advanced; filesystem facts may still have changed.
     Unchanged,
     /// The journal advanced. The range that must be examined is `from..to`.
     ///
-    /// Carrying the range rather than a bare "changed" lets a caller read exactly the records it
-    /// has not seen instead of rescanning the volume.
+    /// Carrying the range lets a caller request records it has not seen. Those records are
+    /// advisory invalidation input; the range alone cannot justify skipping native observations.
     Changed { from: i64, to: i64 },
     /// Reuse is impossible and a full rescan is required.
     ///
@@ -66,16 +59,7 @@ pub enum ChangeVerdict {
 }
 
 impl ChangeVerdict {
-    /// Whether a cached result may be reused without any further work.
-    ///
-    /// Only `Unchanged` qualifies. `Changed` still carries reusable history, but acting on it
-    /// requires applying that history, which is not the same as reuse.
-    #[must_use]
-    pub const fn permits_reuse(self) -> bool {
-        matches!(self, Self::Unchanged)
-    }
-
-    /// Stable machine-readable code, for reporting why a scan could not reuse its cache.
+    /// Stable machine-readable code for journal comparison diagnostics.
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
@@ -91,7 +75,7 @@ impl ChangeVerdict {
 
 /// Compares a captured token against the volume's current journal bounds.
 ///
-/// Delegates the trust decision to [`crate::windows::validate_usn_cursor`] rather than repeating its
+/// Delegates the cursor-range check to [`crate::windows::validate_usn_cursor`] rather than repeating its
 /// comparisons: that function already refuses a changed journal id, a wrapped range and an
 /// impossible cursor, and a second implementation of the same rules could disagree with it. The
 /// only judgement added here is turning an accepted cursor into either `Unchanged` or an explicit
@@ -127,14 +111,13 @@ mod tests {
         }
     }
 
-    /// A quiet volume must compare equal, which is the only case that permits reuse.
+    /// Equal journal positions retain their stable diagnostic without granting fact authority.
     #[test]
-    fn an_unchanged_volume_permits_reuse() {
+    fn equal_positions_report_only_an_unchanged_journal() {
         let current = bounds(7, 100, 500);
         let token = VolumeChangeToken::capture(current);
         let verdict = compare_to_current(token, current);
         assert_eq!(verdict, ChangeVerdict::Unchanged);
-        assert!(verdict.permits_reuse());
     }
 
     /// Activity must be reported as a bounded range, not as a bare flag.
@@ -143,10 +126,6 @@ mod tests {
         let token = VolumeChangeToken::capture(bounds(7, 100, 500));
         let verdict = compare_to_current(token, bounds(7, 100, 900));
         assert_eq!(verdict, ChangeVerdict::Changed { from: 500, to: 900 });
-        assert!(
-            !verdict.permits_reuse(),
-            "a changed volume must not be reused before its history is applied"
-        );
     }
 
     /// A recreated journal restarts numbering, so the USN alone would be misleading.
@@ -161,7 +140,6 @@ mod tests {
             verdict,
             ChangeVerdict::MustRescan(UsnCacheMissReason::JournalChanged)
         );
-        assert!(!verdict.permits_reuse());
     }
 
     /// History older than the token was discarded, so the difference cannot be reconstructed.
@@ -205,30 +183,6 @@ mod tests {
         );
     }
 
-    /// Only `Unchanged` may ever permit reuse; every other verdict must withhold it.
-    ///
-    /// Asserted exhaustively because this predicate is the single gate protecting a user from
-    /// being shown sizes for a tree that has since changed.
-    #[test]
-    fn no_verdict_other_than_unchanged_permits_reuse() {
-        let verdicts = [
-            ChangeVerdict::Changed { from: 1, to: 2 },
-            ChangeVerdict::MustRescan(UsnCacheMissReason::JournalChanged),
-            ChangeVerdict::MustRescan(UsnCacheMissReason::JournalWrapped),
-            ChangeVerdict::MustRescan(UsnCacheMissReason::CursorAhead),
-            ChangeVerdict::MustRescan(UsnCacheMissReason::InvalidBounds),
-        ];
-        for verdict in verdicts {
-            assert!(
-                !verdict.permits_reuse(),
-                "{} must not permit reuse",
-                verdict.code()
-            );
-        }
-        assert!(ChangeVerdict::Unchanged.permits_reuse());
-    }
-
-    /// Codes are a reporting contract and must stay unique and snake_case.
     #[test]
     fn verdict_codes_are_unique_and_stable() {
         let codes = [

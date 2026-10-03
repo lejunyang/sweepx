@@ -378,34 +378,18 @@ Windows 上存在一条基于 NTFS 原生元数据的加速扫描路径。每个
 
 预览输出会与普通目录遍历做交叉验证（两者访问文件系统的代码路径完全不同），要求路径集合与字节总和逐一相等。
 
-### 跨运行复用预览
+### 跨运行的历史预览
 
-只有在能够证明预览仍然成立时，它才有价值。扫描写入预览时，会在同一个 generation 内记录所覆盖各卷的
-NTFS 变更日志位置。下次运行会重新读取该位置：若卷未发生变化，则预览描述的就是当前文件系统状态，扫描会
-报告 `loadStatus: "verified_preview"` 而不是 `stale_preview`。
+普通 `scan` 加载的 generation 始终报告 `loadStatus: "stale_preview"`。它提供历史记录计数，当前文件事实仍来自本次原生遍历；历史预览不提供删除权限。此前的 `verified_preview` 升级已撤回。
 
-校验只会提升加载结果。没有记录证据、日志不可读，或卷确实发生了变化，都会保持原有行为并附带说明原因的
-warning：
+[NTFS 日志会合并未关闭文件的重复同类变化](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records)。因此日志位置未变不能证明文件事实未变，即使游标在遍历前捕获并覆盖全部卷，也不足以建立这个证明。普通预览不再额外探测卷日志，也不要求为加载历史缓存提权。
 
 | Warning | 含义 |
 |---|---|
-| `cache.preview.unverified.no_evidence` | 存下的 generation 里没有任何证据，无从校验。未提权运行不会记录证据。 |
-| `cache.preview.unverified.read_failed (N)` | 重读变更日志失败，`N` 是操作系统错误码。`5` 表示需要提权；`87` 表示 SweepX 传入了非法参数，属于需要上报的缺陷。 |
-| `cache.preview.unverified.journal_must_rescan` | 日志明确表示所存区间已不再被覆盖。没有发生错误，只是证据过期了。 |
-| `cache.preview.unverified.malformed_evidence` | 存下的证据结构上不可用。 |
-| `cache.preview.unverified.unknown_kind (K)` | 证据声明的机制 `K` 是本次构建不认识的，通常是更新版本的 SweepX 写入的。 |
-| `cache.preview.unverified.no_mechanism` | 本次构建在该平台上没有变更检测机制。 |
-| `cache.preview.unverified.changed` | 卷自证据捕获以来确实发生了变化。 |
+| `cache.preview.unverified.no_evidence` | generation 没有有效性 token，保持历史状态；新写入的 generation 使用空列表。 |
+| `cache.preview.unverified.legacy_unbound` | 旧 generation 带有日志提示，但没有完整扫描范围、原生卷身份和捕获顺序证明；保持历史状态，不解析 token 或探测卷。 |
 
-前缀之后的 code 是稳定的、可用于程序匹配；括号中的细节是附加信息，不属于 code 本身。复用还要求所覆盖的**每一个**卷都未变化，因为
-半有效的预览会让一部分目录显示正确大小、另一部分显示过期大小，而整体看起来却是正确的。
-
-预览要通过校验需同时满足两个条件。其一，读取日志需要与加速相同的提权卷句柄，因此未提权运行不会记录任何
-证据，行为与该功能引入之前完全一致。其二，状态目录必须与被扫描的目录树位于**不同的卷**：写入缓存本身会
-被记录到它所记录的那个卷的日志中，从而推进该卷的变更位置，使刚存下的证据当即过期。由于默认状态目录位于
-`C:`，因此目前扫描 `C:` 无法通过校验，仍按 `stale_preview` 上报。证据
-存储在带校验和的 generation payload 内，因此在磁盘上篡改 token 会使整个 generation 失效，而不会换来
-一次虚假的 "unchanged"。
+旧 `validity` 字段和校验摘要仍兼容，旧 token 可以保留和读取。校验摘要证明存储内容一致，不能证明它仍对应当前文件系统。此变化不影响独立的 NTFS 批量预览及其 `authoritative: false` 合同。
 
 ## 当前不存在的命令
 

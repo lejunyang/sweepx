@@ -982,7 +982,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览 validity 范围/游标时机、解析/投影预算、provider 与 state 目录审计 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览解析/投影预算、provider 与 state 目录审计；未来复用仍需独立事实有效性合同 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；普通预览已撤回未经证明的 USN 有效性升级及额外卷探测，保持历史；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1204,3 +1204,16 @@ generation 和 current 指针各自经独占私有 temporary 原子发布；保�
 现在使用隔离 TempDir/Unix canonical root，以普通文件读取独立确认夹具内容。写入前捕获同一游标，每次查询继续保留该游标，最多 5 秒明确等待此次创建文件的精确 FileEvents record，不以任意父级/setup 通知充当证据。后续查询只核对记录位于已观察事件之后，允许迟到通知，不把 empty batch 当作当前静止的证明。等待只发生在测试，未向生产缓存增加 settle sleep、忽略真实事件或恢复整根候选命中。
 
 [修正验证记录](fsevents-fixture-sync-validation-2026-10-03.json)保留旧失败、孤立诊断及修改后的实际运行输出。修改后单项通过，再运行完整 platform suite：97 项通过、0 失败、1 项既有 ignored。最终 host 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 和 platform package list 通过；检查器的 23 项已通过且未改代码，Linux GNU/Windows GNU 工作区 lint 复用前单元通过结果，新增代码及 dev dependency 均仅在 macOS 测试 cfg 生效。其余未改变包的通过结果复用，组合覆盖 1,113 项通过、0 个最终源码测试失败、3 项 opt-in ignored、1 项已诊断系统 Trash 成功挂起用例显式 skip，不称为新完整工作区 invocation。测试前提已修正，不代表 FSEvents 生产 freshness/性能根因已关闭；普通预览 USN 范围/时机与其余跨平台资源审计继续优先。
+
+
+## 普通预览撤回未获证明的有效性升级（2026-10-03）
+
+继续前两单元的 ordinary preview 审计，确认“遍历前捕获 + 完整卷范围”仍不足以修复旧 `verified_preview`。微软的 [NTFS change journal contract](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records) 描述未关闭文件重复同类变化的合并行为：首次原因已记录之后，后续同类写入可能没有新的 USN record，最终 close 才记录汇总。因此相同 journal id/NextUsn 不能独立证明文件长度、内容或分配未变化；跨卷存储也不解决该问题。前文 September 原生测试只观察 create/write/close 后游标前进，不能证明 open-handle repeated-write 情况；保留历史测量并标明其有效性结论已被本节取代。
+
+普通扫描原本每次仍原生遍历，加载的 preview 只提供历史计数，没有真正跳过文件观察。现删除 core 私有 `cache_validity` 模块、逐根扫描后捕获和加载时的额外提权卷探测，全部可读 generation 保持 `stale_preview`。新写入的 `validity` 为空；旧非空列表作为 opaque hint 保留兼容，不解析数字、不打开卷，报告稳定 `cache.preview.unverified.legacy_unbound`；空列表沿用 `no_evidence`。JSON 字段、旧 checksum domain 与 raw journal enum/code 保留。移除 Rust `ChangeVerdict::permits_reuse` 布尔捷径，raw comparison 只描述日志区间，不再授予文件事实复用；独立的 NTFS 批量 layout preview 及 `authoritative: false` 合同保留。没有添加 crate、第二套分类器或永久删除兜底。
+
+新增跨 desktop cfg 回归实际读取旧 generation，覆盖 plausible NTFS、畸形数值、负位置及未来 token kind，验证可读且不升级或误隔离。另一项两根原生扫描回归：先保存单根历史，再改文件长度并加入新根；普通文件枚举/metadata 作为独立 oracle 对照全部文件、当前 scan identity、每根 logical aggregate 与 live provenance，验证旧局部 token 没有掩盖变化，新 generation 不携带 token。Windows/Linux 分支的交叉 lint 不等于这些目标上的原生运行；重复 open-handle NTFS 写入限制来自一手合同，没有伪称本机执行了该原生场景。
+
+这次删除无证据升级及附加 IO 路径，不宣称新的端到端提速或验证过的 Linux/Windows 文件索引。解析前 owned-data admission、首次 row/aggregate 投影、state pathname/额度/代次淘汰、provider/no-materialization、其他发现/指纹路径及目标宿主/MSVC/Trash 资格仍未完成，按用户顺序继续优先；Dart/SvelteKit 新扩展暂缓。构建仍采用关闭 incremental/debug symbols 的 lean 配置；没有清空回收站。
+
+[本单元验证记录](historical-preview-validity-validation-2026-10-03.json)保留初次夹具字段编译错误、两处新链接失败和实际修复后的结果。完整工作区串行测试 1,107 项通过、0 个执行用例失败、3 项既有 opt-in ignored；已独立诊断的系统 Trash 成功挂起用例继续显式 skip，不能称原生资格矩阵全绿。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 和 cache/core/platform 包清单通过；未改文档检查器复用上一单元 23 项通过结果。交叉 lint 不证明 Linux/Windows 运行或 MSVC，包清单不证明 registry 构建。target 实际占用 2,289,152 KiB（约 2.2 GiB），没有清空回收站。

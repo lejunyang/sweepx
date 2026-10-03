@@ -1439,9 +1439,8 @@ mod tests {
             token.journal_id, token.next_usn
         );
 
-        // Re-reading without touching anything must compare equal to itself. This is the property
-        // reuse depends on, and it is not implied by change detection working: a token that never
-        // matched would detect every change and still be useless.
+        // Compare journal bounds without claiming current-file stability. A repeated write
+        // before close can change facts while these bounds remain equal.
         //
         // The volume is shared with the rest of the system, so unrelated processes can write at
         // any moment. A quiet reading is therefore evidence, but a busy one is not a failure; the
@@ -1458,16 +1457,15 @@ mod tests {
             quiet_verdict.code()
         );
 
-        // A write must move the journal forward. Anything else means the token cannot detect
-        // change at all, which would make reuse unsafe rather than merely imprecise.
+        // This creates and closes a file: NTFS records the close summary. It does not test
+        // repeated writes through a still-open handle, which can leave the journal unchanged.
         std::fs::write(directory.join("probe.txt"), b"sweepx usn probe").expect("write probe file");
 
         let after = native::read_journal_bounds(&volume_root).expect("re-read journal bounds");
         let verdict = compare_to_current(token, after);
         println!("verdict after write: {}", verdict.code());
 
-        // The layer only pays for itself if validation is far cheaper than the whole-volume
-        // metadata read it avoids, so the cost is measured rather than assumed.
+        // Measure the cost of this advisory bounds query independently of the layout preview.
         let timing_started = std::time::Instant::now();
         let rounds = 50;
         for _ in 0..rounds {
@@ -1494,8 +1492,8 @@ mod tests {
             ),
         }
         assert!(
-            !verdict.permits_reuse(),
-            "a volume that just changed must never permit reuse"
+            !matches!(verdict, ChangeVerdict::Unchanged),
+            "this create-and-close fixture must advance the journal"
         );
     }
 

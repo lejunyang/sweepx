@@ -204,16 +204,12 @@ pub enum CacheError {
     Json(#[from] serde_json::Error),
 }
 
-/// Evidence that a stored preview still describes the filesystem it was taken from.
+/// Legacy per-volume journal hints retained for generation wire/checksum compatibility.
 ///
-/// Stored inside [`StoredGeneration`] rather than beside it so that the evidence and the data it
-/// vouches for are replaced by the same atomic rename. Two files could disagree after a crash, and
-/// the dangerous direction of that disagreement — fresh evidence pointing at stale data — is
-/// exactly what would show a user sizes for a tree that has since changed.
-///
-/// The record is deliberately platform-neutral: this crate must not depend on any platform crate,
-/// and a cache written by one build should stay readable by another. Interpreting a token is the
-/// caller's job; this type only carries it.
+/// These records do not bind full root scope, native identity or capture ordering. NTFS can
+/// also coalesce repeated writes before close, so matching positions do not prove current
+/// filesystem facts. Consumers must treat loaded generations as historical and independently
+/// observe current facts. The checksum binds these bytes to their generation, not to live state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeValidityRecord {
     /// Which mechanism produced this token, so a consumer never interprets one kind as another.
@@ -226,7 +222,7 @@ pub struct VolumeValidityRecord {
     /// Identifies the incarnation of the change log, so a recreated log cannot look like the
     /// original one that happened to reach the same position.
     pub sequence_id: String,
-    /// The position the change log had reached when the preview was captured.
+    /// Legacy captured journal position; its ordering relative to the preview is not encoded.
     pub position: String,
 }
 
@@ -242,11 +238,8 @@ pub struct StoredGeneration {
     pub schema: String,
     pub created_at: String,
     pub preview: CompactedPreview,
-    /// Per-volume evidence that this preview is still current, empty when none was obtainable.
-    ///
-    /// Defaults to empty so that a generation written before validity existed — or by a build that
-    /// could not capture a token — deserializes into "no evidence" and is therefore never
-    /// reusable. Absence of evidence must fail closed; there is no migration to forget.
+    /// Legacy journal hints, preserved when reading old generations. New core previews write
+    /// an empty list; neither presence nor absence establishes current-fact reuse authority.
     #[serde(default)]
     pub validity: Vec<VolumeValidityRecord>,
 }

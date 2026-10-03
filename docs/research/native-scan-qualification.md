@@ -369,6 +369,13 @@ bound that must never be rendered as precise.
 
 ## Volume change detection via the USN journal (2026-09-03)
 
+Superseded on 2026-10-03: all cache-validity conclusions in this dated section describe historical implementation and measurements,
+not current cache validity. Ordinary generations now remain `stale_preview`, new writes carry no
+journal tokens, and core performs no extra journal probes. NTFS can coalesce repeated same-reason
+changes before close, so equal positions cannot prove current file facts; after-walk capture and
+missing scope/volume bindings were additional gaps. See the [current review](../architecture/design-review-2026-10-01.md)
+and [Microsoft's journal contract](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journal-records).
+
 The parser and cursor validation for the USN journal existed but had no caller: nothing captured a
 position and nothing compared one, so layer 3 of the seven-layer scheme was inert. It is now a
 usable primitive.
