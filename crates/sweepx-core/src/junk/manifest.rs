@@ -1,5 +1,7 @@
 //! Current project declarations, separate from effective configuration, ownership and activity.
 
+mod config;
+mod config_native;
 mod home;
 mod scope;
 mod workspace;
@@ -271,3 +273,7 @@ impl CargoLocalConfigEvidence {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "manifest/scope_include_tests.rs"]
+mod include_tests;

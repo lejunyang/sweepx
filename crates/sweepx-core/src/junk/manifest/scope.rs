@@ -1,5 +1,6 @@
 //! Invocation-local Cargo output observations. This models a Cargo invocation from the candidate's
 //! parent with the captured environment and no CLI overrides, never a future build or Trash permit.
+use super::config_native::{ConfigInputs, ConfigTarget};
 use super::workspace::{WorkspaceError, resolve_workspace};
 use super::workspace_native::{NativeWorkspaceSource, WorkspaceInputs};
 use super::{CargoTargetDirPathKind, ProjectContextStatus};
@@ -10,8 +11,8 @@ use std::time::{Duration, Instant};
 use sweepx_model::ScannedEntry;
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::{
-    CargoConfigMemberObservation, CargoConfigPairObservation, DirectoryPathObservation,
-    LocatorDirectoryIdentity, LocatorDirectoryLookupFailure, LocatorReadError, LocatorReader,
+    CargoConfigPairObservation, DirectoryPathObservation, LocatorDirectoryIdentity,
+    LocatorDirectoryLookupFailure, LocatorReadError, LocatorReader,
 };
 
 /// Source selected in the explicitly modeled project-parent/no-CLI invocation.
@@ -91,6 +92,8 @@ pub struct CargoWorkspaceEvidence {
 pub struct CargoOutputEvidence {
     /// This is a modeled invocation, not the actual parameters of an arbitrary future build.
     pub scope: &'static str,
+    /// Semantics independently checked against pinned Cargo, not an observed installed version.
+    pub config_model: &'static str,
     /// Observed only when all supported source locations have been visited without a gap.
     pub status: ProjectContextStatus,
     /// Stable explanation of the observation or missing evidence.
@@ -112,6 +115,7 @@ impl CargoOutputEvidence {
     fn unknown(reason: &'static str) -> Self {
         Self {
             scope: "project_parent_current_env_no_cli",
+            config_model: "cargo_1_98",
             status: if matches!(reason, "malformed_toml" | "duplicate_toml_key") {
                 ProjectContextStatus::Invalid
             } else {
@@ -239,18 +243,11 @@ impl CargoOutputEnvironment {
     }
 }
 
-struct ConfigRecord {
-    directory: LocatorDirectoryIdentity,
-    nested: bool,
-    value: Result<Option<String>, &'static str>,
-}
-
-/// Shared invocation source index: at most 64 independently admitted directories/8 MiB
-/// retention estimate; only <=4 KiB decoded paths are retained, never complete config bytes.
+/// Worker-owned invocation configuration/workspace inputs. Each bounded source index is
+/// reconstructed on refresh; retained parsing must pass native dependency revalidation.
 pub(in crate::junk) struct CargoOutputSession {
     environment: CargoOutputEnvironment,
-    sources: Vec<ConfigRecord>,
-    retained: usize,
+    config_inputs: ConfigInputs,
     workspace_inputs: WorkspaceInputs,
 }
 
@@ -283,7 +280,7 @@ impl ScopeBudget<'_> {
         *self.reserved_bytes = total;
         Ok(())
     }
-    fn reserve_pair(&mut self, cancel: &CancellationToken) -> Result<(), &'static str> {
+    pub(super) fn reserve_pair(&mut self, cancel: &CancellationToken) -> Result<(), &'static str> {
         self.check(cancel)?;
         let total = self
             .file_bytes
@@ -302,8 +299,7 @@ impl CargoOutputSession {
     pub fn new(environment: CargoOutputEnvironment) -> Self {
         Self {
             environment,
-            sources: Vec::with_capacity(64),
-            retained: 64 * std::mem::size_of::<ConfigRecord>(),
+            config_inputs: ConfigInputs::default(),
             workspace_inputs: WorkspaceInputs::default(),
         }
     }
@@ -335,6 +331,7 @@ impl CargoOutputSession {
         }
         self.environment
             .resolve_system_home_with(cancel, budget, super::home::lookup)?;
+        self.config_inputs.begin();
         let project = reader
             .capture_scanned_ancestor_directory(entry, 1, cancel)
             .map_err(read_error)?;
@@ -351,11 +348,11 @@ impl CargoOutputSession {
                 budget,
             )?;
             if selected.is_none()
-                && let Some(value) = value
+                && let Some(target) = value
             {
                 selected = Some((
-                    directory.clone(),
-                    value,
+                    target.include_base.unwrap_or_else(|| directory.clone()),
+                    target.value,
                     if depth == 0 {
                         CargoOutputSource::ProjectConfig
                     } else {
@@ -397,9 +394,12 @@ impl CargoOutputSession {
         if let DirectoryPathObservation::Present(home) = &home_observation {
             let home_value = self.source(reader, home, false, None, cancel, budget)?;
             if selected.is_none()
-                && let Some(value) = home_value
+                && let Some(target) = home_value
             {
-                let (origin, comparable) = if Path::new(&value).is_absolute() {
+                let value = target.value;
+                let (origin, comparable) = if let Some(base) = target.include_base {
+                    (base, true)
+                } else if Path::new(&value).is_absolute() {
                     (home.clone(), true)
                 } else {
                     let (base, comparable) = reader
@@ -469,6 +469,7 @@ impl CargoOutputSession {
                 return Ok(evidence);
             }
         };
+        self.config_inputs.finish(reader, cancel, budget)?;
         budget.check(cancel)?;
         if reader
             .observe_directory_path(&project, &home_path, cancel)
@@ -520,6 +521,7 @@ impl CargoOutputSession {
         budget.check(cancel)?;
         Ok(CargoOutputEvidence {
             scope: "project_parent_current_env_no_cli",
+            config_model: "cargo_1_98",
             status: ProjectContextStatus::Observed,
             reason: if default_output {
                 "default_output_observed_non_atomic"
@@ -543,84 +545,9 @@ impl CargoOutputSession {
         supplied: Option<&CargoConfigPairObservation>,
         cancel: &CancellationToken,
         budget: &mut ScopeBudget<'_>,
-    ) -> Result<Option<String>, &'static str> {
-        budget.check(cancel)?;
-        if let Some(record) = self
-            .sources
-            .iter()
-            .find(|r| r.nested == nested && &r.directory == directory)
-        {
-            return record.value.clone();
-        }
-        if self.sources.len() >= 64 {
-            return Err("config_source_limit");
-        }
-        let owned;
-        let pair = if let Some(pair) = supplied {
-            pair
-        } else {
-            budget.reserve_pair(cancel)?;
-            owned = reader
-                .read_cargo_config_pair_in_captured_directory(directory, nested, cancel)
-                .map_err(|error| {
-                    if error == LocatorReadError::InvalidRequest {
-                        "config_source_binding_unavailable"
-                    } else {
-                        read_error(error)
-                    }
-                })?;
-            &owned
-        };
-        let value = select_declaration(pair);
-        budget.check(cancel)?;
-        let bytes = directory
-            .retained_bytes_estimate()
-            .saturating_add(std::mem::size_of::<ConfigRecord>())
-            .saturating_add(
-                value
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.as_ref())
-                    .map_or(0, String::capacity),
-            );
-        let retained = self.retained.checked_add(bytes).ok_or("resource_limit")?;
-        if retained > 8 * 1024 * 1024 {
-            return Err("resource_limit");
-        }
-        self.retained = retained;
-        self.sources.push(ConfigRecord {
-            directory: directory.clone(),
-            nested,
-            value: value.clone(),
-        });
-        value
-    }
-}
-
-fn select_declaration(pair: &CargoConfigPairObservation) -> Result<Option<String>, &'static str> {
-    let member = match &pair.config {
-        CargoConfigMemberObservation::AbsentDuringEnumeration
-        | CargoConfigMemberObservation::AbsentDuringLookup => &pair.config_toml,
-        other => other,
-    };
-    match member {
-        CargoConfigMemberObservation::Present(read) => {
-            let value = crate::cargo_cleaner_evidence::inspect_cargo_target_dir_value(&read.bytes)?;
-            if let Some(value) = &value {
-                if value.len() > 4096 {
-                    return Err("resource_limit");
-                }
-                if value.is_empty() || value.contains('\0') {
-                    return Err("invalid_target_dir_declaration");
-                }
-            }
-            Ok(value)
-        }
-        CargoConfigMemberObservation::AbsentDuringEnumeration
-        | CargoConfigMemberObservation::AbsentDuringLookup => Ok(None),
-        CargoConfigMemberObservation::Failed(reason) => {
-            Err(super::super::format::read_reason(reason.clone()))
-        }
+    ) -> Result<Option<ConfigTarget>, &'static str> {
+        self.config_inputs
+            .source(reader, directory, nested, supplied, cancel, budget)
     }
 }
 

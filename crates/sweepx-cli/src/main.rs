@@ -2623,10 +2623,11 @@ fn junk_project_context_label(
         use std::fmt::Write;
         let _ = write!(
             label,
-            "; output={}/{}; outputScope={}; outputSource={}; candidatePath={}",
+            "; output={}/{}; outputScope={}; configModel={}; outputSource={}; candidatePath={}",
             output.status.code(),
             output.reason,
             output.scope,
+            output.config_model,
             output
                 .source
                 .map(|source| source.code())

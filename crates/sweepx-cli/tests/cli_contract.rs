@@ -485,6 +485,85 @@ fn cli_command() -> Command {
 }
 
 #[test]
+fn cargo_include_output_model_is_locale_stable_and_does_not_grant_project_trash() {
+    let (_fixture, base) = duplicate_fixture();
+    let root = base.join("project");
+    let home = base.join("isolated-home");
+    fs::create_dir_all(root.join(".cargo/nested")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='include_cli'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/lib.rs"), "").unwrap();
+    fs::write(root.join("target/personal"), b"preserved personal input").unwrap();
+    fs::write(
+        root.join(".cargo/config.toml"),
+        "include=['nested/input.toml']\n",
+    )
+    .unwrap();
+    let body = format!(
+        "[build]\ntarget-dir={}\n",
+        serde_json::to_string(&root.join("target").to_string_lossy()).unwrap()
+    );
+    fs::write(root.join(".cargo/nested/input.toml"), &body).unwrap();
+    let mut results = Vec::new();
+    for locale in ["zh-CN", "en-US"] {
+        let output = cli_command()
+            .timeout(std::time::Duration::from_secs(10))
+            .env("CARGO_HOME", &home)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .args(["--locale", locale, "--format", "json", "--state-dir"])
+            .arg(base.join("state").join(locale))
+            .arg("junk")
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let rows = report["candidates"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        let model = &row["projectContext"]["cargoOutput"];
+        assert_eq!(model["status"], "observed", "{model}");
+        assert_eq!(model["configModel"], "cargo_1_98");
+        assert_eq!(model["source"], "project_config");
+        assert_eq!(model["candidatePath"], "same_spelling");
+        for blocker in [
+            "project_ownership_not_verified",
+            "project_activity_not_verified",
+        ] {
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(blocker))
+            );
+        }
+        assert!(!model.to_string().contains(root.to_str().unwrap()));
+        assert!(!model.to_string().contains("input.toml"));
+        results.push(model.clone());
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(
+        fs::read(root.join("target/personal")).unwrap(),
+        b"preserved personal input"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".cargo/nested/input.toml")).unwrap(),
+        body
+    );
+}
+
+#[test]
 fn workspace_default_output_and_cwd_selection_are_locale_stable_and_report_only() {
     let (_fixture, base) = duplicate_fixture();
     let root = base.join("workspace");

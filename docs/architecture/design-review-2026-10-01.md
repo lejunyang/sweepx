@@ -977,7 +977,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 | 项目 | 仍缺的内容 | 当前边界 |
 | --- | --- | --- |
-| 项目规则的有效上下文 | include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace、17 场景 home 与 9 场景受控系统 home Cargo oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
+| 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace、17 场景 home 与 9 场景受控系统 home Cargo oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
 | 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
@@ -1038,3 +1038,22 @@ Unix 使用 real UID 和一次 getpwuid_r，调用方缓冲固定 64 KiB；结�
 保留诊断缺口：首次完整核心子进程对照把两个额外账户查询（当时未记录其来源阶段）误计为求解次数；随后新增 capture/lookup/repeat 标记以分开来源。沙箱内两次完整核心程序在原 5 秒期限内没有 stdout/退出或任何阶段/账户记录，一次宿主对照相同；deadline 后仅针对仍独占等待、尚未回收的本次子进程取样，沙箱拒绝，宿主 sampler 在自身 3 秒期限停止，均没有调用栈。没有延长期限、修改生产断言或将重试通过当作修复；其余 8 个完整程序场景未运行，保留 private fixture 入口。小程序证明原生查询模块的 ABI/失败处理，不关闭完整程序的库注入/启动根因，也不等同端到端验收。首次 oracle 版本检查及诊断输出路径保护的问题也保留在[交付记录](cargo-native-home-validation-2026-10-03.json)。
 
 最终工作区串行 1,066 项通过、0 失败、3 项原有/opt-in ignored，系统 Trash 挂起用例仍显式排除；普通矩阵中的 private fixture 入口未启用注入，不将其通过当作上述原生对照通过。affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试及 core/fixtures 包清单通过。交叉 lint 不证明目标宿主运行/MSVC，包清单不证明 registry 构建；没有端到端速度/RSS 测量。include、自定义 cwd/CLI、原生输出对象关系、其他 SDK 样本与所有权/活动仍开放，原生 Linux/Windows/provider/实际回收及其余稳定性根因继续未验收，整份路线图不勾选。
+
+
+## Cargo 配置 include 与发布前依赖复验（2026-10-03）
+
+`cargoOutput` 现补固定 Cargo 1.98 模型的递归 include，新增 locale-stable `configModel=cargo_1_98`。这不观察已安装的 Cargo 版本，也不证明任意未来构建的配置、语法或独占归属。`cargoConfig` 保留单文件窄声明诊断，不跟随 include；有效包含求解由共享输出模型承担。旧 cleaner 的执行 decoder 继续拒绝 include，没有扩大清理准入。
+
+共用既有 TOML parser，支持字符串/inline table 路径和可选缺失，按 include 左到右、当前文件最高优先级合并；根配置的 legacy 优先和 ancestor/home/environment 选择沿用既有模型。保留最终定义文件的原生基点，不把嵌套 include 的输出基点误当成项目目录。重复文件、循环及菱形共享引用在每个发现根内拒绝；不同发现根可共享同一包含文件的解析。数组/表与不兼容形状拒绝合并，标量覆盖延后到完整包含求解，避免被当前文件覆盖的无效 target 值提前造成 unknown。
+
+[64 场景固定 Cargo 原始记录](../../crates/sweepx-fixtures/resources/project-junk/cargo/cargo-include-oracle-2026-10-03.json)使用 offline/no-deps metadata 和隔离 HOME/CARGO_HOME；35 次成功、29 次语义拒绝，所有输入未变，没有运行构建。记录补齐了文档不能直接证明的细节：visited 按发现根分开；重复/菱形引用会拒绝；unknown inline 字段被忽略；include 先归一化完整拼写，所以被 `..` 抵消的缺失组件不需要存在。首次 54 场景成功采集另保留在验证记录中，随后明确扩展十个场景重新采集 64 场景，不将两份样本混成单次记录。API 参考：[Cargo 配置说明](https://doc.rust-lang.org/cargo/reference/config.html#including-extra-configuration-files)，另对照本机固定工具链自带文档，行为以实际原始记录为准。
+
+scanner 新入口复用 manifest 的 provider-safe zero/full stream 和父目录前后复验；包含路径先按 Cargo 归一化，然后独立原生准入，不从 display path 恢复权限，不扩展 scan coverage。原生 basename、文件身份、mount/provider、大小和 change stamp 仍受既有约束。每次发布前重读已使用的根配置与包含文件，比较内容摘要和 native stamp；可选缺失父级重新求解，缺失文件重新查询。两次非原子观察不封闭 ABA，也不证明永久不存在。
+
+配置索引最多 64 个发现根、128 个文件、128 个缺失父级与 8 MiB 保留估算；每根递归最多 32 层/128 个已访问文件，每次候选最多 16,384 次合作式工作检查。临时组合树也有 8 MiB/65,536 节点估算检查；单文件、累计保守请求字节和 deadline 继续使用既有 format 预算，失败不退还请求额度。这些不是 allocator/TOML parser RSS 或系统调用硬实时保证。私有原文/路径/解析值不写入报告与持久缓存。
+
+回归逐条要求全部 35 个 Cargo 成功场景得到 observed，unknown 不能代替成功；另外把 Cargo 原始输出目录只在测试夹具内创建并扫描，用实际原生行核对包含值和定义文件基点，避免仅凭 different_spelling 放过错误输出。29 个拒绝场景不得得到 observed。额外测试覆盖内容变化、同名替换、可选文件/父级后来出现、根配置变化、资源/取消、provider 与链接拒绝；中英文真实 CLI 核对模型字段、来源、路径关系、无原文泄露及项目所有权/活动 blocker。初期缺失证据比较和测试准入问题及最终验收范围保留在[交付记录](cargo-include-production-validation-2026-10-03.json)。
+
+工作区在 core 的旧工具缓存探测 2 秒超时停止：585 项通过、1 项失败、2 项既有 ignored；工具启动约 6 ms 返回后没有 stdout/EOF/退出，未捕获失败子进程的实时堆栈，不据此归因。本单元没有修改工具探测，也没有延长期限、排除或重试此失败。补验受中止影响的包和 doctest 后，按不同用例合计 1,072 项通过、1 项失败、3 项 ignored，不称为全绿矩阵。一次受限环境补验出现 FSEvents ID 为零/stream start 失败，改用主机权限后平台 97 项通过；新增扫描器测试的绝对临时路径超出默认 8 组件，改用既有生产 64/129 组件上限后扫描器 94 项与 TUI 95 项通过，没有放宽生产预算。系统 Trash 挂起用例仍由命令显式排除。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试、2 项采集器准入回归与四包清单通过；交叉编译不证明原生目标或 MSVC，包清单不证明 registry 构建。没有本单元端到端性能结论。
+
+按用户本次调序，Dart/SvelteKit 扩展暂缓。完成本单元后先用 SweepX 扫描并尝试将项目 debug 构建产物移入回收站，再优先推进“跨平台缓存与资源审计”；不把回收站移动当作已经释放磁盘块。其余原生宿主、MSVC/provider/实际回收、旧间歇根因、输出对象关系和最终 pathname 竞态仍开放。

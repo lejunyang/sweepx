@@ -194,3 +194,8 @@ pub const CARGO_HOME_ORACLE: &str =
 /// Native interposition is fixture-only; observations do not prove real NSS or Trash authority.
 pub const CARGO_NATIVE_HOME_ORACLE: &str =
     include_str!("../resources/project-junk/cargo/cargo-native-home-oracle-2026-10-03.json");
+
+/// Raw pinned POSIX Cargo 1.98 include inputs, merge errors and output-directory observations.
+/// These isolated metadata runs neither build projects nor establish cleanup authority.
+pub const CARGO_INCLUDE_ORACLE: &str =
+    include_str!("../resources/project-junk/cargo/cargo-include-oracle-2026-10-03.json");

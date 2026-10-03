@@ -141,6 +141,155 @@ fn new_reader(limits: LocatorReadLimits, mutation: Option<PathBuf>) -> LocatorRe
 }
 
 #[test]
+fn captured_include_reads_match_ordinary_bytes_and_refuse_probe_races_and_provider_reads() {
+    let (_owner, directory, _) = fixture();
+    let path = directory.join("input.toml");
+    std::fs::write(&path, b"[build]\ntarget-dir='ordinary'\n").unwrap();
+    let reader = new_reader(Default::default(), None);
+    let cancel = CancellationToken::new();
+    let captured = reader
+        .capture_directory_identity(&directory, &cancel)
+        .unwrap();
+    let CargoConfigMemberObservation::Present(read) = reader
+        .read_cargo_config_include_in_captured_directory(&captured, &native("input.toml"), &cancel)
+    else {
+        panic!("complete ordinary include missing");
+    };
+    assert_eq!(read.bytes, std::fs::read(&path).unwrap());
+    assert_eq!(
+        read.observed_after.logical_bytes.to_string(),
+        std::fs::metadata(&path).unwrap().len().to_string()
+    );
+    assert_eq!(reader.platform.streams.load(Ordering::SeqCst), 2);
+
+    let mut denied = new_reader(Default::default(), None);
+    denied.platform.deny_stream = true;
+    assert!(matches!(
+        denied.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("input.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ProviderOrOffline)
+    ));
+    assert_eq!(denied.platform.streams.load(Ordering::SeqCst), 1);
+    let changed = new_reader(Default::default(), Some(path));
+    assert!(matches!(
+        changed.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("input.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::Failed(_)
+    ));
+}
+
+#[test]
+fn captured_include_admission_and_absence_do_not_bypass_native_read_limits() {
+    let (_owner, directory, _) = fixture();
+    let reader = new_reader(Default::default(), None);
+    let cancel = CancellationToken::new();
+    let captured = reader
+        .capture_directory_identity(&directory, &cancel)
+        .unwrap();
+    assert_eq!(
+        reader.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("missing.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::AbsentDuringLookup
+    );
+    let invalid = new_reader(Default::default(), None);
+    assert_eq!(
+        invalid.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("../other.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::InvalidBinding)
+    );
+    assert_eq!(invalid.platform.streams.load(Ordering::SeqCst), 0);
+    let limited = new_reader(
+        LocatorReadLimits {
+            max_requests: 1,
+            ..Default::default()
+        },
+        None,
+    );
+    assert_eq!(
+        limited.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("input.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::ResourceLimit)
+    );
+    assert_eq!(limited.platform.streams.load(Ordering::SeqCst), 0);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        reader.read_cargo_config_include_in_captured_directory(
+            &captured,
+            &native("missing.toml"),
+            &cancel
+        ),
+        CargoConfigMemberObservation::Failed(LocatorReadFailure::Cancelled)
+    );
+    #[cfg(unix)]
+    {
+        let cancel = CancellationToken::new();
+        std::os::unix::fs::symlink("config.json", directory.join("linked.toml")).unwrap();
+        assert_eq!(
+            reader.read_cargo_config_include_in_captured_directory(
+                &captured,
+                &native("linked.toml"),
+                &cancel
+            ),
+            CargoConfigMemberObservation::Failed(LocatorReadFailure::SymlinkOrReparse)
+        );
+    }
+}
+
+#[test]
+fn include_parent_normalizes_the_complete_spelling_before_native_lookup() {
+    let (_owner, directory, _) = fixture();
+    std::fs::write(directory.join("input.toml"), "[build]\n").unwrap();
+    // Absolute admission walks the full host temporary path, unlike a fixed basename read.
+    // Match the production Cargo observer's path bounds rather than relying on tmp depth.
+    let reader = new_reader(
+        LocatorReadLimits {
+            max_components_per_request: 64,
+            max_total_components: 129,
+            ..Default::default()
+        },
+        None,
+    );
+    let cancel = CancellationToken::new();
+    let captured = reader
+        .capture_directory_identity(&directory, &cancel)
+        .unwrap();
+    assert!(!directory.join("missing").exists());
+    let (observed, name) = reader
+        .observe_cargo_config_include_parent(&captured, Path::new("missing/../input.toml"), &cancel)
+        .unwrap();
+    let DirectoryPathObservation::Present(parent) = observed else {
+        panic!("normalized parent missing");
+    };
+    assert_eq!(parent, captured);
+    assert_eq!(name, native("input.toml"));
+    let dotted = reader
+        .capture_directory_identity(&directory.join("."), &cancel)
+        .unwrap();
+    let (observed, name) = reader
+        .observe_cargo_config_include_parent(&dotted, Path::new("input.toml"), &cancel)
+        .unwrap();
+    assert_eq!(observed, DirectoryPathObservation::Present(parent));
+    assert_eq!(name, native("input.toml"));
+    assert!(!directory.join("missing").exists());
+}
+
+#[test]
 fn ancestor_cargo_pair_preserves_native_binding_and_reports_both_current_files() {
     let (_owner, directory, mut captured) = fixture();
     let cargo = directory.parent().unwrap().join(".cargo");

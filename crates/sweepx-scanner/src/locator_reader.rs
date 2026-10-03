@@ -245,6 +245,21 @@ pub enum DirectoryPathObservation {
     AbsentDuringLookup(DirectoryPathAbsence),
 }
 
+impl DirectoryPathObservation {
+    /// Conservative retained allocation estimate, including an opaque absence anchor's parent
+    /// and basename. No path or execution authority is exposed; this is not allocator RSS.
+    pub fn retained_bytes_estimate(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Present(directory) => directory.retained_bytes_estimate(),
+                Self::AbsentDuringLookup(absence) => absence
+                    .parent
+                    .retained_bytes_estimate()
+                    .saturating_add(native_name_retained_bytes(&absence.name)),
+            }
+    }
+}
+
 /// Opaque time-local anchor for a directory path that could not continue through one component.
 /// This contains no executable locator and exposes no absolute path or authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,13 +846,124 @@ impl<P: PlatformScanner> LocatorReader<P> {
         captured: &LocatorDirectoryIdentity,
         cancel: &CancellationToken,
     ) -> CargoManifestObservation {
+        match self.read_named_input_in_captured_directory(
+            captured,
+            &fixed_native_name("Cargo.toml"),
+            cancel,
+        ) {
+            Ok(read) => CargoManifestObservation::Present(Box::new(read)),
+            Err(ReadAttempt::Absent) => CargoManifestObservation::AbsentDuringLookup,
+            Err(ReadAttempt::Failed(failure)) => CargoManifestObservation::Failed(failure),
+        }
+    }
+
+    /// Reads one configuration include basename under an opaque, independently admitted parent.
+    /// Reuses the manifest's provider-safe zero/full stream and before/after parent validation.
+    /// Only the first typed NotFound is time-local absence; links, provider objects, changed
+    /// inputs and partial reads fail closed. No path is taken from a display string.
+    ///
+    /// This method does not parse extensions, expand include paths or grant scan/cleanup scope.
+    /// The caller must bound cumulative requests, retain input stamps and reobserve dependencies
+    /// before publishing a non-atomic configuration interpretation.
+    pub fn read_cargo_config_include_in_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        name: &NativeName,
+        cancel: &CancellationToken,
+    ) -> CargoConfigMemberObservation {
+        match self.read_named_input_in_captured_directory(captured, name, cancel) {
+            Ok(read) => CargoConfigMemberObservation::Present(Box::new(read)),
+            Err(ReadAttempt::Absent) => CargoConfigMemberObservation::AbsentDuringLookup,
+            Err(ReadAttempt::Failed(failure)) => CargoConfigMemberObservation::Failed(failure),
+        }
+    }
+
+    /// Resolves an include's parent using Cargo's lexical normalization of the complete joined
+    /// spelling, including the captured config directory. Native admission follows normalization;
+    /// components cancelled by `..` need not exist, while remaining links/mount/provider boundaries
+    /// still fail closed. Revalidates the source first and never exposes the joined absolute path.
+    ///
+    /// The returned parent observation and basename are input data only. Missing parents are
+    /// time-local anchors, not sealed absence. Requests retain the ordinary reader path/work bounds.
+    pub fn observe_cargo_config_include_parent(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        include: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<(DirectoryPathObservation, NativeName), LocatorDirectoryLookupFailure> {
+        self.validate_captured_cargo_pair_budget(captured)
+            .map_err(map_directory_operation_error)?;
+        if native_path_bytes(include) > 4096 {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        // Drive/root-relative Windows paths need invocation drive state, which this model does
+        // not capture. Do not silently join them using the scanner process's unrelated cwd.
+        if (include.has_root() && !include.is_absolute())
+            || (!include.is_absolute()
+                && matches!(
+                    include.components().next(),
+                    Some(std::path::Component::Prefix(_))
+                ))
+        {
+            return Err(LocatorReadFailure::InvalidBinding.into());
+        }
+        self.reopen_captured_directory(captured, cancel)
+            .map_err(map_directory_attempt)?;
+        let base = native_absolute_path_buf(&captured.native_absolute_path)
+            .map_err(map_directory_attempt)?;
+        let joined = base.join(include);
+        if native_path_bytes(&joined) > 64 * 1024 {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        let mut normalized = PathBuf::new();
+        for component in joined.components() {
+            use std::path::Component;
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => match normalized.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        normalized.pop();
+                    }
+                    Some(Component::RootDir) => {}
+                    _ => normalized.push(component.as_os_str()),
+                },
+                _ => normalized.push(component.as_os_str()),
+            }
+        }
+        let name = normalized
+            .file_name()
+            .ok_or(LocatorReadFailure::InvalidBinding)?;
+        let name = native_name_from_component(name);
+        let parent = normalized
+            .parent()
+            .ok_or(LocatorReadFailure::InvalidBinding)?;
+        let observed = self.observe_directory_path(captured, parent, cancel)?;
+        Ok((observed, name))
+    }
+
+    fn read_named_input_in_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        name: &NativeName,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, ReadAttempt> {
         let observe = || -> Result<PresentRegularFileRead, ReadAttempt> {
+            name.validate_basename_for_current_platform()
+                .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::InvalidBinding))?;
+            if native_name_bytes(name)
+                > self
+                    .limits
+                    .max_directory_batch_bytes
+                    .min(self.limits.max_directory_bytes)
+            {
+                return Err(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit));
+            }
             self.validate_captured_cargo_pair_budget(captured)
                 .map_err(|error| ReadAttempt::Failed(map_captured_operation_error(error)))?;
             let directory = self.reopen_captured_directory(captured, cancel)?;
             let result = self.read_current_regular_file_attempt(
                 &directory,
-                &fixed_native_name("Cargo.toml"),
+                name,
                 RegularFileReadExpectation::establish_live(),
                 self.limits.max_file_bytes.min(self.limits.max_total_bytes),
                 cancel,
@@ -847,11 +973,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
             self.reopen_captured_directory(captured, cancel)?;
             result
         };
-        match observe() {
-            Ok(read) => CargoManifestObservation::Present(Box::new(read)),
-            Err(ReadAttempt::Absent) => CargoManifestObservation::AbsentDuringLookup,
-            Err(ReadAttempt::Failed(failure)) => CargoManifestObservation::Failed(failure),
-        }
+        observe()
     }
 
     /// Captures one direct directory child through a retained, revalidated native parent handle.
@@ -2811,17 +2933,23 @@ fn ascii_case_fold_matches(name: &NativeName, expected: &str) -> bool {
 }
 
 fn fixed_native_name(value: &str) -> NativeName {
+    native_name_from_component(std::ffi::OsStr::new(value))
+}
+
+fn native_name_from_component(value: &std::ffi::OsStr) -> NativeName {
     #[cfg(unix)]
     {
+        use std::os::unix::ffi::OsStrExt;
         NativeName::unix(value.as_bytes().to_vec())
     }
     #[cfg(windows)]
     {
-        NativeName::windows_utf16(value.encode_utf16().collect::<Vec<_>>())
+        use std::os::windows::ffi::OsStrExt;
+        NativeName::windows_utf16(value.encode_wide().collect::<Vec<_>>())
     }
     #[cfg(not(any(unix, windows)))]
     {
-        NativeName::unix(value.as_bytes().to_vec())
+        NativeName::unix(value.as_encoded_bytes().to_vec())
     }
 }
 

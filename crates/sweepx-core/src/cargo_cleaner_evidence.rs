@@ -7,7 +7,9 @@
 //! identity evidence. Readers are bounded and do not execute Cargo/configuration; this module
 //! starts no process and produces no cleanup candidate or plan.
 
+mod config;
 mod workspace;
+pub(crate) use config::{CargoConfigInclude, CargoConfigInput, decode_cargo_config_input};
 pub(crate) use workspace::{
     WorkspaceDeclaration, WorkspaceDependencySource, WorkspaceManifest, WorkspacePackageVersion,
     decode_cargo_workspace_manifest,
@@ -1986,10 +1988,7 @@ fn decode_workspace_target_dir_declaration(
 /// Parse once, moving the decoded string out of the bounded TOML table instead of copying it.
 /// Presence/type and include handling are common to reporting and the narrower execution model.
 fn parse_cargo_target_dir_value(bytes: &[u8]) -> Result<Option<String>, CargoEvidenceReason> {
-    if bytes.len() > MAX_CARGO_INPUT_FILE_BYTES {
-        return Err(CargoEvidenceReason::ResourceLimit);
-    }
-    let mut table = parse_toml(bytes)?;
+    let mut table = config::parse_config_table(bytes)?;
     if table.contains_key("include") {
         return Err(CargoEvidenceReason::UnsupportedConfigInclude);
     }
