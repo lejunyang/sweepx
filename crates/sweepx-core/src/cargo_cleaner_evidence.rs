@@ -7,6 +7,12 @@
 //! identity evidence. Readers are bounded and do not execute Cargo/configuration; this module
 //! starts no process and produces no cleanup candidate or plan.
 
+mod workspace;
+pub(crate) use workspace::{
+    WorkspaceDeclaration, WorkspaceDependencySource, WorkspaceManifest, WorkspacePackageVersion,
+    decode_cargo_workspace_manifest,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;

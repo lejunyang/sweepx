@@ -484,6 +484,13 @@ fn native_target_path_declarations_are_reobserved_without_opening_declared_outpu
 #[test]
 fn native_output_scope_selects_sources_bases_and_special_environment_without_authorizing_trash() {
     let (owner, project, mut candidate) = fixture();
+    // This fixture validates output selection; declaration-only tests intentionally use a
+    // missing member elsewhere. A real standalone package keeps this contract independent.
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname='output_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
     let nested = project.parent().unwrap();
     let home = owner.path().join("isolated-cargo-home");
     std::fs::create_dir(&home).unwrap();
@@ -631,8 +638,15 @@ fn native_output_scope_selects_sources_bases_and_special_environment_without_aut
 }
 
 #[test]
-fn output_scope_keeps_missing_workspace_defaults_resource_gaps_and_bad_sources_distinct() {
+fn output_scope_keeps_package_defaults_resource_gaps_and_bad_sources_distinct() {
     let (owner, project, mut candidate) = fixture();
+    // This fixture validates output selection; declaration-only tests intentionally use a
+    // missing member elsewhere. A real standalone package keeps this contract independent.
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname='output_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
     let home = owner.path().join("isolated-home");
     std::fs::create_dir(&home).unwrap();
     #[cfg(unix)]
@@ -651,8 +665,17 @@ fn output_scope_keeps_missing_workspace_defaults_resource_gaps_and_bad_sources_d
     };
     let missing = refresh(&mut candidate, Default::default());
     assert!(missing.source_locations_observed, "{missing:?}");
-    assert_eq!(missing.reason, "workspace_default_not_resolved");
-    assert_eq!(missing.source, None);
+    assert_eq!(missing.status, ProjectContextStatus::Observed);
+    assert_eq!(missing.reason, "default_output_observed_non_atomic");
+    assert_eq!(missing.source, Some(CargoOutputSource::PackageDefault));
+    assert_eq!(
+        missing.candidate_path,
+        CargoOutputPathComparison::SameSpelling
+    );
+    let workspace = missing.workspace.unwrap();
+    assert!(!workspace.is_workspace);
+    assert_eq!(workspace.member_count, 1);
+    assert_eq!(workspace.default_member_count, 1);
     let limited = refresh(
         &mut candidate,
         ProjectFormatLimits {
@@ -678,4 +701,80 @@ fn output_scope_keeps_missing_workspace_defaults_resource_gaps_and_bad_sources_d
         std::fs::read(project.join("target/personal")).unwrap(),
         b"preserved"
     );
+}
+
+#[test]
+fn default_workspace_report_counts_packages_and_rejects_missing_members_without_authority() {
+    let (owner, project, mut candidate) = fixture();
+    let home = owner.path().join("isolated-workspace-home");
+    std::fs::create_dir(&home).unwrap();
+    #[cfg(unix)]
+    let home = home.canonicalize().unwrap();
+    std::fs::create_dir(project.join("a")).unwrap();
+    std::fs::write(
+        project.join("a/Cargo.toml"),
+        b"[package]\nname='member'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    let environment =
+        || CargoOutputEnvironment::from_values(None, None, Some(home.as_os_str()), None);
+    let refresh = |candidate: &mut crate::junk::candidate::JunkCandidate| {
+        ProjectFormatSession::with_cargo_environment(
+            sweepx_scanner::HostPlatformScanner::new(),
+            Default::default(),
+            CancellationToken::new(),
+            environment(),
+        )
+        .refresh(candidate);
+        candidate.project_context.unwrap().cargo_output.unwrap()
+    };
+    let virtual_root = refresh(&mut candidate);
+    assert_eq!(
+        virtual_root.status,
+        ProjectContextStatus::Observed,
+        "{virtual_root:?}"
+    );
+    assert_eq!(
+        virtual_root.source,
+        Some(CargoOutputSource::WorkspaceDefault)
+    );
+    assert_eq!(
+        virtual_root.candidate_path,
+        CargoOutputPathComparison::SameSpelling
+    );
+    let facts = virtual_root.workspace.unwrap();
+    assert!(facts.is_workspace && facts.project_is_root);
+    assert_eq!((facts.member_count, facts.default_member_count), (1, 1));
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname='root_package'\nversion='0.1.0'\n[workspace]\nmembers=['a']\n",
+    )
+    .unwrap();
+    let package_root = refresh(&mut candidate).workspace.unwrap();
+    assert!(package_root.is_workspace && package_root.project_is_root);
+    assert_eq!(
+        (package_root.member_count, package_root.default_member_count),
+        (2, 1)
+    );
+    std::fs::write(project.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let empty = refresh(&mut candidate).workspace.unwrap();
+    assert!(empty.is_workspace);
+    assert_eq!((empty.member_count, empty.default_member_count), (0, 0));
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[workspace]\nmembers=['missing']\n",
+    )
+    .unwrap();
+    let invalid = refresh(&mut candidate);
+    assert_eq!(invalid.status, ProjectContextStatus::Invalid);
+    assert_eq!(invalid.reason, "workspace_member_missing");
+    assert!(invalid.workspace.is_none());
+    assert!(candidate.project_execution_blocker().is_some());
+    assert_eq!(
+        std::fs::read(project.join("target/personal")).unwrap(),
+        b"preserved"
+    );
+    let encoded = serde_json::to_string(&virtual_root).unwrap();
+    assert!(!encoded.contains(project.to_str().unwrap()));
+    assert!(!encoded.contains("root_package"));
 }

@@ -12,6 +12,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+glob = "=0.3.3"
 libc = "0.2.189"
 semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }

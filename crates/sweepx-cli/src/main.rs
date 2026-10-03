@@ -232,7 +232,7 @@ enum Commands {
     },
     /// Discover known rebuildable or disposable artifacts under the selected roots.
     /// Reports partial results when discovery or scan evidence is incomplete.
-    /// Cargo target candidates report current parent manifest/local config declarations; these do not prove ownership or effective output scope.
+    /// Cargo target candidates report current manifests and bounded workspace/default output for a parent-cwd/no-CLI model; ownership and activity remain unverified.
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
@@ -2633,6 +2633,16 @@ fn junk_project_context_label(
                 .unwrap_or("unknown"),
             output.candidate_path.code()
         );
+        if let Some(workspace) = output.workspace {
+            let _ = write!(
+                label,
+                "; workspace={}; members={}; defaultMembers={}; projectIsRoot={}",
+                workspace.is_workspace,
+                workspace.member_count,
+                workspace.default_member_count,
+                workspace.project_is_root
+            );
+        }
     }
     label
 }

@@ -484,6 +484,100 @@ fn cli_command() -> Command {
     Command::cargo_bin("sweepx").expect("binary available")
 }
 
+#[test]
+fn workspace_default_output_and_cwd_selection_are_locale_stable_and_report_only() {
+    let (_fixture, base) = duplicate_fixture();
+    let root = base.join("workspace");
+    let home = base.join("isolated-cargo-home");
+    fs::create_dir(&home).unwrap();
+    for package in ["a", "b"] {
+        let directory = root.join(package);
+        fs::create_dir_all(directory.join("target")).unwrap();
+        fs::write(
+            directory.join("Cargo.toml"),
+            format!("[package]\nname='{package}'\nversion='0.1.0'\n"),
+        )
+        .unwrap();
+        fs::write(directory.join("target/personal"), package.as_bytes()).unwrap();
+    }
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("target/personal"), b"root").unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[workspace]\nmembers=['a','b']\ndefault-members=['b']\n",
+    )
+    .unwrap();
+    let mut results = Vec::new();
+    for locale in ["zh-CN", "en-US"] {
+        let mut command = cli_command();
+        command
+            .timeout(std::time::Duration::from_secs(10))
+            .env("CARGO_HOME", &home)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .args(["--locale", locale, "--format", "json", "--state-dir"])
+            .arg(base.join("state").join(locale))
+            .arg("junk")
+            .arg(&root);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let rows = report["candidates"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        let mut facts = Vec::new();
+        for row in rows {
+            let parent = std::path::Path::new(row["path"].as_str().unwrap())
+                .parent()
+                .unwrap();
+            let at_root = parent == root;
+            let output = &row["projectContext"]["cargoOutput"];
+            assert_eq!(output["status"], "observed", "{output}");
+            assert_eq!(output["source"], "workspace_default");
+            assert_eq!(
+                output["candidatePath"],
+                if at_root {
+                    "same_spelling"
+                } else {
+                    "different_spelling"
+                }
+            );
+            assert_eq!(
+                output["workspace"],
+                json!({ "isWorkspace": true, "memberCount": 2,
+                "defaultMemberCount": 1, "projectIsRoot": at_root })
+            );
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("project_ownership_not_verified"))
+            );
+            assert!(
+                row["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("project_activity_not_verified"))
+            );
+            assert!(!output.to_string().contains(root.to_str().unwrap()));
+            facts.push((row["path"].as_str().unwrap().to_owned(), output.clone()));
+        }
+        facts.sort_by(|a, b| a.0.cmp(&b.0));
+        results.push(facts);
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(fs::read(root.join("target/personal")).unwrap(), b"root");
+    for package in ["a", "b"] {
+        assert_eq!(
+            fs::read(root.join(package).join("target/personal")).unwrap(),
+            package.as_bytes()
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 static LINUX_TEMP_ENV_LOCK: Mutex<()> = Mutex::new(());
 

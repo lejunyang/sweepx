@@ -31,6 +31,17 @@ use thiserror::Error;
 #[path = "locator_content_tests.rs"]
 mod content_tests;
 
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "linux", feature = "platform-linux"),
+        all(target_os = "macos", feature = "platform-macos"),
+        all(target_os = "windows", feature = "platform-windows"),
+    )
+))]
+#[path = "locator_workspace_tests.rs"]
+mod workspace_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocatorReadLimits {
     pub max_requests: usize,
@@ -109,6 +120,30 @@ impl CargoConfigMemberObservation {
     }
 }
 
+/// One fixed-name `Cargo.toml` lookup in a revalidated, opaque native directory.
+///
+/// This is an invocation-time input observation, not a sealed directory generation or evidence
+/// of tool ownership. In particular, a missing name is not an atomic absence proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoManifestObservation {
+    /// Complete provider-safe bytes, bound to the zero-payload probe's native file/change stamp.
+    Present(Box<PresentRegularFileRead>),
+    /// The first fixed-name no-follow probe returned typed NotFound at that time point.
+    AbsentDuringLookup,
+    /// The input could not be observed completely and safely; this never means absence.
+    Failed(LocatorReadFailure),
+}
+
+impl CargoManifestObservation {
+    /// Returns bytes only for a complete, successful observation.
+    pub fn observed_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Present(read) => Some(&read.bytes),
+            Self::AbsentDuringLookup | Self::Failed(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CargoConfigPairConsistency {
     NonAtomic,
@@ -183,6 +218,23 @@ pub enum LocatorReadError {
     Cancelled,
 }
 
+/// Failure to resolve an invocation-time directory relative to an opaque native capture.
+///
+/// Kept separate from file-read failures so a missing directory or a regular file cannot become
+/// a successful directory observation or change existing file-reader absence contracts.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LocatorDirectoryLookupFailure {
+    /// A native binding, scope, permission, cancellation or resource check failed closed.
+    #[error(transparent)]
+    Read(#[from] LocatorReadFailure),
+    /// The fixed-name no-follow lookup found a non-directory ordinary object.
+    #[error("resolved object is not a directory")]
+    NotDirectory,
+    /// One fixed-name no-follow lookup returned typed NotFound; this is not atomic absence.
+    #[error("directory name was not found during lookup")]
+    NotFoundDuringLookup,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocatorDirectoryIdentity {
     native_absolute_path: NativeAbsolutePath,
@@ -194,6 +246,16 @@ pub struct LocatorDirectoryIdentity {
 }
 
 impl LocatorDirectoryIdentity {
+    /// Compares only the captured native object, filesystem and mount identifiers. This is a
+    /// cheap comparison of two time-point snapshots: it does not revalidate either directory,
+    /// equate fingerprints or native spellings, extend scan coverage, or grant any permission.
+    pub fn same_captured_native_object(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.identity == other.identity
+            && self.filesystem_identity == other.filesystem_identity
+            && self.mount_identity == other.mount_identity
+    }
+
     /// Conservative retained allocation estimate for bounded invocation-local indexes. It exposes
     /// no native path/authority and is not an allocator RSS measurement.
     pub fn retained_bytes_estimate(&self) -> usize {
@@ -337,17 +399,34 @@ impl<P: PlatformScanner> LocatorReader<P> {
         maximum: usize,
         cancel: &CancellationToken,
     ) -> Result<PresentRegularFileRead, LocatorReadFailure> {
-        let failed = |error| match error {
-            ReadAttempt::Failed(failure) => failure,
-            ReadAttempt::Absent => LocatorReadFailure::ReadFailed,
-        };
+        self.read_current_regular_file_attempt(parent, name, expectation, maximum, cancel)
+            .map_err(|error| match error {
+                ReadAttempt::Failed(failure) => failure,
+                // Existing fixed/enumerated file reads do not expose lookup absence. Only the new
+                // Cargo manifest observation distinguishes an initial typed NotFound time point.
+                ReadAttempt::Absent => LocatorReadFailure::IdentityMismatch,
+            })
+    }
+
+    fn read_current_regular_file_attempt(
+        &self,
+        parent: &OpenedDirectory<P::DirectoryHandle>,
+        name: &NativeName,
+        expectation: RegularFileReadExpectation,
+        maximum: usize,
+        cancel: &CancellationToken,
+    ) -> Result<PresentRegularFileRead, ReadAttempt> {
         let probe = RegularFileStreamRequest::new(name.clone(), expectation, 0, 0, None)
-            .map_err(|error| failed(map_file_read_error(error)))?;
+            .map_err(map_file_read_error)?;
         let observed =
             stream_bound_regular_file(&self.platform, &parent.handle, &probe, cancel, &mut |_| {
                 Ok(())
             })
-            .map_err(|error| failed(map_file_read_error(error)))?
+            .map_err(|error| match error {
+                _ if cancel.is_cancelled() => ReadAttempt::Failed(LocatorReadFailure::Cancelled),
+                BoundedRegularFileReadError::NotFound => ReadAttempt::Absent,
+                error => map_file_read_error(error),
+            })?
             .observed_after;
         // EstablishLive identifies this current file, but it must still be in the captured
         // directory's scope. Check before any payload byte, not after parsing a crossed mount.
@@ -355,12 +434,11 @@ impl<P: PlatformScanner> LocatorReader<P> {
             &parent.metadata,
             &observed.filesystem_identity,
             &observed.mount_identity,
-        )
-        .map_err(failed)?;
+        )?;
         let length = usize::try_from(observed.logical_bytes.0)
             .ok()
             .filter(|length| *length <= maximum)
-            .ok_or(LocatorReadFailure::ResourceLimit)?;
+            .ok_or(ReadAttempt::Failed(LocatorReadFailure::ResourceLimit))?;
         let request = RegularFileStreamRequest::new(
             name.clone(),
             RegularFileReadExpectation::previously_observed(
@@ -372,11 +450,11 @@ impl<P: PlatformScanner> LocatorReader<P> {
             length as u64,
             Some(observed),
         )
-        .map_err(|error| failed(map_file_read_error(error)))?;
+        .map_err(map_file_read_error)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(length)
-            .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            .map_err(|_| ReadAttempt::Failed(LocatorReadFailure::ResourceLimit))?;
         let result = stream_bound_regular_file(
             &self.platform,
             &parent.handle,
@@ -387,7 +465,7 @@ impl<P: PlatformScanner> LocatorReader<P> {
                 Ok(())
             },
         )
-        .map_err(|error| failed(map_file_read_error(error)))?;
+        .map_err(map_file_read_error)?;
         Ok(PresentRegularFileRead {
             bytes,
             observed_before: result.observed_before,
@@ -719,6 +797,365 @@ impl<P: PlatformScanner> LocatorReader<P> {
             return Ok(None);
         };
         self.capture_directory_identity(parent, cancel).map(Some)
+    }
+
+    /// Reads the complete fixed-name `Cargo.toml` in an independently captured directory.
+    /// The directory is revalidated before and after the provider-safe zero/full content stream.
+    /// Only typed NotFound from the first zero-payload probe is a time-local missing-name result;
+    /// disappearance after that probe, denial, links, unknown scope or partial reads fail closed.
+    ///
+    /// Two stream requests and their components must fit the reader's per-call limits. Callers
+    /// must separately bound cumulative workspace inputs/retention and recheck all inputs before
+    /// using their interpretation. No scan coverage or execution permission is created here.
+    pub fn read_cargo_manifest_in_captured_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> CargoManifestObservation {
+        let observe = || -> Result<PresentRegularFileRead, ReadAttempt> {
+            self.validate_captured_cargo_pair_budget(captured)
+                .map_err(|error| ReadAttempt::Failed(map_captured_operation_error(error)))?;
+            let directory = self.reopen_captured_directory(captured, cancel)?;
+            let result = self.read_current_regular_file_attempt(
+                &directory,
+                &fixed_native_name("Cargo.toml"),
+                RegularFileReadExpectation::establish_live(),
+                self.limits.max_file_bytes.min(self.limits.max_total_bytes),
+                cancel,
+            );
+            // An initial missing lookup is still only a time point. Reject an observed parent
+            // change even on that path instead of publishing absence from a replaced directory.
+            self.reopen_captured_directory(captured, cancel)?;
+            result
+        };
+        match observe() {
+            Ok(read) => CargoManifestObservation::Present(Box::new(read)),
+            Err(ReadAttempt::Absent) => CargoManifestObservation::AbsentDuringLookup,
+            Err(ReadAttempt::Failed(failure)) => CargoManifestObservation::Failed(failure),
+        }
+    }
+
+    /// Captures one direct directory child through a retained, revalidated native parent handle.
+    /// Names must be one platform-native basename. The child must have complete object,
+    /// filesystem, mount and fingerprint evidence and remain in the parent's native scope.
+    /// Symlinks, reparse points, provider/boundary failures and uncertain objects fail closed.
+    /// A returned capture is a configuration input snapshot, never extended scan coverage.
+    pub fn capture_child_directory(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        name: &NativeName,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryIdentity, LocatorDirectoryLookupFailure> {
+        self.validate_captured_cargo_pair_budget(captured)
+            .map_err(map_directory_operation_error)?;
+        name.validate_basename_for_current_platform()
+            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        if native_name_bytes(name)
+            > self
+                .limits
+                .max_directory_batch_bytes
+                .min(self.limits.max_directory_bytes)
+        {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        let directory = self
+            .reopen_captured_directory(captured, cancel)
+            .map_err(map_directory_attempt)?;
+        let child = DirectoryEntryRecord::from_parent_and_name(&directory.path, name.clone())
+            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        let walked = inspect_bound_child(
+            &self.platform,
+            &directory.handle,
+            &directory.path,
+            &child,
+            cancel,
+        )
+        .map_err(|error| LocatorDirectoryLookupFailure::Read(map_platform_failure(error)))?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled.into());
+        }
+        let metadata = match walked {
+            WalkEntry::Directory(opened) => opened.metadata,
+            WalkEntry::Error(error) if error.kind == sweepx_platform::ErrorKind::NotFound => {
+                return Err(LocatorDirectoryLookupFailure::NotFoundDuringLookup);
+            }
+            WalkEntry::File(_) | WalkEntry::CachedFile(_) => {
+                return Err(LocatorDirectoryLookupFailure::NotDirectory);
+            }
+            WalkEntry::Link(_) => return Err(LocatorReadFailure::SymlinkOrReparse.into()),
+            WalkEntry::Boundary(boundary) => {
+                return Err(map_boundary_failure(boundary.kind).into());
+            }
+            WalkEntry::Error(error) => return Err(map_walk_failure(error.kind).into()),
+        };
+        let (Some(filesystem), Some(mount)) =
+            (&metadata.filesystem_identity, &metadata.mount_identity)
+        else {
+            return Err(LocatorReadFailure::IdentityMismatch.into());
+        };
+        validate_same_scope(&directory.metadata, filesystem, mount)
+            .map_err(map_directory_attempt)?;
+        if metadata.fingerprint.is_empty() {
+            return Err(LocatorReadFailure::Unavailable.into());
+        }
+        let native = native_path_from_buf(&child.path).map_err(map_directory_operation_error)?;
+        let result = capture_metadata(native, metadata).map_err(map_directory_operation_error)?;
+        self.reopen_captured_directory(captured, cancel)
+            .map_err(map_directory_attempt)?;
+        Ok(result)
+    }
+
+    /// Enumerates bounded native child names for invocation-time workspace glob expansion.
+    /// Every reporting token is validated against the retained parent; no display spelling is
+    /// interpreted as authority. Names include ordinary files and links: callers must capture
+    /// each selected directory with [`Self::capture_child_directory`] before reading it.
+    ///
+    /// Enumeration and returned allocation each obey the directory entry/byte limits. Names are
+    /// copied without retaining backend spare capacity; exact duplicate tokens fail as ambiguous.
+    /// Native sorting is for duplicate detection only, not host case equivalence. A complete result
+    /// is a non-atomic enumeration with before/after parent checks, never a sealed absence proof.
+    pub fn captured_directory_child_names(
+        &self,
+        captured: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<NativeName>, LocatorDirectoryLookupFailure> {
+        self.validate_captured_cargo_pair_budget(captured)
+            .map_err(map_directory_operation_error)?;
+        let mut directory = self
+            .reopen_captured_directory(captured, cancel)
+            .map_err(map_directory_attempt)?;
+        let mut names = Vec::new();
+        let mut retained_payload = 0usize;
+        let mut budget = BatchBudget::default();
+        loop {
+            let batch = self.next_directory_batch(&mut directory, cancel, &mut budget)?;
+            let count = names
+                .len()
+                .checked_add(batch.entries.len())
+                .filter(|count| *count <= self.limits.max_directory_entries)
+                .ok_or(LocatorReadFailure::ResourceLimit)?;
+            count
+                .checked_mul(std::mem::size_of::<NativeName>())
+                .and_then(|slots| slots.checked_add(retained_payload))
+                .filter(|bytes| *bytes <= self.limits.max_directory_bytes)
+                .ok_or(LocatorReadFailure::ResourceLimit)?;
+            names
+                .try_reserve_exact(batch.entries.len())
+                .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            for child in batch.entries {
+                if cancel.is_cancelled() {
+                    return Err(LocatorReadFailure::Cancelled.into());
+                }
+                child
+                    .validate_for_parent(&directory.path)
+                    .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+                if names
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<NativeName>())
+                    .and_then(|slots| slots.checked_add(retained_payload))
+                    .and_then(|bytes| bytes.checked_add(native_name_bytes(&child.file_name)))
+                    .is_none_or(|bytes| bytes > self.limits.max_directory_bytes)
+                {
+                    return Err(LocatorReadFailure::ResourceLimit.into());
+                }
+                let name = clone_native_name_bounded(&child.file_name)?;
+                retained_payload = retained_payload
+                    .checked_add(native_name_retained_bytes(&name))
+                    .ok_or(LocatorReadFailure::ResourceLimit)?;
+                if names
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<NativeName>())
+                    .and_then(|slots| slots.checked_add(retained_payload))
+                    .is_none_or(|bytes| bytes > self.limits.max_directory_bytes)
+                {
+                    return Err(LocatorReadFailure::ResourceLimit.into());
+                }
+                names.push(name);
+            }
+            if batch.end_of_directory {
+                break;
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled.into());
+        }
+        names.sort_unstable_by(native_name_order);
+        if names.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(LocatorReadFailure::AmbiguousAlias.into());
+        }
+        self.reopen_captured_directory(captured, cancel)
+            .map_err(map_directory_attempt)?;
+        Ok(names)
+    }
+
+    /// Compares native objects only after independently revalidating both opaque captures.
+    /// Equal identifiers/fingerprints at these time points do not prove path alias equivalence,
+    /// a shared atomic snapshot, scan coverage or execution permission.
+    pub fn captured_directories_same_native_object(
+        &self,
+        left: &LocatorDirectoryIdentity,
+        right: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<bool, LocatorDirectoryLookupFailure> {
+        for captured in [left, right] {
+            self.validate_captured_cargo_pair_budget(captured)
+                .map_err(map_directory_operation_error)?;
+            self.reopen_captured_directory(captured, cancel)
+                .map_err(map_directory_attempt)?;
+        }
+        Ok(left.same_captured_native_object(right) && left.fingerprint == right.fingerprint)
+    }
+
+    /// Returns native relative basenames when two revalidated captures have an exact lexical
+    /// ancestor relationship within one filesystem/mount scope. `None` means unrelated native
+    /// spellings, not non-membership under host aliases. The empty vector denotes the same path.
+    /// This exposes only a configuration relationship, never an absolute execution locator.
+    pub fn captured_directory_relative_components(
+        &self,
+        descendant: &LocatorDirectoryIdentity,
+        ancestor: &LocatorDirectoryIdentity,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Vec<NativeName>>, LocatorDirectoryLookupFailure> {
+        for captured in [ancestor, descendant] {
+            self.validate_captured_cargo_pair_budget(captured)
+                .map_err(map_directory_operation_error)?;
+            self.reopen_captured_directory(captured, cancel)
+                .map_err(map_directory_attempt)?;
+        }
+        let ancestor_path = native_absolute_path_buf(&ancestor.native_absolute_path)
+            .map_err(map_directory_attempt)?;
+        let descendant_path = native_absolute_path_buf(&descendant.native_absolute_path)
+            .map_err(map_directory_attempt)?;
+        if native_path_has_dot_components(&ancestor_path)
+            || native_path_has_dot_components(&descendant_path)
+        {
+            return Err(LocatorReadFailure::InvalidBinding.into());
+        }
+        let Ok(relative) = descendant_path.strip_prefix(&ancestor_path) else {
+            return Ok(None);
+        };
+        if descendant.mount_identity != ancestor.mount_identity {
+            return Err(LocatorReadFailure::MountChanged.into());
+        }
+        if descendant.filesystem_identity != ancestor.filesystem_identity {
+            return Err(LocatorReadFailure::IdentityMismatch.into());
+        }
+        let steps = parse_relative_directory_steps(relative, self.limits)?;
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(steps.len())
+            .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+        for step in steps {
+            if cancel.is_cancelled() {
+                return Err(LocatorReadFailure::Cancelled.into());
+            }
+            match step {
+                RelativeDirectoryStep::Child(name) => names.push(name),
+                RelativeDirectoryStep::Current | RelativeDirectoryStep::Parent => {
+                    return Err(LocatorReadFailure::InvalidBinding.into());
+                }
+            }
+        }
+        Ok(Some(names))
+    }
+
+    /// Compares a raw Cargo declaration prefix with two freshly revalidated native captures.
+    /// The declared path is joined lexically to the origin, or replaces it when absolute. Parent
+    /// components are preserved: `a/../b` is never rewritten to `b`, and the declared path is never
+    /// opened. This matches configuration prefix semantics rather than resolving a directory.
+    ///
+    /// Input is limited to 4096 native bytes and the joined spelling to 64 KiB. Windows drive- or
+    /// root-relative syntax and NULs are rejected. The result is only a time-local relationship
+    /// between configuration spellings; it does not prove alias equivalence, expand scan coverage,
+    /// produce an execution locator, or authorize an operation on the declared prefix.
+    pub fn captured_directory_matches_declared_prefix(
+        &self,
+        descendant: &LocatorDirectoryIdentity,
+        origin: &LocatorDirectoryIdentity,
+        declared: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<bool, LocatorDirectoryLookupFailure> {
+        use std::path::Component;
+        if native_path_bytes(declared) > 4096 {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        if (declared.has_root() && !declared.is_absolute())
+            || (!declared.is_absolute()
+                && matches!(declared.components().next(), Some(Component::Prefix(_))))
+            || declared.as_os_str().as_encoded_bytes().contains(&0)
+        {
+            return Err(LocatorReadFailure::InvalidBinding.into());
+        }
+        for captured in [origin, descendant] {
+            self.validate_captured_cargo_pair_budget(captured)
+                .map_err(map_directory_operation_error)?;
+            self.reopen_captured_directory(captured, cancel)
+                .map_err(map_directory_attempt)?;
+        }
+        let origin_path = native_absolute_path_buf(&origin.native_absolute_path)
+            .map_err(map_directory_attempt)?;
+        let descendant_path = native_absolute_path_buf(&descendant.native_absolute_path)
+            .map_err(map_directory_attempt)?;
+        let joined = origin_path.join(declared);
+        if native_path_bytes(&joined) > 64 * 1024 {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        native_path_from_buf(&joined)
+            .map_err(map_directory_operation_error)?
+            .validate_for_current_platform()
+            .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+        if cancel.is_cancelled() {
+            return Err(LocatorReadFailure::Cancelled.into());
+        }
+        Ok(descendant_path.starts_with(joined))
+    }
+
+    /// Resolves a bounded relative directory configuration without lexical path collapse.
+    /// Each normal basename uses native child capture, `.` revalidates without moving, and `..`
+    /// independently admits the parent through [`Self::capture_parent_directory`]. Thus `a/../b`
+    /// must actually observe a safe directory `a`; links, missing steps or denied scope fail.
+    /// Parent admission may establish its own scope for configuration discovery only.
+    ///
+    /// Absolute, Windows root/drive-relative and empty spellings are rejected. Input is bounded
+    /// to 4096 native bytes and 64 lexical steps, then charged against this reader's request and
+    /// component limits before traversal. Callers must additionally bound invocation totals.
+    pub fn capture_relative_directory(
+        &self,
+        origin: &LocatorDirectoryIdentity,
+        relative: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<LocatorDirectoryIdentity, LocatorDirectoryLookupFailure> {
+        self.validate_captured_cargo_pair_budget(origin)
+            .map_err(map_directory_operation_error)?;
+        let steps = parse_relative_directory_steps(relative, self.limits)?;
+        if steps.is_empty() {
+            return Err(LocatorReadFailure::InvalidBinding.into());
+        }
+        self.reopen_captured_directory(origin, cancel)
+            .map_err(map_directory_attempt)?;
+        let mut current = origin.clone();
+        for step in steps {
+            if cancel.is_cancelled() {
+                return Err(LocatorReadFailure::Cancelled.into());
+            }
+            current = match step {
+                RelativeDirectoryStep::Child(name) => {
+                    self.capture_child_directory(&current, &name, cancel)?
+                }
+                RelativeDirectoryStep::Current => {
+                    self.reopen_captured_directory(&current, cancel)
+                        .map_err(map_directory_attempt)?;
+                    current
+                }
+                RelativeDirectoryStep::Parent => self
+                    .capture_parent_directory(&current, cancel)
+                    .map_err(map_directory_operation_error)?
+                    .ok_or(LocatorReadFailure::InvalidBinding)?,
+            };
+        }
+        self.reopen_captured_directory(&current, cancel)
+            .map_err(map_directory_attempt)?;
+        Ok(current)
     }
 
     fn observe_cargo_config_members(
@@ -1954,6 +2391,204 @@ struct OpenedDirectory<D> {
 enum ReadAttempt {
     Absent,
     Failed(LocatorReadFailure),
+}
+
+#[derive(Debug)]
+enum RelativeDirectoryStep {
+    Child(NativeName),
+    Current,
+    Parent,
+}
+
+fn map_captured_operation_error(error: LocatorReadError) -> LocatorReadFailure {
+    match error {
+        LocatorReadError::Cancelled => LocatorReadFailure::Cancelled,
+        LocatorReadError::ResourceLimit => LocatorReadFailure::ResourceLimit,
+        LocatorReadError::InvalidRequest => LocatorReadFailure::InvalidBinding,
+    }
+}
+
+fn map_directory_operation_error(error: LocatorReadError) -> LocatorDirectoryLookupFailure {
+    map_captured_operation_error(error).into()
+}
+
+fn map_directory_attempt(attempt: ReadAttempt) -> LocatorDirectoryLookupFailure {
+    match attempt {
+        ReadAttempt::Failed(failure) => failure.into(),
+        ReadAttempt::Absent => LocatorReadFailure::IdentityMismatch.into(),
+    }
+}
+
+fn native_name_bytes(name: &NativeName) -> usize {
+    match name {
+        NativeName::UnixBytes(bytes) => bytes.len(),
+        NativeName::WindowsUtf16(units) => units.len().saturating_mul(2),
+    }
+}
+
+fn native_name_retained_bytes(name: &NativeName) -> usize {
+    match name {
+        NativeName::UnixBytes(bytes) => bytes.capacity(),
+        NativeName::WindowsUtf16(units) => units.capacity().saturating_mul(2),
+    }
+}
+
+fn native_name_order(left: &NativeName, right: &NativeName) -> std::cmp::Ordering {
+    match (left, right) {
+        (NativeName::UnixBytes(left), NativeName::UnixBytes(right)) => left.cmp(right),
+        (NativeName::WindowsUtf16(left), NativeName::WindowsUtf16(right)) => left.cmp(right),
+        (NativeName::UnixBytes(_), NativeName::WindowsUtf16(_)) => std::cmp::Ordering::Less,
+        (NativeName::WindowsUtf16(_), NativeName::UnixBytes(_)) => std::cmp::Ordering::Greater,
+    }
+}
+
+fn clone_native_name_bounded(name: &NativeName) -> Result<NativeName, LocatorReadFailure> {
+    match name {
+        NativeName::UnixBytes(source) => {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(source.len())
+                .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            bytes.extend_from_slice(source);
+            Ok(NativeName::UnixBytes(bytes))
+        }
+        NativeName::WindowsUtf16(source) => {
+            let mut units = Vec::new();
+            units
+                .try_reserve_exact(source.len())
+                .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            units.extend_from_slice(source);
+            Ok(NativeName::WindowsUtf16(units))
+        }
+    }
+}
+
+fn native_path_bytes(path: &Path) -> usize {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().count().saturating_mul(2)
+    }
+    #[cfg(not(windows))]
+    {
+        path.as_os_str().as_encoded_bytes().len()
+    }
+}
+
+fn native_path_has_dot_components(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .split(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+        .any(|component| component == b"." || component == b"..")
+}
+
+fn parse_relative_directory_steps(
+    path: &Path,
+    limits: LocatorReadLimits,
+) -> Result<Vec<RelativeDirectoryStep>, LocatorDirectoryLookupFailure> {
+    use std::path::Component;
+    if native_path_bytes(path) > 4096 {
+        return Err(LocatorReadFailure::ResourceLimit.into());
+    }
+    if path.is_absolute()
+        || path.has_root()
+        || matches!(path.components().next(), Some(Component::Prefix(_)))
+    {
+        return Err(LocatorReadFailure::InvalidBinding.into());
+    }
+    // Path::components removes interior '.', which would hide lexical steps from both the
+    // resource charge and revalidation. Split lossless native units instead; no display codec
+    // or canonicalization participates in traversal.
+    let count = path
+        .as_os_str()
+        .as_encoded_bytes()
+        .split(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+        .filter(|part| !part.is_empty())
+        .count();
+    if count > 64
+        || count > limits.max_requests
+        || count > limits.max_components_per_request
+        || count
+            .checked_mul(std::mem::size_of::<RelativeDirectoryStep>())
+            // Windows needs one bounded UTF-16 input copy while constructing the output names.
+            .and_then(|bytes| {
+                native_path_bytes(path)
+                    .checked_mul(if cfg!(windows) { 2 } else { 1 })
+                    .and_then(|payload| bytes.checked_add(payload))
+            })
+            .is_none_or(|bytes| bytes > limits.max_directory_bytes)
+    {
+        return Err(LocatorReadFailure::ResourceLimit.into());
+    }
+    let mut steps = Vec::new();
+    steps
+        .try_reserve_exact(count)
+        .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+    let mut components = 1usize;
+    let mut append = |name: NativeName| -> Result<(), LocatorDirectoryLookupFailure> {
+        let step = if name == fixed_native_name(".") {
+            components = components
+                .checked_add(1)
+                .ok_or(LocatorReadFailure::ResourceLimit)?;
+            RelativeDirectoryStep::Current
+        } else if name == fixed_native_name("..") {
+            components = components
+                .checked_add(2)
+                .ok_or(LocatorReadFailure::ResourceLimit)?;
+            RelativeDirectoryStep::Parent
+        } else {
+            name.validate_basename_for_current_platform()
+                .map_err(|_| LocatorReadFailure::InvalidBinding)?;
+            components = components
+                .checked_add(2)
+                .ok_or(LocatorReadFailure::ResourceLimit)?;
+            RelativeDirectoryStep::Child(name)
+        };
+        if components > limits.max_total_components {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        steps.push(step);
+        Ok(())
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        for part in path
+            .as_os_str()
+            .as_bytes()
+            .split(|byte| *byte == b'/')
+            .filter(|part| !part.is_empty())
+        {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(part.len())
+                .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            bytes.extend_from_slice(part);
+            append(NativeName::UnixBytes(bytes))?;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(native_path_bytes(path) / 2)
+            .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+        units.extend(path.as_os_str().encode_wide());
+        for part in units
+            .split(|unit| *unit == b'/' as u16 || *unit == b'\\' as u16)
+            .filter(|part| !part.is_empty())
+        {
+            let mut name = Vec::new();
+            name.try_reserve_exact(part.len())
+                .map_err(|_| LocatorReadFailure::ResourceLimit)?;
+            name.extend_from_slice(part);
+            append(NativeName::WindowsUtf16(name))?;
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    return Err(LocatorReadFailure::Unavailable.into());
+    Ok(steps)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

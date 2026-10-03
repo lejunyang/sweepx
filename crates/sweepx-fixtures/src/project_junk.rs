@@ -179,3 +179,8 @@ pub fn generate(root: &Path) -> std::io::Result<Vec<(&'static ProjectJunkLayoutC
     }
     Ok(generated)
 }
+
+/// Raw pinned Cargo 1.98 metadata inputs and outputs for independent workspace tests.
+/// These observations cover membership/default selection, not builds or deletion authority.
+pub const CARGO_WORKSPACE_ORACLE: &str =
+    include_str!("../resources/project-junk/cargo/cargo-workspace-oracle-2026-10-03.json");

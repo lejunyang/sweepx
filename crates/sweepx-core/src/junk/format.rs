@@ -1,4 +1,4 @@
-//! Current, bounded content/context evidence. No declared path is opened or deletion authorized.
+//! Current, bounded content/context evidence. Output paths are not opened or deletion authorized.
 //!
 //! Profiles recognize bounded generated signatures, not arbitrary Dart URI/YAML or TypeScript/JS
 //! semantics. Unsupported shapes remain unknown. Even a perfect imitation is report-only: a
@@ -93,9 +93,9 @@ impl Default for ProjectFormatLimits {
             max_file_bytes: 256 * 1024,
             max_reserved_file_bytes: 32 * 1024 * 1024,
             locator: LocatorReadLimits {
-                max_requests: 5,
-                max_components_per_request: 32,
-                max_total_components: 32,
+                max_requests: 64,
+                max_components_per_request: 64,
+                max_total_components: 129,
                 ..LocatorReadLimits::default()
             },
             timeout: Duration::from_secs(5),

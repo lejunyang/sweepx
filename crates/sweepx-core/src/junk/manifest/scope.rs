@@ -1,5 +1,7 @@
 //! Invocation-local Cargo output observations. This models a Cargo invocation from the candidate's
 //! parent with the captured environment and no CLI overrides, never a future build or Trash permit.
+use super::workspace::{WorkspaceError, resolve_workspace};
+use super::workspace_native::{NativeWorkspaceSource, WorkspaceInputs};
 use super::{CargoTargetDirPathKind, ProjectContextStatus};
 use serde::Serialize;
 use std::ffi::OsStr;
@@ -26,6 +28,10 @@ pub enum CargoOutputSource {
     AncestorConfig,
     /// Selected configuration directly in the captured Cargo home.
     CargoHomeConfig,
+    /// Default target below the resolved workspace root.
+    WorkspaceDefault,
+    /// Default target below a standalone package.
+    PackageDefault,
 }
 impl CargoOutputSource {
     /// Stable display/machine value.
@@ -36,6 +42,8 @@ impl CargoOutputSource {
             Self::ProjectConfig => "project_config",
             Self::AncestorConfig => "ancestor_config",
             Self::CargoHomeConfig => "cargo_home_config",
+            Self::WorkspaceDefault => "workspace_default",
+            Self::PackageDefault => "package_default",
         }
     }
 }
@@ -62,6 +70,21 @@ impl CargoOutputPathComparison {
     }
 }
 
+/// Complete bounded membership and default-selection counts for this modeled invocation.
+/// No member names, paths, build validity, ownership or execution permissions are serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoWorkspaceEvidence {
+    /// True for a manifest declaring a workspace, including an empty virtual workspace.
+    pub is_workspace: bool,
+    /// Distinct package members; virtual manifest nodes are excluded.
+    pub member_count: usize,
+    /// Distinct packages selected by default from this modeled cwd.
+    pub default_member_count: usize,
+    /// Whether the modeled cwd is the resolved workspace/standalone root.
+    pub project_is_root: bool,
+}
+
 /// Fixed-size, non-atomic output evidence. No raw path/config/environment value is serialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +105,8 @@ pub struct CargoOutputEvidence {
     pub path_kind: Option<CargoTargetDirPathKind>,
     /// Exact spelling only; no configured path is opened or used as execution authority.
     pub candidate_path: CargoOutputPathComparison,
+    /// Membership is present only after every visited native input passes final revalidation.
+    pub workspace: Option<CargoWorkspaceEvidence>,
 }
 impl CargoOutputEvidence {
     fn unknown(reason: &'static str) -> Self {
@@ -98,6 +123,7 @@ impl CargoOutputEvidence {
             ancestor_depth: None,
             path_kind: None,
             candidate_path: CargoOutputPathComparison::NotChecked,
+            workspace: None,
         }
     }
 }
@@ -184,6 +210,7 @@ pub(in crate::junk) struct CargoOutputSession {
     environment: CargoOutputEnvironment,
     sources: Vec<ConfigRecord>,
     retained: usize,
+    workspace_inputs: WorkspaceInputs,
 }
 
 pub(in crate::junk) struct ScopeBudget<'a> {
@@ -194,7 +221,7 @@ pub(in crate::junk) struct ScopeBudget<'a> {
     pub timeout: Duration,
 }
 impl ScopeBudget<'_> {
-    fn check(&self, cancel: &CancellationToken) -> Result<(), &'static str> {
+    pub(super) fn check(&self, cancel: &CancellationToken) -> Result<(), &'static str> {
         if cancel.is_cancelled() {
             Err("cancelled")
         } else if self.started.elapsed() >= self.timeout {
@@ -202,6 +229,18 @@ impl ScopeBudget<'_> {
         } else {
             Ok(())
         }
+    }
+    pub(super) fn reserve_file(&mut self, cancel: &CancellationToken) -> Result<(), &'static str> {
+        self.check(cancel)?;
+        let total = self
+            .reserved_bytes
+            .checked_add(self.file_bytes)
+            .ok_or("resource_limit")?;
+        if self.file_bytes == 0 || total > self.max_reserved_bytes {
+            return Err("resource_limit");
+        }
+        *self.reserved_bytes = total;
+        Ok(())
     }
     fn reserve_pair(&mut self, cancel: &CancellationToken) -> Result<(), &'static str> {
         self.check(cancel)?;
@@ -224,6 +263,7 @@ impl CargoOutputSession {
             environment,
             sources: Vec::with_capacity(64),
             retained: 64 * std::mem::size_of::<ConfigRecord>(),
+            workspace_inputs: WorkspaceInputs::default(),
         }
     }
 
@@ -344,11 +384,43 @@ impl CargoOutputSession {
         {
             return Err("project_binding_changed");
         }
-        let Some((origin, value, source, depth)) = selected else {
-            let mut evidence = CargoOutputEvidence::unknown("workspace_default_not_resolved");
-            evidence.source_locations_observed = true;
-            return Ok(evidence);
+        let workspace_observation = (|| -> Result<_, WorkspaceError> {
+            let mut native =
+                NativeWorkspaceSource::new(reader, cancel, budget, &mut self.workspace_inputs);
+            let project_id = native.intern(project.clone())?;
+            let resolution = resolve_workspace(&mut native, &project_id)?;
+            native.finish()?;
+            let facts = CargoWorkspaceEvidence {
+                is_workspace: resolution.is_workspace,
+                member_count: resolution.members.len(),
+                default_member_count: resolution.default_members.len(),
+                project_is_root: project_id == resolution.root,
+            };
+            Ok((native.directory(resolution.root).clone(), facts))
+        })();
+        let (root, workspace) = match workspace_observation {
+            Ok(observed) => observed,
+            Err(error) => {
+                let mut evidence = CargoOutputEvidence::unknown(error.reason());
+                if matches!(error, WorkspaceError::Invalid(_)) {
+                    evidence.status = ProjectContextStatus::Invalid;
+                }
+                return Ok(evidence);
+            }
         };
+        let default_output = selected.is_none();
+        let (origin, value, source, depth) = selected.unwrap_or_else(|| {
+            (
+                root,
+                "target".to_owned(),
+                if workspace.is_workspace {
+                    CargoOutputSource::WorkspaceDefault
+                } else {
+                    CargoOutputSource::PackageDefault
+                },
+                None,
+            )
+        });
         // A non-comparable lexical path is separate from failed native revalidation. Do not
         // turn an origin replacement/denial into an apparently complete observation.
         reader
@@ -378,12 +450,17 @@ impl CargoOutputSession {
         Ok(CargoOutputEvidence {
             scope: "project_parent_current_env_no_cli",
             status: ProjectContextStatus::Observed,
-            reason: "configured_output_observed_non_atomic",
+            reason: if default_output {
+                "default_output_observed_non_atomic"
+            } else {
+                "configured_output_observed_non_atomic"
+            },
             source_locations_observed: true,
             source: Some(source),
             ancestor_depth: depth,
             path_kind: Some(CargoTargetDirPathKind::from_value(&value)),
             candidate_path,
+            workspace: Some(workspace),
         })
     }
 
@@ -476,7 +553,7 @@ fn select_declaration(pair: &CargoConfigPairObservation) -> Result<Option<String
     }
 }
 
-fn read_error(error: LocatorReadError) -> &'static str {
+pub(super) fn read_error(error: LocatorReadError) -> &'static str {
     match error {
         LocatorReadError::Cancelled => "cancelled",
         LocatorReadError::ResourceLimit => "resource_limit",

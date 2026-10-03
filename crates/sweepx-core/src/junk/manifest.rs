@@ -1,8 +1,11 @@
 //! Current project declarations, separate from effective configuration, ownership and activity.
 
 mod scope;
+mod workspace;
+mod workspace_native;
 pub use scope::{
     CargoOutputEnvironment, CargoOutputEvidence, CargoOutputPathComparison, CargoOutputSource,
+    CargoWorkspaceEvidence,
 };
 pub(super) use scope::{CargoOutputSession, ScopeBudget};
 

@@ -961,7 +961,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 ## Cargo workspace 的固定版本独立对照（2026-10-03）
 
-[53 场景原始对照](cargo-workspace-oracle-2026-10-03.json)通过[可复验脚本](../../scripts/cargo-workspace-oracle.py)在隔离 fixture/cwd/home 中运行本机固定 Cargo/Rust 1.98.0 的 `metadata --offline --no-deps --format-version=1`。预定 53 个场景全部记录：40 个 metadata 成功、13 个 Cargo 语义拒绝，没有期限/输出越界或输入变化，未生成额外文件。每场景声明输入最多 64 文件/128 KiB，子进程共享 stdout/stderr 256 KiB 保留额度、5 秒合作期限与另计 2 秒清理；这些不是内核硬中断、全磁盘配额或项目文件系统原子快照。没有生产 SDK 调用、构建、用户项目读取、Trash 或性能声明。
+[53 场景原始对照](../../crates/sweepx-fixtures/resources/project-junk/cargo/cargo-workspace-oracle-2026-10-03.json)通过[可复验脚本](../../scripts/cargo-workspace-oracle.py)在隔离 fixture/cwd/home 中运行本机固定 Cargo/Rust 1.98.0 的 `metadata --offline --no-deps --format-version=1`。预定 53 个场景全部记录：40 个 metadata 成功、13 个 Cargo 语义拒绝，没有期限/输出越界或输入变化，未生成额外文件。每场景声明输入最多 64 文件/128 KiB，子进程共享 stdout/stderr 256 KiB 保留额度、5 秒合作期限与另计 2 秒清理；这些不是内核硬中断、全磁盘配额或项目文件系统原子快照。没有生产 SDK 调用、构建、用户项目读取、Trash 或性能声明。
 
 原始输入、版本、二进制/harness 摘要、完整 metadata 输出及拒绝文本均保留；独立复核所有输入长度/SHA-256、成功结果的 workspace root、默认 target 及成员/default-member ID 集合，不要求枚举顺序一致。脚本 AST、子进程输出/期限/清理自测和文档链接检查通过。本次不改变 Rust 行为，复用前一单元检查，不重新执行无关 Rust 矩阵。
 
@@ -969,7 +969,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 - 外部成员的 `package.workspace` 指针、嵌套 workspace 冲突、成员指向错误根及缺失成员均需要独立观察/拒绝。`default-members` 的检查与本次 cwd 有关；从有效成员启动不等同于在 workspace 根执行默认选择。
 - 空 virtual workspace 和依赖成员环被此处 metadata/no-deps 接受；所有成功记录 `resolve=null`，这不证明构建或完整依赖解析有效，也不证明生成目录独占、没有进程活动或可以回收。Cargo 的路径解析结果不授予 SweepX 的 no-follow 原生身份关系。
 
-这是后续生产模型的独立输入，未实现 workspace 默认输出求解。当前 `cargoOutput` 仍保持受限 invocation 范围和 `workspace_default_not_resolved`；更广配置、原生输出匹配、独占归属及活动仍开放，不能因 oracle 成功勾选规则扩展。
+这次 oracle 提交只提供生产模型的独立输入；当时 `cargoOutput` 仍返回 `workspace_default_not_resolved`。工作区成员和默认输出的生产求解随后接入，见下节；更广配置、原生输出匹配、独占归属及活动仍开放，不能因 oracle 成功勾选规则扩展。
 
 ## 当前未完成摘要（2026-10-03）
 
@@ -977,7 +977,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 | 项目 | 仍缺的内容 | 当前边界 |
 | --- | --- | --- |
-| 项目规则的有效上下文 | Cargo workspace 默认输出/成员关系的生产求解，relative/missing home、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置和依赖样本 | 已有有界原生配置观察、受限输出模型和真实 SDK 样本；53 场景 Cargo oracle 只是独立证据 |
+| 项目规则的有效上下文 | relative/missing home、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出模型和真实 SDK 样本；53 场景 Cargo oracle 已用于纯模型及原生输入对照 |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
 | 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
@@ -985,3 +985,16 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
 大文件/重复内容分析及动态 TUI、选中刷新持久缓存片段合并、取消后 Base 残留修复、跨刷新呈现预算、macOS 普通文件 mount 证据和 22 → 17 crate 收敛已经完成，不再列为实现待办。会话/TUI 的主功能已经具备，未勾选主要体现原生验收与上述明确缺口；继续合并 crate 需要新的实际依赖/契约收益依据。
+
+
+## Cargo workspace 成员与默认输出生产求解（2026-10-03）
+
+`cargoOutput` 的受限“候选父目录、当前环境、无 CLI 覆盖”模型现调用同一 TOML 解析器的工作区投影，沿原生捕获读取成员、workspace 指针和 normal/dev/build/optional/target-specific/传递路径依赖。继承按依赖 alias 查找，未使用 workspace dependency/patch 不形成成员边；exclude 使用未经 parent 规范化的原始组件前缀，literal member 前缀保留 Cargo 的覆盖语义。默认成员依本次 cwd 选择，virtual manifest 不计入 package 数。无配置覆盖时，默认 `target` 基于解析后的 workspace root 或独立 package，新增来源 `workspace_default` / `package_default`。
+
+JSON 新增固定大小 `cargoOutput.workspace`：`isWorkspace`、`memberCount`、`defaultMemberCount`、`projectIsRoot`，两种语言展示和帮助同步。已知成员冲突/缺失返回 invalid；原生拒绝、取消、额度、未知别名及不支持的形状返回 unknown，不输出截断集合。局部声明事实仍独立保留。没有 Cargo/SDK 子进程、第二个 TOML parser、新 workspace crate 或删除授权；所有项目候选继续受独占归属与活动限制。
+
+扫描器补固定 `Cargo.toml` provider-safe zero/full 读取与原生目录操作：只有第一次 zero probe 的 typed NotFound 是 time-local missing，后续消失、拒绝或不完整读取保持失败。成员路径逐步 no-follow 解析，`a/../b` 必须先观察真实目录 a；绝对路径独立准入其原生范围，不从文件系统根跨 mount 扩展遍历。读取声明目录是配置观察，不扩展 scan coverage。所有已使用 manifest 在发布前重读内容摘要/native change stamp，glob 名称重新枚举，捕获目录重新核验；这些是非原子时间点检查，既不封闭 absence，也不证明 Cargo 构建有效。
+
+工作区输入索引只存在于本调用/revision，最多 256 个目录和 8 MiB capacity/payload 估算；模型最多 256 个成员、1,024 个待处理依赖、4,096 个 glob 状态、16,384 个步骤及 64 层祖先。文件读取和最终 reread 沿用上下文共享 32 MiB 最坏请求预留/5 秒合作期限，失败不退额度；更严调用者限额保留。配置模型另有原祖先/来源额度。无常驻 handle/线程或持久化配置答案，估算不等于 RSS，合作期限不承诺中断内核阻塞。
+
+原始 53 场景 artifact 移入 fixtures 包的资源目录，保持字节不变并由文档链接；纯模型与真实原生目录对照都从 raw Cargo metadata 推导 root/member/default-member 集合，40 条成功与 13 条语义拒绝全部需要匹配，不将 unknown 当作拒绝通过。额外回归覆盖工作区/package/empty virtual 计数、个人文件保留、链接、目录替换、内容变化、取消与资源上限。[交付验证记录](cargo-workspace-production-validation-2026-10-03.json)保留初期测试/fixture/lint 失败及修正范围。完整工作区串行 1,050 项通过、0 失败、3 项既有 ignored；之后新增真实中英文 CLI 契约 1 项通过，共覆盖 1,051 个不同通过用例，未称为第二次完整矩阵。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown、23 项检查器测试与四包清单通过。原始 artifact 字节与旧提交独立对照完全一致，fixtures 包包含资源，core/scanner 包包含新源码与测试；package list 不证明 registry 依赖构建。系统 Trash 成功挂起用例仍显式排除；没有目标宿主/MSVC、真实 provider、实际 Trash/隔离成功或端到端提速验收。更广配置、所有权/活动、跨平台缓存、旧间歇根因及 pathname 竞态仍未完成。
