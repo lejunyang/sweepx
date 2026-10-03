@@ -1,0 +1,728 @@
+{
+  "schema": "sweepx.native-home-oracle.v1",
+  "recordedAtUtc": "2026-10-03T04:15:04Z",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64"
+  },
+  "cargo": {
+    "path": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+    "sha256": "1de2e84c15443b70444eecfa959ff9099dd8c1a5606b6d9ef5bc0ea9c25bc7f9"
+  },
+  "rustc": {
+    "path": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+    "sha256": "a11618eca0956a8aa4372c2bc898690b513cbdfa2cb9125b2a5301e360ed5b49"
+  },
+  "shim": {
+    "source": "#include <errno.h>\n#include <fcntl.h>\n#include <pwd.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nstatic int fixture_getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t length, struct passwd **result) {\n    const char *directory = getenv(\"SWEEPX_NATIVE_HOME\");\n    const char *record = getenv(\"SWEEPX_NATIVE_HOME_RECORD\");\n    const char *mode = getenv(\"SWEEPX_NATIVE_HOME_MODE\");\n    if (!directory || !record || !mode) _exit(125);\n    int fd = open(record, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);\n    if (fd < 0) _exit(126);\n    dprintf(fd, \"{\\\"uid\\\":%u,\\\"realUid\\\":%u,\\\"length\\\":%zu,\\\"mode\\\":\\\"%s\\\"}\\n\", (unsigned)uid, (unsigned)getuid(), length, mode);\n    close(fd);\n    *result = NULL;\n    if (!strcmp(mode, \"absent\")) return 0;\n    if (!strcmp(mode, \"error\")) return EIO;\n    if (!strcmp(mode, \"range\")) return ERANGE;\n    size_t needed = strlen(directory) + 1;\n    if (needed > length) return ERANGE;\n    memcpy(buffer, directory, needed);\n    memset(pwd, 0, sizeof(*pwd));\n    pwd->pw_uid = uid;\n    pwd->pw_dir = buffer;\n    *result = pwd;\n    return 0;\n}\n#ifdef __APPLE__\n__attribute__((used)) static struct { const void *replacement; const void *original; } interpose[]\n__attribute__((section(\"__DATA,__interpose\"))) = { {(const void *)fixture_getpwuid_r, (const void *)getpwuid_r} };\n#else\nint getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t length, struct passwd **result) {\n    return fixture_getpwuid_r(uid, pwd, buffer, length, result);\n}\n#endif\n",
+    "sha256": "d06d78102c90f0301d8582025e87a3b44bf0c53c543d086a140c9dd58d92a6be"
+  },
+  "harness": {
+    "source": "import hashlib,importlib.util,json,os,platform,sys,tempfile,time\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location('runner',Path.cwd()/'scripts/cargo-workspace-oracle.py'); runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)\ncargo=Path('/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo')\nrustc=cargo.with_name('rustc'); shim=Path('/private/tmp/sweepx-native-home-shim.dylib'); output=Path('/private/tmp/sweepx-native-home-oracle-2026-10-03.json')\nassert not output.exists()\ncases=[('unset',None,None,'present'),('empty_home','',None,'present'),('empty_cargo',None,'','present'),('empty_native',None,None,'empty'),('missing_native',None,None,'absent'),('error_native',None,None,'error'),('range_native',None,None,'range'),('explicit_home',None,'explicit','present'),('environment_home','env-home',None,'present')]\ndigest=lambda b:hashlib.sha256(b).hexdigest()\nreport={'schema':'sweepx.native-home-oracle.v1','recordedAtUtc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'host':{'system':platform.system(),'release':platform.release(),'machine':platform.machine()},'cargo':{'path':str(cargo),'sha256':digest(cargo.read_bytes())},'rustc':{'path':str(rustc),'sha256':digest(rustc.read_bytes())},'shim':{'source':Path('/private/tmp/sweepx-native-home-shim.c').read_text(),'sha256':digest(shim.read_bytes())},'harness':{'source':Path(__file__).read_text(),'sha256':digest(Path(__file__).read_bytes())},'scope':'Controlled native getpwuid_r injection into pinned Cargo; no user config, build, global environment change, deletion, or production injection. Verifies home selection with OS inputs, not real NSS availability.','plannedCases':[c[0] for c in cases],'records':[],'complete':False}\nwith tempfile.TemporaryDirectory(prefix='sweepx-native-home-',dir='/private/tmp') as temporary:\n base=Path(temporary).resolve()\n common={'CARGO_NET_OFFLINE':'true','RUSTC':str(rustc),'PATH':str(cargo.parent)+':/usr/bin:/bin','DYLD_INSERT_LIBRARIES':str(shim)}\n report['cargoVersion']=runner.run_bounded([str(cargo),'--version'],base,dict({k:v for k,v in common.items() if k!='DYLD_INSERT_LIBRARIES'},HOME=str(base),CARGO_HOME=str(base)))\n assert report['cargoVersion']['stdout'].strip()=='cargo 1.98.0 (797e8a9bc 2026-08-05)'\n for name,env_home,env_cargo,mode in cases:\n  root=base/name;project=root/'project';project.mkdir(parents=True)\n  files={'project/Cargo.toml':'[package]\\nname=\"native_home_oracle\"\\nversion=\"0.1.0\"\\nedition=\"2024\"\\n','project/src/lib.rs':'pub fn answer() -> u8 { 42 }\\n','project/target/personal':'preserved\\n','os-home/.cargo/config.toml':'[build]\\ntarget-dir=\"native-output\"\\n','env-home/.cargo/config.toml':'[build]\\ntarget-dir=\"env-output\"\\n','explicit/config.toml':'[build]\\ntarget-dir=\"explicit-output\"\\n'}\n  if mode=='empty': files['project/.cargo/config.toml']='[build]\\ntarget-dir=\"empty-native-output\"\\n'\n  for relative,body in files.items():\n   path=root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(body)\n  native_value='' if mode=='empty' else str(root/'os-home');record_path=root/'lookup.jsonl'\n  env=dict(common,SWEEPX_NATIVE_HOME=native_value,SWEEPX_NATIVE_HOME_MODE='present' if mode=='empty' else mode,SWEEPX_NATIVE_HOME_RECORD=str(record_path))\n  if env_home is not None:env['HOME']='' if env_home=='' else str(root/env_home)\n  if env_cargo is not None:env['CARGO_HOME']='' if env_cargo=='' else str(root/env_cargo)\n  result=runner.run_bounded([str(cargo),'metadata','--offline','--no-deps','--format-version=1'],project,env)\n  calls=[json.loads(s) for s in record_path.read_text().splitlines()] if record_path.exists() else []\n  assert all(c['uid']==c['realUid'] for c in calls)\n  changes=[p for p,b in files.items() if not (root/p).is_file() or (root/p).read_text()!=b]\n  assert not changes and result['boundedFailure'] is None\n  item={'name':name,'fixtureRoot':str(root),'cwd':str(project),'nativeHome':native_value,'nativeMode':mode,'environment':env,'inputs':[{'path':p,'utf8':b,'sha256':digest(b.encode())} for p,b in sorted(files.items())],'cargo':result,'nativeCalls':calls,'inputChanges':changes}\n  report['records'].append(item);output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\\n')\n  if name not in ('explicit_home','environment_home'): assert calls,(name,result,calls)\n  print(name,'status',result['status'],'native calls',len(calls),'target',json.loads(result['stdout']).get('target_directory') if result['status']==0 else result['stderr'][:100],flush=True)\n report['complete']=True;output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\\n')\n",
+    "sha256": "078a79a4f724bbdf64d95689a3bb8e7c54a8fb2d4b4adc5ab2e7b07429ef7037"
+  },
+  "scope": "Controlled native getpwuid_r injection into pinned Cargo; no user config, build, global environment change, deletion, or production injection. Verifies home selection with OS inputs, not real NSS availability.",
+  "plannedCases": [
+    "unset",
+    "empty_home",
+    "empty_cargo",
+    "empty_native",
+    "missing_native",
+    "error_native",
+    "range_native",
+    "explicit_home",
+    "environment_home"
+  ],
+  "records": [
+    {
+      "name": "unset",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/unset",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/unset/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/unset/os-home",
+      "nativeMode": "present",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/unset/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/unset/lookup.jsonl"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/unset/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/unset/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/unset/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/unset/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/unset/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/unset/os-home/native-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/unset/os-home/native-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/unset/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1307
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "empty_home",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/empty_home",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/empty_home/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/empty_home/os-home",
+      "nativeMode": "present",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/empty_home/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/empty_home/lookup.jsonl",
+        "HOME": ""
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_home/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_home/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_home/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_home/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_home/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_home/os-home/native-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_home/os-home/native-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/empty_home/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1347
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "empty_cargo",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/empty_cargo",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/empty_cargo/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/empty_cargo/os-home",
+      "nativeMode": "present",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/empty_cargo/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/empty_cargo/lookup.jsonl",
+        "CARGO_HOME": ""
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_cargo/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_cargo/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_cargo/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_cargo/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_cargo/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_cargo/os-home/native-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_cargo/os-home/native-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/empty_cargo/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1355
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "empty_native",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/empty_native",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/empty_native/project",
+      "nativeHome": "",
+      "nativeMode": "empty",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/empty_native/lookup.jsonl"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"empty-native-output\"\n",
+          "sha256": "6af3048b4fca0cd807c2c1ef11a24fcbca0ddb938aac3af624c19fc674582882"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_native/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_native/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/empty_native/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_native/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/empty_native/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_native/project/empty-native-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/empty_native/project/empty-native-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/empty_native/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1375
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "missing_native",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/missing_native",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/missing_native/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/missing_native/os-home",
+      "nativeMode": "absent",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/missing_native/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "absent",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/missing_native/lookup.jsonl"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 101,
+        "boundedFailure": null,
+        "stdout": "",
+        "stderr": "error: Cargo couldn't find your home directory. This probably means that $HOME was not set.\n",
+        "retainedOutputBytes": 92
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "absent"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "absent"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "absent"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "error_native",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/error_native",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/error_native/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/error_native/os-home",
+      "nativeMode": "error",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/error_native/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "error",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/error_native/lookup.jsonl"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 101,
+        "boundedFailure": null,
+        "stdout": "",
+        "stderr": "error: Cargo couldn't find your home directory. This probably means that $HOME was not set.\n",
+        "retainedOutputBytes": 92
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "error"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "error"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "error"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "range_native",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/range_native",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/range_native/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/range_native/os-home",
+      "nativeMode": "range",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/range_native/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "range",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/range_native/lookup.jsonl"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 101,
+        "boundedFailure": null,
+        "stdout": "",
+        "stderr": "error: Cargo couldn't find your home directory. This probably means that $HOME was not set.\n",
+        "retainedOutputBytes": 92
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "range"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "range"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 4096,
+          "mode": "range"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "explicit_home",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/explicit_home",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/explicit_home/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/explicit_home/os-home",
+      "nativeMode": "present",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/explicit_home/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/explicit_home/lookup.jsonl",
+        "CARGO_HOME": "/private/tmp/sweepx-native-home-945_myua/explicit_home/explicit"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/explicit_home/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/explicit_home/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/explicit_home/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/explicit_home/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/explicit_home/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/explicit_home/explicit-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/explicit_home/explicit-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/explicit_home/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1359
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    },
+    {
+      "name": "environment_home",
+      "fixtureRoot": "/private/tmp/sweepx-native-home-945_myua/environment_home",
+      "cwd": "/private/tmp/sweepx-native-home-945_myua/environment_home/project",
+      "nativeHome": "/private/tmp/sweepx-native-home-945_myua/environment_home/os-home",
+      "nativeMode": "present",
+      "environment": {
+        "CARGO_NET_OFFLINE": "true",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "DYLD_INSERT_LIBRARIES": "/private/tmp/sweepx-native-home-shim.dylib",
+        "SWEEPX_NATIVE_HOME": "/private/tmp/sweepx-native-home-945_myua/environment_home/os-home",
+        "SWEEPX_NATIVE_HOME_MODE": "present",
+        "SWEEPX_NATIVE_HOME_RECORD": "/private/tmp/sweepx-native-home-945_myua/environment_home/lookup.jsonl",
+        "HOME": "/private/tmp/sweepx-native-home-945_myua/environment_home/env-home"
+      },
+      "inputs": [
+        {
+          "path": "env-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"env-output\"\n",
+          "sha256": "63345d5593da4855579651ff942126109c3d1ec710f87036b93db76858887a18"
+        },
+        {
+          "path": "explicit/config.toml",
+          "utf8": "[build]\ntarget-dir=\"explicit-output\"\n",
+          "sha256": "b6211cc0ab60115273b8f751ce264986706cbfe3ea32c2567751803b9ffd2f20"
+        },
+        {
+          "path": "os-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"native-output\"\n",
+          "sha256": "c0de64eab757071563ed4be306184b56ad2215ce4d775d579cb7226bba31c128"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"native_home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "69ab4cb672b44f4525df61a3e4878bab7c141abb0635c81cbf1b92b271dbb1a8"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "preserved\n",
+          "sha256": "7ee0e7f63b9b65e302add82986c18196ecb8da0121575e4733219572eeac2712"
+        }
+      ],
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"native_home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-native-home-945_myua/environment_home/project#native_home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"native_home_oracle\",\"src_path\":\"/private/tmp/sweepx-native-home-945_myua/environment_home/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-native-home-945_myua/environment_home/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/environment_home/project#native_home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-native-home-945_myua/environment_home/project#native_home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-native-home-945_myua/environment_home/env-home/env-output\",\"build_directory\":\"/private/tmp/sweepx-native-home-945_myua/environment_home/env-home/env-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-native-home-945_myua/environment_home/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1391
+      },
+      "nativeCalls": [
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        },
+        {
+          "uid": 501,
+          "realUid": 501,
+          "length": 2024,
+          "mode": "present"
+        }
+      ],
+      "inputChanges": []
+    }
+  ],
+  "complete": true,
+  "cargoVersion": {
+    "status": 0,
+    "boundedFailure": null,
+    "stdout": "cargo 1.98.0 (797e8a9bc 2026-08-05)\n",
+    "stderr": "",
+    "retainedOutputBytes": 36
+  }
+}

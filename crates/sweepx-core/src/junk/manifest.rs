@@ -1,5 +1,6 @@
 //! Current project declarations, separate from effective configuration, ownership and activity.
 
+mod home;
 mod scope;
 mod workspace;
 mod workspace_native;

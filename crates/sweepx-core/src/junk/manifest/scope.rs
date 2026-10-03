@@ -4,7 +4,7 @@ use super::workspace::{WorkspaceError, resolve_workspace};
 use super::workspace_native::{NativeWorkspaceSource, WorkspaceInputs};
 use super::{CargoTargetDirPathKind, ProjectContextStatus};
 use serde::Serialize;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use sweepx_model::ScannedEntry;
@@ -136,16 +136,20 @@ pub struct CargoOutputEnvironment {
     target: Result<Option<String>, &'static str>,
     build: Result<Option<String>, &'static str>,
     home: Result<PathBuf, &'static str>,
+    /// Only a process-environment snapshot may request a native fallback. Resolve it once,
+    /// on the first Cargo observation's worker, within that session's cooperative budget.
+    system_home_pending: bool,
 }
 impl CargoOutputEnvironment {
-    /// Captures only the three Cargo variables and the host's home variable. Missing fallback
-    /// home stays unknown; no system-user lookup, tool launch or global environment mutation runs.
+    /// Captures the three Cargo variables and the host's home variable without native I/O.
+    /// Missing/empty user home requests one lazy OS lookup during Cargo interpretation on a
+    /// worker. Native errors remain unknown; no tool launch or global environment change runs.
     pub fn current() -> Self {
         let target = std::env::var_os("CARGO_TARGET_DIR");
         let build = std::env::var_os("CARGO_BUILD_TARGET_DIR");
         let home = std::env::var_os("CARGO_HOME");
         let fallback = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-        Self::from_values(
+        Self::from_process_values(
             target.as_deref(),
             build.as_deref(),
             home.as_deref(),
@@ -153,10 +157,44 @@ impl CargoOutputEnvironment {
         )
     }
 
+    fn from_process_values(
+        target: Option<&OsStr>,
+        build: Option<&OsStr>,
+        home: Option<&OsStr>,
+        user_home: Option<&OsStr>,
+    ) -> Self {
+        let explicit = home.filter(|value| !value.is_empty());
+        let fallback = user_home.filter(|value| !value.is_empty());
+        let mut snapshot = Self::from_values(target, build, home, fallback);
+        snapshot.system_home_pending = explicit.is_none() && fallback.is_none();
+        snapshot
+    }
+
+    fn resolve_system_home_with(
+        &mut self,
+        cancel: &CancellationToken,
+        budget: &ScopeBudget<'_>,
+        lookup: impl FnOnce() -> Result<OsString, &'static str>,
+    ) -> Result<(), &'static str> {
+        if self.system_home_pending {
+            budget.check(cancel)?;
+            self.system_home_pending = false;
+            let observed = lookup();
+            // Native directory services may block in the host. A late/cancelled answer must
+            // not become usable evidence; failures also deduplicate for this invocation only.
+            self.home = budget.check(cancel).and_then(|()| {
+                let user_home = observed?;
+                Self::from_values(None, None, None, Some(&user_home)).home
+            });
+        }
+        self.home.as_ref().map(|_| ()).map_err(|reason| *reason)
+    }
+
     /// Admits explicit values for independent callers/tests, without changing process environment.
     /// Path values are capped before copying; non-Unicode output inputs remain unsupported.
     /// Empty Cargo home falls back to user home; relative home uses the explicitly modeled cwd.
-    /// `user_home` only supplies the default `<home>/.cargo` location.
+    /// `user_home` supplies an already resolved user home, including a valid empty native home
+    /// (`.cargo` relative to the modeled cwd). Missing data stays unknown, with no native fallback.
     pub fn from_values(
         target: Option<&OsStr>,
         build: Option<&OsStr>,
@@ -180,7 +218,7 @@ impl CargoOutputEnvironment {
             if value.as_encoded_bytes().len() > 64 * 1024 {
                 return Err("resource_limit");
             }
-            if value.is_empty() || value.as_encoded_bytes().contains(&0) {
+            if value.as_encoded_bytes().contains(&0) {
                 return Err("cargo_home_invalid");
             }
             let mut path = PathBuf::from(value);
@@ -196,6 +234,7 @@ impl CargoOutputEnvironment {
             target: output(target),
             build: output(build),
             home,
+            system_home_pending: false,
         }
     }
 }
@@ -290,11 +329,12 @@ impl CargoOutputSession {
         budget: &mut ScopeBudget<'_>,
     ) -> Result<CargoOutputEvidence, &'static str> {
         budget.check(cancel)?;
-        self.environment.home.as_ref().map_err(|reason| *reason)?;
         let target = self.environment.target.as_ref().map_err(|reason| *reason)?;
         if target.is_none() {
             self.environment.build.as_ref().map_err(|reason| *reason)?;
         }
+        self.environment
+            .resolve_system_home_with(cancel, budget, super::home::lookup)?;
         let project = reader
             .capture_scanned_ancestor_directory(entry, 1, cancel)
             .map_err(read_error)?;
@@ -599,3 +639,7 @@ fn directory_reason(error: LocatorDirectoryLookupFailure) -> &'static str {
         LocatorDirectoryLookupFailure::NotFoundDuringLookup => "cargo_home_lookup_changed",
     }
 }
+
+#[cfg(test)]
+#[path = "scope_home_tests.rs"]
+mod home_tests;

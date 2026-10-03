@@ -977,7 +977,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 | 项目 | 仍缺的内容 | 当前边界 |
 | --- | --- | --- |
-| 项目规则的有效上下文 | 无 home 环境时的系统用户目录回退、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace 与 17 场景 home Cargo oracle 已用于独立对照 |
+| 项目规则的有效上下文 | include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace、17 场景 home 与 9 场景受控系统 home Cargo oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
 | 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
@@ -1024,3 +1024,17 @@ Cargo 对 home 配置中的相对 `target-dir` 先取原始 home spelling 的 pa
 旧 300 ms 启动问题另进行预先限定的一次串行 core 诊断：只在原期限已经失败后，才允许对尚未回收的自有子进程记录原生 task info 和 sample。306 项通过、2 项 ignored，没有触发诊断，取得零份现场记录；临时代码全部移除，原 patch 和完整记录保存在交付证据中。这次通过不能关闭旧启动根因，进程回收修复也没有提供其因果解释。
 
 本轮完整工作区串行 1,061 项通过、0 失败、3 项既有/opt-in ignored，已诊断系统 Trash 挂起用例仍显式排除。之后补充 spawn 前检查和一项 sentinel 回归，最终工具专项 18 项与安装发现专项 15 项通过；新增回归使覆盖合计 1,062 个不同通过用例，其他用例重叠，不称为第二次完整矩阵。affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试与 core 包清单通过；最后仅调整源码注释，复用未变行为的检查。交叉 lint 不证明目标宿主运行或 MSVC，包清单不证明 registry 构建。本轮没有端到端提速或 RSS 测量，旧 probe/热缓存 PTY/FSEvents 根因、真实 provider、实际 Trash/隔离成功及最终 pathname 竞态仍开放，整体路线图不勾选。
+
+## 缺少 home 环境时的系统目录回退（2026-10-03）
+
+`CargoOutputEnvironment::current` 仍只捕获环境，不做账户查询。非空 `CARGO_HOME` 优先，否则使用非空 HOME（Unix）或 USERPROFILE（Windows）；缺少或为空时，在首次 Cargo 解释的工作线程上求解系统 home。本次 session 内复用成功或失败，下一调用/revision 重建，没有持久化答案。查询前后使用同一个 ScopeBudget 的取消/期限检查；过期或取消的原生答案丢弃，原生目录服务阻塞不能被合作期限硬中断。没有扩大扫描/回收范围或解除项目独占归属与活动限制。
+
+Unix 使用 real UID 和一次 getpwuid_r，调用方缓冲固定 64 KiB；结果指针、UID、home 指针在该缓冲内的范围及有界 NUL 均核对，ERANGE 和其他失败保留 unknown。系统记录中的空 home 是有效输入，按本次 cwd 使用 `.cargo`；环境 HOME 为空则触发系统回退，二者分开。Windows 使用 FOLDERID_Profile/KF_FLAG_DONT_VERIFY，不创建或验证目录；最多观察 32 Ki UTF-16 单元，所有成功/失败出口均释放原生分配，再沿用既有路径准入与 64 KiB 编码限制。额度约束调用方请求/复制，不证明 OS 内部 allocation/RSS 上限。显式 `from_values` 输入表示调用方已经求解的 home，缺失时仍 unknown，不偷偷查询宿主。
+
+资料快照：2026-10-03。[Cargo home 文档](https://doc.rust-lang.org/cargo/guide/cargo-home.html)、[Rust home_dir 文档](https://doc.rust-lang.org/std/env/fn.home_dir.html)和 [Microsoft Profile 查询契约](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath)作为 API 参考，Unix 空 HOME 的行为另对照本机固定 Rust 1.98 源码及实际 Cargo，未沿用 home crate 旧文档的“空 HOME 也直接使用”描述。[9 场景原始 Cargo 记录](../../crates/sweepx-fixtures/resources/project-junk/cargo/cargo-native-home-oracle-2026-10-03.json)用隔离 home/config 和仅测试子进程的原生 passwd 注入录制，6 次成功、3 次 home 不可用拒绝，全部原始输入保持；不读取用户配置、运行构建、修改全局环境或授予回收权。
+
+核心原生目录求解逐条与 raw Cargo metadata 比较，成功不能用 unknown 通过；另验证查询延后、成功/失败去重、取消/过期准入及取消后的答案拒绝。真实 macOS 账户的 C 与 Rust 查询一致，记录只保留 home 摘要；直接编译未改动 Unix 生产查询模块的小程序通过 7 个受控原生场景，并用阶段标记与独立 C 记录证明每次实际求解只有一次请求。Windows 最后补充空原生 Profile 拒绝，仅改 Windows cfg；复用未改 Unix 的运行证据。
+
+保留诊断缺口：首次完整核心子进程对照把两个额外账户查询（当时未记录其来源阶段）误计为求解次数；随后新增 capture/lookup/repeat 标记以分开来源。沙箱内两次完整核心程序在原 5 秒期限内没有 stdout/退出或任何阶段/账户记录，一次宿主对照相同；deadline 后仅针对仍独占等待、尚未回收的本次子进程取样，沙箱拒绝，宿主 sampler 在自身 3 秒期限停止，均没有调用栈。没有延长期限、修改生产断言或将重试通过当作修复；其余 8 个完整程序场景未运行，保留 private fixture 入口。小程序证明原生查询模块的 ABI/失败处理，不关闭完整程序的库注入/启动根因，也不等同端到端验收。首次 oracle 版本检查及诊断输出路径保护的问题也保留在[交付记录](cargo-native-home-validation-2026-10-03.json)。
+
+最终工作区串行 1,066 项通过、0 失败、3 项原有/opt-in ignored，系统 Trash 挂起用例仍显式排除；普通矩阵中的 private fixture 入口未启用注入，不将其通过当作上述原生对照通过。affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项检查器测试及 core/fixtures 包清单通过。交叉 lint 不证明目标宿主运行/MSVC，包清单不证明 registry 构建；没有端到端速度/RSS 测量。include、自定义 cwd/CLI、原生输出对象关系、其他 SDK 样本与所有权/活动仍开放，原生 Linux/Windows/provider/实际回收及其余稳定性根因继续未验收，整份路线图不勾选。

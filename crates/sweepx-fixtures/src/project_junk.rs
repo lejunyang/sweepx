@@ -189,3 +189,8 @@ pub const CARGO_WORKSPACE_ORACLE: &str =
 /// These observations supply output selection/path oracles, never ownership or Trash authority.
 pub const CARGO_HOME_ORACLE: &str =
     include_str!("../resources/project-junk/cargo/cargo-home-oracle-2026-10-03.json");
+
+/// Raw Cargo 1.98 metadata with controlled native passwd home inputs and isolated config files.
+/// Native interposition is fixture-only; observations do not prove real NSS or Trash authority.
+pub const CARGO_NATIVE_HOME_ORACLE: &str =
+    include_str!("../resources/project-junk/cargo/cargo-native-home-oracle-2026-10-03.json");

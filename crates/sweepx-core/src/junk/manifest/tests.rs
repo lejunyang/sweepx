@@ -76,7 +76,7 @@ fn invalid_and_unsupported_context_never_produces_declarations() {
     }
 }
 
-fn fixture() -> (
+pub(super) fn fixture() -> (
     tempfile::TempDir,
     std::path::PathBuf,
     crate::junk::candidate::JunkCandidate,
