@@ -1,6 +1,10 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
 use super::{AccountedFile, EntryMetadata, with_cache_io, write_json};
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests;
+#[cfg(any(target_os = "linux", test))]
+mod mount;
 #[cfg(test)]
 use super::{Limits, ReadBudget};
 use std::ffi::{CStr, CString};
@@ -49,13 +53,28 @@ pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
 }
 
 /// A private cache directory retained by native handle; display paths are not reopened.
-pub struct Directory(OwnedFd);
+pub struct Directory {
+    fd: OwnedFd,
+    // Handle lifetime pins the captured mount; do not persist/recover this from display paths.
+    #[cfg(target_os = "linux")]
+    mount: mount::Identity,
+}
 
 impl Directory {
+    fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        let mount = mount::for_fd(fd.as_raw_fd())?;
+        Ok(Self {
+            fd,
+            #[cfg(target_os = "linux")]
+            mount,
+        })
+    }
+
     /// Duplicates retained authority without resolving a display pathname again.
     pub(crate) fn retain(&self) -> io::Result<Self> {
         self.private()?;
-        Ok(Self(self.0.try_clone()?))
+        Self::from_owned(self.fd.try_clone()?)
     }
 
     /// Verifies that a retained child still has the same binding beneath this parent.
@@ -73,11 +92,52 @@ impl Directory {
     fn accounting_metadata_guarded(&self, name: &str) -> io::Result<AccountedFile> {
         let parent = self.private()?;
         let name = component(name)?;
+        #[cfg(target_os = "linux")]
+        {
+            let (mount, metadata) = mount::relative(self.fd.as_raw_fd(), &name)?;
+            self.mount.require_same(mount)?;
+            let device = libc::makedev(metadata.stx_dev_major, metadata.stx_dev_minor);
+            let mode = u32::from(metadata.stx_mode);
+            // One no-follow statx result supplies the ledger fields and mount admission.
+            // It is not an atomic snapshot against concurrent chmod/chown/namespace changes.
+            if mode & libc::S_IFMT != libc::S_IFREG
+                || metadata.stx_uid != unsafe { libc::geteuid() }
+                || mode & 0o077 != 0
+                || metadata.stx_nlink != 1
+                || device != parent.dev()
+            {
+                return Err(io::Error::other(
+                    "cache accounting requires private single-link regular files on the retained mount",
+                ));
+            }
+            Ok(AccountedFile {
+                bytes: metadata.stx_size,
+                accessed: (
+                    metadata.stx_atime.tv_sec,
+                    i64::from(metadata.stx_atime.tv_nsec),
+                ),
+                identity: [device, metadata.stx_ino, u64::from(metadata.stx_nlink)],
+                changed: (
+                    metadata.stx_ctime.tv_sec,
+                    i64::from(metadata.stx_ctime.tv_nsec),
+                ),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.accounting_metadata_unix(parent, name)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn accounting_metadata_unix(
+        &self,
+        parent: Metadata,
+        name: CString,
+    ) -> io::Result<AccountedFile> {
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: validated basename under a retained private directory, initialized on success.
         if unsafe {
             libc::fstatat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 name.as_ptr(),
                 metadata.as_mut_ptr(),
                 libc::AT_SYMLINK_NOFOLLOW,
@@ -121,7 +181,10 @@ impl Directory {
     }
 
     fn private(&self) -> io::Result<Metadata> {
-        let metadata = File::from(self.0.try_clone()?).metadata()?;
+        #[cfg(target_os = "linux")]
+        self.mount
+            .require_same(mount::for_fd(self.fd.as_raw_fd())?)?;
+        let metadata = File::from(self.fd.try_clone()?).metadata()?;
         // SAFETY: geteuid has no pointer arguments. The retained descriptor remains authority.
         if !metadata.is_dir()
             || metadata.uid() != unsafe { libc::geteuid() }
@@ -151,7 +214,7 @@ impl Directory {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        let mut current = Self(owned(fd)?);
+        let mut current = Self::from_owned(owned(fd)?)?;
         for part in path.components() {
             let Component::Normal(part) = part else {
                 if matches!(part, Component::RootDir | Component::CurDir) {
@@ -162,19 +225,19 @@ impl Directory {
             let name = CString::new(part.as_encoded_bytes()).map_err(io::Error::other)?;
             let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             // SAFETY: retained directory plus one native component; no path authority is reconstructed.
-            let mut next = unsafe { libc::openat(current.0.as_raw_fd(), name.as_ptr(), flags) };
+            let mut next = unsafe { libc::openat(current.fd.as_raw_fd(), name.as_ptr(), flags) };
             if next < 0 && create && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
                 // SAFETY: mkdirat creates only this basename beneath the retained directory.
-                let result = unsafe { libc::mkdirat(current.0.as_raw_fd(), name.as_ptr(), 0o700) };
+                let result = unsafe { libc::mkdirat(current.fd.as_raw_fd(), name.as_ptr(), 0o700) };
                 if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
                     return Err(io::Error::last_os_error());
                 }
                 // SAFETY: same no-follow binding as the initial open; another creator may have raced.
-                next = unsafe { libc::openat(current.0.as_raw_fd(), name.as_ptr(), flags) };
+                next = unsafe { libc::openat(current.fd.as_raw_fd(), name.as_ptr(), flags) };
             }
-            current = Self(owned(next)?);
+            current = Self::from_owned(owned(next)?)?;
         }
-        let metadata = File::from(current.0.try_clone()?).metadata()?;
+        let metadata = File::from(current.fd.try_clone()?).metadata()?;
         // SAFETY: geteuid has no pointer arguments or side effects.
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
             return Err(io::Error::other(
@@ -195,13 +258,15 @@ impl Directory {
         // SAFETY: no-follow basename beneath this retained directory; returned fd is owned.
         let fd = unsafe {
             libc::openat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
-        let child = Self(owned(fd)?);
-        let meta = File::from(child.0.try_clone()?).metadata()?;
+        let child = Self::from_owned(owned(fd)?)?;
+        #[cfg(target_os = "linux")]
+        self.mount.require_same(child.mount)?;
+        let meta = File::from(child.fd.try_clone()?).metadata()?;
         if meta.dev() != self.private()?.dev() {
             return Err(io::Error::other("cache child crossed a volume boundary"));
         }
@@ -221,7 +286,7 @@ impl Directory {
         self.private()?;
         let native = component(name)?;
         // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
-        if unsafe { libc::mkdirat(self.0.as_raw_fd(), native.as_ptr(), 0o700) } < 0
+        if unsafe { libc::mkdirat(self.fd.as_raw_fd(), native.as_ptr(), 0o700) } < 0
             && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
         {
             return Err(io::Error::last_os_error());
@@ -240,7 +305,7 @@ impl Directory {
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
             libc::openat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 c".lock".as_ptr(),
                 libc::O_WRONLY
                     | libc::O_CREAT
@@ -251,6 +316,8 @@ impl Directory {
             )
         };
         let file = File::from(owned(fd)?);
+        #[cfg(target_os = "linux")]
+        self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
         let meta = file.metadata()?;
         // SAFETY: geteuid has no arguments; flock is applied to the live owned descriptor.
         if !meta.is_file()
@@ -272,27 +339,30 @@ impl Directory {
     }
 
     pub(super) fn open_file(&self, name: &str) -> io::Result<File> {
-        self.private()?;
+        let parent = self.private()?;
         let name = component(name)?;
         // Nonblocking prevents a substituted FIFO from stalling before the type check.
         // SAFETY: validated basename and a live retained parent; the opened fd is checked below.
         let fd = unsafe {
             libc::openat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         let file = File::from(owned(fd)?);
+        #[cfg(target_os = "linux")]
+        self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
         let metadata = file.metadata()?;
         // SAFETY: geteuid has no arguments.
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o077 != 0
             || metadata.nlink() != 1
+            || metadata.dev() != parent.dev()
         {
             return Err(io::Error::other(
-                "cache entry is not a private regular file with one link",
+                "cache entry is not a private single-link regular file on the retained device",
             ));
         }
         #[cfg(target_os = "macos")]
@@ -345,7 +415,7 @@ impl Directory {
             // SAFETY: exclusive no-follow creation cannot truncate any existing entry.
             let fd = unsafe {
                 libc::openat(
-                    self.0.as_raw_fd(),
+                    self.fd.as_raw_fd(),
                     temp.as_ptr(),
                     libc::O_WRONLY
                         | libc::O_CREAT
@@ -357,6 +427,8 @@ impl Directory {
             };
             let mut file = File::from(owned(fd)?);
             created = true;
+            #[cfg(target_os = "linux")]
+            self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
             encode(&mut file)?;
             Ok(file)
         });
@@ -366,12 +438,25 @@ impl Directory {
             // Disposable cache publication is atomic but not crash durable. No data stream
             // access occurs after policy restoration; only the retained-parent name commit.
             self.private()?;
+            #[cfg(target_os = "linux")]
+            {
+                let observed =
+                    self.accounting_metadata_guarded(temp.to_str().map_err(io::Error::other)?)?;
+                self.mount.require_same(mount::for_fd(_file.as_raw_fd())?)?;
+                let expected = _file.metadata()?;
+                if observed.identity != [expected.dev(), expected.ino(), expected.nlink()]
+                    || observed.bytes != expected.len()
+                    || observed.changed != (expected.ctime(), expected.ctime_nsec())
+                {
+                    return Err(io::Error::other("cache temporary binding changed"));
+                }
+            }
             // SAFETY: both validated names live beneath the same retained directory.
             if unsafe {
                 libc::renameat(
-                    self.0.as_raw_fd(),
+                    self.fd.as_raw_fd(),
                     temp.as_ptr(),
-                    self.0.as_raw_fd(),
+                    self.fd.as_raw_fd(),
                     destination.as_ptr(),
                 )
             } < 0
@@ -384,7 +469,7 @@ impl Directory {
             // SAFETY: cleanup only after this invocation's exclusive temporary creation.
             // A pre-existing temp collision must never be removed.
             unsafe {
-                libc::unlinkat(self.0.as_raw_fd(), temp.as_ptr(), 0);
+                libc::unlinkat(self.fd.as_raw_fd(), temp.as_ptr(), 0);
             }
         }
         result
@@ -396,10 +481,12 @@ impl Directory {
     }
 
     fn remove_guarded(&self, name: &str) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        self.accounting_metadata_guarded(name)?;
         self.private()?;
         let name = component(name)?;
         // SAFETY: unlink only removes this entry beneath the retained parent, never follows it.
-        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -411,13 +498,27 @@ impl Directory {
     }
 
     fn metadata_guarded(&self, name: &str) -> io::Result<EntryMetadata> {
+        #[cfg(target_os = "linux")]
+        {
+            let metadata = self.accounting_metadata_guarded(name)?;
+            Ok(EntryMetadata {
+                bytes: metadata.bytes,
+                accessed: metadata.accessed,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.metadata_unix(name)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn metadata_unix(&self, name: &str) -> io::Result<EntryMetadata> {
         self.private()?;
         let name = component(name)?;
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: validated basename and live parent; success initializes the native stat.
         if unsafe {
             libc::fstatat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 name.as_ptr(),
                 metadata.as_mut_ptr(),
                 libc::AT_SYMLINK_NOFOLLOW,
@@ -455,12 +556,14 @@ impl Directory {
         // SAFETY: this is the already retained directory, not a display path.
         let fd = unsafe {
             libc::openat(
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 c".".as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
         let fd = owned(fd)?;
+        #[cfg(target_os = "linux")]
+        self.mount.require_same(mount::for_fd(fd.as_raw_fd())?)?;
         use std::os::fd::IntoRawFd;
         // SAFETY: fdopendir takes ownership on success; close the raw fd ourselves on failure.
         let raw = fd.into_raw_fd();

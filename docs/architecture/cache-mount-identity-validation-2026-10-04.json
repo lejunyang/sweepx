@@ -1,0 +1,141 @@
+{
+  "schema": "sweepx.cache-mount-identity-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "38a6a83",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2541196
+  },
+  "scope": [
+    "Linux native cache mount capture/admission using existing libc, no new dependency/crate/scanner",
+    "retained Directory mount identity, same-mount child/lock/file/directory-stream/publication paths",
+    "single relative statx observation for ledger and mount admission with explicit returned-field checks; LRU/removal use same admission",
+    "Unix opened cache files now also check retained-parent device",
+    "publication rechecks temporary basename identity/change marker and mount before commit"
+  ],
+  "sources": [
+    {
+      "url": "https://man7.org/linux/man-pages/man2/statx.2.html",
+      "used": "mask support, AT_EMPTY_PATH/NOFOLLOW/NO_AUTOMOUNT, mount ID, non-atomic fields"
+    },
+    {
+      "path": "libc-0.2.189/src/unix/linux_like/mod.rs",
+      "used": "actual pinned STATX_MNT_ID=0x1000 and statx ABI read from installed Cargo registry"
+    }
+  ],
+  "semantics": {
+    "root": "explicit no-follow absolute root may reside on its own mount; relative descendants confined to root mount. Not a slash-mount-only policy.",
+    "identity": "mount IDs are invocation/retained-handle scoped, never persisted as validity tokens",
+    "evidence": "absent returned required bits -> Unsupported; syscall/mismatch/permission errors -> unavailable cache, existing core miss/load_failed keeps fresh scan; no device-only fallback",
+    "accounting": "encoded lengths/metadata only, not allocation/reclaimable or global RSS",
+    "races": "fields and lookup/rechecks not an atomic snapshot; final relative-name rename/unlink races remain. Cleanup is best effort if a mounted temporary prevents unlink.",
+    "permissions": "existing owner/private/ordinary/single-link checks remain, no repair",
+    "cacheValidity": "Linux/Windows validated current file indexes and ordinary preview freshness not upgraded"
+  },
+  "initialFailures": [
+    {
+      "check": "first host policy test compilation",
+      "result": "exit101, no tests executed",
+      "reason": "broad Directory .0 -> .fd edit also affected unrelated tuple Stream Drop. Diff review and compiler both identified E0609; restore only Stream.0, no lint exemption."
+    },
+    {
+      "check": "initial Linux affected lint",
+      "result": "exit101",
+      "reason": "2 needless_return diagnostics at cfg tail expressions; remove returns, retain OS gates, no exemption."
+    }
+  ],
+  "checks": [
+    {
+      "name": "host-affected-tests",
+      "result": "passed",
+      "passed": 93,
+      "failed": 0,
+      "ignored": 0,
+      "command": "cargo test -p sweepx-cache --all-features --locked -- --test-threads=1"
+    },
+    {
+      "name": "host-affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "linux-workspace-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "all cfg test branches compiled including controlled namespace fixture; not Linux execution"
+    },
+    {
+      "name": "workspace-native-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1153,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "note": "macOS service-enabled invocation; Linux-only native tests absent on this host, not counted as runtime passes"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "fmt-diff-docs-package",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check; Python scripts/lint_docs.py; cargo package -p sweepx-cache --list --allow-dirty --locked",
+      "note": "54 Markdown files, both new private native modules present in package; not a registry build"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "reused",
+      "baselineCommit": "38a6a83",
+      "note": "Windows cfg source and dependency edges unchanged; previous complete successful lint reused, not rerun"
+    }
+  ],
+  "nativeLinuxTests": [
+    {
+      "test": "descriptor_mounts_and_accounting_match_independent_kernel_and_file_oracles",
+      "result": "not_run",
+      "evidence": "GNU cross-lint compilation only; bounded proc fdinfo independent ID, ordinary metadata and literal14 byte ledger oracle"
+    },
+    {
+      "test": "mismatched_retained_mount_refuses_work_and_preserves_pointer_bytes",
+      "result": "not_run",
+      "evidence": "GNU cross-lint compilation only; invalid captured private ID injected, every operation refused, exact old pointer retained"
+    },
+    {
+      "test": "same_device_bind_mounts_are_refused_in_private_namespace",
+      "result": "ignored_and_not_run",
+      "evidence": "GNU cross-lint compilation only; explicit opt-in unshare controlled user/mount namespace, device/inode preserving file/child/lock self binds and post-encoder temporary bind; 30 second task-child deadline",
+      "command": "cargo test -p sweepx-cache --all-features --locked native::unix::linux_tests::same_device_bind_mounts_are_refused_in_private_namespace -- --exact --ignored --nocapture --test-threads=1"
+    }
+  ],
+  "environmentGap": "No native Linux runner; command inventory finds no Docker, Podman, Lima or qemu-x86_64. No host VM installation or unknown SSH host used. Report qualification gap instead of widening native cfg or claiming cross compilation is execution.",
+  "excluded": [
+    {
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "status": "explicitly skipped",
+      "reason": "previous independent macOS Foundation success hang diagnosis remains; test preserved"
+    },
+    {
+      "check": "23 docs-linter tests",
+      "status": "reused",
+      "reason": "checker unchanged, prior generation-state-retention unit successful result reused"
+    },
+    {
+      "tests": "3 existing macOS workspace ignored tests",
+      "status": "ignored",
+      "reason": "existing declarations preserved; the Linux-only bind test is cfg-absent on macOS and separately not_run"
+    }
+  ],
+  "remaining": [
+    "native Linux, actual private-namespace bind mounts, Windows/MSVC and provider/Trash qualification",
+    "other SnapshotStore/journal state paths and broader discovery/candidate/fingerprint/legacy resource audit",
+    "validated Linux/Windows file indexes and original performance root causes",
+    "final pathname mutation race; real provider behavior; no new end-to-end/hot-cache/RSS/percentile measurement"
+  ],
+  "disk": "43.323 GiB debug payloads previously moved through SweepX to OS Trash; do not empty Trash; all new compilation uses lean profiles"
+}

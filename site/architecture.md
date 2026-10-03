@@ -56,6 +56,8 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 macOS 详情扫描通过 `inspect_bound_child_with_mount_identity` 补充文件/链接自身的文件系统身份：相对已保留父句柄打开临时元数据句柄，核对对象与当前 basename 绑定，再由 `fstatfs` 观察 fsid。链接只观察自身；没有内容读取，也不复制父目录 mount。普通批量扫描保持原路径，只有需要身份复验的详情扫描承担额外系统调用。拒绝、变化和缺失证据仍使刷新失败；分配/可释放字节不因此变为已知，删除前的身份重验仍独立执行。
 
+Linux cache 的私有 mount 模块通过 retained FD 的 `statx(AT_EMPTY_PATH)` 捕获本次挂载身份，文件计费一次 `statx` 返回所需字段及挂载证据。必需 bit 缺失拒绝缓存，没有基于设备号的降级；ID 仅在句柄保留期间使用，不新增持久 token、crate 或扫描器。绝对 root 获取可穿过明确路径上的挂载盘，root 内的相对操作严格限制到该 mount。原生与 bind mount 测试尚待 Linux 运行。
+
 Linux `delete` 复用 `sweepx-audit` 的 exact authorization、claim、intent、outcome 与 fence，但不宣称通用 P3 executor 已 native 化。CLI 自己构造并持久化一个最多 256 action 的封闭 R4 plan；普通文件执行一次 exact-basename `unlinkat`，目录按 manifest 后序逐项执行 `unlinkat`/nonrecursive `rmdir`。该 adapter 在非 Linux 构建中不存在。
 
 Git 增强由 core 的 `GitEvidenceSession` 共用于普通报告和垃圾会话。每个候选通过一次有界 `rev-parse` 同时观察工作区和 `.git` 位置，再分别进行原生身份、filesystem/mount 和变化指纹核对；范围不跨候选缓存，环境重定向仍移除，外部配置变化不能沿用旧范围。Unix 路径含换行时保留两个独立查询，避免输出分隔符歧义；其他联合输出必须有且仅有两个完整绝对路径，截断、额外记录或查询失败不提供范围依据。当前 tracked/ignore 查询、资源期限与项目回收约束继续独立生效。
