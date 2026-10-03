@@ -551,43 +551,55 @@ mod tests {
     }
 
     #[test]
-    fn detects_a_change_under_a_root_and_then_a_clean_history() {
-        let dir = std::env::temp_dir().join(format!("sweepx-fsevents-{}", std::process::id()));
-        // macOS TMPDIR is under a symlinked ancestor (/var -> /private/var); canonicalize so the
-        // queried path matches what FSEvents reports.
-        fs::create_dir_all(&dir).expect("temp dir");
-        let dir = fs::canonicalize(&dir).expect("canonical temp dir");
-
-        // Establish a baseline id after the directory creation.
+    fn fixture_change_is_observed_after_bounded_delivery_wait() {
+        let fixture = tempfile::tempdir().expect("isolated fixture");
+        // Unix temporary ancestors may be symlinked; FSEvents reports the resolved spelling.
+        let root = fs::canonicalize(fixture.path()).expect("canonical fixture root");
+        let file = root.join("new.txt");
+        let expected_path = file.to_str().expect("controlled UTF-8 fixture");
         let baseline = current_event_id();
-        // A creation strictly after the baseline must show up under the root.
-        fs::write(dir.join("new.txt"), b"x").expect("write");
-        let changed =
-            events_since(&[dir.as_path()], baseline, Duration::from_secs(5)).expect("drain");
-        // Without the FileEvents flag FSEvents reports at directory granularity: creating
-        // new.txt surfaces an event naming its parent directory (the fixture root), not the
-        // file. That is exactly the "something changed under this path" signal a cache needs.
-        let root_prefix = format!("{}/", dir.display());
-        assert!(
-            changed
+        fs::write(&file, b"fixture mutation").expect("write fixture");
+        assert_eq!(fs::read(&file).unwrap(), b"fixture mutation");
+
+        // HistoryDone only closes the currently delivered historical batch. Wait explicitly
+        // for this known fixture's FileEvents record, retaining the pre-mutation cursor on
+        // every query. A delayed setup event cannot stand in for the exact created filename.
+        // This synchronization lives only in the test, never in cache hit decisions.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let observed = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "fixture write was not delivered within 5 seconds"
+            );
+            let batch =
+                events_since(&[root.as_path()], baseline, remaining).expect("drain history");
+            assert!(
+                !batch.must_rescan,
+                "ordinary fixture write has no history gap"
+            );
+            if let Some(event) = batch
                 .events
                 .iter()
-                .any(|event| event.path == root_prefix || event.path.starts_with(&root_prefix)),
-            "the parent directory of the new file must be reported; got {:?}",
-            changed.events
-        );
-        assert!(
-            !changed.must_rescan,
-            "an ordinary write is not a dropped history"
-        );
+                .find(|event| event.path == expected_path)
+            {
+                assert!(
+                    event.id > baseline,
+                    "the fixture mutation follows its captured cursor"
+                );
+                break event.id;
+            }
+            std::thread::sleep(
+                Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        };
 
-        // A fresh query past the last event id reports a clean, empty history.
-        let latest = current_event_id();
-        let clean = events_since(&[dir.as_path()], latest, Duration::from_secs(5)).expect("drain");
-        assert!(clean.events.is_empty(), "no writes since the latest id");
-        assert!(!clean.must_rescan);
-
-        let _ = fs::remove_dir_all(&dir);
+        // Subsequent batches must be beyond the observed mutation. They may legitimately
+        // contain delayed notifications; an empty answer would not prove current quiescence.
+        let later = events_since(&[root.as_path()], observed, Duration::from_secs(5))
+            .expect("history beyond observed mutation");
+        assert!(!later.must_rescan);
+        assert!(later.events.iter().all(|event| event.id > observed));
     }
     fn deliver(collector: &mut Collector, paths: &[&[u8]], flags: &[u32]) {
         assert_eq!(paths.len(), flags.len());

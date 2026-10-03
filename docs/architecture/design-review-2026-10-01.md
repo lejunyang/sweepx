@@ -1195,3 +1195,12 @@ generation 和 current 指针各自经独占私有 temporary 原子发布；保�
 
 
 [本单元验证记录](native-preview-storage-validation-2026-10-03.json)保留初期 compile/权限夹具/跨 cfg 失败与修正。cache 58、core 332、CLI 132（既有系统 Trash 成功挂起用例仍显式 skip）共 522 项通过。按未改变的通过前缀、修正 core/后续包及失败之后补跑的尾部组合，工作区 1,112 项通过、1 项原生 FSEvents 失败、3 项既有 opt-in ignored；不是全绿矩阵。FSEvents 孤立诊断再次得到空历史，生产模块已声明 HistoryDone 不是当前写入屏障，旧测试的即时可见前提需单独修正，实际缓存 freshness 缺口仍开放。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown/23 项检查器和 cache/core/CLI package list 通过；交叉 lint 不证明宿主 IO，package list 不证明 registry 构建。target 约 2.2 GiB，继续使用 lean 构建，没有清空回收站。
+
+
+## FSEvents 原生夹具同步合同修正（2026-10-03）
+
+上节缓存交付的 FSEvents 失败没有被重跑掩盖：旧用例用 PID 拼目录，在写入后立即作一次历史查询，并把空历史解释为当前没有写入。这与生产模块已声明的“HistoryDone 只完成已投递历史批次，近期写入可能稍后投递”合同冲突；其父目录匹配还可被迟到的 setup 通知满足，旧注释也仍按未启用 FileEvents 描述实际已启用的路径粒度。
+
+现在使用隔离 TempDir/Unix canonical root，以普通文件读取独立确认夹具内容。写入前捕获同一游标，每次查询继续保留该游标，最多 5 秒明确等待此次创建文件的精确 FileEvents record，不以任意父级/setup 通知充当证据。后续查询只核对记录位于已观察事件之后，允许迟到通知，不把 empty batch 当作当前静止的证明。等待只发生在测试，未向生产缓存增加 settle sleep、忽略真实事件或恢复整根候选命中。
+
+[修正验证记录](fsevents-fixture-sync-validation-2026-10-03.json)保留旧失败、孤立诊断及修改后的实际运行输出。修改后单项通过，再运行完整 platform suite：97 项通过、0 失败、1 项既有 ignored。最终 host 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 和 platform package list 通过；检查器的 23 项已通过且未改代码，Linux GNU/Windows GNU 工作区 lint 复用前单元通过结果，新增代码及 dev dependency 均仅在 macOS 测试 cfg 生效。其余未改变包的通过结果复用，组合覆盖 1,113 项通过、0 个最终源码测试失败、3 项 opt-in ignored、1 项已诊断系统 Trash 成功挂起用例显式 skip，不称为新完整工作区 invocation。测试前提已修正，不代表 FSEvents 生产 freshness/性能根因已关闭；普通预览 USN 范围/时机与其余跨平台资源审计继续优先。
