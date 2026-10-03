@@ -161,7 +161,7 @@ cargo run -p sweepx-cli -- \
 
 `status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=%LOCALAPPDATA%\sweepx\state` 并在该目录写入 durable snapshot；若状态目录可被其他用户访问则失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
 
-`status` 和 `cancel` 只打开现有状态：缺少根或 `operations/` 时返回未找到，不创建目录，也不修补现有权限。legacy snapshot 的原生读写保留目录句柄，拒绝链接、多硬链接、非普通或非私有文件；macOS 读取与写入准备共用禁止物化策略，Linux 相对操作保留 mount 身份，Windows 保留 DACL/卷边界检查。每份快照限 8 MiB 编码，解码前另限 65,536 次 JSON 值/键访问尝试；超过上限返回错误，写入拒绝保留旧快照。该额度不是进程 RSS 或全部状态文件的磁盘配额。Linux SQLite journal、全局状态保留额度、真实 provider 与目标宿主验收仍单独待做。写入请求原生文件刷新（Unix 另刷新保留父目录），不据此承诺断电恢复；提交后刷新失败返回错误，但不会删除已发布的新文件。
+`status` 和 `cancel` 只打开现有状态：缺少根或 `operations/` 时返回未找到，不创建目录，也不修补现有权限。legacy snapshot 的原生读写保留目录句柄，拒绝链接、多硬链接、非普通或非私有文件；macOS 读取与写入准备共用禁止物化策略，Linux 相对操作保留 mount 身份，Windows 保留 DACL/卷边界检查。每份快照限 8 MiB 编码，解码前另限 65,536 次 JSON 值/键访问尝试；超过上限返回错误，写入拒绝保留旧快照。该额度不是进程 RSS 或全部状态文件的磁盘配额。Linux journal 的目录、锁与数据库预检共用保留句柄和 mount 证据；缺失查询不创建文件，不修补已有公共权限。大小与身份重查使用相对元数据，避免关闭另一个数据库句柄而释放 SQLite 的进程锁。SQLite VFS 实际句柄与旁文件的绑定、全局状态保留额度、真实 provider 与目标宿主验收仍待完成。写入请求原生文件刷新（Unix 另刷新保留父目录），不据此承诺断电恢复；提交后刷新失败返回错误，但不会删除已发布的新文件。
 
 ## Preview cache 只读诊断
 

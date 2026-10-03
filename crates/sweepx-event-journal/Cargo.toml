@@ -24,6 +24,9 @@ sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
 thiserror = "2.0.16"
 time.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sweepx-cache = { version = "0.0.1", path = "../sweepx-cache" }
+
 [dev-dependencies]
 sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
 tempfile = "3.21.0"

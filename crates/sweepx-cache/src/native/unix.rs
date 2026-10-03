@@ -99,6 +99,9 @@ impl Directory {
             self.mount.require_same(mount)?;
             let device = libc::makedev(metadata.stx_dev_major, metadata.stx_dev_minor);
             let mode = u32::from(metadata.stx_mode);
+            if mode & libc::S_IFMT == libc::S_IFLNK {
+                return Err(linked_object());
+            }
             // One no-follow statx result supplies the ledger fields and mount admission.
             // It is not an atomic snapshot against concurrent chmod/chown/namespace changes.
             if mode & libc::S_IFMT != libc::S_IFREG
@@ -149,6 +152,9 @@ impl Directory {
         }
         // SAFETY: successful fstatat initialized the stat without following a link.
         let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(linked_object());
+        }
         // libc stat widths differ between Darwin and Linux; the ledger uses fixed u64 IDs.
         #[allow(clippy::unnecessary_cast)]
         let device = metadata.st_dev as u64;
@@ -359,6 +365,72 @@ impl Directory {
     }
 
     pub(super) fn open_file(&self, name: &str) -> io::Result<File> {
+        self.open_file_mode(name, false, false)
+    }
+
+    /// Duplicates an admitted Linux directory for native clients that retain its lifetime.
+    /// This is handle authority, not a path recipe; the client must revalidate before later I/O.
+    #[cfg(target_os = "linux")]
+    pub fn directory_file(&self) -> io::Result<File> {
+        self.private()?;
+        Ok(File::from(self.fd.try_clone()?))
+    }
+
+    /// Compares two retained Linux directories, including mount identity. Both must still
+    /// satisfy their captured private/native contract; missing evidence returns an error.
+    #[cfg(target_os = "linux")]
+    pub fn same_object(&self, other: &Self) -> io::Result<bool> {
+        let left = self.private()?;
+        let right = other.private()?;
+        Ok(self.mount == other.mount && left.dev() == right.dev() && left.ino() == right.ino())
+    }
+
+    /// Checks one Linux relative binding against an already retained private file, including
+    /// mount evidence. No data descriptor is opened/closed, preserving POSIX database locks.
+    #[cfg(target_os = "linux")]
+    pub fn contains_file(&self, name: &str, file: &File) -> io::Result<bool> {
+        self.contains_file_guarded(name, file)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn contains_file_guarded(&self, name: &str, file: &File) -> io::Result<bool> {
+        let relative = self.accounting_metadata_guarded(name)?;
+        #[cfg(target_os = "linux")]
+        self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
+        let observed = file.metadata()?;
+        // SAFETY: geteuid has no arguments. Do not treat a current namespace match as private
+        // if the retained file itself has become shared or public.
+        if !observed.is_file()
+            || observed.uid() != unsafe { libc::geteuid() }
+            || observed.mode() & 0o077 != 0
+            || observed.nlink() != 1
+        {
+            return Err(io::Error::other("retained state file is no longer private"));
+        }
+        Ok(relative.identity == [observed.dev(), observed.ino(), observed.nlink()])
+    }
+
+    /// Opens a private single-link Linux state file for read/write without truncation.
+    /// Optional creation is exclusive and private; a competing creator is admitted once.
+    /// The returned descriptor pins the object; this does not validate subsequent name binding.
+    #[cfg(target_os = "linux")]
+    pub fn state_file(&self, name: &str, create: bool) -> io::Result<(File, bool)> {
+        match self.open_file_mode(name, true, false) {
+            Ok(file) => Ok((file, false)),
+            Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
+                match self.open_file_mode(name, true, true) {
+                    Ok(file) => Ok((file, true)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        Ok((self.open_file_mode(name, true, false)?, false))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_file_mode(&self, name: &str, writable: bool, create_new: bool) -> io::Result<File> {
         let parent = self.private()?;
         let name = component(name)?;
         // Nonblocking prevents a substituted FIFO from stalling before the type check.
@@ -367,9 +439,23 @@ impl Directory {
             libc::openat(
                 self.fd.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                (if writable {
+                    libc::O_RDWR
+                } else {
+                    libc::O_RDONLY
+                }) | (if create_new {
+                    libc::O_CREAT | libc::O_EXCL
+                } else {
+                    0
+                }) | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
             )
         };
+        if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP) {
+            return Err(linked_object());
+        }
         let file = File::from(owned(fd)?);
         #[cfg(target_os = "linux")]
         self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
@@ -888,6 +974,145 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         let directory = Directory::open(&path, false).unwrap();
         (guard, path, directory)
+    }
+
+    #[test]
+    fn writable_state_open_preserves_bytes_and_refuses_unsafe_entries() {
+        use std::io::Write;
+        let (_guard, path, directory) = directory();
+        let mut file = with_cache_io(|| directory.open_file_mode("state", true, true)).unwrap();
+        file.write_all(b"independent state bytes").unwrap();
+        drop(file);
+        assert!(with_cache_io(|| directory.open_file_mode("state", true, true)).is_err());
+        let file = with_cache_io(|| directory.open_file_mode("state", true, false)).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 23);
+        drop(file);
+        assert_eq!(
+            std::fs::read(path.join("state")).unwrap(),
+            b"independent state bytes"
+        );
+        symlink(path.join("state"), path.join("link")).unwrap();
+        std::fs::hard_link(path.join("state"), path.join("alias")).unwrap();
+        std::fs::write(path.join("public"), b"public bytes").unwrap();
+        std::fs::set_permissions(path.join("public"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let fifo = CString::new(path.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: isolated NUL-terminated fixture name, not a process-shared FIFO.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        for name in ["state", "alias", "link", "public", "fifo"] {
+            assert!(
+                with_cache_io(|| directory.open_file_mode(name, true, false)).is_err(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(path.join("state")).unwrap(),
+            b"independent state bytes"
+        );
+        assert_eq!(std::fs::read(path.join("public")).unwrap(), b"public bytes");
+        assert_eq!(
+            std::fs::metadata(path.join("public")).unwrap().mode() & 0o777,
+            0o644
+        );
+    }
+
+    fn observe_posix_lock(path: &Path, held: bool) {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        // A fresh exec queries the parent's lock, avoiding unsafe fork work in a parallel
+        // Rust test process. No output pipes can fill while waiting for this owned child.
+        let mut child = OwnedChild(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "native::unix::tests::posix_lock_child",
+                    "--test-threads=1",
+                ])
+                .env("SWEEPX_POSIX_LOCK_ORACLE_PATH", path)
+                .env(
+                    "SWEEPX_POSIX_LOCK_ORACLE_HELD",
+                    if held { "yes" } else { "no" },
+                )
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "independent lock observer failed: {status}"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "independent lock observer timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn posix_lock_child() {
+        let Some(path) = std::env::var_os("SWEEPX_POSIX_LOCK_ORACLE_PATH") else {
+            return;
+        };
+        let held = std::env::var("SWEEPX_POSIX_LOCK_ORACLE_HELD").unwrap() == "yes";
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        // SAFETY: all-zero flock is valid storage; required fields are initialized below.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as libc::c_short;
+        lock.l_whence = libc::SEEK_SET as libc::c_short;
+        // SAFETY: live regular FD and complete flock; F_GETLK observes without acquiring.
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) },
+            0
+        );
+        assert_eq!(
+            lock.l_type,
+            (if held { libc::F_WRLCK } else { libc::F_UNLCK }) as libc::c_short
+        );
+    }
+
+    #[test]
+    fn metadata_and_retained_binding_preserve_posix_locks() {
+        let (_guard, path, directory) = directory();
+        let file = with_cache_io(|| directory.open_file_mode("journal.db", true, true)).unwrap();
+        // SAFETY: all-zero flock is valid storage; required fields are initialized below.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as libc::c_short;
+        lock.l_whence = libc::SEEK_SET as libc::c_short;
+        // SAFETY: live read/write FD and flock spanning the whole isolated fixture file.
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) },
+            0
+        );
+        let display = path.join("journal.db");
+        observe_posix_lock(&display, true);
+        for _ in 0..3 {
+            assert_eq!(directory.metadata("journal.db").unwrap().bytes, 0);
+            assert!(
+                with_cache_io(|| directory.contains_file_guarded("journal.db", &file)).unwrap()
+            );
+        }
+        observe_posix_lock(&display, true);
+        // Independent negative control: closing any other same-process FD for this inode
+        // releases POSIX locks. This pins the old defect rather than assuming it exists.
+        drop(File::open(&display).unwrap());
+        observe_posix_lock(&display, false);
     }
 
     #[test]

@@ -16,9 +16,11 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::fmt;
 #[cfg(target_os = "linux")]
-use std::fs::OpenOptions;
-#[cfg(any(target_os = "linux", all(test, target_os = "linux")))]
-use std::fs::{self, File};
+mod native_state;
+#[cfg(all(test, target_os = "linux"))]
+use std::fs;
+#[cfg(target_os = "linux")]
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -503,24 +505,14 @@ impl DurableCursor {
 
 #[derive(Debug)]
 pub struct EventJournal {
-    #[cfg(target_os = "linux")]
-    root: PathBuf,
-    #[cfg(target_os = "linux")]
-    anchored_root: PathBuf,
-    #[cfg(target_os = "linux")]
-    database_path: PathBuf,
-    #[cfg(target_os = "linux")]
-    root_identity: FileIdentity,
-    #[cfg(target_os = "linux")]
-    database_identity: FileIdentity,
-    #[cfg(target_os = "linux")]
-    lock_identity: FileIdentity,
-    #[cfg(target_os = "linux")]
-    _root_directory: File,
-    #[cfg(target_os = "linux")]
-    _database_file: File,
+    // Drop SQLite first: its close may checkpoint/delete sidecars, so retained evidence and
+    // stream exclusion must outlive it. The default VFS still has a separate pathname boundary.
     #[cfg(target_os = "linux")]
     connection: Mutex<Connection>,
+    #[cfg(target_os = "linux")]
+    root: native_state::Root,
+    #[cfg(target_os = "linux")]
+    _database_file: File,
     #[cfg(target_os = "linux")]
     _lock: ExclusiveLock,
 }
@@ -561,13 +553,6 @@ struct VerifiedJournal {
     integrity: JournalIntegrity,
     events: Vec<EventEnvelope>,
     final_snapshot: Option<FinalSnapshotMetadata>,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -667,26 +652,56 @@ impl EventJournal {
         Self::open_inner(root.as_ref(), true, true)
     }
 
+    /// Opens a journal beneath already admitted Linux directory authority. `display` is a
+    /// binding/rejection diagnostic, never the root used for native creation or file checks.
+    /// SQLite VFS operations still have a separate pathname audit boundary.
+    #[cfg(target_os = "linux")]
+    pub fn open_in(
+        directory: sweepx_cache::native::Directory,
+        display: &Path,
+    ) -> Result<Self, JournalError> {
+        Self::open_root(
+            native_state::Root::captured(directory, display)?,
+            true,
+            true,
+        )
+    }
+
+    /// Opens existing Linux journal files under a captured root; missing files cause failure
+    /// without creation. SQLite may maintain its existing WAL state; this is not read-only SQL.
+    #[cfg(target_os = "linux")]
+    pub fn open_existing_in(
+        directory: sweepx_cache::native::Directory,
+        display: &Path,
+    ) -> Result<Self, JournalError> {
+        Self::open_root(
+            native_state::Root::captured(directory, display)?,
+            true,
+            false,
+        )
+    }
+
+    /// Verifies a bounded completed replay under captured Linux authority without creating
+    /// missing journal files or performing an earlier redundant stream verification.
+    #[cfg(target_os = "linux")]
+    pub fn open_replay_in(
+        directory: sweepx_cache::native::Directory,
+        display: &Path,
+    ) -> Result<ReplaySession, JournalError> {
+        Self::open_root(
+            native_state::Root::captured(directory, display)?,
+            false,
+            false,
+        )?
+        .snapshot_replay_session()
+    }
+
     /// Opens and verifies one replay session without first performing a redundant full-journal
     /// verification. No journal handle escapes before the session snapshot is verified.
     pub fn open_verified_replay_session(
         root: impl AsRef<Path>,
     ) -> Result<ReplaySession, JournalError> {
-        let root = root.as_ref();
-        #[cfg(target_os = "linux")]
-        {
-            ensure_existing_private_state_dir(root)?;
-            for required in [LOCK_FILE, DATABASE_FILE] {
-                match fs::symlink_metadata(root.join(required)) {
-                    Ok(_) => ensure_private_regular_file(&root.join(required))?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(JournalError::StateNotFound);
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        Self::open_inner(root, false, false)?.snapshot_replay_session()
+        Self::open_inner(root.as_ref(), false, false)?.snapshot_replay_session()
     }
 
     fn open_inner(
@@ -703,69 +718,49 @@ impl EventJournal {
         }
         #[cfg(target_os = "linux")]
         {
-            let root = root.to_path_buf();
-            if create_if_missing {
-                ensure_private_state_dir(&root)?;
-            } else {
-                ensure_existing_private_state_dir(&root)?;
-            }
-            let root_directory = open_state_directory(&root)?;
-            ensure_local_filesystem(&root_directory)?;
-            let root_identity = file_identity(&root_directory)?;
-            let anchored_root =
-                PathBuf::from(format!("/proc/self/fd/{}", root_directory.as_raw_fd()));
-            let lock_path = anchored_root.join(LOCK_FILE);
-            let lock_file = if create_if_missing {
-                open_lock_file(&lock_path)?
-            } else {
-                open_existing_lock_file(&lock_path)?
-            };
-            ensure_local_filesystem(&lock_file)?;
-            let lock_identity = file_identity(&lock_file)?;
-            lock_file
-                .try_lock_exclusive()
-                .map_err(|_| JournalError::ConcurrentWriterDenied)?;
-            let database_path = anchored_root.join(DATABASE_FILE);
-            let database_preexisting = database_path.exists();
-            if !database_preexisting && create_if_missing {
-                create_private_database_file(&database_path)?;
-            } else if !database_preexisting {
-                return Err(JournalError::StateNotFound);
-            }
-            ensure_private_regular_file(&database_path)?;
-            ensure_private_regular_file_if_exists(&root.join(format!("{DATABASE_FILE}-wal")))?;
-            ensure_private_regular_file_if_exists(&root.join(format!("{DATABASE_FILE}-shm")))?;
-            check_size_budget(&root)?;
-            let database_file = open_database_file(&database_path)?;
-            let database_identity = file_identity(&database_file)?;
-            let sqlite_path = PathBuf::from(format!("/proc/self/fd/{}", database_file.as_raw_fd()));
-            let mut connection = open_connection(&sqlite_path)?;
-            if sqlite_database_identity(&connection)? != database_identity {
-                return Err(JournalError::StateIdentityChanged);
-            }
-            if database_preexisting {
-                verify_initialized_database(&connection)?;
-            } else {
-                initialize_database(&mut connection)?;
-            }
-            let journal = Self {
-                root,
-                anchored_root,
-                database_path,
-                root_identity,
-                database_identity,
-                lock_identity,
-                _root_directory: root_directory,
-                _database_file: database_file,
-                connection: Mutex::new(connection),
-                _lock: ExclusiveLock { file: lock_file },
-            };
-            if verify_full_state {
-                let connection = journal.lock_connection()?;
-                let _ = verify_database(&connection)?;
-            }
-            Ok(journal)
+            Self::open_root(
+                native_state::Root::open(root, create_if_missing)?,
+                verify_full_state,
+                create_if_missing,
+            )
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_root(
+        root: native_state::Root,
+        verify_full_state: bool,
+        create_if_missing: bool,
+    ) -> Result<Self, JournalError> {
+        let (lock_file, _) = root.file(LOCK_FILE, create_if_missing)?;
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| JournalError::ConcurrentWriterDenied)?;
+        let (database_file, database_created) = root.file(DATABASE_FILE, create_if_missing)?;
+        check_size_budget(&root)?;
+        let sqlite_path = PathBuf::from(format!("/proc/self/fd/{}", database_file.as_raw_fd()));
+        let mut connection = open_connection(&sqlite_path)?;
+        if !sqlite_database_matches(&connection, &root, &database_file)? {
+            return Err(JournalError::StateIdentityChanged);
+        }
+        root.binding()?;
+        configure_connection(&connection)?;
+        if !database_created {
+            verify_initialized_database(&connection)?;
+        } else {
+            initialize_database(&mut connection, &root)?;
+        }
+        let journal = Self {
+            root,
+            _database_file: database_file,
+            connection: Mutex::new(connection),
+            _lock: ExclusiveLock { file: lock_file },
+        };
+        if verify_full_state {
+            let connection = journal.lock_connection()?;
+            let _ = verify_database(&connection)?;
+        }
+        Ok(journal)
     }
 
     /// Returns the exact next sequence/cursor/checkpoint tuple owned by this journal.
@@ -964,7 +959,7 @@ impl EventJournal {
             )?;
             validate_durable_event_stream(&assigned_events, &derived_snapshot.terminal)
                 .map_err(|error| JournalError::ProtocolValidation(error.to_string()))?;
-            ensure_append_budget(&self.anchored_root, payload_bytes)?;
+            ensure_append_budget(&self.root, payload_bytes)?;
 
             {
                 let mut insert_event = transaction.prepare(
@@ -1178,7 +1173,7 @@ impl EventJournal {
             )
             .ok_or(JournalError::QuotaExceeded)?;
         let mut connection = self.lock_connection()?;
-        ensure_append_budget(&self.anchored_root, append_bytes)?;
+        ensure_append_budget(&self.root, append_bytes)?;
         let integrity = verify_database(&connection)?;
         let projected_replay_bytes = integrity
             .decoded_event_bytes
@@ -1341,25 +1336,18 @@ impl EventJournal {
 
     #[cfg(target_os = "linux")]
     fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, JournalError> {
-        ensure_private_state_dir(&self.root)?;
-        let anchored_root = self.anchored_root.as_path();
-        check_size_budget(anchored_root)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| JournalError::ConnectionPoisoned)?;
-        if file_identity_for_directory_path(&self.root)? != self.root_identity
-            || file_identity_for_path(&self.database_path)? != self.database_identity
-            || file_identity_for_path(&anchored_root.join(LOCK_FILE))? != self.lock_identity
-            || sqlite_database_identity(&connection)? != self.database_identity
+        self.root.binding()?;
+        check_size_budget(&self.root)?;
+        if !self.root.contains(DATABASE_FILE, &self._database_file)?
+            || !self.root.contains(LOCK_FILE, &self._lock.file)?
+            || !sqlite_database_matches(&connection, &self.root, &self._database_file)?
         {
             return Err(JournalError::StateIdentityChanged);
         }
-        ensure_private_regular_file(&self.database_path)?;
-        ensure_private_regular_file_if_exists(&anchored_root.join(format!("{DATABASE_FILE}-wal")))?;
-        ensure_private_regular_file_if_exists(&anchored_root.join(format!("{DATABASE_FILE}-shm")))?;
-        ensure_private_regular_file_if_exists(&anchored_root.join(format!("{DATABASE_FILE}-wal")))?;
-        ensure_private_regular_file_if_exists(&anchored_root.join(format!("{DATABASE_FILE}-shm")))?;
         Ok(connection)
     }
 }
@@ -1926,10 +1914,10 @@ fn verify_cursor_table(
 }
 
 #[cfg(target_os = "linux")]
-fn check_size_budget(root: &Path) -> Result<(), JournalError> {
-    let db = file_len_if_exists(&root.join(DATABASE_FILE))?;
-    let wal = file_len_if_exists(&root.join(format!("{DATABASE_FILE}-wal")))?;
-    let shm = file_len_if_exists(&root.join(format!("{DATABASE_FILE}-shm")))?;
+fn check_size_budget(root: &native_state::Root) -> Result<(), JournalError> {
+    let db = root.length(DATABASE_FILE)?;
+    let wal = root.length("journal.db-wal")?;
+    let shm = root.length("journal.db-shm")?;
     let total = db
         .checked_add(wal)
         .and_then(|value| value.checked_add(shm))
@@ -1941,7 +1929,7 @@ fn check_size_budget(root: &Path) -> Result<(), JournalError> {
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_append_budget(root: &Path, event_bytes: usize) -> Result<(), JournalError> {
+fn ensure_append_budget(root: &native_state::Root, event_bytes: usize) -> Result<(), JournalError> {
     let current = current_size_bytes(root)?;
     let reserve = u64::try_from(event_bytes)
         .map_err(|_| JournalError::QuotaExceeded)?
@@ -1957,282 +1945,30 @@ fn ensure_append_budget(root: &Path, event_bytes: usize) -> Result<(), JournalEr
 }
 
 #[cfg(target_os = "linux")]
-fn current_size_bytes(root: &Path) -> Result<u64, JournalError> {
-    [
-        root.join(DATABASE_FILE),
-        root.join(format!("{DATABASE_FILE}-wal")),
-        root.join(format!("{DATABASE_FILE}-shm")),
-    ]
-    .into_iter()
-    .try_fold(0_u64, |total, path| {
-        total
-            .checked_add(file_len_if_exists(&path)?)
-            .ok_or(JournalError::QuotaExceeded)
-    })
+fn current_size_bytes(root: &native_state::Root) -> Result<u64, JournalError> {
+    [DATABASE_FILE, "journal.db-wal", "journal.db-shm"]
+        .into_iter()
+        .try_fold(0_u64, |total, name| {
+            total
+                .checked_add(root.length(name)?)
+                .ok_or(JournalError::QuotaExceeded)
+        })
 }
 
 #[cfg(target_os = "linux")]
-fn file_len_if_exists(path: &Path) -> Result<u64, JournalError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(JournalError::SymlinkRejected(path.display().to_string()));
-            }
-            Ok(metadata.len())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_private_state_dir(root: &Path) -> Result<(), JournalError> {
-    if !root.is_absolute() {
-        return Err(JournalError::StateDirNotAbsolute);
-    }
-    for component in root.components() {
-        match component {
-            std::path::Component::RootDir | std::path::Component::Normal(_) => {}
-            _ => return Err(JournalError::UnsafeStateDir(root.display().to_string())),
-        }
-    }
-    let mut current = PathBuf::from("/");
-    for component in root.components() {
-        match component {
-            std::path::Component::RootDir => continue,
-            std::path::Component::Normal(part) => current.push(part),
-            _ => return Err(JournalError::UnsafeStateDir(root.display().to_string())),
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(JournalError::SymlinkRejected(current.display().to_string()));
-                }
-                if !metadata.is_dir() {
-                    return Err(JournalError::UnsafeStateDir(current.display().to_string()));
-                }
-                if current == root {
-                    validate_private_directory(&current, &metadata)?;
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                use std::os::unix::fs::DirBuilderExt;
-                fs::DirBuilder::new().mode(0o700).create(&current)?;
-                let metadata = fs::symlink_metadata(&current)?;
-                validate_private_directory(&current, &metadata)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_existing_private_state_dir(root: &Path) -> Result<(), JournalError> {
-    if !root.is_absolute() {
-        return Err(JournalError::StateDirNotAbsolute);
-    }
-    let mut current = PathBuf::from("/");
-    for component in root.components() {
-        match component {
-            std::path::Component::RootDir => continue,
-            std::path::Component::Normal(part) => current.push(part),
-            _ => return Err(JournalError::UnsafeStateDir(root.display().to_string())),
-        }
-        let metadata = match fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(JournalError::StateNotFound);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if metadata.file_type().is_symlink() {
-            return Err(JournalError::SymlinkRejected(current.display().to_string()));
-        }
-        if !metadata.is_dir() {
-            return Err(JournalError::UnsafeStateDir(current.display().to_string()));
-        }
-        if current == root {
-            validate_private_directory(&current, &metadata)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), JournalError> {
-    use std::os::unix::fs::MetadataExt;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(JournalError::StateDirNotPrivate(path.display().to_string()));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn open_state_directory(path: &Path) -> Result<File, JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    validate_private_directory(path, &directory.metadata()?)?;
-    Ok(directory)
-}
-
-#[cfg(target_os = "linux")]
-fn file_identity(file: &File) -> Result<FileIdentity, JournalError> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata()?;
-    Ok(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn file_identity_for_path(path: &Path) -> Result<FileIdentity, JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    file_identity(&file)
-}
-
-#[cfg(target_os = "linux")]
-fn open_database_file(path: &Path) -> Result<File, JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    use std::os::unix::fs::MetadataExt;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err(JournalError::UnsafeStateFile(path.display().to_string()));
-    }
-    Ok(file)
-}
-
-#[cfg(target_os = "linux")]
-fn file_identity_for_directory_path(path: &Path) -> Result<FileIdentity, JournalError> {
-    file_identity(&open_state_directory(path)?)
-}
-
-#[cfg(target_os = "linux")]
-fn sqlite_database_identity(connection: &Connection) -> Result<FileIdentity, JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn sqlite_database_matches(
+    connection: &Connection,
+    root: &native_state::Root,
+    file: &File,
+) -> Result<bool, JournalError> {
+    // This validates SQLite's reported name against retained authority. It does not inspect
+    // the C VFS's opened descriptor or close its later pathname/sidecar races.
     let filename: String = connection.query_row(
         "SELECT file FROM pragma_database_list WHERE name='main'",
         [],
         |row| row.get(0),
     )?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(filename)?;
-    file_identity(&file)
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_private_regular_file(path: &Path) -> Result<(), JournalError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(JournalError::SymlinkRejected(path.display().to_string()));
-    }
-    let file = OpenOptions::new().read(true).open(path)?;
-    let metadata = file.metadata()?;
-    use std::os::unix::fs::MetadataExt;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err(JournalError::UnsafeStateFile(path.display().to_string()));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_private_regular_file_if_exists(path: &Path) -> Result<(), JournalError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => ensure_private_regular_file(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_lock_file(path: &Path) -> Result<File, JournalError> {
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(JournalError::SymlinkRejected(path.display().to_string()));
-    }
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    ensure_private_regular_file(path)?;
-    Ok(file)
-}
-
-#[cfg(target_os = "linux")]
-fn open_existing_lock_file(path: &Path) -> Result<File, JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(JournalError::SymlinkRejected(path.display().to_string()));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(JournalError::StateNotFound);
-        }
-        Err(error) => return Err(error.into()),
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    ensure_private_regular_file(path)?;
-    Ok(file)
-}
-
-#[cfg(target_os = "linux")]
-fn create_private_database_file(path: &Path) -> Result<(), JournalError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?
-        .sync_all()?;
-    sync_directory(
-        path.parent()
-            .ok_or_else(|| JournalError::UnsafeStateDir(path.display().to_string()))?,
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn sync_directory(path: &Path) -> Result<(), JournalError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
+    root.sqlite_binding(Path::new(&filename), file)
 }
 
 #[cfg(target_os = "linux")]
@@ -2257,6 +1993,11 @@ fn open_connection(path: &Path) -> Result<Connection, JournalError> {
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
     let connection = Connection::open_with_flags(path, flags)?;
+    Ok(connection)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_connection(connection: &Connection) -> Result<(), JournalError> {
     connection.busy_timeout(Duration::ZERO)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
@@ -2274,8 +2015,8 @@ fn open_connection(path: &Path) -> Result<Connection, JournalError> {
             "journal_mode is not WAL".to_string(),
         ));
     }
-    verify_connection_pragmas(&connection)?;
-    Ok(connection)
+    verify_connection_pragmas(connection)?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2395,7 +2136,10 @@ fn normalize_sql(sql: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn initialize_database(connection: &mut Connection) -> Result<(), JournalError> {
+fn initialize_database(
+    connection: &mut Connection,
+    root: &native_state::Root,
+) -> Result<(), JournalError> {
     connection.pragma_update(None, "page_size", PAGE_SIZE)?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT)?;
     connection.pragma_update(None, "application_id", APPLICATION_ID)?;
@@ -2412,14 +2156,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), JournalError> 
     )?;
     transaction.commit()?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT)?;
-    sync_directory(
-        connection
-            .path()
-            .and_then(|path| Path::new(path).parent())
-            .ok_or_else(|| {
-                JournalError::DatabaseConfiguration("database path unavailable".to_string())
-            })?,
-    )?;
+    root.sync()?;
     verify_initialized_database(connection)?;
     Ok(())
 }
@@ -2894,6 +2631,62 @@ mod tests {
         assert!(!missing.exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_existing_open_never_creates_or_repairs_state() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let capture = sweepx_cache::native::Directory::open(&root, false).unwrap();
+        assert!(matches!(
+            EventJournal::open_existing_in(capture, &root),
+            Err(JournalError::StateNotFound)
+        ));
+        let capture = sweepx_cache::native::Directory::open(&root, false).unwrap();
+        assert!(matches!(
+            EventJournal::open_replay_in(capture, &root),
+            Err(JournalError::StateNotFound)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::write(root.join(LOCK_FILE), b"old lock bytes").unwrap();
+        fs::set_permissions(root.join(LOCK_FILE), fs::Permissions::from_mode(0o644)).unwrap();
+        let capture = sweepx_cache::native::Directory::open(&root, false).unwrap();
+        assert!(matches!(
+            EventJournal::open_existing_in(capture, &root),
+            Err(JournalError::UnsafeStateFile(_))
+        ));
+        assert_eq!(fs::read(root.join(LOCK_FILE)).unwrap(), b"old lock bytes");
+        assert_eq!(
+            fs::metadata(root.join(LOCK_FILE)).unwrap().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            EventJournal::open_verified_replay_session(&root),
+            Err(JournalError::StateDirNotPrivate(_))
+        ));
+        assert_eq!(fs::metadata(&root).unwrap().mode() & 0o777, 0o755);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_capture_is_rejected_before_journal_file_creation() {
+        use std::os::unix::fs::DirBuilderExt;
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let capture = sweepx_cache::native::Directory::open(&root, false).unwrap();
+        let moved = temp.path().join("retained-root");
+        fs::rename(&root, &moved).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        assert!(matches!(
+            EventJournal::open_in(capture, &root),
+            Err(JournalError::StateIdentityChanged)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+    }
+
     #[test]
     fn durable_cursor_accepts_the_protocol_maximum_length() {
         let token_len = MAX_CURSOR_BYTES - "sxcur1.".len();
@@ -3272,6 +3065,80 @@ mod tests {
         ));
         drop(first);
         EventJournal::open(&root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn journal_checks_preserve_sqlite_process_locks() {
+        const ROOT_ENV: &str = "SWEEPX_JOURNAL_SQLITE_LOCK_ROOT";
+        const HELD_ENV: &str = "SWEEPX_JOURNAL_SQLITE_LOCK_HELD";
+        if let Some(root) = std::env::var_os(ROOT_ENV) {
+            // Bypass stream.lock: this process independently tests SQLite's own lock.
+            let connection = Connection::open_with_flags(
+                PathBuf::from(root).join(DATABASE_FILE),
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+            )
+            .unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            let result = connection.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+            if std::env::var(HELD_ENV).unwrap() == "yes" {
+                assert_eq!(
+                    result.unwrap_err().sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy)
+                );
+            } else {
+                result.unwrap();
+            }
+            return;
+        }
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = TempDir::new().unwrap();
+        let root = private_root(&temp);
+        let journal = EventJournal::open(&root).unwrap();
+        let observe = |held| {
+            let mut child = OwnedChild(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tests::journal_checks_preserve_sqlite_process_locks",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(ROOT_ENV, &root)
+                    .env(HELD_ENV, if held { "yes" } else { "no" })
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(status.success(), "SQLite lock oracle failed: {status}");
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "SQLite lock oracle timed out"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        observe(true);
+        for _ in 0..3 {
+            journal.verify_integrity().unwrap();
+            journal
+                .next_append_position("stream-1", "op-1", true)
+                .unwrap();
+        }
+        observe(true);
+        drop(journal);
+        observe(false);
     }
 
     #[cfg(target_os = "linux")]

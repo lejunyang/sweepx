@@ -685,32 +685,29 @@ impl DurableSnapshotStore {
     }
 
     #[cfg(target_os = "linux")]
-    fn journal_path_if_present(
+    fn journal_root(
         &self,
         operation_id: &ValidatedOperationId,
-    ) -> Result<Option<PathBuf>, StateError> {
-        let journals = self.base_dir.join("event-journals");
-        match fs::symlink_metadata(&journals) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(StateError::SymlinkStateDir(journals));
+        create: bool,
+    ) -> Result<Option<sweepx_cache::native::Directory>, StateError> {
+        let display = self.journal_dir(operation_id);
+        let lookup = || {
+            let journals = if create {
+                self.directory.create_child("event-journals")?
+            } else {
+                self.directory.child("event-journals")?
+            };
+            let name = digest_hex(operation_id.as_str());
+            if create {
+                journals.create_child(&name)
+            } else {
+                journals.child(&name)
             }
-            Ok(metadata) if metadata.is_dir() => ensure_private_dir(&journals)?,
-            Ok(_) => return Err(StateError::InvalidStateDir(journals)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        }
-        let path = self.journal_dir(operation_id);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                Err(StateError::SymlinkStateDir(path))
-            }
-            Ok(metadata) if metadata.is_dir() => {
-                ensure_private_dir(&path)?;
-                Ok(Some(path))
-            }
-            Ok(_) => Err(StateError::InvalidStateDir(path)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+        };
+        match lookup() {
+            Ok(root) => Ok(Some(root)),
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(snapshot_store::native_error(&display, error)),
         }
     }
 
@@ -719,9 +716,13 @@ impl DurableSnapshotStore {
         &self,
         operation_id: &ValidatedOperationId,
     ) -> Result<EventJournal, StateError> {
-        let journals = self.base_dir.join("event-journals");
-        validate_or_prepare_private_subdir(&journals)?;
-        Ok(EventJournal::open(self.journal_dir(operation_id))?)
+        let root = self
+            .journal_root(operation_id, true)?
+            .expect("create returns root");
+        Ok(EventJournal::open_in(
+            root,
+            &self.journal_dir(operation_id),
+        )?)
     }
 
     #[cfg(target_os = "linux")]
@@ -729,21 +730,12 @@ impl DurableSnapshotStore {
         &self,
         operation_id: &ValidatedOperationId,
     ) -> Result<Option<EventJournal>, StateError> {
-        let Some(path) = self.journal_path_if_present(operation_id)? else {
+        let Some(root) = self.journal_root(operation_id, false)? else {
             return Ok(None);
         };
-        for required in ["journal.db", "stream.lock"] {
-            if let Err(error) = fs::symlink_metadata(path.join(required)) {
-                if error.kind() == io::ErrorKind::NotFound {
-                    return Err(sweepx_event_journal::JournalError::Corruption(
-                        "journal file is missing",
-                    )
-                    .into());
-                }
-                return Err(error.into());
-            }
-        }
-        Ok(Some(EventJournal::open(path)?))
+        EventJournal::open_existing_in(root, &self.journal_dir(operation_id))
+            .map(Some)
+            .map_err(journal_open_error)
     }
 
     #[cfg(target_os = "linux")]
@@ -751,21 +743,22 @@ impl DurableSnapshotStore {
         &self,
         operation_id: &ValidatedOperationId,
     ) -> Result<Option<sweepx_event_journal::ReplaySession>, StateError> {
-        let Some(path) = self.journal_path_if_present(operation_id)? else {
+        let Some(root) = self.journal_root(operation_id, false)? else {
             return Ok(None);
         };
-        for required in ["journal.db", "stream.lock"] {
-            if let Err(error) = fs::symlink_metadata(path.join(required)) {
-                if error.kind() == io::ErrorKind::NotFound {
-                    return Err(sweepx_event_journal::JournalError::Corruption(
-                        "journal file is missing",
-                    )
-                    .into());
-                }
-                return Err(error.into());
-            }
+        EventJournal::open_replay_in(root, &self.journal_dir(operation_id))
+            .map(Some)
+            .map_err(journal_open_error)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn journal_open_error(error: sweepx_event_journal::JournalError) -> StateError {
+    match error {
+        sweepx_event_journal::JournalError::StateNotFound => {
+            sweepx_event_journal::JournalError::Corruption("journal file is missing").into()
         }
-        Ok(Some(EventJournal::open_verified_replay_session(path)?))
+        error => error.into(),
     }
 }
 
@@ -3567,37 +3560,6 @@ fn stale_preview_aggregate(
     preview_projection::historical_aggregate(aggregate, &timestamp_now())
 }
 
-#[cfg(target_os = "linux")]
-fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
-    if !path.is_absolute() {
-        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
-    }
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    return Err(StateError::SymlinkStateDir(current));
-                }
-                if !meta.is_dir() {
-                    return Err(StateError::InvalidStateDir(current));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&current)?;
-                set_private_dir_mode(&current)?;
-                let meta = fs::symlink_metadata(&current)?;
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(StateError::SymlinkStateDir(current));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
 pub fn serialize_json(output: &OutputEnvelope) -> String {
     serde_json::to_string_pretty(output).expect("output envelope serializable")
 }
@@ -5739,34 +5701,6 @@ fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
     Ok(true)
 }
 
-#[cfg(target_os = "linux")]
-fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
-    if !durable_state_supported() {
-        return Err(StateError::DurableStateUnsupportedOnWindows);
-    }
-    #[cfg(any(unix, target_os = "windows"))]
-    validate_or_prepare_private_ancestor_chain(path)?;
-    if path.exists() {
-        let meta = fs::symlink_metadata(path)?;
-        if meta.file_type().is_symlink() {
-            return Err(StateError::SymlinkStateDir(path.to_path_buf()));
-        }
-        if !meta.is_dir() {
-            return Err(StateError::InvalidStateDir(path.to_path_buf()));
-        }
-    } else {
-        fs::create_dir_all(path)?;
-    }
-    set_private_dir_mode(path)?;
-    ensure_private_dir(path)
-}
-
-#[cfg(target_os = "linux")]
-fn set_private_dir_mode(path: &Path) -> Result<(), StateError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
 #[cfg(unix)]
 fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
     let meta = fs::symlink_metadata(path)?;
@@ -6473,7 +6407,7 @@ mod tests {
 
         let validated = ValidatedOperationId::parse(&snapshot.operation_id).unwrap();
         let journal_dir = store.journal_dir(&validated);
-        validate_or_prepare_private_subdir(&journal_dir).unwrap();
+        let _fixture_root = store.journal_root(&validated, true).unwrap().unwrap();
         fs::write(journal_dir.join("journal.db"), b"corrupt").unwrap();
         fs::write(journal_dir.join("stream.lock"), b"").unwrap();
         fs::set_permissions(

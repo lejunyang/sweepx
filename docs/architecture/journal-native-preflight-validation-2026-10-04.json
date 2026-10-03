@@ -1,0 +1,180 @@
+{
+  "schema": "sweepx.journal-native-preflight-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "c2e3d62",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2773872,
+    "debugDuKiB": 1768448
+  },
+  "scope": [
+    "Core journal children acquired relative to retained private root; no new crate",
+    "journal native root/file admission shares cache mount/no-follow/private/ordinary/single-link contract; permission repair removed",
+    "read existing journal does not create missing required files; stale capture rejected before file creation",
+    "metadata-only size and binding checks preserve POSIX database locks"
+  ],
+  "sources": [
+    {
+      "url": "https://man7.org/linux/man-pages/man2/fcntl_locking.2.html",
+      "used": "POSIX record locks released when any same-process descriptor for the file is closed; independently observed by fresh F_GETLK processes"
+    },
+    {
+      "url": "https://www.sqlite.org/wal.html",
+      "used": "WAL/SHM and close/checkpoint remain separate VFS operations; EXCLUSIVE before first WAL access does not prove all pathname binding"
+    },
+    {
+      "url": "https://www.sqlite.org/c3ref/vfs.html",
+      "used": "actual xOpen/xAccess/xDelete and VFS descriptor binding remain separate audit boundary"
+    },
+    {
+      "package": "libsqlite3-sys 0.38.2 bundled sqlite3/sqlite3.c",
+      "sha256": "0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d",
+      "used": "unixFullPathname/appendOnePathElement resolve proc FD magic name; unixOpen and unixOpenSharedMemory retain pathname/sidecar boundaries; no global xSetSystemCall hooks installed"
+    }
+  ],
+  "semantics": {
+    "wire": "no journal schema/field/cursor changes; complete-stream transaction and replay preserved",
+    "authority": "native preflight/relative metadata holds private root and regular file handles with mount evidence; current root/display binding is rejection-only. SQLite reported filename match does not prove actual C descriptor",
+    "creation": "state files RW without truncation; optional private exclusive creation with at most one competing-creator admission; existing root/files are not chmod-repaired. Existing SQL connection can maintain WAL, not read-only database",
+    "locking": "connection field drops first; retained database/root and stream exclusion outlive SQLite close. Size, retained-file and reported-name checks never open/close another database FD. No claim that SQLite VFS path races are solved",
+    "limits": "unchanged per-journal DB/WAL/total/append allowances; relative statx supplies length without data reads. Explicit NotFound optional sidecars are zero; unsafe/unknown metadata stays error. Aggregate operations/journals quota and retention absent",
+    "tests": "portable native helper observed on macOS; three fresh exec F_GETLK queries held/held/released with real File::open/drop negative control. Child observation has 10s deadline and owned cleanup, no output pipes. This is POSIX/lower-layer evidence, not Linux native qualification",
+    "resources": "no new end-to-end timing or RSS claims; lean build retained; no user payloads or OS Trash emptied"
+  },
+  "initialFailures": [
+    {
+      "check": "initial Linux GNU lint",
+      "result": "exit101",
+      "reason": "production fs import became unused after pathname helper removal; schema initialization still referenced removed directory sync helper. Narrow test import and use retained Root.sync"
+    },
+    {
+      "check": "Linux lint after legacy Core creator helper removal",
+      "result": "exit101, 42 missing-function errors",
+      "reason": "edit helper mistakenly removed neighboring functions without cfg attributes. Restore only unrelated original HEAD function block and retain intended journal changes before final full validation"
+    },
+    {
+      "check": "read-only publisher topology diagnostic",
+      "result": "Python AttributeError",
+      "reason": "local harness expected crates array; actual script uses publish_order. Correct harness to inspect actual array; no publisher mutation or release"
+    }
+  ],
+  "checks": [
+    {
+      "name": "focused-native-helper-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache --all-features --locked native::unix::tests -- --test-threads=1",
+      "note": "12 main harness passes; three extra process observations not counted twice",
+      "passed": 12,
+      "failed": 0
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-event-journal -p sweepx-core --all-targets --all-features --locked -- -D warnings",
+      "note": "Final after unsafe-open byte-preservation assertion; unchanged production/other tests reuse full workspace matrix"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "note": "macOS service-enabled; new Linux-only journal tests absent here, not passes; three subprocess oracle queries excluded from total",
+      "passed": 1169,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1
+    },
+    {
+      "name": "workspace-host-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "workspace-linux-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "including Linux test branches; pinned Zig local compiler wrapper; not Linux runtime"
+    },
+    {
+      "name": "workspace-windows-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "note": "including Windows tests; not Windows/MSVC runtime"
+    },
+    {
+      "name": "fmt",
+      "result": "passed",
+      "command": "cargo fmt --all --check"
+    },
+    {
+      "name": "diff",
+      "result": "passed",
+      "command": "git diff --check"
+    },
+    {
+      "name": "markdown-content-links",
+      "result": "passed",
+      "command": "python3 scripts/lint_docs.py",
+      "note": "final 54 Markdown files; unchanged checker reuses previous 23 passing self-tests"
+    },
+    {
+      "name": "package-file-list",
+      "result": "passed",
+      "command": "cargo package --list --allow-dirty --locked --offline -p sweepx-cache -p sweepx-event-journal -p sweepx-core",
+      "note": "contains native_state.rs; not registry packaging/build qualification"
+    },
+    {
+      "name": "publisher-normal-build-topology",
+      "result": "passed",
+      "command": "cargo metadata --offline --locked --format-version 1 --no-deps; local publish_order comparison",
+      "note": "17 packages, 48 normal/build workspace edges including cache -> journal; no release"
+    },
+    {
+      "name": "final-state-byte-contract",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache --all-features --locked native::unix::tests::writable_state_open_preserves_bytes_and_refuses_unsafe_entries -- --exact --test-threads=1",
+      "passed": 1,
+      "note": "Extra independent assertion after full workspace run confirms refused hard-link/symlink/public/FIFO opens preserve original state bytes"
+    },
+    {
+      "name": "final-linux-cache-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu sweepx-cache",
+      "note": "final shared Unix test assertion; unchanged remaining Linux/Windows production branches reuse workspace lint"
+    }
+  ],
+  "skipped": [
+    {
+      "name": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previously isolated Foundation Trash success hang; explicit skip preserved, see debug-cleanup investigation"
+    }
+  ],
+  "notRun": [
+    {
+      "name": "Linux journal native suite",
+      "command": "cargo test -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "reason": "macOS host; no Linux runner available. New SQLite lock oracle, missing-existing/stale-capture tests and original Linux suite cross-compiled only"
+    },
+    {
+      "name": "Linux native cache/bind-mount suite",
+      "reason": "target host/user namespace qualification still open from previous unit"
+    },
+    {
+      "name": "Windows host/MSVC, actual provider, target Trash",
+      "reason": "cross-compilation is not native qualification"
+    },
+    {
+      "name": "SQLite retained VFS descriptor/sidecar binding, power-loss and aggregate state retention",
+      "reason": "not implemented/qualified by this native preflight unit"
+    }
+  ],
+  "changedDocs": [
+    "README.md",
+    "site/cli.md",
+    "site/en/cli.md",
+    "docs/architecture/design-review-2026-10-01.md"
+  ],
+  "remaining": "full roadmap remains active; prioritize cross-platform resource/cache audit, defer new Dart/SvelteKit work"
+}
