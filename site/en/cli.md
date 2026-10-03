@@ -85,6 +85,8 @@ After complete successful scope analysis, d/Delete submits the marked files (or 
 
 Each analysis retains at most 16384 view rows and a 64 MiB admission estimate, independently of collector/model bounds. A reliable channel has one slot, plus one bounded producer payload; ranking preview and progress each have one replaceable slot. Content work is serial. Trash shares the process-wide mutation worker quota with junk/quarantine; closing cancels pending work and does not join a blocked kernel call. System Trash success, real cloud providers and target-host behavior still require runtime qualification; the existing final pathname-check-to-Trash race remains.
 
+Ordinary `scan` sparse previews retain the existing top-K, mandatory boundaries and Others totals, while avoiding repeated copying and serialization of all rows under budget pressure. Generations stream as compact JSON with the existing payload checksum. Actual encoded generations are capped at 65 MiB; an oversized update keeps the current pointer and reports a cache resource gap, without discarding scan facts. Older formats remain readable. This supplies no deletion authority; ordinary preview loading and native storage boundaries remain under audit.
+
 ## Install
 
 A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.

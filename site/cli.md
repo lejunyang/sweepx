@@ -86,6 +86,8 @@ sweepx scan --no-state --tui --duplicates --min-duplicate-bytes 1024 /absolute/r
 
 分析视图最多保留 16384 行及 64 MiB 准入估算，与收集器/界面模型预算分别计算。可靠通道一个槽加生产者一份有界载荷，中途榜单和进度各一个可替换槽；内容串行读取。回收与 junk/隔离共用进程级 mutation worker 配额，关闭取消待执行工作，不在界面 join 阻塞内核调用。系统 Trash 成功、真实云 provider 和目标宿主仍需运行验证，已有最终 pathname 检查到 Trash 调用之间的竞态仍在。
 
+普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限；普通预览加载及原生存储边界的审计仍未完成。
+
 ## 安装
 
 正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。

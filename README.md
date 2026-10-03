@@ -311,3 +311,5 @@ Linux/macOS/Windows 的 TUI 历史根记录共享有界私有存储，并绑定�
 Windows 的状态目录从同一个已打开目录句柄读取 owner/DACL，拒绝最终 reparse/offline/recall 对象。私有权限仅接受可完整解释的普通 allow/deny 条目；陌生授权布局、损坏边界或不可读信息均拒绝。既有 token user/owner 及本用户确有 Administrators 组时的受控 owner 策略保留；SYSTEM/Administrators 的允许访问政策不变。令牌信息每次读取最多 256 KiB，SID 使用有界对齐存储，SDK 文本最多 32,767 个无内嵌 NUL 的原生 UTF-16 单元；这些是单项准入额度，不是 RSS 上限或系统调用期限。该检查不绑定后续路径操作，垃圾历史缓存已沿保留句柄接入；其他状态路径及完整执行路径竞态审计仍在推进。
 
 Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿保留目录/文件句柄进行，复用受保护 DACL 与权限解释器，拒绝 reparse、offline/recall、远程设备、跨卷及多硬链接文件。仅支持普通绝对 drive 路径（含 verbatim drive），UNC/device 与未知文件系统回退现场扫描；这些记录仍是历史展示，没有 Linux/Windows 当前文件索引命中。各平台每缓存目录最多观察 4,096 条枚举项（含未知名称）；Windows 单页固定 64 KiB，零进度、截断和超额报缓存不可用，当前扫描继续。成功发布后沿用原磁盘淘汰额度；淘汰失败可能留下已发布代次，不保证崩溃耐久或进程 RSS。Windows 原生运行/MSVC/provider 验收仍待完成。
+
+普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限；普通预览加载及原生存储边界的审计仍未完成。测量与边界见 [设计审视](docs/architecture/design-review-2026-10-01.md)。

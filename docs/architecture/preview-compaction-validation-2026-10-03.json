@@ -1,0 +1,168 @@
+{
+  "baselineCommit": "c693171",
+  "driverSourceSha256": "d350bf75ec721e7f94e0c627aef854fb62e3349a82956be4d9b77ca58c9dc4b6",
+  "baselineBinarySha256": "4f0b8c245325d65e3ae46b082d443fd2d3753092cce390b59fb3641b5b4629b9",
+  "newBinarySha256": "b6f39b80257ae4f4e05de5639e4a3e0a6cf24248e92f0cf54c57d645bc208bcc",
+  "equivalence": [
+    {
+      "compactionElapsedNanos": "32162277458",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "baseline"
+    },
+    {
+      "compactionElapsedNanos": "65945916",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "new"
+    }
+  ],
+  "runs": [
+    {
+      "compactionElapsedNanos": "31712449500",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "baseline",
+      "repetition": 1,
+      "rawTimeStats": "       31.72 real        31.58 user         0.03 sys\n             7094272  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 602  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                2213  involuntary context switches\n        427870397099  instructions retired\n        106003039987  cycles elapsed\n             6046008  peak memory footprint\n",
+      "maxRssBytes": 7094272,
+      "wallSeconds": 31.72
+    },
+    {
+      "compactionElapsedNanos": "64102708",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "new",
+      "repetition": 1,
+      "rawTimeStats": "        0.07 real         0.07 user         0.00 sys\n             6995968  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 594  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   8  involuntary context switches\n           975755237  instructions retired\n           251296500  cycles elapsed\n             5914936  peak memory footprint\n",
+      "maxRssBytes": 6995968,
+      "wallSeconds": 0.07
+    },
+    {
+      "compactionElapsedNanos": "62639417",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "new",
+      "repetition": 2,
+      "rawTimeStats": "        0.07 real         0.07 user         0.00 sys\n             6995968  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 594  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   6  involuntary context switches\n           974387634  instructions retired\n           247987773  cycles elapsed\n             5914936  peak memory footprint\n",
+      "maxRssBytes": 6995968,
+      "wallSeconds": 0.07
+    },
+    {
+      "compactionElapsedNanos": "31820352750",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "baseline",
+      "repetition": 2,
+      "rawTimeStats": "       31.83 real        31.68 user         0.03 sys\n             7225344  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 610  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                3086  involuntary context switches\n        427874731322  instructions retired\n        106134065510  cycles elapsed\n             5980472  peak memory footprint\n",
+      "maxRssBytes": 7225344,
+      "wallSeconds": 31.83
+    },
+    {
+      "compactionElapsedNanos": "32494958333",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "baseline",
+      "repetition": 3,
+      "rawTimeStats": "       32.50 real        32.38 user         0.04 sys\n             7553024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 659  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                4745  involuntary context switches\n        427907624717  instructions retired\n        106682486763  cycles elapsed\n             6619448  peak memory footprint\n",
+      "maxRssBytes": 7553024,
+      "wallSeconds": 32.5
+    },
+    {
+      "compactionElapsedNanos": "66256084",
+      "resultSha256": "3cbf45a21e9ebd4c672051839fa4e583de13269135ef8570ccd0201da43c2096",
+      "serializedBytes": 147156,
+      "mode": "new",
+      "repetition": 3,
+      "rawTimeStats": "        0.08 real         0.07 user         0.00 sys\n             7045120  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 553  page reclaims\n                  44  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  32  involuntary context switches\n           978745287  instructions retired\n           256222181  cycles elapsed\n             5964088  peak memory footprint\n",
+      "maxRssBytes": 7045120,
+      "wallSeconds": 0.08
+    }
+  ],
+  "schema": "sweepx.preview_compaction.validation/v1",
+  "date": "2026-10-03",
+  "host": {
+    "architecture": "arm64",
+    "os": "macOS 26.5.2",
+    "build": "25F84"
+  },
+  "build": {
+    "rust": "1.98.0 (88d9e12ae 2026-08-18)",
+    "profile": "unoptimized dev, debug symbols/incremental disabled",
+    "baseline": "standalone copy of c693171 cache source, identical driver, matching registry versions/checksums with workspace lock"
+  },
+  "baselineSourceSha256": "db61955b17b0a3715084a1a5427e4d4ba8b2dffeebb388922d50f07027042829",
+  "workload": {
+    "parents": 32,
+    "directoryRowsPerParent": 64,
+    "rows": 2048,
+    "recordCap": 256,
+    "byteCap": 67108864,
+    "logicalAndAllocatedBytes": "distinct ordinary integers 1..=2048",
+    "nativeIO": false
+  },
+  "phase": {
+    "compactionElapsedNanos": "compact_preview only, excluding fixture construction and independent oracle/serialization/hash",
+    "maxRssBytes": "whole benchmark process from macOS time -l; includes fixture/oracle/output"
+  },
+  "cacheState": "in-memory fixture, no filesystem scanning, no SweepX or OS file-cache measurement",
+  "driver": "../../crates/sweepx-cache/examples/preview_compaction_bench.rs",
+  "order": "baseline/new for repetitions 1 and 3, new/baseline for repetition 2",
+  "limitations": [
+    "three rounds, no p95/p99 inference",
+    "single macOS host, lean debug; no release or target runtime claim",
+    "no native write/scan/TUI performance or RSS claim",
+    "hash buffering was added after measurement; timed compaction/driver unchanged and final cache tests rerun",
+    "ordinary load/native storage/freshness and initial preview projection remain under audit"
+  ],
+  "earlyFailures": [
+    {
+      "kind": "baseline independent oracle",
+      "reason": "incorrectly assumed every parent has Others; untouched high-rank parents retain all rows; corrected numerical threshold accounting before timed repetitions"
+    },
+    {
+      "kind": "baseline offline build setup",
+      "reason": "exact manifest minimum versions differ from installed root lock; use actual matching root lock versions, production manifests unchanged"
+    },
+    {
+      "kind": "new regression compile",
+      "reason": "wrong fixture helper/reason enum names corrected; no production workaround or warning suppression"
+    }
+  ],
+  "checks": {
+    "affectedTests": {
+      "cachePassed": 38,
+      "corePassed": 346,
+      "cliUnitPassed": 61,
+      "cliContractPassed": 71,
+      "cliRelayPassed": 1,
+      "failed": 0,
+      "existingOptInIgnored": 2,
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p sweepx-cache -p sweepx-core -p sweepx-cli --all-features --locked -- --test-threads=1"
+    },
+    "laterFinalCacheTests": {
+      "passed": 38,
+      "failed": 0,
+      "reason": "fixed checksum buffering added after full run; compaction/benchmark unchanged"
+    },
+    "lint": {
+      "hostWorkspaceAllTargetsAllFeatures": "passed",
+      "linuxGnuWorkspaceAllTargetsAllFeatures": "passed",
+      "windowsGnuWorkspaceAllTargetsAllFeatures": "passed"
+    },
+    "fmt": "passed",
+    "diff": "passed",
+    "docs": {
+      "markdownFiles": 54,
+      "checkerTestsPassed": 23
+    },
+    "cachePackageList": "passed; includes example and lib source, not registry build evidence",
+    "unchangedPackages": "reuse previous validated results; no new full workspace runtime matrix",
+    "nativePlatformGaps": [
+      "Linux/Windows host runtime",
+      "MSVC",
+      "real cloud providers"
+    ],
+    "targetApprox": "1.9 GiB"
+  }
+}

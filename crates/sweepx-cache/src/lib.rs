@@ -3,7 +3,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
@@ -79,10 +79,10 @@ pub struct PreviewSummary {
 }
 
 impl PreviewSummary {
+    /// Counts compact JSON bytes without allocating a serialized row. This is the existing
+    /// preview admission measure, not an estimate of allocator overhead or process RSS.
     pub fn estimated_bytes(&self) -> usize {
-        serde_json::to_vec(self)
-            .expect("preview summary serialization must succeed")
-            .len()
+        serialized_len(self).expect("preview summary serialization must succeed")
     }
 
     pub fn is_mandatory(&self) -> bool {
@@ -249,10 +249,10 @@ pub struct StoredGeneration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredEnvelope {
+struct StoredEnvelope<T = StoredGeneration> {
     pub generation: String,
     pub checksum_sha256: String,
-    pub payload: StoredGeneration,
+    pub payload: T,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,21 +345,48 @@ impl AtomicGenerationStore {
         &self.root
     }
 
+    /// Publishes a bounded generation before advancing its pointer. JSON uses compact encoding;
+    /// its payload checksum is compatible with existing generations. Oversized encodings are
+    /// refused before creating a generation file. Filesystem/IO failures never publish a
+    /// partially encoded file through the current pointer.
     pub fn write_generation(&self, generation: &StoredGeneration) -> Result<(), CacheError> {
+        self.write_generation_with_limit(generation, INSPECT_GENERATION_BYTE_LIMIT as usize)
+    }
+
+    fn write_generation_with_limit(
+        &self,
+        generation: &StoredGeneration,
+        byte_limit: usize,
+    ) -> Result<(), CacheError> {
         validate_generation_id(&generation.generation)?;
         validate_stored_generation(generation)?;
         self.prepare_secure_root()?;
         self.prepare_private_subdir(&self.generations_dir())?;
+        let (checksum_sha256, payload_bytes) = checksum_and_len(generation)?;
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),
-            checksum_sha256: checksum_hex(generation)?,
-            payload: generation.clone(),
+            checksum_sha256,
+            payload: generation,
         };
 
-        let bytes = serde_json::to_vec_pretty(&envelope)?;
+        // Validate actual encoded bytes rather than trusting caller-supplied preview counters.
+        // Inspection uses the same cap. Overlarge generations cannot replace current.json.
+        // Count the envelope header with a null payload; only the payload's JSON value changes.
+        // Its exact length was counted during hashing, avoiding a third full serialization.
+        let header = StoredEnvelope {
+            generation: envelope.generation.clone(),
+            checksum_sha256: envelope.checksum_sha256.clone(),
+            payload: (),
+        };
+        let header_bytes = serialized_len(&header)? - serialized_len(&())?;
+        if payload_bytes > byte_limit.saturating_sub(header_bytes) || header_bytes > byte_limit {
+            return Err(CacheError::ResourceLimit {
+                reason: ReasonCode::ResourceLimit,
+            });
+        }
         let generation_path = self.generation_path(&generation.generation);
         let tmp_generation = temp_path(&generation_path, "tmp");
-        self.atomic_write_file(&tmp_generation, &bytes)?;
+        self.atomic_write_json(&tmp_generation, &envelope, byte_limit)?;
         self.rename_checked(&tmp_generation, &generation_path)?;
 
         let pointer = CurrentPointer {
@@ -695,6 +722,38 @@ impl AtomicGenerationStore {
     }
 
     fn atomic_write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+        let mut file = self.create_temporary_file(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn atomic_write_json<T: Serialize>(
+        &self,
+        path: &Path,
+        value: &T,
+        byte_limit: usize,
+    ) -> Result<(), CacheError> {
+        let file = self.create_temporary_file(path)?;
+        // No complete encoded generation or cloned payload is retained alongside the model.
+        // Preflight is independent of this final guard; neither permits truncated publication.
+        let mut writer = LimitedWriter::new(
+            std::io::BufWriter::with_capacity(16 * 1024, file),
+            byte_limit,
+        );
+        let result = serde_json::to_writer(&mut writer, value);
+        if writer.exhausted {
+            return Err(CacheError::ResourceLimit {
+                reason: ReasonCode::ResourceLimit,
+            });
+        }
+        result?;
+        writer.flush()?;
+        writer.inner.get_ref().sync_all()?;
+        Ok(())
+    }
+
+    fn create_temporary_file(&self, path: &Path) -> Result<fs::File, CacheError> {
         if let Some(parent) = path.parent() {
             self.prepare_private_subdir(parent)?;
         }
@@ -702,17 +761,14 @@ impl AtomicGenerationStore {
             return Err(CacheError::InsecurePath(path.to_path_buf()));
         }
         #[cfg(unix)]
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)?;
         #[cfg(not(unix))]
-        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        use std::io::Write as _;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(())
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        Ok(file)
     }
 
     fn rename_checked(&self, from: &Path, to: &Path) -> Result<(), CacheError> {
@@ -1370,18 +1426,7 @@ pub fn compact_preview(
     };
     recompute_totals(&mut compacted);
 
-    while compacted.total_records > budgets.preview_record_cap
-        || compacted.total_estimated_bytes > budgets.preview_byte_cap
-    {
-        if !trim_one_nonmandatory_record(&mut compacted) {
-            compacted.visible_resource_limit = true;
-            break;
-        }
-        compacted.visible_resource_limit = true;
-        recompute_totals(&mut compacted);
-    }
-
-    compacted
+    trim_to_budgets(compacted, budgets)
 }
 
 fn compact_parent(parent_id: String, entries: Vec<PreviewSummary>) -> ParentPreview {
@@ -1408,28 +1453,21 @@ fn compact_parent(parent_id: String, entries: Vec<PreviewSummary>) -> ParentPrev
     }
 
     eligible.sort_by(compare_preview_rows);
-    let retained_top = eligible
-        .iter()
-        .take(TOP_HEAVY_CHILDREN)
-        .cloned()
-        .map(|mut entry| {
-            entry.roles.insert(PreviewRole::TopHeavyChild);
-            entry
-        })
-        .collect::<Vec<_>>();
-
-    let evicted = eligible.into_iter().skip(TOP_HEAVY_CHILDREN);
     let mut retained = mandatory;
-    retained.extend(retained_top);
+    for (index, mut entry) in eligible.into_iter().enumerate() {
+        if index < TOP_HEAVY_CHILDREN {
+            entry.roles.insert(PreviewRole::TopHeavyChild);
+            retained.push(entry);
+        } else {
+            remainder.push(entry);
+        }
+    }
     retained.sort_by(compare_preview_rows);
 
-    let mut others_inputs = remainder;
-    others_inputs.extend(evicted);
-
-    let others = if others_inputs.is_empty() {
+    let others = if remainder.is_empty() {
         None
     } else {
-        Some(build_others_summary(&parent_id, &others_inputs))
+        Some(build_others_summary(&parent_id, &remainder))
     };
 
     ParentPreview {
@@ -1503,40 +1541,99 @@ fn recompute_totals(compacted: &mut CompactedPreview) {
     compacted.total_estimated_bytes = bytes;
 }
 
-fn trim_one_nonmandatory_record(compacted: &mut CompactedPreview) -> bool {
-    let candidate = compacted
-        .parents
+fn trim_to_budgets(mut compacted: CompactedPreview, budgets: &PreviewBudgets) -> CompactedPreview {
+    let over_budget =
+        |records, bytes| records > budgets.preview_record_cap || bytes > budgets.preview_byte_cap;
+    if !over_budget(compacted.total_records, compacted.total_estimated_bytes) {
+        return compacted;
+    }
+    compacted.visible_resource_limit = true;
+
+    // Rank only integer slots once. Immutable row ranks never change during eviction, and
+    // Others/mandatory rows never participate. Tied ranks choose the last parent/row as the
+    // old BTreeMap/Vec max_by did. No candidate owns a duplicate name, aggregate or provenance.
+    let parents: Vec<_> = compacted.parents.values().collect();
+    let mut candidates: Vec<_> = parents
         .iter()
-        .flat_map(|(parent_id, parent)| {
+        .enumerate()
+        .flat_map(|(parent_index, parent)| {
             parent
                 .retained
                 .iter()
                 .enumerate()
                 .filter(|(_, row)| !row.is_mandatory())
-                .map(move |(index, row)| (parent_id.clone(), index, row.clone()))
+                .map(move |(row_index, _)| (parent_index, row_index))
         })
-        .max_by(|(_, _, left), (_, _, right)| compare_preview_rows(left, right));
+        .collect();
+    candidates.sort_unstable_by(|left, right| {
+        compare_preview_rows(
+            &parents[left.0].retained[left.1],
+            &parents[right.0].retained[right.1],
+        )
+        .then_with(|| left.cmp(right))
+    });
 
-    let Some((parent_id, index, _removed)) = candidate else {
-        return false;
-    };
-
-    let parent = compacted
-        .parents
-        .get_mut(&parent_id)
-        .expect("parent must exist while trimming");
-    let removed = parent
-        .retained
-        .remove(index)
-        .with_role_removed(&PreviewRole::TopHeavyChild);
-
-    let mut others_inputs = Vec::new();
-    if let Some(existing) = parent.others.take() {
-        others_inputs.push(existing);
+    struct Slots {
+        key: String,
+        parent_id: String,
+        retained: Vec<Option<PreviewSummary>>,
+        others: Option<PreviewSummary>,
+        others_bytes: usize,
     }
-    others_inputs.push(removed);
-    parent.others = Some(build_others_summary(&parent.parent_id, &others_inputs));
-    true
+    // Vacant slots keep ranking indexes stable while rows move into Others. Both vectors are
+    // bounded by the already-owned input/compacted rows; neither retains another payload copy.
+    let mut slots: Vec<_> = std::mem::take(&mut compacted.parents)
+        .into_iter()
+        .map(|(key, parent)| Slots {
+            key,
+            parent_id: parent.parent_id,
+            retained: parent.retained.into_iter().map(Some).collect(),
+            others_bytes: parent
+                .others
+                .as_ref()
+                .map_or(0, PreviewSummary::estimated_bytes),
+            others: parent.others,
+        })
+        .collect();
+    for (parent_index, row_index) in candidates.into_iter().rev() {
+        if !over_budget(compacted.total_records, compacted.total_estimated_bytes) {
+            break;
+        }
+        let parent = &mut slots[parent_index];
+        let removed = parent.retained[row_index]
+            .take()
+            .expect("each ranked slot is evicted once");
+        let removed_bytes = removed.estimated_bytes();
+        let removed = removed.with_role_removed(&PreviewRole::TopHeavyChild);
+        let had_others = parent.others.is_some();
+        let others = if let Some(existing) = parent.others.take() {
+            // Preserve the original fold order, including reason order and unknown/lower-bound
+            // propagation. Merging at most two rows never recreates all previous omitted rows.
+            build_others_summary(&parent.parent_id, &[existing, removed])
+        } else {
+            build_others_summary(&parent.parent_id, std::slice::from_ref(&removed))
+        };
+        let others_bytes = others.estimated_bytes();
+        compacted.total_records = compacted.total_records - 1 + usize::from(!had_others);
+        compacted.total_estimated_bytes =
+            compacted.total_estimated_bytes - removed_bytes - parent.others_bytes + others_bytes;
+        parent.others_bytes = others_bytes;
+        parent.others = Some(others);
+    }
+    compacted.parents = slots
+        .into_iter()
+        .map(|parent| {
+            (
+                parent.key,
+                ParentPreview {
+                    parent_id: parent.parent_id,
+                    retained: parent.retained.into_iter().flatten().collect(),
+                    others: parent.others,
+                },
+            )
+        })
+        .collect();
+    compacted
 }
 
 fn enforce_spill_and_state_budgets(
@@ -1703,12 +1800,95 @@ where
     }
 }
 
+struct CountingWriter(usize);
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_len<T: Serialize>(value: &T) -> Result<usize, serde_json::Error> {
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
+}
+
+struct HashWriter(Sha256);
+impl Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct LimitedWriter<W> {
+    inner: W,
+    limit: usize,
+    written: usize,
+    exhausted: bool,
+}
+impl<W> LimitedWriter<W> {
+    fn new(inner: W, limit: usize) -> Self {
+        Self {
+            inner,
+            limit,
+            written: 0,
+            exhausted: false,
+        }
+    }
+}
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.written) {
+            self.exhausted = true;
+            return Err(std::io::Error::other(
+                "preview JSON byte allowance exhausted",
+            ));
+        }
+        let count = self.inner.write(bytes)?;
+        self.written += count;
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn checksum_hex(generation: &StoredGeneration) -> Result<String, CacheError> {
-    let bytes = serde_json::to_vec(generation)?;
+    checksum_and_len(generation).map(|(checksum, _)| checksum)
+}
+
+fn checksum_and_len(generation: &StoredGeneration) -> Result<(String, usize), CacheError> {
     let mut hasher = Sha256::new();
     hasher.update(CHECKSUM_DOMAIN);
-    hasher.update(bytes);
-    Ok(hex_lower(hasher.finalize().as_slice()))
+    // Small serializer fragments share a fixed buffer before SHA-256; buffering stays bounded
+    // and preserves the exact byte sequence/domain used by existing on-disk checksums.
+    let mut writer = LimitedWriter::new(
+        std::io::BufWriter::with_capacity(16 * 1024, HashWriter(hasher)),
+        INSPECT_GENERATION_BYTE_LIMIT as usize,
+    );
+    let result = serde_json::to_writer(&mut writer, generation);
+    if writer.exhausted {
+        return Err(CacheError::ResourceLimit {
+            reason: ReasonCode::ResourceLimit,
+        });
+    }
+    result?;
+    let hash_writer = writer
+        .inner
+        .into_inner()
+        .map_err(|error| error.into_error())?;
+    Ok((
+        hex_lower(hash_writer.0.finalize().as_slice()),
+        writer.written,
+    ))
 }
 
 fn validate_generation_id(generation: &str) -> Result<(), CacheError> {
@@ -3041,5 +3221,273 @@ mod tests {
         assert!(parent.retained.iter().any(|row| row.entry_id == "at"));
         assert!(!parent.retained.iter().any(|row| row.entry_id == "below"));
         assert!(parent.others.is_some());
+    }
+
+    #[test]
+    fn measured_json_and_streamed_checksum_match_independent_legacy_encoding() {
+        let mut row = summary(
+            "parent",
+            "escaped",
+            PreviewKind::Directory,
+            3,
+            stale_preview(),
+        );
+        row.display_name = "quote\" slash\\ newline\n中文😀".into();
+        row.coverage.incomplete_reasons = vec![ReasonCode::IncompleteStreamCoverage];
+        assert_eq!(
+            row.estimated_bytes(),
+            serde_json::to_vec(&row).unwrap().len()
+        );
+        let generation = StoredGeneration {
+            generation: "streamed_compatible".into(),
+            schema: STORED_PREVIEW_SCHEMA.into(),
+            created_at: "fixture".into(),
+            preview: compact_preview(vec![row], &PreviewBudgets::default()),
+            validity: Vec::new(),
+        };
+        let encoded = serde_json::to_vec(&generation).unwrap();
+        let mut oracle = Sha256::new();
+        // Literal existing disk contract, independent of the implementation's constant/writer.
+        oracle.update(b"SweepX sparse preview generation v1\0");
+        oracle.update(&encoded);
+        assert_eq!(
+            checksum_hex(&generation).unwrap(),
+            format!("{:x}", oracle.finalize())
+        );
+        assert_eq!(serialized_len(&generation).unwrap(), encoded.len());
+        let owned = StoredEnvelope {
+            generation: generation.generation.clone(),
+            checksum_sha256: checksum_hex(&generation).unwrap(),
+            payload: generation.clone(),
+        };
+        let borrowed = StoredEnvelope {
+            generation: owned.generation.clone(),
+            checksum_sha256: owned.checksum_sha256.clone(),
+            payload: &generation,
+        };
+        assert_eq!(
+            serde_json::to_vec(&owned).unwrap(),
+            serde_json::to_vec(&borrowed).unwrap()
+        );
+        let (_, payload_bytes) = checksum_and_len(&generation).unwrap();
+        let header = StoredEnvelope {
+            generation: owned.generation.clone(),
+            checksum_sha256: owned.checksum_sha256.clone(),
+            payload: (),
+        };
+        assert_eq!(
+            payload_bytes + serialized_len(&header).unwrap() - serialized_len(&()).unwrap(),
+            serde_json::to_vec(&owned).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn limited_writer_caps_actual_bytes_and_keeps_underlying_io_errors_distinct() {
+        let mut writer = LimitedWriter::new(Vec::new(), 8);
+        writer.write_all(b"12345").unwrap();
+        writer.write_all(b"678").unwrap();
+        assert!(writer.write_all(b"9").is_err());
+        assert!(writer.exhausted);
+        assert_eq!(writer.inner, b"12345678");
+        struct Failing {
+            bytes: Vec<u8>,
+        }
+        impl Write for Failing {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let available = 3 - self.bytes.len();
+                if available == 0 {
+                    return Err(std::io::Error::other("controlled write failure"));
+                }
+                let count = available.min(bytes.len());
+                self.bytes.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = LimitedWriter::new(Failing { bytes: Vec::new() }, 64);
+        let error = writer.write_all(b"abcdef").unwrap_err();
+        assert!(error.to_string().contains("controlled write failure"));
+        assert!(!writer.exhausted);
+        assert_eq!(writer.written, 3);
+        assert_eq!(writer.inner.bytes, b"abc");
+    }
+
+    #[test]
+    fn rejected_encoded_generation_preserves_pointer_and_creates_no_generation_file() {
+        let fixture = TestTempDir::new();
+        let store = AtomicGenerationStore::new(fixture.path().join("cache"));
+        let mut generation = StoredGeneration {
+            generation: "first".into(),
+            schema: STORED_PREVIEW_SCHEMA.into(),
+            created_at: "fixture".into(),
+            preview: compact_preview(
+                vec![summary(
+                    "parent",
+                    "one",
+                    PreviewKind::Directory,
+                    1,
+                    stale_preview(),
+                )],
+                &PreviewBudgets::default(),
+            ),
+            validity: Vec::new(),
+        };
+        store.write_generation(&generation).unwrap();
+        let original = fs::read(store.current_pointer_path()).unwrap();
+        generation.generation = "too_large".into();
+        // Public counters can be forged. Actual encoding remains the admission authority.
+        generation.preview.total_estimated_bytes = 0;
+        let error = store
+            .write_generation_with_limit(&generation, 256)
+            .unwrap_err();
+        assert!(matches!(error, CacheError::ResourceLimit { .. }));
+        assert_eq!(fs::read(store.current_pointer_path()).unwrap(), original);
+        let names: BTreeSet<_> = fs::read_dir(store.generations_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, BTreeSet::from([OsString::from("first.json")]));
+        let LoadResult::Hit(restored) = store.load_current().unwrap() else {
+            panic!("old generation remains")
+        };
+        assert_eq!(restored.generation, "first");
+    }
+
+    #[test]
+    fn incremental_trimming_matches_exhaustive_eviction_and_json_size_oracle() {
+        use std::cmp::Reverse;
+        fn rank(row: &PreviewSummary) -> Option<u128> {
+            fn value(value: &ByteValue) -> Option<u128> {
+                match value {
+                    EvidenceValue::Known { value } | EvidenceValue::LowerBound { value, .. } => {
+                        Some(value.0)
+                    }
+                    _ => None,
+                }
+            }
+            value(&row.allocated_bytes).or_else(|| value(&row.logical_bytes))
+        }
+        fn recount(preview: &mut CompactedPreview) {
+            let rows: Vec<_> = preview
+                .parents
+                .values()
+                .flat_map(|parent| parent.retained.iter().chain(parent.others.iter()))
+                .collect();
+            preview.total_records = rows.len();
+            preview.total_estimated_bytes = rows
+                .iter()
+                .map(|row| serde_json::to_vec(row).unwrap().len())
+                .sum();
+        }
+        fn oracle(mut full: CompactedPreview, budgets: &PreviewBudgets) -> CompactedPreview {
+            while full.total_records > budgets.preview_record_cap
+                || full.total_estimated_bytes > budgets.preview_byte_cap
+            {
+                full.visible_resource_limit = true;
+                // Exhaustive search and materialized JSON recount differ from ranked slots and
+                // incremental counters. All comparator ties choose the later parent/position.
+                let candidate = full
+                    .parents
+                    .iter()
+                    .flat_map(|(parent_key, parent)| {
+                        parent
+                            .retained
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, row)| !row.is_mandatory())
+                            .map(move |(index, row)| {
+                                (
+                                    (
+                                        rank(row),
+                                        Reverse(row.native_name.encoded_value()),
+                                        Reverse(row.entry_id.as_str()),
+                                        Reverse(parent_key.as_str()),
+                                        Reverse(index),
+                                    ),
+                                    parent_key,
+                                    index,
+                                )
+                            })
+                    })
+                    .min_by(|left, right| left.0.cmp(&right.0))
+                    .map(|(_, key, index)| (key.clone(), index));
+                let Some((key, index)) = candidate else {
+                    break;
+                };
+                let parent = full.parents.get_mut(&key).unwrap();
+                let mut removed = parent.retained.remove(index);
+                removed.roles.remove(&PreviewRole::TopHeavyChild);
+                let mut inputs = Vec::new();
+                inputs.extend(parent.others.take());
+                inputs.push(removed);
+                parent.others = Some(build_others_summary(&parent.parent_id, &inputs));
+                recount(&mut full);
+            }
+            full
+        }
+        let mut rows = Vec::new();
+        for parent in ["a", "b", "c"] {
+            for (name, bytes) in [("same", 4), ("large", 9), ("zero", 0)] {
+                rows.push(summary(
+                    parent,
+                    name,
+                    PreviewKind::Directory,
+                    bytes,
+                    stale_preview(),
+                ));
+            }
+            let mut unknown = summary(
+                parent,
+                "unknown",
+                PreviewKind::Directory,
+                0,
+                stale_preview(),
+            );
+            unknown.logical_bytes = EvidenceValue::Unknown {
+                reason: ReasonCode::IncompleteStreamCoverage,
+            };
+            unknown.allocated_bytes = unknown.logical_bytes.clone();
+            unknown.coverage = coverage(false);
+            rows.push(unknown);
+            rows.push(summary(
+                parent,
+                "boundary",
+                PreviewKind::Boundary,
+                0,
+                stale_preview(),
+            ));
+            rows.push(summary(
+                parent,
+                "tiny",
+                PreviewKind::Leaf,
+                2,
+                stale_preview(),
+            ));
+        }
+        let full = compact_preview(
+            rows.clone(),
+            &PreviewBudgets {
+                preview_record_cap: usize::MAX,
+                preview_byte_cap: usize::MAX,
+                ..Default::default()
+            },
+        );
+        for records in [0, 1, 3, 5, 8, usize::MAX] {
+            for bytes in [0, 700, 1400, 5000, usize::MAX] {
+                let budgets = PreviewBudgets {
+                    preview_record_cap: records,
+                    preview_byte_cap: bytes,
+                    ..Default::default()
+                };
+                let result = compact_preview(rows.clone(), &budgets);
+                assert_eq!(
+                    result,
+                    oracle(full.clone(), &budgets),
+                    "records={records}, bytes={bytes}"
+                );
+            }
+        }
     }
 }
