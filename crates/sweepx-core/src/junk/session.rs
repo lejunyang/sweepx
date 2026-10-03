@@ -4,7 +4,7 @@
 //! the session. Progress/statistics are coalesced. Drop closes the queue and cancels native work
 //! without joining on the UI thread: blocking OS calls remain cooperative, not interruptible.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod cache;
 #[cfg(target_os = "linux")]
 mod linux_temp;
@@ -659,7 +659,7 @@ impl Worker {
         if !self.request.system {
             self.scan_roots = self.request.roots.clone();
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         let mut cache = if let Some(directory) = self.request.cache_dir.clone() {
             writer.phase(JunkSessionPhase::Cache)?;
             // Capture before preview reads, validation and traversal. Racing changes belong to
@@ -678,7 +678,7 @@ impl Worker {
             {
                 Some((directory, cursor, reader))
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
                 Some((directory, reader))
             }
@@ -725,7 +725,7 @@ impl Worker {
             writer.phase(JunkSessionPhase::Cache)?;
             self.restore_history(reader, &service, rules_digest, job, writer)?;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.request.system
             && job.revision.0 == 1
             && let Some((_, reader)) = &mut cache
@@ -992,7 +992,7 @@ impl Worker {
                 writer,
             )?;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Some((directory, reader)) = &mut cache {
             writer.phase(JunkSessionPhase::CacheWrite)?;
             self.store_history(

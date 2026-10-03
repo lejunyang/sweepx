@@ -115,8 +115,8 @@ impl Worker {
     }
 
     /// Historical-only publication does not qualify a root/file index as unchanged. This policy
-    /// is exercised with native Unix fixtures on macOS too; Linux storage/runtime remains distinct.
-    #[cfg(any(target_os = "linux", test))]
+    /// is exercised on macOS too; each platform retains its native storage/runtime boundary.
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn store_history(
         &self,
@@ -567,9 +567,12 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         #[cfg(target_os = "linux")]
         let fixture = tempfile::tempdir_in("/dev/shm").unwrap();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = fixture.path().to_path_buf();
         let root = base.join("projects");
         for (name, payload) in [("a", &b"aaaa"[..]), ("b", &b"bbbbbbbb"[..])] {
             let project = root.join(name);
@@ -827,7 +830,10 @@ mod tests {
     #[test]
     fn legacy_allocation_does_not_turn_into_recursive_logical_size_or_known_counts() {
         let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let root = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = fixture.path().to_path_buf();
         let scanned = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
             .unwrap();

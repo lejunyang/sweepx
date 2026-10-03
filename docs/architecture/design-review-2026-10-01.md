@@ -1132,3 +1132,20 @@ macOS 文件索引保留：集中查询变更历史后，缓存逻辑长度还�
 [验证记录](windows-private-state-validation-2026-10-03.json)区分七项主机可运行的纯字节/额度回归，与两项仅编译的 Windows 原生回归。字面 ACL/SID oracle 覆盖受控和外部 grant、deny、第二条陌生 grant、损坏长度与最大令牌/文本准入；不是调用生产常量制造期望值。Windows 用 SDK 安装真实 Everyone 对象 grant，再以独立 named-security API 确认实际 ACE 类型；另将保留句柄的目录重命名并在旧路径安装外部 grant，检查句柄仍观察原对象而旧路径不私有。Windows 原生用例由现有 MSVC CI 工作区测试纳入，本机尚未运行，不把纯策略通过或 GNU cross lint 当作其运行结论。
 
 本轮 core 完整串行 339 项通过、0 失败、2 项既有/opt-in ignored，之后增加文本准入回归，最终策略专项七项通过，合计覆盖 340 个不同 core 通过用例；未改 CLI/其他包沿用上一单元结果。host/Linux GNU/Windows GNU 工作区 lint、追加代码的 affected lint、fmt/diff、文档和包清单检查分别见 artifact。第一次 Windows test 编译漏引入独立 oracle 的 `GetNamedSecurityInfoW`，已仅在测试模块补导入；没有压制 warning 或扩大原生生产 cfg。没有 Windows/MSVC/provider 实际运行、完整路径 authority、Windows 历史首屏或性能测量结论。下一单元继续句柄相对的 Windows 历史存储及 TUI 接线，整体跨平台缓存/资源审计保持未完成；Dart/SvelteKit 暂缓。
+
+
+## Windows 历史首屏与原生有界存储（2026-10-03）
+
+Windows 垃圾会话现接入与 Linux 共用的历史读取/发布策略：显式根在 discovery 前呈现历史，系统根在发现本次范围后呈现；扫描中的历史行不能回收。根记录仍为 v10，绑定实际规则字节、平台、设备/文件/mount 身份及原始嵌套根范围，没有合成 USN/FSEvents 游标或当前文件索引命中。当前候选来自本次原生遍历；选中刷新只合并历史展示，取消、不完整或候选保留估算超额不覆盖旧记录。没有新增 crate、第二套分类器或持久活动/权限 verdict。
+
+存储拆成共用 byte/retained allowance、固定缓冲写入和两个原生 backend。Windows 复用上一单元修正的 DACL/owner 解释和同一个 protected descriptor factory；每个祖先沿保留目录句柄进行 `NtCreateFile` 相对打开，临时文件独占创建，rename 的目标是保留目录句柄，删除仅操作已打开的 managed cache 文件。读句柄排斥数据写入/删除共享；权限/type/provider/单硬链接检查在读后再次执行。没有将这些缓存句柄变成后续 Trash pathname 操作的完整竞态证明。
+
+普通绝对 drive/verbatim drive 路径可准入，UNC/device 路径和超过 native 单路径/255 单元 basename 额度拒绝；原生 UTF-16 单元不做 lossy 转换。drive 类型预检查之后，再从已打开句柄查询 [FileFsDeviceInformation](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile)，拒绝未知/远程设备，关闭 drive alias 改变造成的该检查缺口；沿途 volume serial、reparse/offline/recall 均复验。NTFS 不能组合 DIRECTORY_FILE 和 NO_RECALL：目录只检查 native attributes，不读文件内容；非目录打开仍请求 NO_RECALL，沿用平台 backend 已记录的限制。真机/provider 语义仍需运行验证。
+
+枚举通过 [ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile) 保留同一对象并取得独立 cursor，复验 file/volume identity；固定 64 KiB pointer-aligned page，依据 [NtQueryDirectoryFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile) 的返回字节界限解释 FILE_NAMES_INFORMATION。零进度、截断、未知完成或超额拒绝，不扩大 buffer 或无限重试。各平台 cache directory 最多观察 4,096 个名称，未知名称也计费；只枚举名称，对真正 managed group 再观察 metadata，避免逐个无关文件读取。成功发布后的淘汰仍用原每项/根/总盘/根数额度，淘汰失败可能留下已写入的代次；不是原子淘汰、崩溃耐久、阻塞 native call 的硬期限或 RSS 上限。
+
+[本轮验证](windows-junk-history-validation-2026-10-03.json)区分 macOS 原生 Unix/历史策略与 Windows compiled-only：core 完整 342 项通过、0 失败、2 项既有/opt-in ignored，之后新增原生枚举额度回归 1 项通过，覆盖 343 个不同 core 通过用例；CLI 61 unit、71 contracts、1 relay 共 133 项通过，包含普通真实系统 Trash 集成用例。未改包沿用上一单元 625 项通过、1 项 ignored，不称为又一次完整工作区运行。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint 通过，最后 Windows device/type/drive/test 变更的 affected lint 另验；fmt/diff、54 份 Markdown、23 项文档检查器及 core package list 通过。
+
+Windows 原生新增四项 storage 回归已编译：保留父目录重命名/旧路径替换与重复枚举（普通 read_dir 为独立名字 oracle）、锁竞争/不继承、失败发布保留旧字节/临时清理/读取分享、真实 hard-link/Everyone DACL 拒绝及原生 basename 额度。既有 history、片段刷新及两项 session 历史首屏/系统重发现合同现在也纳入 Windows cfg；Unix symlink/非 UTF-8 夹具正确留在 Unix，未将 canonicalize workaround 应用到 Windows。两项 pure directory-page 字面 ABI/额度回归在 macOS 实际运行；不把它们当作 Windows kernel 运行。初次 Windows 编译缺少 descriptor pointer cast 和 presentation contains 的实际 Windows cfg，下一次 lint 指出定长 chunks API，均修正并记录，未压制 warning。
+
+仍未关闭 Windows/MSVC 真机、Linux 原生历史运行、云 provider、Linux/Windows 已验证文件索引、全局可增长容器/其他发现路径的资源审计、旧间歇 probe/cache/PTY 根因及最终 Trash pathname 竞态。没有本轮性能/RSS 基准；target 仍约 1.9 GiB，持续关闭 debug symbols/incremental。Dart/SvelteKit 扩展暂缓，整体路线图不勾选完成。

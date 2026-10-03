@@ -19,12 +19,13 @@
 //! # Failure direction
 //!
 //! Every error — missing file, unreadable log, timeout, parse failure — is a miss, never a claim
-//! of freshness. The cache lives in a user-private directory (`0700`) with `0600` files and
-//! rejects symlinks.
-//! Linux records are historical presentation only, with no synthetic change cursor. The live
+//! of freshness. Unix storage requires private owner/mode (`0700`/`0600`); Windows uses the
+//! shared protected DACL policy. Storage preserves no-follow; records separately bind the source
+//! root mount identity. Windows cache entries additionally remain on their admitted local volume.
+//! Linux/Windows records are historical presentation only, with no synthetic change cursor. The live
 //! scanner still observes every directory/file; a matching root or rule digest is not freshness.
 
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(target_os = "macos")]
@@ -569,6 +570,8 @@ fn observed_root_binding(
 fn host_platform() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "linux"
     }
@@ -656,7 +659,7 @@ fn prune_with_observations(
 ) -> io::Result<()> {
     let mut groups = BTreeMap::<String, RootGroup>::new();
     // Enumeration retains at most roots + 1 groups, never an unbounded directory inventory.
-    directory.entries(|name, _| {
+    directory.entries(|name| {
         if legacy_name(name) || (name.starts_with(".sweepx-") && name.ends_with(".tmp")) {
             return directory.remove(name);
         }
@@ -699,7 +702,7 @@ fn prune_with_observations(
     })?;
     // Retired per-device indexes are never read; remove only their known file namespace.
     match directory.child("subtrees") {
-        Ok(legacy) => legacy.entries(|name, _| {
+        Ok(legacy) => legacy.entries(|name| {
             if legacy_name(name) || (name.starts_with('.') && name.ends_with(".json.tmp")) {
                 legacy.remove(name)
             } else {

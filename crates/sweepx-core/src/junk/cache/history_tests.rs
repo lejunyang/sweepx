@@ -7,9 +7,12 @@ use sweepx_scanner::{HostPlatformScanner, Scanner, ScannerOptions};
 fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     #[cfg(target_os = "linux")]
     let guard = tempfile::tempdir_in("/dev/shm").unwrap();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let guard = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
     let base = guard.path().canonicalize().unwrap();
+    #[cfg(windows)]
+    let base = guard.path().to_path_buf();
     let root = base.join("project");
     fs::create_dir_all(root.join("target")).unwrap();
     fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
@@ -172,17 +175,22 @@ fn rule_platform_scope_replacement_and_linked_ancestors_refuse_history() {
     fs::rename(&root, &original).unwrap();
     fs::create_dir(&root).unwrap();
     assert!(CacheReader::new(&cache).historical_roots(std::slice::from_ref(&root))[0].is_none());
-    fs::remove_dir(&root).unwrap();
-    std::os::unix::fs::symlink(&original, &root).unwrap();
-    assert!(CacheReader::new(&cache).historical_roots(std::slice::from_ref(&root))[0].is_none());
-    // A linked ancestor can reach the original inode; native admission must still reject it.
-    let link = root.with_file_name("alias-parent");
-    std::os::unix::fs::symlink(original.parent().unwrap(), &link).unwrap();
-    let aliased = link.join("original");
-    let mut alias_record = record;
-    alias_record.root = aliased.to_str().unwrap().into();
-    write(&cache, &alias_record).unwrap();
-    assert!(CacheReader::new(&cache).historical_roots(&[aliased])[0].is_none());
+    #[cfg(unix)]
+    {
+        fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&original, &root).unwrap();
+        assert!(
+            CacheReader::new(&cache).historical_roots(std::slice::from_ref(&root))[0].is_none()
+        );
+        // A linked ancestor can reach the original inode; native admission must still reject it.
+        let link = root.with_file_name("alias-parent");
+        std::os::unix::fs::symlink(original.parent().unwrap(), &link).unwrap();
+        let aliased = link.join("original");
+        let mut alias_record = record;
+        alias_record.root = aliased.to_str().unwrap().into();
+        write(&cache, &alias_record).unwrap();
+        assert!(CacheReader::new(&cache).historical_roots(&[aliased])[0].is_none());
+    }
 }
 
 #[test]

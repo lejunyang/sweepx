@@ -5,7 +5,7 @@
 
 /// Bounded historical caches on Linux/macOS, with separately validated macOS file reuse.
 /// Historical reports never establish current classification or execution authority.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod cache;
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;

@@ -1,0 +1,222 @@
+{
+  "schema": "sweepx.windows-junk-history-validation/v1",
+  "date": "2026-10-03",
+  "base_commit": "b475686",
+  "host": {
+    "platform": "aarch64-apple-darwin",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "build": "dev/test, debug symbols=0, incremental=0",
+    "target_du_estimate": "1.9 GiB",
+    "free_space_df_estimate": "41 GiB"
+  },
+  "scope": [
+    "Enable Windows junk-session historical first paint using the shared Linux historical publication policy; all current facts still traverse natively",
+    "Root records remain v10, platform/native file/mount/rule-bytes/nested-scope bound; absent cursors remain null",
+    "Split bounded read/retained allowance and 64 KiB streamed JSON serialization from native Unix/Windows storage; no new crate or duplicate classifier",
+    "Relative NtCreateFile component walk, retained directory/file handles for publication and managed cache deletion; explicit private descriptor factory shared with state-directory creation",
+    "Handle owner/DACL, reparse/offline/recall, local device, volume and single hard-link admission; file privacy/type/link checks repeated after reads",
+    "Non-directory opens request NO_RECALL; DIRECTORY_FILE cannot combine with it on NTFS, matching the existing platform backend restriction",
+    "Local drive precheck plus opened-device FileFsDeviceInformation query rejects unknown/remote devices, including drive-alias races; unsupported UNC/device paths refuse cache",
+    "Share-none lock claims real data access, excludes contenders and is not inherited; read handles deny data-write/delete sharing",
+    "Atomic relative rename of exclusive private temporary; failed write cleans only its owned handle and preserves prior bytes",
+    "ReOpenFile enumeration retains native identity and independent cursor; fixed pointer-aligned 64 KiB pages, exact completion byte bounds, zero-progress/overflow failure",
+    "Each Unix/Windows cache directory examines at most 4096 names, including unknown names; metadata only for managed groups, no directory inventory retained",
+    "Historical/session/grouping fixtures use normal Windows paths; Unix-only symlink/native-name fixtures remain correctly gated",
+    "Unexpected positive NtCreateFile completion adopts the returned handle before refusing it, preventing conservative errors from leaking handles"
+  ],
+  "not_delivered": [
+    "Native Windows kernel/MSVC execution or real cloud-provider acceptance; this host has no Windows execution environment",
+    "Linux native execution; Linux cfg was cross-linted only",
+    "Linux/Windows validated current file-index acceleration, synthesized watcher/USN freshness, or delete authority from historical rows",
+    "Full state/Trash pathname race proof, global growing-container/discovery-path resource audit, old intermittent probe/cache/PTY root causes",
+    "Crash durability, atomic eviction, hard native-call deadlines, RSS bounds or performance benchmark claims"
+  ],
+  "limits": {
+    "entry_encoded_bytes": 4194304,
+    "root_pair_encoded_bytes": 8388608,
+    "managed_encoded_disk_bytes_after_successful_eviction": 67108864,
+    "retained_root_groups": 256,
+    "shared_encoded_read_bytes": 16777216,
+    "shared_owned_data_estimate_bytes": 134217728,
+    "candidate_owned_estimate_per_root_before_cloning": 4194304,
+    "native_enumerated_names_per_directory": 4096,
+    "windows_directory_page_bytes": 65536,
+    "windows_enumeration_queries_max": 4097,
+    "windows_basename_utf16_units": 255,
+    "native_path_utf16_units": 32767
+  },
+  "failure_notes": [
+    "Failed eviction may leave a fully published generation: bounded cache warnings do not fail current scan results; disk quotas are not a hard on-disk guarantee across errors/crashes",
+    "Other state-directory callers remain pathname based after the shared permission observation; this slice retains authority specifically inside junk cache storage",
+    "Native data-write/delete sharing denial is not a proof against every memory-mapped/privileged filesystem race; history remains presentation only"
+  ],
+  "proof_scopes": {
+    "portable_host": [
+      "Two FILE_NAMES_INFORMATION page tests use literal 12-byte SDK headers, truncation/overlap/alignment/count/unknown-surrogate oracles",
+      "Unix ordinary read_dir independently confirms 4097 controlled unknown files; bounded native enumeration refuses excess without deleting them"
+    ],
+    "windows_native_compiled_only": [
+      "retained_parent_lock_and_enumeration_survive_path_replacement: native private creation, lowercase drive, SDK name offset=12, lock exclusion/inheritance, retained namespace after rename, two set comparisons against ordinary read_dir, managed deletion does not touch replacement",
+      "bounded_input_atomic_publication_and_read_sharing_preserve_old_generation: independent ordinary byte/length checks, shared input budget, oversize refusal, writer/rename exclusion, failed publication cleans temporary, success atomically replaces old bytes",
+      "native_hardlinks_and_external_acl_grants_are_refused_without_repair: ordinary hard_link plus SDK count=2, actual SDK Everyone DACL install, refusals preserve linked/public contents and do not repair permissions",
+      "names_preserve_native_units_and_refuse_alternate_streams_or_unbounded_requests: opaque UTF-16 units, stream/separator/NUL/component and unsupported namespace refusal",
+      "Existing history/session publication tests and system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history / cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id now compile on Windows"
+    ],
+    "ci": "Existing native-cli Windows MSVC Test Windows scan stack natively includes core; workflow inspected, no remote run triggered or success claimed"
+  },
+  "checks": {
+    "core_full": {
+      "command": "cargo test -p sweepx-core --all-features --locked -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 342,
+      "failed": 0,
+      "ignored": 2,
+      "seconds": 38.68,
+      "log_capture": "tool response, no standalone logfile retained",
+      "source_scope": "Shared/Unix storage and historical/session policies; subsequent production changes are Windows cfg only"
+    },
+    "final_unix_enumeration": {
+      "command": "cargo test -p sweepx-core --all-features --locked enumeration_charges_unknown_names -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": 1.39,
+      "distinct_core_passes_total": 343
+    },
+    "cli_full": {
+      "command": "cargo test -p sweepx-cli --all-features --locked -- --test-threads=1",
+      "exit_code": 0,
+      "log_sha256": "eb1d3e53b9283635f4db65f4d9669696847d4be61d3a3dff7291904f6261e6fa",
+      "summaries": [
+        "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s",
+        "test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.77s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s"
+      ],
+      "tail": [
+        "",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        ""
+      ]
+    },
+    "host_workspace_lint": {
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "1aec07b02b07cf5dc5ecb61d9f6666ad34348d56380832bf8f10d4e8136a9a43",
+      "summaries": [],
+      "tail": [
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized] target(s) in 3.54s"
+      ]
+    },
+    "linux_gnu_workspace_lint": {
+      "command": "task-local Zig cross helper x86_64-unknown-linux-gnu all",
+      "exit_code": 0,
+      "log_sha256": "5978c142b0b1b06993334ccec6cc58dbc44385b600977624662de53e9cc57c7e",
+      "summaries": [],
+      "tail": [
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized] target(s) in 9.80s"
+      ]
+    },
+    "windows_gnu_workspace_lint": {
+      "command": "task-local Zig cross helper x86_64-pc-windows-gnu all",
+      "exit_code": 0,
+      "log_sha256": "89ec9e67b0133f7b6e9c8ca6dc756b3411d99c4fa29450adb4a414f08ed31ea9",
+      "summaries": [],
+      "tail": [
+        "    Checking sweepx-executor v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-executor)",
+        "    Checking sweepx-cli v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-cli)",
+        "    Finished `dev` profile [unoptimized] target(s) in 6.82s"
+      ]
+    },
+    "final_windows_gnu_core_lint": {
+      "command": "task-local Zig cross helper x86_64-pc-windows-gnu sweepx-core",
+      "exit_code": 0,
+      "log_sha256": "626a762ffe314430623ac59bfea0a9c06314bb57e8ac2077d3e059be88582ebd",
+      "summaries": [],
+      "tail": [
+        "    Checking sweepx-audit v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-audit)",
+        "    Checking sweepx-core v0.0.1 (/Users/bytedance/Desktop/Projects/lejunyang/sweepx/crates/sweepx-core)",
+        "    Finished `dev` profile [unoptimized] target(s) in 7.02s"
+      ]
+    },
+    "docs_unit": {
+      "command": "python -m unittest discover -s scripts/tests -p test_lint_docs.py",
+      "exit_code": 0,
+      "log_sha256": "c8b971e7e9d503a8cdc98fdc5ad490a81711a38d90b4fd6d860ee5e3358fac35",
+      "summaries": [
+        "Ran 23 tests in 0.101s"
+      ],
+      "tail": [
+        "Ran 23 tests in 0.101s",
+        "",
+        "OK"
+      ]
+    },
+    "package_list": {
+      "command": "cargo package -p sweepx-core --list --allow-dirty --locked",
+      "exit_code": 0,
+      "log_sha256": "d64b18e41e6d7f2902f53a95efa28ae32b5fef76fe7444d7f3828dd625092ed6",
+      "summaries": [],
+      "tail": [
+        "src/tools/mod.rs",
+        "src/windows_state_policy.rs",
+        "src/windows_state_security.rs"
+      ]
+    },
+    "unmodified_runtime_reuse": {
+      "reference": "current-junk-traversal-validation-2026-10-03.json",
+      "passed": 625,
+      "ignored": 1,
+      "scope": "Unchanged packages; not a fresh whole-workspace runtime matrix"
+    },
+    "docs_lint": {
+      "command": "python scripts/lint_docs.py",
+      "exit_code": 0,
+      "markdown_files": 54,
+      "log_sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1"
+    },
+    "fmt": {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0
+    },
+    "diff": {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  },
+  "early_failures": [
+    {
+      "phase": "Initial Windows core lint/compile",
+      "exit_code": 101,
+      "reason": "Missing SDK security descriptor pointer cast and Windows presentation contains cfg; corrected in their actual native/shared branches"
+    },
+    {
+      "phase": "Next Windows core lint",
+      "exit_code": 101,
+      "reason": "Clippy constant-sized chunks API preference; replaced with as_chunks without warning suppression"
+    }
+  ],
+  "sources": [
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile",
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information",
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile",
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile",
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_fs_device_information",
+    "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew"
+  ],
+  "source_sha256": {
+    "crates/sweepx-core/Cargo.toml": "5c63865b44f73c08d5e9a7a949cf5da94a8157be8250d3d7e02952e33500575b",
+    "crates/sweepx-core/src/windows_state_security.rs": "a8c5de93211432ac18f72a4ee09d773de808a29f177f25b9d9734e39db9f8a89",
+    "crates/sweepx-core/src/junk/cache/storage.rs": "02d23ae50556e06fb5a3f1ec093b092e6c0ef31de7056907c78f0d41938f43e5",
+    "crates/sweepx-core/src/junk/cache/storage/unix.rs": "f09ea2ca42e15ff542b46ef9487f65f57991667a7cdb33ca9a866f4a40ff2cc9",
+    "crates/sweepx-core/src/junk/cache/storage/windows.rs": "19659d4ea8b4f4eb7f184c50c697c4593e5f8be9a2b866cdbd51a8e5d279407a",
+    "crates/sweepx-core/src/junk/cache/storage/windows_names.rs": "d25932c9cffa1e19a0dfaa888d26faa1c15523134188b8667b3399b865a3ff8f",
+    "crates/sweepx-core/src/junk/session.rs": "b258b8b6d20532799e77d757a5551ad1a72cb6b1b25de56972380db3f02a2134",
+    "crates/sweepx-core/src/junk/session/cache.rs": "20b8821d377329d860bd03bf28311d73462a87db703e95fbf8b143a4c3c1be37"
+  }
+}

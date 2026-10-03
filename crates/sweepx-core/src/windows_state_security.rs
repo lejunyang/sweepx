@@ -89,41 +89,19 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
 /// Creates `path` with an explicit current-user-private DACL.
 ///
 /// Returns `Ok(false)` when the directory already exists, leaving verification to
-/// [`is_current_user_private`]: an existing directory may have been created by something else, and
+/// [`is_private_owned_directory`]: an existing directory may have been created by something else, and
 /// silently rewriting its ACL would hide exactly the misconfiguration worth reporting.
 pub fn create_private_dir(path: &Path) -> io::Result<bool> {
     let target = wide(path.as_os_str())?;
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    let user = current_user_sid()?;
-    let user_text = sid_to_string(user.as_ptr() as PSID)?;
-    let sddl = wide(OsStr::new(
-        &PRIVATE_DIR_SDDL_TEMPLATE.replace("{USER}", &user_text),
-    ))?;
-    // SAFETY: `sddl` is a NUL-terminated UTF-16 buffer that outlives the call, and the descriptor
-    // out-parameter is freed below on every path.
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            ptr::null_mut(),
-        )
-    };
-    if converted == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let descriptor = PrivateSecurityDescriptor::new()?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor,
+        lpSecurityDescriptor: descriptor.as_ptr(),
         bInheritHandle: 0,
     };
     // SAFETY: both pointers remain valid for this synchronous call.
     let created = unsafe { CreateDirectoryW(target.as_ptr(), &attributes) };
     let error = io::Error::last_os_error();
-    // SAFETY: `descriptor` came from the conversion above and is freed exactly once.
-    unsafe {
-        LocalFree(descriptor as HLOCAL);
-    }
     if created != 0 {
         return Ok(true);
     }
@@ -132,6 +110,53 @@ pub fn create_private_dir(path: &Path) -> io::Result<bool> {
         return Ok(false);
     }
     Err(error)
+}
+
+/// One protected current-user/SYSTEM/Administrators DACL, shared by pathname and relative opens.
+/// The allocation remains live throughout the synchronous creation call and is freed once.
+pub(crate) struct PrivateSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl PrivateSecurityDescriptor {
+    /// Creates the protected policy without inheriting grants from an existing parent.
+    pub(crate) fn new() -> io::Result<Self> {
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let user = current_user_sid()?;
+        let user_text = sid_to_string(user.as_ptr() as PSID)?;
+        let sddl = wide(OsStr::new(
+            &PRIVATE_DIR_SDDL_TEMPLATE.replace("{USER}", &user_text),
+        ))?;
+        // SAFETY: `sddl` is a NUL-terminated UTF-16 buffer that outlives the call, and the descriptor
+        // out-parameter is freed below on every path.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if descriptor.is_null() {
+            return Err(io::Error::other(
+                "Windows returned no private security descriptor",
+            ));
+        }
+        Ok(Self(descriptor))
+    }
+
+    /// Borrows the SDK allocation only while this owner remains live during native creation.
+    pub(crate) fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
+        self.0
+    }
+}
+
+impl Drop for PrivateSecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: conversion allocated this descriptor; this RAII owner frees it exactly once.
+        unsafe { LocalFree(self.0 as HLOCAL) };
+    }
 }
 
 /// A Windows-allocated descriptor and its borrowed owner/DACL pointers.

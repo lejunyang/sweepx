@@ -22,7 +22,10 @@ impl NativeFixture {
     fn new() -> Self {
         let guard = tempfile::tempdir().unwrap();
         // Native APIs reject linked ancestors; /var is a host-created alias on macOS.
+        #[cfg(unix)]
         let base = fs::canonicalize(guard.path()).unwrap();
+        #[cfg(windows)]
+        let base = guard.path().to_path_buf();
         let parent = base.join("root");
         let nested = parent.join("nested");
         let deep = nested.join("deep");
@@ -434,6 +437,7 @@ fn candidate_paths_come_from_native_locators_despite_divergent_display_paths() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn native_non_utf8_aliases_remain_distinct_for_attribution() {
     use std::ffi::OsString;

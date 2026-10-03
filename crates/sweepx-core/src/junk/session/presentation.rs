@@ -22,7 +22,7 @@ struct PresentedPath {
 }
 
 impl PresentationIndex {
-    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
     pub(super) fn contains(&self, key: &JunkCandidateKey) -> bool {
         self.paths.contains_key(key)
     }

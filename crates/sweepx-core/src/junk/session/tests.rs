@@ -606,7 +606,7 @@ fn discovered_root_admission_is_bounded_and_preserves_link_sensitive_spelling() 
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[test]
 fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history() {
     let _serial = SESSION_TESTS
@@ -718,7 +718,7 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
     ));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[test]
 fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id() {
     let _serial = SESSION_TESTS
