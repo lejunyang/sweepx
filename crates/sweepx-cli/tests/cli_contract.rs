@@ -4072,6 +4072,35 @@ fn cancel_json_is_honest_for_missing_operation() {
     );
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn status_and_cancel_do_not_create_missing_state_or_operations() {
+    let (_fixture, base) = duplicate_fixture();
+    let missing = base.join("missing-parent/state");
+    let existing = base.join("private-state");
+    let _store = sweepx_core::DurableSnapshotStore::new(&existing).unwrap();
+    for state in [&missing, &existing] {
+        for command in ["status", "cancel"] {
+            let output = cli_command()
+                .args(["--format", "json", "--state-dir"])
+                .arg(state)
+                .args([command, "--operation-id", "op_missing_123"])
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["kind"], format!("{command}.result"));
+            if command == "status" {
+                assert_eq!(report["summary"]["found"], false);
+            } else {
+                assert_eq!(report["summary"]["disposition"], "not_found");
+            }
+            assert!(!missing.parent().unwrap().exists());
+            assert!(!existing.join("operations").exists());
+            assert!(!existing.join("event-journals").exists());
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn relative_state_dir_is_rejected() {

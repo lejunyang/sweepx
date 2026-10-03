@@ -1,6 +1,6 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
-use super::{AccountedFile, EntryMetadata, with_cache_io, write_json};
+use super::{AccountedFile, EntryMetadata, commit_sync, linked_object, with_cache_io, write_json};
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests;
 #[cfg(any(target_os = "linux", test))]
@@ -53,6 +53,7 @@ pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
 }
 
 /// A private cache directory retained by native handle; display paths are not reopened.
+#[derive(Debug)]
 pub struct Directory {
     fd: OwnedFd,
     // Handle lifetime pins the captured mount; do not persist/recover this from display paths.
@@ -235,6 +236,25 @@ impl Directory {
                 // SAFETY: same no-follow binding as the initial open; another creator may have raced.
                 next = unsafe { libc::openat(current.fd.as_raw_fd(), name.as_ptr(), flags) };
             }
+            if next < 0 {
+                let error = io::Error::last_os_error();
+                // Diagnostic classification stays beneath the retained parent. A link can
+                // yield ENOTDIR with O_DIRECTORY; never reopen/follow it to explain the error.
+                let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+                if unsafe {
+                    libc::fstatat(
+                        current.fd.as_raw_fd(),
+                        name.as_ptr(),
+                        stat.as_mut_ptr(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } == 0
+                    && unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFLNK
+                {
+                    return Err(linked_object());
+                }
+                return Err(error);
+            }
             current = Self::from_owned(owned(next)?)?;
         }
         let metadata = File::from(current.fd.try_clone()?).metadata()?;
@@ -397,6 +417,26 @@ impl Directory {
         name: &str,
         encode: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.publish_mode(name, encode, false)
+    }
+
+    /// Publishes bounded, already encoded state bytes with file and retained-parent sync.
+    /// Failure before rename preserves the old destination. A post-rename sync error may
+    /// leave the new file visible with uncertain persistence; it never deletes that file.
+    pub fn write_synced_bytes(&self, name: &str, bytes: &[u8], cap: usize) -> io::Result<()> {
+        use std::io::Write;
+        if bytes.len() > cap {
+            return Err(io::Error::other("state encoded byte budget exceeded"));
+        }
+        self.publish_mode(name, |file| file.write_all(bytes), true)
+    }
+
+    fn publish_mode(
+        &self,
+        name: &str,
+        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        sync: bool,
+    ) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let destination = component(name)?;
         let temp = component(&format!(
@@ -430,6 +470,9 @@ impl Directory {
             #[cfg(target_os = "linux")]
             self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
             encode(&mut file)?;
+            if sync {
+                file.sync_all()?;
+            }
             Ok(file)
         });
         // A restoration failure must be known before rename, including current.json. A
@@ -462,6 +505,9 @@ impl Directory {
             } < 0
             {
                 return Err(io::Error::last_os_error());
+            }
+            if sync {
+                commit_sync(|| File::from(self.fd.try_clone()?).sync_all())?;
             }
             Ok(())
         });

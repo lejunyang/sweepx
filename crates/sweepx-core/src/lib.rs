@@ -5,6 +5,7 @@ mod duplicates;
 pub mod junk;
 mod large_files;
 mod scan_output;
+mod snapshot_store;
 pub use duplicates::scan_duplicates_with_store;
 pub use scan_output::ScanOutput;
 pub mod tools;
@@ -19,7 +20,9 @@ mod preview_projection;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+#[cfg(all(test, unix))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -77,7 +80,7 @@ use sweepx_scanner::{ProgressEvent, ScanError};
 use thiserror::Error;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use sweepx_platform::ScanRoot;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -506,6 +509,14 @@ pub enum CoreError {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    /// Snapshot encoded input or pre-decode JSON work admission failed; no partial DTO.
+    #[error("operation snapshot exceeds {resource} limit ({limit})")]
+    SnapshotResourceLimit {
+        /// Stable diagnostic unit, not a process memory measurement.
+        resource: &'static str,
+        /// Maximum encoded bytes or JSON value/key visitor attempts.
+        limit: usize,
+    },
     #[error("state directory must be absolute: {0}")]
     NonAbsoluteStateDir(PathBuf),
     #[error(
@@ -574,39 +585,77 @@ pub trait SnapshotStore {
 }
 
 #[derive(Debug, Clone)]
+/// Operation-state storage rooted in a retained private native directory.
+/// Constructor creation is explicit; open_existing and load never create children or repair
+/// permissions. Clone shares the admitted root, including after its display path is renamed.
 pub struct DurableSnapshotStore {
     base_dir: PathBuf,
+    #[cfg(any(unix, windows))]
+    directory: Arc<sweepx_cache::native::Directory>,
 }
 
 impl DurableSnapshotStore {
+    /// Opens or privately creates an absolute state root without modifying existing modes/DACLs.
     pub fn new(base_dir: impl Into<PathBuf>) -> Result<Self, StateError> {
         let base_dir = base_dir.into();
         if !durable_state_supported() {
             return Err(StateError::DurableStateUnsupportedOnWindows);
         }
-        validate_or_prepare_state_dir(&base_dir)?;
-        Ok(Self { base_dir })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn open_existing(base_dir: impl Into<PathBuf>) -> Result<Option<Self>, StateError> {
-        let base_dir = base_dir.into();
-        if !validate_existing_state_dir(&base_dir)? {
-            return Ok(None);
+        if !base_dir.is_absolute() {
+            return Err(StateError::NonAbsoluteStateDir(base_dir));
         }
-        Ok(Some(Self { base_dir }))
+        #[cfg(any(unix, windows))]
+        let directory = Arc::new(
+            sweepx_cache::native::Directory::open(&base_dir, true)
+                .map_err(|error| snapshot_store::native_error(&base_dir, error))?,
+        );
+        Ok(Self {
+            base_dir,
+            #[cfg(any(unix, windows))]
+            directory,
+        })
     }
 
-    fn operations_dir(&self) -> Result<PathBuf, StateError> {
-        let path = self.base_dir.join("operations");
-        validate_or_prepare_private_subdir(&path)?;
-        Ok(path)
+    /// Opens an existing private state root; absence is None and causes no creation or repair.
+    pub fn open_existing(base_dir: impl Into<PathBuf>) -> Result<Option<Self>, StateError> {
+        let base_dir = base_dir.into();
+        if !durable_state_supported() {
+            return Err(StateError::DurableStateUnsupportedOnWindows);
+        }
+        if !base_dir.is_absolute() {
+            return Err(StateError::NonAbsoluteStateDir(base_dir));
+        }
+        #[cfg(any(unix, windows))]
+        let directory = match sweepx_cache::native::Directory::open(&base_dir, false) {
+            Ok(directory) => Arc::new(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(snapshot_store::native_error(&base_dir, error)),
+        };
+        Ok(Some(Self {
+            base_dir,
+            #[cfg(any(unix, windows))]
+            directory,
+        }))
     }
 
-    fn file_path(&self, operation_id: &ValidatedOperationId) -> Result<PathBuf, StateError> {
-        Ok(self
-            .operations_dir()?
-            .join(format!("{}.json", digest_hex(operation_id.as_str()))))
+    #[cfg(any(unix, windows))]
+    fn operations(
+        &self,
+        create: bool,
+    ) -> Result<Option<sweepx_cache::native::Directory>, StateError> {
+        let result = if create {
+            self.directory.create_child("operations")
+        } else {
+            self.directory.child("operations")
+        };
+        match result {
+            Ok(directory) => Ok(Some(directory)),
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(snapshot_store::native_error(
+                &self.base_dir.join("operations"),
+                error,
+            )),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -614,30 +663,18 @@ impl DurableSnapshotStore {
         &self,
         operation_id: &ValidatedOperationId,
     ) -> Result<bool, StateError> {
-        let operations = self.base_dir.join("operations");
-        match fs::symlink_metadata(&operations) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(StateError::SymlinkStateDir(operations));
-            }
-            Ok(metadata) if metadata.is_dir() => ensure_private_dir(&operations)?,
-            Ok(_) => return Err(StateError::InvalidStateDir(operations)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        }
-        let path = operations.join(format!("{}.json", digest_hex(operation_id.as_str())));
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
+        let Some(operations) = self.operations(false)? else {
+            return Ok(false);
         };
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1 {
-            return Err(StateError::InvalidStateDir(path));
+        let name = format!("{}.json", digest_hex(operation_id.as_str()));
+        match operations.metadata(&name) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(snapshot_store::native_error(
+                &self.base_dir.join("operations").join(name),
+                error,
+            )),
         }
-        #[cfg(unix)]
-        if metadata.uid() != current_euid() || metadata.permissions().mode() & 0o077 != 0 {
-            return Err(StateError::InsecureStateDir(path));
-        }
-        Ok(true)
     }
 
     #[cfg(target_os = "linux")]
@@ -735,28 +772,53 @@ impl DurableSnapshotStore {
 impl SnapshotStore for DurableSnapshotStore {
     fn save(&self, snapshot: &OperationSnapshot) -> Result<(), StateError> {
         let operation_id = ValidatedOperationId::parse(&snapshot.operation_id)?;
-        let path = self.file_path(&operation_id)?;
-        let bytes = serde_json::to_vec_pretty(snapshot)?;
-        atomic_write_private_file(&path, &bytes)?;
-        Ok(())
+        let bytes = snapshot_store::encode(snapshot)?;
+        #[cfg(any(unix, windows))]
+        {
+            let directory = self.operations(true)?.expect("create returns a directory");
+            let name = format!("{}.json", digest_hex(operation_id.as_str()));
+            directory.write_synced_bytes(&name, &bytes, snapshot_store::ENCODED_CAP)?;
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (operation_id, bytes);
+            Err(StateError::DurableStateUnsupportedOnWindows)
+        }
     }
 
     fn load(&self, operation_id: &str) -> Result<Option<OperationSnapshot>, StateError> {
         let operation_id = ValidatedOperationId::parse(operation_id)?;
-        let path = self.file_path(&operation_id)?;
-        match fs::read(path) {
-            Ok(bytes) => {
-                let snapshot: OperationSnapshot = serde_json::from_slice(&bytes)?;
-                if snapshot.operation_id == operation_id.as_str() {
-                    Ok(Some(snapshot))
-                } else {
-                    Err(StateError::InvalidOperationId(
-                        operation_id.as_str().to_string(),
-                    ))
+        #[cfg(any(unix, windows))]
+        {
+            let Some(directory) = self.operations(false)? else {
+                return Ok(None);
+            };
+            let name = format!("{}.json", digest_hex(operation_id.as_str()));
+            let bytes = match directory.read_bytes(&name, snapshot_store::ENCODED_CAP as u64) {
+                Ok(read) => read.contents.ok_or_else(|| {
+                    snapshot_store::resource("encoded_bytes", snapshot_store::ENCODED_CAP)
+                })?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(snapshot_store::native_error(
+                        &self.base_dir.join("operations").join(name),
+                        error,
+                    ));
                 }
+            };
+            let snapshot = snapshot_store::decode(&bytes)?;
+            if snapshot.operation_id != operation_id.as_str() {
+                return Err(StateError::InvalidOperationId(
+                    operation_id.as_str().to_owned(),
+                ));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+            Ok(Some(snapshot))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = operation_id;
+            Err(StateError::DurableStateUnsupportedOnWindows)
         }
     }
 }
@@ -794,6 +856,16 @@ pub fn durable_store(state_dir: Option<&Path>) -> Result<Option<DurableSnapshotS
 
     match state_dir {
         Some(path) => Ok(Some(DurableSnapshotStore::new(path)?)),
+        None => Ok(None),
+    }
+}
+
+/// Resolves read-only snapshot storage; missing state stays missing.
+pub fn existing_durable_store(
+    state_dir: Option<&Path>,
+) -> Result<Option<DurableSnapshotStore>, StateError> {
+    match state_dir {
+        Some(path) => DurableSnapshotStore::open_existing(path),
         None => Ok(None),
     }
 }
@@ -3495,7 +3567,7 @@ fn stale_preview_aggregate(
     preview_projection::historical_aggregate(aggregate, &timestamp_now())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
@@ -4267,7 +4339,9 @@ fn load_snapshot_preferring_journal<S: SnapshotStore>(
     if let Some(state_dir) = state_dir {
         let validated = ValidatedOperationId::parse(operation_id)
             .map_err(|_| CoreError::InvalidOperationId(operation_id.to_string()))?;
-        let durable = DurableSnapshotStore::new(state_dir)?;
+        let Some(durable) = DurableSnapshotStore::open_existing(state_dir)? else {
+            return load_snapshot(context, operation_id, store);
+        };
         if let Some(journal) = durable.open_journal(&validated)? {
             let snapshot = journal
                 .read_final_snapshot()
@@ -5641,78 +5715,6 @@ fn normalize_scan_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, CoreError> {
     Ok(retained)
 }
 
-/// Walks `path` component by component, refusing reparse points and creating what is missing.
-///
-/// The Windows counterpart to the Unix ancestor-chain check. Reparse points matter more here than
-/// the symlink case does on Unix: a **directory junction** can be created by an ordinary user with
-/// no elevation and no developer mode, so an attacker who can write into any ancestor can redirect
-/// the state directory elsewhere. Measured on this host, Rust reports a junction as
-/// `is_symlink() == true`, so one check covers junctions, directory symlinks and file symlinks.
-///
-/// Missing components are created with an explicit private DACL rather than an inherited one, and
-/// the result is verified, so a widened profile ACL cannot silently propagate.
-#[cfg(target_os = "windows")]
-fn validate_or_prepare_private_ancestor_chain(path: &Path) -> Result<(), StateError> {
-    if !path.is_absolute() {
-        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
-    }
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        // The prefix and root of an absolute Windows path (`C:` then `\`) are not directories that
-        // can be created or inspected on their own; the first real component follows them.
-        if matches!(
-            component,
-            std::path::Component::Prefix(_) | std::path::Component::RootDir
-        ) {
-            continue;
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    return Err(StateError::SymlinkStateDir(current));
-                }
-                if !meta.is_dir() {
-                    return Err(StateError::InvalidStateDir(current));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                windows_state_security::create_private_dir(&current)?;
-                let meta = fs::symlink_metadata(&current)?;
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(StateError::SymlinkStateDir(current));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn validate_or_prepare_state_dir(path: &Path) -> Result<(), StateError> {
-    if !durable_state_supported() {
-        return Err(StateError::DurableStateUnsupportedOnWindows);
-    }
-    if !path.is_absolute() {
-        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
-    }
-    #[cfg(any(unix, target_os = "windows"))]
-    validate_or_prepare_private_ancestor_chain(path)?;
-    if path.exists() {
-        let meta = fs::symlink_metadata(path)?;
-        if meta.file_type().is_symlink() {
-            return Err(StateError::SymlinkStateDir(path.to_path_buf()));
-        }
-        if !meta.is_dir() {
-            return Err(StateError::InvalidStateDir(path.to_path_buf()));
-        }
-    } else {
-        fs::create_dir_all(path)?;
-    }
-    set_private_dir_mode(path)?;
-    ensure_private_dir(path)
-}
-
 #[cfg(any(unix, target_os = "windows"))]
 fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
     if !path.is_absolute() {
@@ -5737,6 +5739,7 @@ fn validate_existing_state_dir(path: &Path) -> Result<bool, StateError> {
     Ok(true)
 }
 
+#[cfg(target_os = "linux")]
 fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
     if !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows);
@@ -5758,25 +5761,10 @@ fn validate_or_prepare_private_subdir(path: &Path) -> Result<(), StateError> {
     ensure_private_dir(path)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn set_private_dir_mode(path: &Path) -> Result<(), StateError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
-}
-
-/// Windows has no mode bits; privacy is established by the DACL written at creation time.
-///
-/// Rewriting the ACL of a directory that already exists is deliberately not done here: an existing
-/// directory may have been created by another tool or an administrator, and silently re-securing it
-/// would hide the very misconfiguration `ensure_private_dir` exists to report.
-#[cfg(target_os = "windows")]
-fn set_private_dir_mode(_path: &Path) -> Result<(), StateError> {
-    Ok(())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn set_private_dir_mode(_path: &Path) -> Result<(), StateError> {
-    Err(StateError::DurableStateUnsupportedOnWindows)
 }
 
 #[cfg(unix)]
@@ -5811,65 +5799,6 @@ fn ensure_private_dir(_path: &Path) -> Result<(), StateError> {
 #[cfg(unix)]
 fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
-}
-
-fn atomic_write_private_file(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StateError::InvalidStateDir(path.to_path_buf()))?;
-    validate_or_prepare_private_subdir(parent)?;
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("snapshot"),
-        nonce_tag()
-    ));
-
-    #[cfg(unix)]
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp_path)?;
-
-    #[cfg(not(unix))]
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
-
-    file.write_all(bytes)?;
-    file.sync_all()?;
-
-    #[cfg(unix)]
-    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))?;
-
-    fs::rename(&temp_path, path)?;
-    sync_directory(parent)?;
-    Ok(())
-}
-
-/// Flushes a directory entry so a rename is durable across a crash.
-///
-/// Unix requires an explicit `fsync` on the parent directory: without it the rename can be lost
-/// even though the file's own data reached disk.
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), StateError> {
-    let file = File::open(path)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Windows has no directory-flush equivalent, and asking for one fails.
-///
-/// `File::open` on a directory returns `ERROR_ACCESS_DENIED` (measured), because opening a
-/// directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`, which `std` does not set. That is not a
-/// durability gap to work around: NTFS journals the metadata change, so once `MoveFileEx` returns,
-/// the rename is already recoverable. Doing nothing is therefore correct rather than a compromise.
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), StateError> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -6387,7 +6316,8 @@ mod tests {
     #[test]
     fn snapshot_store_hashes_filenames_and_writes_private_file() {
         let temp = tempfile::tempdir().unwrap();
-        let base = fs::canonicalize(temp.path()).unwrap();
+        // A public TempDir is not silently chmodded by the store; create our own state child.
+        let base = fs::canonicalize(temp.path()).unwrap().join("state");
         let store = DurableSnapshotStore::new(&base).unwrap();
         let snapshot = OperationSnapshot {
             schema: SNAPSHOT_SCHEMA.to_string(),
@@ -6409,7 +6339,7 @@ mod tests {
             error: None,
         };
         store.save(&snapshot).unwrap();
-        let operations_dir = temp.path().join("operations");
+        let operations_dir = base.join("operations");
         let entry = fs::read_dir(&operations_dir)
             .unwrap()
             .next()
@@ -6816,6 +6746,8 @@ mod tests {
     fn scan_persists_then_loads_stale_preview_without_replacing_live_authority() {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
+        // The fixture owns this directory; production stores refuse to repair public modes.
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("large.bin"), vec![0u8; 4096]).unwrap();
@@ -7068,6 +7000,7 @@ mod tests {
     fn scan_quarantines_corrupt_preview_and_still_returns_live_scan() {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();

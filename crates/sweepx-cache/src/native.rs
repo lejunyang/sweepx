@@ -1,10 +1,33 @@
-//! Native, bounded I/O shared by disposable cache namespaces.
+//! Native, bounded I/O shared by private cache and operation-state namespaces.
 //!
 //! Directory handles retain authority across path renames. Native backends refuse linked,
-//! shared or non-regular cache files. Publication is atomic, not a durable operation journal.
+//! shared or non-regular files. Ordinary cache publication is atomic; explicit synced writes
+//! request file flushes and Unix parent-directory synchronization, not an operation journal.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
+
+#[derive(Debug)]
+struct LinkedObject;
+
+impl std::fmt::Display for LinkedObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("linked private-state object")
+    }
+}
+impl std::error::Error for LinkedObject {}
+
+fn linked_object() -> io::Error {
+    io::Error::other(LinkedObject)
+}
+
+/// Identifies a native refusal of a linked object without reopening its display path.
+/// Other unsafe or inaccessible observations remain ordinary I/O errors.
+pub fn is_link_refusal(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<LinkedObject>())
+}
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -56,6 +79,20 @@ fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> 
 #[cfg(all(test, target_os = "macos"))]
 std::thread_local! {
     static FAIL_RESTORE_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A post-commit flush failure must not be treated as a pre-commit encoder failure.
+pub(super) fn commit_sync(operation: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_COMMIT_SYNC.with(|flag| flag.replace(false)) {
+        return Err(io::Error::other("injected post-commit flush failure"));
+    }
+    operation()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_COMMIT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Maximum native entries examined per disposable cache directory, including unknown names.
@@ -218,13 +255,17 @@ impl<W: Write> Write for LimitedWriter<W> {
 }
 
 /// Result of reading a private regular file. Oversize files are observed without reading data.
-pub(crate) struct BoundedRead {
+pub struct BoundedRead {
+    /// Observed encoded length; oversize data is not read into memory.
     pub bytes: u64,
+    /// Complete, revalidated bytes, or None when the encoded cap refused input.
     pub contents: Option<Vec<u8>>,
 }
 
 impl Directory {
-    pub(crate) fn read_bytes(&self, name: &str, cap: u64) -> io::Result<BoundedRead> {
+    /// Reads one relative private regular file within an encoded cap. Oversize returns
+    /// metadata with no contents; missing/unsafe/unstable observations remain errors.
+    pub fn read_bytes(&self, name: &str, cap: u64) -> io::Result<BoundedRead> {
         with_cache_io(|| self.read_bytes_guarded(name, cap))
     }
 
@@ -258,5 +299,81 @@ impl Directory {
         #[cfg(windows)]
         windows::revalidate_file(&file)?;
         Ok(BoundedRead { bytes, contents })
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod synced_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Directory) {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let parent = std::fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let parent = temp.path().to_path_buf();
+        let path = parent.join("state");
+        let directory = Directory::open(&path, true).unwrap();
+        (temp, path, directory)
+    }
+
+    #[test]
+    fn synced_bytes_match_independent_read_and_oversize_preserves_old_file() {
+        let (_temp, path, directory) = fixture();
+        directory
+            .write_synced_bytes("snapshot", b"old bytes", 9)
+            .unwrap();
+        assert_eq!(std::fs::read(path.join("snapshot")).unwrap(), b"old bytes");
+        assert!(
+            directory
+                .write_synced_bytes("snapshot", b"too many bytes", 9)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("snapshot")).unwrap(), b"old bytes");
+        let read = directory.read_bytes("snapshot", 8).unwrap();
+        assert_eq!(read.bytes, 9);
+        assert!(read.contents.is_none());
+        assert_eq!(
+            directory
+                .read_bytes("snapshot", 9)
+                .unwrap()
+                .contents
+                .unwrap(),
+            b"old bytes"
+        );
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn post_commit_flush_failure_never_removes_the_published_file() {
+        let (_temp, path, directory) = fixture();
+        directory
+            .write_synced_bytes("snapshot", b"old", 64)
+            .unwrap();
+        // Inject only this phase's result, not a real kernel flush failure or power loss.
+        FAIL_COMMIT_SYNC.with(|flag| flag.set(true));
+        let error = directory
+            .write_synced_bytes("snapshot", b"new", 64)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "injected post-commit flush failure");
+        assert_eq!(std::fs::read(path.join("snapshot")).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn synced_publication_restoration_failure_preserves_old_file_before_commit() {
+        let (_temp, path, directory) = fixture();
+        directory
+            .write_synced_bytes("snapshot", b"old", 64)
+            .unwrap();
+        FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+        assert!(
+            directory
+                .write_synced_bytes("snapshot", b"new", 64)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("snapshot")).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
     }
 }

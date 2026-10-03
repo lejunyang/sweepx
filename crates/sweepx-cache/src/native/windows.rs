@@ -1,7 +1,7 @@
 //! Windows cache I/O uses relative NT opens, retained handles and protected private DACLs.
 //! No operation reconstructs a pathname after admission. Unsupported namespaces are cache misses.
 
-use super::{EntryMetadata, write_json};
+use super::{EntryMetadata, commit_sync, linked_object, write_json};
 use crate::windows_state_security::{PrivateSecurityDescriptor, is_private_owned_handle};
 use std::ffi::OsStr;
 use std::fs::{File, Metadata};
@@ -25,8 +25,8 @@ use windows_sys::Wdk::System::SystemServices::{
     FILE_FS_DEVICE_INFORMATION, FILE_REMOTE_DEVICE, FILE_REMOTE_DEVICE_VSMB,
 };
 use windows_sys::Win32::Foundation::{
-    FILETIME, HANDLE, INVALID_HANDLE_VALUE, RtlNtStatusToDosError, STATUS_NO_MORE_FILES,
-    UNICODE_STRING,
+    FILETIME, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, RtlNtStatusToDosError,
+    STATUS_NO_MORE_FILES, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
@@ -49,6 +49,7 @@ const REFUSED: u32 = FILE_ATTRIBUTE_REPARSE_POINT
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
 
 /// A private cache directory retained by native handle; display paths are not reopened.
+#[derive(Debug)]
 pub struct Directory {
     file: File,
     volume: u64,
@@ -330,6 +331,26 @@ impl Directory {
         name: &str,
         encode: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.publish_mode(name, encode, false)
+    }
+
+    /// Publishes bounded encoded state bytes, flushing the same file handle before and after
+    /// relative rename. Post-rename flush failure keeps the published file, with uncertain
+    /// persistence. This requests native barriers; it does not qualify power-loss recovery.
+    pub fn write_synced_bytes(&self, name: &str, bytes: &[u8], cap: usize) -> io::Result<()> {
+        use std::io::Write;
+        if bytes.len() > cap {
+            return Err(io::Error::other("state encoded byte budget exceeded"));
+        }
+        self.publish_mode(name, |file| file.write_all(bytes), true)
+    }
+
+    fn publish_mode(
+        &self,
+        name: &str,
+        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        sync: bool,
+    ) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         self.private()?;
         match self.open_file(name) {
@@ -346,20 +367,33 @@ impl Directory {
         let descriptor = PrivateSecurityDescriptor::new()?;
         let mut file = self.open_relative(
             &temp,
-            FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE,
+            FILE_WRITE_DATA
+                | FILE_READ_ATTRIBUTES
+                | READ_CONTROL
+                | DELETE
+                | if sync { GENERIC_WRITE } else { 0 },
             FILE_NON_DIRECTORY_FILE,
             FILE_CREATE,
             0,
             Some(&descriptor),
         )?;
+        let mut published = false;
         let result = (|| {
             self.valid_file(&file)?;
             encode(&mut file)?;
+            if sync {
+                file.sync_all()?;
+            }
             self.private()?;
             self.valid_file(&file)?;
-            rename(&file, &self.file, &destination)
+            rename(&file, &self.file, &destination)?;
+            published = true;
+            if sync {
+                commit_sync(|| file.sync_all())?;
+            }
+            Ok(())
         })();
-        if result.is_err() {
+        if result.is_err() && !published {
             // Delete only the handle returned by our exclusive FILE_CREATE, even after a rename
             // of an ancestor. Cleanup failure leaves a managed temporary for later eviction.
             let _ = dispose(&file);
@@ -620,6 +654,9 @@ fn ordinary(file: &File, directory: bool, volume: Option<u64>) -> io::Result<FIL
         return Err(io::Error::other("cache object belongs to a remote device"));
     }
     let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(linked_object());
+    }
     let standard: FILE_STANDARD_INFO = query(file, FileStandardInfo)?;
     let id: FILE_ID_INFO = query(file, FileIdInfo)?;
     // SAFETY: GetFileType observes the live handle and has no borrowed output.

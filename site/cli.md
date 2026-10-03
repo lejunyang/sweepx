@@ -140,7 +140,7 @@ Dart 与 SvelteKit 候选使用有界原生内容观察，JSON 的 `projectForma
 
 ## 状态快照与取消
 
-Linux 或 macOS 上从 scan 输出取得 `operationId` 后，可以查询对应的 terminal snapshot：
+Linux、macOS 或 Windows 上从 scan 输出取得 `operationId` 后，可以查询对应的 terminal snapshot：
 
 ```bash
 cargo run -p sweepx-cli -- \
@@ -160,6 +160,8 @@ cargo run -p sweepx-cli -- \
 ```
 
 `status` 在 Linux 上 journal-first 读取已持久化 terminal state，并支持 degraded 的 `sweepx --format ndjson status --operation-id <OPERATION_ID> --watch [--after SXCUR1]` completed replay：它只覆盖已完成且已持久化的 stream，先做一次同 snapshot 全量校验，然后按每页最多 1024 条事件续读；unknown 但语法有效的 cursor 返回 `stream.reset_required`，malformed cursor/usage 返回 usage error。它不等待新事件，不创建后台 operation，也不支持 cancel，因此不是 live progress。macOS 使用 legacy snapshot，仍无 replay/watch。Windows 默认 `state_dir=%LOCALAPPDATA%\sweepx\state` 并在该目录写入 durable snapshot；若状态目录可被其他用户访问则失败关闭。当前没有 live in-process registry，结果会显示 `canCancel: false`，`cancel` capability 为 `disabled`。cancel 命令存在是为了明确区分 `not_found`、`already_terminal` 或 `unsupported`，而不是伪装已经能中断同步扫描。
+
+`status` 和 `cancel` 只打开现有状态：缺少根或 `operations/` 时返回未找到，不创建目录，也不修补现有权限。legacy snapshot 的原生读写保留目录句柄，拒绝链接、多硬链接、非普通或非私有文件；macOS 读取与写入准备共用禁止物化策略，Linux 相对操作保留 mount 身份，Windows 保留 DACL/卷边界检查。每份快照限 8 MiB 编码，解码前另限 65,536 次 JSON 值/键访问尝试；超过上限返回错误，写入拒绝保留旧快照。该额度不是进程 RSS 或全部状态文件的磁盘配额。Linux SQLite journal、全局状态保留额度、真实 provider 与目标宿主验收仍单独待做。写入请求原生文件刷新（Unix 另刷新保留父目录），不据此承诺断电恢复；提交后刷新失败返回错误，但不会删除已发布的新文件。
 
 ## Preview cache 只读诊断
 
@@ -385,7 +387,7 @@ Windows 上存在一条基于 NTFS 原生元数据的加速扫描路径。每个
 
 普通 `scan` 加载的 generation 始终报告 `loadStatus: "stale_preview"`。它提供历史记录计数，当前文件事实仍来自本次原生遍历；历史预览不提供删除权限。此前的 `verified_preview` 升级已撤回。
 
-macOS 普通预览与垃圾历史缓存现在复用平台的线程级禁止 dataless 物化策略，覆盖目录打开、枚举、计费、读取与发布准备。未知/拒绝的策略调用不回退无保护读取，已知 dataless 文件直接拒绝；读取成功还需恢复原策略，恢复失败丢弃结果。发布先完成受保护编码和策略恢复，再提交相对名称替换，恢复失败保留旧指针。整文件限额读取也接入同一保护。原生线程策略已有本机验证，真实云 provider、其他 snapshot/journal 状态路径与 Linux bind mount 身份仍待审计。
+macOS 普通预览与垃圾历史缓存现在复用平台的线程级禁止 dataless 物化策略，覆盖目录打开、枚举、计费、读取与发布准备。未知/拒绝的策略调用不回退无保护读取，已知 dataless 文件直接拒绝；读取成功还需恢复原策略，恢复失败丢弃结果。发布先完成受保护编码和策略恢复，再提交相对名称替换，恢复失败保留旧指针。整文件限额读取也接入同一保护。原生线程策略已有本机验证，真实云 provider、SQLite journal 绑定、全局状态保留额度及原生 Linux bind mount 验收仍待审计。
 
 Linux 缓存目录现在保留本次打开句柄的挂载身份；子目录、锁、读取文件、计费和发布临时文件必须与该目录同挂载、同设备。设备号与 inode 相同的 bind mount 也不能代替这一证据。缺少所需原生字段、身份不匹配或拒绝时跳过缓存，当前扫描继续；不跟随链接，不把未知证据算零。显式缓存根可以位于独立挂载盘，根内对象不能跨挂载。发布前再次核对临时文件的名称绑定；检查到 rename/unlink 的最终竞态仍开放。Linux 原生及私有命名空间 bind mount 测试仍待目标宿主运行。
 
@@ -539,6 +541,6 @@ Dart 2.18.0/3.6.0 的真实生成样本覆盖单项目和共享 workspace；中�
 
 Linux/macOS/Windows 的垃圾 TUI 历史记录共享私有、无链接跟随的有界存储。根记录绑定实际规则字节、平台、设备/文件/mount 身份及嵌套根范围，链接祖先或缺失身份拒绝读取。历史首屏只用于展示，上次完整覆盖不证明当前完整；活动、Git 和删除许可必须重建。Linux/Windows 仍重新扫描全部文件，选中刷新可保存新子树并保留未选兄弟的旧展示，回放行全部标为历史；macOS 文件索引仍独立验证变化历史。缺失游标保持 `null`，不能视作 0；v9 根记录失效重建，macOS 文件索引 schema 不变。每根候选复制前受独立 4 MiB 保留数据估算限制，取消、不完整扫描和超额不覆盖旧记录；该限制不是 RSS 上限。
 
-Windows 状态目录的 owner/DACL 检查来自同一个已打开目录句柄，最终 reparse/offline/recall 对象拒绝。私有权限只接受能完整解释的普通 allow/deny 条目；陌生授权类型、损坏边界或读取失败不算私有。受控 owner 仍为 token user/owner，或本用户令牌确有 Administrators 组时的该组；SYSTEM/Administrators 的允许访问政策不变。每次令牌信息最多 256 KiB，SID 有界并按原生要求对齐，SDK 文本最多 32,767 个原生 UTF-16 单元，内嵌 NUL 拒绝。这些不是进程 RSS 或阻塞系统调用的硬期限；目录检查也不绑定后续路径操作。垃圾历史缓存已使用保留句柄接入；其他状态路径及完整执行路径竞态审计仍开放。
+Windows 状态目录的 owner/DACL 检查来自同一个已打开目录句柄，最终 reparse/offline/recall 对象拒绝。私有权限只接受能完整解释的普通 allow/deny 条目；陌生授权类型、损坏边界或读取失败不算私有。受控 owner 仍为 token user/owner，或本用户令牌确有 Administrators 组时的该组；SYSTEM/Administrators 的允许访问政策不变。每次令牌信息最多 256 KiB，SID 有界并按原生要求对齐，SDK 文本最多 32,767 个原生 UTF-16 单元，内嵌 NUL 拒绝。这些不是进程 RSS 或阻塞系统调用的硬期限；目录检查也不绑定后续路径操作。垃圾历史缓存与 legacy operation snapshot 已使用保留句柄接入；其他状态路径及完整执行路径竞态审计仍开放。
 
 Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿保留目录/文件句柄进行，复用受保护 DACL 与权限解释器，拒绝 reparse、offline/recall、远程设备、跨卷及多硬链接文件。仅支持普通绝对 drive 路径（含 verbatim drive），UNC/device 与未知文件系统回退现场扫描；这些记录仍是历史展示，没有 Linux/Windows 当前文件索引命中。各平台每缓存目录最多观察 4,096 条枚举项（含未知名称）；Windows 单页固定 64 KiB，零进度、截断和超额报缓存不可用，当前扫描继续。成功发布后沿用原磁盘淘汰额度；淘汰失败可能留下已发布代次，不保证崩溃耐久或进程 RSS。Windows 原生运行/MSVC/provider 验收仍待完成。

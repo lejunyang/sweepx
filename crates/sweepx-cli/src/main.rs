@@ -125,6 +125,7 @@ struct Cli {
     format: FormatArg,
     #[arg(long, global = true)]
     locale: Option<String>,
+    /// Absolute private state directory. Status/cancel never create missing state or repair permissions.
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
     /// Unit used by human-readable byte columns. JSON always keeps exact bytes.
@@ -212,6 +213,7 @@ enum Commands {
         #[arg(long, default_value_t = sweepx_core::DEFAULT_ANALYSIS_INPUT_BYTES)]
         max_input_bytes: usize,
     },
+    /// Read existing operation state; missing state stays missing.
     Status {
         #[arg(long)]
         operation_id: String,
@@ -220,6 +222,7 @@ enum Commands {
         #[arg(long)]
         after: Option<String>,
     },
+    /// Report cancellation disposition; live cancellation remains disabled.
     Cancel {
         #[arg(long)]
         operation_id: String,
@@ -447,10 +450,11 @@ fn main() -> ProcessExitCode {
                 eprintln!("{SCAN_NDJSON_UNAVAILABLE_MESSAGE}");
                 return ProcessExitCode::from(3);
             }
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), no_state) {
-                Ok(value) => value,
-                Err(code) => return code,
-            };
+            let (state_dir, store) =
+                match resolve_state_store(cli.state_dir.as_deref(), no_state, true) {
+                    Ok(value) => value,
+                    Err(code) => return code,
+                };
             let roots = match normalize_scan_roots(&roots) {
                 Ok(roots) => roots,
                 Err(error) => {
@@ -599,10 +603,11 @@ fn main() -> ProcessExitCode {
                     }
                 }
             }
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), false) {
-                Ok(value) => value,
-                Err(code) => return code,
-            };
+            let (state_dir, store) =
+                match resolve_state_store(cli.state_dir.as_deref(), false, false) {
+                    Ok(value) => value,
+                    Err(code) => return code,
+                };
             match store.as_ref() {
                 Some(store) => status_with_store(
                     &context,
@@ -625,10 +630,11 @@ fn main() -> ProcessExitCode {
             }
         }
         Commands::Cancel { operation_id } => {
-            let (state_dir, store) = match resolve_state_store(cli.state_dir.as_deref(), false) {
-                Ok(value) => value,
-                Err(code) => return code,
-            };
+            let (state_dir, store) =
+                match resolve_state_store(cli.state_dir.as_deref(), false, false) {
+                    Ok(value) => value,
+                    Err(code) => return code,
+                };
             match store.as_ref() {
                 Some(store) => cancel_with_store(
                     &context,
@@ -2716,6 +2722,7 @@ fn tui_exit_code(scan_exit_code: u8, browser_exit: BrowserExit) -> u8 {
 fn resolve_state_store(
     explicit: Option<&std::path::Path>,
     no_state: bool,
+    create: bool,
 ) -> Result<(Option<PathBuf>, Option<sweepx_core::DurableSnapshotStore>), ProcessExitCode> {
     if no_state {
         return Ok((None, None));
@@ -2727,7 +2734,12 @@ fn resolve_state_store(
             return Err(ProcessExitCode::from(state_error_exit_code(&error)));
         }
     };
-    let store = match durable_store(state_dir.as_deref()) {
+    let resolved = if create {
+        durable_store(state_dir.as_deref())
+    } else {
+        sweepx_core::existing_durable_store(state_dir.as_deref())
+    };
+    let store = match resolved {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");

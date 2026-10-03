@@ -207,6 +207,8 @@ P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只�
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前运行平台的两个 Trash cell 以 `degraded` preview 报告，Linux 上 file/directory Permanent 也报告 `degraded`；link 与其他平台 Permanent 仍为 `disabled`。preview 不等于发布资格。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。
 
+`status` / `cancel` 查询缺失状态不会创建根或 `operations/`，也不会修补权限。legacy snapshot 读写复用保留原生目录句柄及 no-follow/private/provider/mount 边界；每份快照最多 8 MiB 编码、65,536 次解码前 JSON 值/键访问尝试，写入拒绝保留旧文件。它不是全进程内存或全部状态的磁盘配额；Linux journal 的绑定、全局状态保留和目标宿主验收仍开放。发布前后请求原生刷新，提交后刷新失败不删除已发布文件，也不据此承诺断电恢复。
+
 ## Agent 权限边界
 
 当前 Agent 可安全协助的范围仅限：

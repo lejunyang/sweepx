@@ -1,0 +1,148 @@
+{
+  "schema": "sweepx.snapshot-native-io-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "b403d28",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2763580,
+    "debugDuKiB": 1760648
+  },
+  "scope": [
+    "operation SnapshotStore retains native root authority and uses shared private cache primitives without adding crates",
+    "read-only status/cancel/open_existing/load do not create missing roots/operations or repair permissions",
+    "bounded snapshot writer, native encoded-input admission and serde visitor shape preflight",
+    "explicit synced publication preserves published file after post-commit flush errors; ordinary cache publication keeps original no-fsync behavior"
+  ],
+  "sources": [
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers",
+      "used": "GENERIC_WRITE requirement for file flush handle; no Windows rename/power-loss qualification inferred"
+    },
+    {
+      "url": "https://www.sqlite.org/wal.html",
+      "used": "SQLite WAL/SHM are separate sidecar bindings; journal audit intentionally remains a separate unit"
+    }
+  ],
+  "semantics": {
+    "wire": "same hashed operation filenames/schema/field names; compact JSON replaces pretty JSON; old private legacy snapshots within admission remain readable",
+    "limits": "8,388,608 encoded bytes per snapshot, 65,536 JSON value/key visitor attempts including terminal attempts, before typed decode; writer shares shape admission before child creation",
+    "shape": "existing serde_json parser used twice, no Value intermediate or second JSON parser; unknown fields pay work budget. deserialize_any preflight intentionally refuses unrepresentable numbers in unknown fields such as 1e999 that ordinary typed serde IgnoredAny would accept",
+    "memory": "geometric fallible encoded Vec requests stay at/below wire cap; fixed DTO owned cardinality admitted before decode. Existing source snapshot storage, parser/allocator overhead and process RSS are not measured or bounded by this number",
+    "authority": "root clones share retained native directory; operations child acquired relative for each operation, display path only diagnostic. Existing private/no-follow/single-link/provider/device/volume/mount gates remain; no clean authority",
+    "sync": "same temporary file flushed before rename; Unix retained operation parent synced after rename; Windows same file flushed after native relative rename with required write access. Post-commit failure returns error with new visible state potentially persistent, never deletes new file; no power-loss or all-ancestor creation durability qualification",
+    "injection": "post-commit flush and macOS restoration tests inject phase result only, not real failed kernel calls/provider or power loss",
+    "disk": "aggregate operation count/bytes quota and retention are not implemented; user payloads and OS Trash are untouched"
+  },
+  "initialFailures": [
+    {
+      "check": "first affected check",
+      "result": "exit101, no tests",
+      "reason": "FilesystemLoop ErrorKind is unstable on pinned Rust; use typed native linked-object io error plus shared marker query instead of changing toolchain"
+    },
+    {
+      "check": "second affected check",
+      "result": "exit101, no tests",
+      "reason": "new resource error accidentally inserted in CoreError instead of StateError, and Write import incorrectly test-gated despite production scan_output using it; relocate variant and restore production import"
+    },
+    {
+      "check": "initial snapshot-focused test",
+      "result": "14 passed, 1 failed",
+      "reason": "old snapshot filename/privacy fixture relied on constructor chmod of public TempDir; fixture now explicitly creates private state child, preserving private-file/hash contract. Two preview fixtures explicitly set their isolated owned state modes before store creation"
+    },
+    {
+      "check": "initial Windows GNU workspace lint",
+      "result": "exit101",
+      "reason": "test-only OpenOptions import used only by Unix fixture was not Unix-gated; narrow cfg to all(test, unix), no lint suppression"
+    },
+    {
+      "check": "initial workspace tests",
+      "result": "678 passed, 1 failed, 2 ignored, 1 explicit skip; later crates/doc tests untested",
+      "reason": "independent capacity comparison included separately generated variable-length RFC3339 times; separate test-only fix normalizes generated time and preserves exact oracle, see preview-projection-clock-validation-2026-10-04.json"
+    }
+  ],
+  "checks": [
+    {
+      "name": "affected-check",
+      "result": "passed",
+      "command": "cargo check -p sweepx-cache -p sweepx-core -p sweepx-cli --all-targets --all-features --locked"
+    },
+    {
+      "name": "initial-focused-followup",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-core -p sweepx-cli --all-features --locked snapshot -- --test-threads=1",
+      "note": "16 executed passes at this point, later two extra tests and fixture changes covered by final workspace run"
+    },
+    {
+      "name": "initial-synced-focused",
+      "result": "passed",
+      "passed": 2,
+      "command": "cargo test -p sweepx-cache --all-features --locked native::synced_tests -- --test-threads=1",
+      "note": "later macOS restoration test covered by final workspace run"
+    },
+    {
+      "name": "cli-readonly-focused",
+      "result": "passed",
+      "passed": 1,
+      "command": "cargo test -p sweepx-cli --all-features --locked status_and_cancel_do_not_create_missing_state_or_operations -- --test-threads=1"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-core -p sweepx-cli --all-targets --all-features --locked -- -D warnings",
+      "note": "final after all source/test fixes"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "passed": 1166,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "note": "macOS service-enabled invocation, preserves diagnosed Trash hang exclusion; Linux/Windows-only runtime branches absent, not counted as passes"
+    },
+    {
+      "name": "workspace-host-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "note": "final after all production and fixture changes"
+    },
+    {
+      "name": "workspace-linux-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "all targets/features including Linux tests compiled; later import cfg change keeps same Linux active branch; not Linux runtime"
+    },
+    {
+      "name": "workspace-windows-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "note": "final after narrowing unused Unix-only test import; compiles native synced tests, not Windows execution or MSVC"
+    },
+    {
+      "name": "docs-fmt-diff-packages",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check",
+        "Python scripts/lint_docs.py",
+        "cargo package -p sweepx-cache --list --allow-dirty --locked",
+        "cargo package -p sweepx-core --list --allow-dirty --locked",
+        "cargo package -p sweepx-cli --list --allow-dirty --locked"
+      ],
+      "note": "54 Markdown files; new snapshot module and native sources included. Package lists do not prove registry dependency build. Unmodified docs checker 23 regressions reused from previous generation-state unit"
+    }
+  ],
+  "remaining": [
+    "Linux SQLite journal root/database/lock/WAL/SHM bindings, provider checks and native retained authority integration",
+    "aggregate durable snapshot/journal quota and non-destructive retention policy",
+    "Linux/Windows native runtime, Windows MSVC, real provider/Trash and Linux bind-mount qualification",
+    "Linux/Windows validated current file indexes, remaining discovery/candidate/fingerprint/legacy resource audit",
+    "previous end-to-end warm-cache intermittent root cause and final pathname-to-system-Trash race",
+    "Dart/SvelteKit new work deferred per user ordering"
+  ],
+  "relatedTestCommit": "a5942c8"
+}
