@@ -1,6 +1,6 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
-use super::{EntryMetadata, write_json};
+use super::{AccountedFile, EntryMetadata, write_json};
 #[cfg(test)]
 use super::{Limits, ReadBudget};
 use std::ffi::{CStr, CString};
@@ -31,6 +31,13 @@ impl Drop for LockGuard {
     }
 }
 
+impl LockGuard {
+    /// Accounts the held lock without reopening a potentially share-denying lock file.
+    pub(crate) fn encoded_bytes(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+}
+
 pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
     left.dev() == right.dev()
         && left.ino() == right.ino()
@@ -45,6 +52,70 @@ pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
 pub struct Directory(OwnedFd);
 
 impl Directory {
+    /// Duplicates retained authority without resolving a display pathname again.
+    pub(crate) fn retain(&self) -> io::Result<Self> {
+        self.private()?;
+        Ok(Self(self.0.try_clone()?))
+    }
+
+    /// Verifies that a retained child still has the same binding beneath this parent.
+    pub(crate) fn same_child(&self, name: &str, expected: &Self) -> io::Result<bool> {
+        let actual = self.child(name)?.private()?;
+        let expected = expected.private()?;
+        Ok(actual.dev() == expected.dev() && actual.ino() == expected.ino())
+    }
+
+    /// Reads only relative no-follow metadata for complete cache quota accounting.
+    pub(crate) fn accounting_metadata(&self, name: &str) -> io::Result<AccountedFile> {
+        let parent = self.private()?;
+        let name = component(name)?;
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: validated basename under a retained private directory, initialized on success.
+        if unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful fstatat initialized the stat without following a link.
+        let metadata = unsafe { metadata.assume_init() };
+        // libc stat widths differ between Darwin and Linux; the ledger uses fixed u64 IDs.
+        #[allow(clippy::unnecessary_cast)]
+        let device = metadata.st_dev as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let links = metadata.st_nlink as u64;
+        // SAFETY: geteuid has no arguments. Unknown/shared/special objects cannot contribute
+        // a seemingly complete total or become disposable generation metadata.
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+            || metadata.st_uid != unsafe { libc::geteuid() }
+            || metadata.st_mode & 0o077 != 0
+            || metadata.st_nlink != 1
+            || device != parent.dev()
+            || metadata.st_size < 0
+        {
+            return Err(io::Error::other(
+                "cache accounting requires private single-link regular files on the retained device",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if metadata.st_flags & 0x4000_0000 != 0 {
+            // Public SDK sys/stat.h SF_DATALESS (libc omits it). Metadata accounting must
+            // refuse this known provider boundary, without opening its data stream.
+            return Err(io::Error::other("dataless cache entry"));
+        }
+        Ok(AccountedFile {
+            bytes: metadata.st_size as u64,
+            accessed: (metadata.st_atime, metadata.st_atime_nsec),
+            identity: [device, metadata.st_ino, links],
+            changed: (metadata.st_ctime, metadata.st_ctime_nsec),
+        })
+    }
+
     fn private(&self) -> io::Result<Metadata> {
         let metadata = File::from(self.0.try_clone()?).metadata()?;
         // SAFETY: geteuid has no pointer arguments. The retained descriptor remains authority.
@@ -166,6 +237,7 @@ impl Directory {
             || meta.uid() != unsafe { libc::geteuid() }
             || meta.nlink() != 1
             || meta.mode() & 0o077 != 0
+            || meta.dev() != self.private()?.dev()
         {
             return Err(io::Error::other("invalid cache lock file"));
         }

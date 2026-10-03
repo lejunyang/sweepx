@@ -3335,8 +3335,8 @@ fn store_stale_preview_with_projection_limits(
         unix_timestamp_nanos(),
         &digest_hex(scan_id.as_ref())[..12]
     );
-    let state_directory_bytes = match state_dir_bytes(store.root()) {
-        Ok(bytes) => bytes,
+    let session = match store.begin_write() {
+        Ok(session) => session,
         Err(_) => {
             return CachePreviewStoreResult {
                 status: CACHE_STORE_MODE_SKIPPED,
@@ -3365,7 +3365,7 @@ fn store_stale_preview_with_projection_limits(
         &BudgetUsage {
             operation_spill_bytes: 0,
             global_spill_bytes: 0,
-            state_directory_bytes,
+            state_directory_bytes: session.state_directory_bytes(),
         },
     ) {
         Ok(admission) => admission,
@@ -3398,7 +3398,7 @@ fn store_stale_preview_with_projection_limits(
         // require privileged volume probes, and advisory cursors are not current-fact proof.
         validity: Vec::new(),
     };
-    match store.write_generation(&stored) {
+    match session.write_generation(&stored) {
         Ok(()) => CachePreviewStoreResult {
             status: CACHE_STORE_MODE_WRITTEN,
             generation: Some(generation_id),
@@ -3481,11 +3481,10 @@ fn preview_generation_store(
     let Some(path) = state_dir else {
         return Ok(None);
     };
-    validate_or_prepare_private_ancestor_chain(path)?;
-    validate_or_prepare_state_dir(path)?;
+    if !path.is_absolute() {
+        return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
+    }
     let preview_root = path.join(PREVIEW_GENERATION_POINTER_DIR);
-    validate_or_prepare_private_ancestor_chain(&preview_root)?;
-    validate_or_prepare_private_subdir(&preview_root)?;
     Ok(Some(AtomicGenerationStore::new(preview_root)))
 }
 
@@ -3494,40 +3493,6 @@ fn stale_preview_aggregate(
     aggregate: &sweepx_model::DirectoryAggregate,
 ) -> sweepx_model::DirectoryAggregate {
     preview_projection::historical_aggregate(aggregate, &timestamp_now())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn state_dir_bytes(path: &Path) -> io::Result<u64> {
-    fn visit(path: &Path, total: &mut u64, visited_dirs: &mut usize) -> io::Result<()> {
-        const MAX_STATE_DIR_ENTRIES: usize = 16_384;
-        *visited_dirs = visited_dirs.saturating_add(1);
-        if *visited_dirs > MAX_STATE_DIR_ENTRIES {
-            return Err(io::Error::other(
-                "preview cache state traversal exceeded bounded entry cap",
-            ));
-        }
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() {
-                return Err(io::Error::other("preview cache state contains symlink"));
-            }
-            if metadata.is_dir() {
-                visit(&entry.path(), total, visited_dirs)?;
-            } else {
-                *total = total.saturating_add(metadata.len());
-            }
-        }
-        Ok(())
-    }
-
-    if !path.exists() {
-        return Ok(0);
-    }
-    let mut total = 0;
-    let mut visited_dirs = 0;
-    visit(path, &mut total, &mut visited_dirs)?;
-    Ok(total)
 }
 
 #[cfg(unix)]
@@ -6613,7 +6578,7 @@ mod tests {
         let base = fixture.path().to_path_buf();
         let state = base.join("state");
         let store = preview_generation_store(Some(&state)).unwrap().unwrap();
-        sweepx_cache::native::Directory::open(store.root(), false)
+        sweepx_cache::native::Directory::open(store.root(), true)
             .unwrap()
             .write_json("current.json", &"fixture", 64)
             .unwrap();
@@ -6747,6 +6712,7 @@ mod tests {
             sequence_id: "7".into(),
             position: "500".into(),
         }];
+        legacy.generation = "legacy_partial_scope".into();
         store.write_generation(&legacy).unwrap();
         fs::write(first_root.join("first.bin"), b"changed contents").unwrap();
         let current = scan_with_store::<MemorySnapshotStore>(
@@ -6911,6 +6877,110 @@ mod tests {
         );
         let state_dir = second.output.summary["cachePreview"].as_object().is_some();
         assert!(state_dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn ordinary_preview_factory_and_missing_load_do_not_prepare_state_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
+        let state = base.join("missing-state");
+        let store = preview_generation_store(Some(&state)).unwrap().unwrap();
+        assert!(!state.exists());
+        assert!(!store.root().exists());
+        assert_eq!(
+            load_stale_preview(Some(&state)).status,
+            CACHE_LOAD_MODE_MISS
+        );
+        assert!(!state.exists());
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(store.root()).unwrap();
+            fs::set_permissions(store.root(), fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(store.begin_write().is_err());
+            assert_eq!(
+                fs::metadata(store.root()).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(fs::read_dir(store.root()).unwrap().next().is_none());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn preview_accounting_refusal_preserves_current_scan_facts_and_old_pointer() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
+        let root = base.join("root");
+        fs::create_dir(&root).unwrap();
+        let file = root.join("live.bin");
+        fs::write(&file, b"old").unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let request = ScanRequest {
+            roots: vec![root],
+            state_dir: Some(base.clone()),
+        };
+        let first = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
+        assert_eq!(
+            first.output.summary["cachePreview"]["storeStatus"],
+            "written"
+        );
+        let store = preview_generation_store(Some(&base)).unwrap().unwrap();
+        let pointer = fs::read(store.root().join("current.json")).unwrap();
+        let previous = match store.load_current().unwrap() {
+            LoadResult::Hit(generation) => generation,
+            _ => panic!("previous generation"),
+        };
+        let data_path = store
+            .root()
+            .join("generations")
+            .join(format!("{}.json", previous.generation));
+        let data = fs::read(&data_path).unwrap();
+        sweepx_cache::native::Directory::open(store.root(), false)
+            .unwrap()
+            .create_child("unknown-directory")
+            .unwrap();
+        fs::write(&file, b"independent new live facts").unwrap();
+        let current = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
+        assert_eq!(
+            current.output.summary["cachePreview"]["storeStatus"],
+            "skipped"
+        );
+        assert_eq!(
+            current.output.summary["cachePreview"]["resourceLimit"],
+            true
+        );
+        let entry = current
+            .summary
+            .entries
+            .iter()
+            .find(|entry| entry.object_type == ObjectType::File)
+            .unwrap();
+        assert_eq!(
+            entry.logical_bytes,
+            EvidenceValue::Known {
+                value: DecimalU128::new(fs::metadata(&file).unwrap().len() as u128)
+            }
+        );
+        assert!(matches!(
+            entry.provenance,
+            FieldProvenance::LiveObservation { .. }
+        ));
+        assert_eq!(
+            fs::read(store.root().join("current.json")).unwrap(),
+            pointer
+        );
+        assert_eq!(fs::read(data_path).unwrap(), data);
+        assert_eq!(store.load_current().unwrap(), LoadResult::Hit(previous));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

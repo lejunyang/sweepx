@@ -1,0 +1,147 @@
+{
+  "schema": "sweepx.generation-state-retention-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "69c5775",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2320152
+  },
+  "scope": [
+    "ordinary historical preview namespace only: root, generations, quarantine; no new crate or scanner",
+    "core prepares native write session before projection; same retained root/children, nonblocking lock and bounded ledger through publication",
+    "fixed three flat directories; every non-dot name charged, unknown directories/opaque names/unsafe files refuse complete accounting",
+    "private metadata-only lengths include unknown files and quarantine; no recursive pathname accounting or permission repair in ordinary preview factory",
+    "four managed generations and 512 MiB encoded-length quota; 4090 total non-dot entries; reserve publication coexistence including temporaries",
+    "complete eviction plan before deletion; only noncurrent managed generation basenames eligible; protect all on unknown pointer; reobserve identity/change marker before retention",
+    "fresh native generation targets, including volume case aliases; quarantine mutations use same lock/ledger; inspection totals request metadata only"
+  ],
+  "semantics": {
+    "quotaUnits": "observed encoded file lengths, not physical allocation/reclaimable space or process RSS",
+    "retention": "prepare can remove noncurrent cache metadata even if later projection fails. IO failures during pruning may leave partial noncurrent eviction; current/pointer remain protected.",
+    "pointer": "absent means no active generation; valid ID protects matching basename; malformed/oversized/invalid pointer pins all",
+    "unknownFiles": "counted and never evicted; quarantine may still overwrite its existing diagnostic destination as before",
+    "atomicity": "cooperative cache publisher/quarantine exclusion; no atomic filesystem snapshot or crash durability. Unix unlinkat and child-binding-to-pointer-rename final windows remain for non-cooperating filesystem actors.",
+    "macos": "live SDK sys/stat.h line 359 SF_DATALESS=0x40000000 verified; metadata accounting refuses this known flag. This does not qualify actual cloud provider behavior or ancestor materialization.",
+    "windows": "relative attribute/control queries, FILE_OPEN_NO_RECALL, ordinary/online/private/single-link/same-volume checks; held share-none lock accounted without reopening",
+    "compatibility": "stored generation schema/checksum unchanged; new publication requires a new native target; resource failures preserve current scan facts and old pointer",
+    "mountBoundary": "same-device Unix metadata admission is not a full Linux bind-mount identity proof; this and provider/ancestor boundaries remain open native audit work"
+  },
+  "regressions": [
+    "ordinary recursive fixture metadata length oracle equals native flat inventory; 12 successful writes keep four managed generations and preserve unknown/quarantine bytes",
+    "controlled baseline generation cap evicts only noncurrent, with exact pointer/current bytes and independent total",
+    "unsatisfiable quota plans no partial deletion; unknown pointer protects all, small malformed state can publish new generation",
+    "flat entry count and publication temporary coexistence budgets; unknown nested directory refusal without traversal",
+    "nonblocking writer/quarantine contention and lock release; late unknown namespace mutation observed before publication",
+    "existing generation ID and native case alias refuse overwrite; independent fixture-volume probe chooses expected case-sensitive/insensitive result",
+    "Unix root rename publishes only original namespace, replaced child refuses pointer update",
+    "Unix linked/multi-link/public/FIFO entries refuse complete totals; Linux actual opaque-byte filesystem regression compiles but has not run on native Linux",
+    "4294967297-byte Unix sparse fixture has independently observed blocks*512 <1048576; high controlled quota equals ordinary lengths; default/quarantine refuse without payload reads",
+    "core accounting refusal still reports new native length/live provenance, exact old pointer/generation and reload; factory/missing load do not create storage; public Unix cache modes not repaired"
+  ],
+  "initialFailures": [
+    {
+      "check": "first generation_state focused suite",
+      "result": "11 passed, 1 failed",
+      "reason": "APFS rejects illegal UTF-8 byte filename with EILSEQ (92), before exercising production. Split actual opaque-byte fixture into Linux cfg; preserve native enumeration refusal for unknown names. No cap widening."
+    },
+    {
+      "check": "first affected lint",
+      "result": "exit 101",
+      "reason": "redundant st_ino u64 cast; remove it. Device/link widths differ across Darwin/Linux, so only these two conversion expressions have documented unnecessary_cast allowance."
+    },
+    {
+      "check": "first docs lint before artifact creation",
+      "result": "exit 1; 1 missing local link",
+      "reason": "new validation JSON was not saved yet; create this artifact before final link check."
+    }
+  ],
+  "checks": [
+    {
+      "name": "initial-check",
+      "result": "passed",
+      "command": "cargo check -p sweepx-cache -p sweepx-core --all-targets --all-features --locked"
+    },
+    {
+      "name": "affected-tests-before-native-alias-guard",
+      "result": "passed",
+      "passed": 423,
+      "ignored": 2,
+      "command": "cargo test -p sweepx-cache -p sweepx-core --all-features --locked -- --test-threads=1",
+      "note": "cache 86/core 337; final workspace also reruns these after alias guard"
+    },
+    {
+      "name": "initial-workspace-tests",
+      "result": "passed",
+      "passed": 1145,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "note": "before final native case-alias guard; superseded by successful final complete invocation"
+    },
+    {
+      "name": "final-workspace-tests",
+      "result": "passed",
+      "passed": 1146,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "note": "final native case-alias guard included; cache 87/core 337; no product code edits afterwards"
+    },
+    {
+      "name": "final-host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "final-linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "final native case-alias guard and cfg test code included; compilation only, not native runtime"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "note": "native-alias guard included; doc comments added afterwards"
+    },
+    {
+      "name": "fmt-diff-docs-package",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check",
+        "python scripts/lint_docs.py",
+        "cargo package -p sweepx-cache --list --allow-dirty --locked",
+        "cargo package -p sweepx-core --list --allow-dirty --locked"
+      ],
+      "markdownFiles": 54,
+      "note": "cache package includes src/generation_state.rs; package list does not verify registry builds"
+    },
+    {
+      "name": "docs-checker-tests",
+      "result": "reused",
+      "passed": 23,
+      "sourceCommit": "69c5775",
+      "note": "checker unchanged"
+    }
+  ],
+  "explicitSkip": {
+    "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+    "reason": "previously diagnosed macOS system Trash success hang; preserved test and explicit exclusion; native Trash success remains unverified by suite"
+  },
+  "remaining": [
+    "snapshot/journal and other state path/permission contracts",
+    "real provider no-materialization and native Linux/Windows/MSVC qualification",
+    "validated current Linux/Windows file indexes",
+    "other discovery/candidate/fingerprint/legacy projection resource audit",
+    "production scan/FSEvents/tool probe intermittent performance root causes and final Trash pathname race"
+  ],
+  "performance": "bounded work/storage audit and independent accounting regressions only; no end-to-end cache/scan, release/RSS or p95/p99 speed claim",
+  "trash": "earlier debug payloads remain in OS Trash; this unit does not empty it or permanently delete scanned payloads",
+  "status": "implemented_with_documented_native_validation_gaps"
+}

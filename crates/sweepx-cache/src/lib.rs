@@ -7,8 +7,10 @@ mod windows_state_policy;
 #[cfg(windows)]
 pub mod windows_state_security;
 
+mod generation_state;
 mod json_budget;
 mod writer_admission;
+pub use generation_state::GenerationWriteSession;
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
@@ -361,7 +363,9 @@ impl AtomicGenerationStore {
     /// its payload checksum is compatible with existing generations. Oversized encodings are
     /// refused before creating a generation file. Loader reservations are admitted with
     /// bounded per-fragment scratch, without duplicating the complete preview. Filesystem/IO
-    /// failures never publish a partially encoded file through the current pointer.
+    /// failures never publish a partially encoded file through the current pointer. IDs must
+    /// be new on the actual volume, including case aliases. Retention may remove noncurrent
+    /// cache metadata before publication; the old current generation remains protected.
     pub fn write_generation(&self, generation: &StoredGeneration) -> Result<(), CacheError> {
         self.write_generation_with_limit(generation, INSPECT_GENERATION_BYTE_LIMIT as usize)
     }
@@ -384,55 +388,10 @@ impl AtomicGenerationStore {
         byte_limit: usize,
         parse_cap: usize,
     ) -> Result<(), CacheError> {
-        validate_generation_id(&generation.generation)?;
-        writer_admission::admit(generation, parse_cap)?;
-        validate_stored_generation(generation)?;
-        let (checksum_sha256, payload_bytes) = checksum_and_len(generation)?;
-        let envelope = StoredEnvelope {
-            generation: generation.generation.clone(),
-            checksum_sha256,
-            payload: generation,
-        };
-
-        // Validate actual encoded bytes rather than trusting caller-supplied preview counters.
-        // Inspection uses the same cap. Overlarge generations cannot replace current.json.
-        // Count the envelope header with a null payload; only the payload's JSON value changes.
-        // Its exact length was counted during hashing, avoiding a third full serialization.
-        let header = StoredEnvelope {
-            generation: envelope.generation.clone(),
-            checksum_sha256: envelope.checksum_sha256.clone(),
-            payload: (),
-        };
-        let header_bytes = serialized_len(&header)? - serialized_len(&())?;
-        if payload_bytes > byte_limit.saturating_sub(header_bytes) || header_bytes > byte_limit {
-            return Err(CacheError::ResourceLimit {
-                reason: ReasonCode::ResourceLimit,
-            });
-        }
-        let directory = native::Directory::open(&self.root, true)
-            .map_err(|error| directory_error(error, &self.root))?;
-        let generations = directory
-            .create_child("generations")
-            .map_err(|error| directory_error(error, &self.generations_dir()))?;
-        generations.publish(&format!("{}.json", generation.generation), |file| {
-            let mut writer = LimitedWriter::new(
-                std::io::BufWriter::with_capacity(16 * 1024, &mut *file),
-                byte_limit,
-            );
-            serde_json::to_writer(&mut writer, &envelope).map_err(std::io::Error::other)?;
-            writer.flush()?;
-            drop(writer);
-            file.sync_all()
-        })?;
-        let pointer = CurrentPointer {
-            generation: generation.generation.clone(),
-        };
-        let pointer_bytes = serde_json::to_vec_pretty(&pointer)?;
-        directory.publish("current.json", |file| {
-            file.write_all(&pointer_bytes)?;
-            file.sync_all()
-        })?;
-        Ok(())
+        // Keep encoding/parser refusals ahead of storage creation for standalone writers.
+        let prepared = PreparedGeneration::new(generation, byte_limit, parse_cap)?;
+        let mut session = self.begin_write()?;
+        prepared.publish(&mut session)
     }
 
     /// Loads one bounded historical generation through retained private native directories.
@@ -765,14 +724,7 @@ impl AtomicGenerationStore {
         name: &str,
         bytes: &[u8],
     ) -> Result<(), CacheError> {
-        let quarantine = directory
-            .create_child("quarantine")
-            .map_err(|error| directory_error(error, &self.quarantine_dir()))?;
-        quarantine.publish(name, |file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })?;
-        Ok(())
+        GenerationWriteSession::quarantine(self, directory, name, bytes)
     }
 
     fn quarantine_generation(
@@ -782,6 +734,80 @@ impl AtomicGenerationStore {
         bytes: &[u8],
     ) -> Result<(), CacheError> {
         self.quarantine(directory, &format!("{generation}.corrupt.json"), bytes)
+    }
+}
+
+/// Borrowed generation admission; no complete JSON or preview copy is retained.
+struct PreparedGeneration<'a> {
+    envelope: StoredEnvelope<&'a StoredGeneration>,
+    encoded_bytes: u64,
+    byte_limit: usize,
+    pointer_bytes: Vec<u8>,
+}
+
+impl<'a> PreparedGeneration<'a> {
+    fn new(
+        generation: &'a StoredGeneration,
+        byte_limit: usize,
+        parse_cap: usize,
+    ) -> Result<Self, CacheError> {
+        validate_generation_id(&generation.generation)?;
+        writer_admission::admit(generation, parse_cap)?;
+        validate_stored_generation(generation)?;
+        let (checksum_sha256, payload_bytes) = checksum_and_len(generation)?;
+        let envelope = StoredEnvelope {
+            generation: generation.generation.clone(),
+            checksum_sha256,
+            payload: generation,
+        };
+        // Actual encoded length, including the envelope; caller preview counters are not proof.
+        // Hashing already counted the payload, so counting this header avoids another full pass.
+        let header = StoredEnvelope {
+            generation: envelope.generation.clone(),
+            checksum_sha256: envelope.checksum_sha256.clone(),
+            payload: (),
+        };
+        let header_bytes = serialized_len(&header)? - serialized_len(&())?;
+        if payload_bytes > byte_limit.saturating_sub(header_bytes) || header_bytes > byte_limit {
+            return Err(CacheError::ResourceLimit {
+                reason: ReasonCode::ResourceLimit,
+            });
+        }
+        let pointer_bytes = serde_json::to_vec_pretty(&CurrentPointer {
+            generation: generation.generation.clone(),
+        })?;
+        Ok(Self {
+            envelope,
+            encoded_bytes: (payload_bytes + header_bytes) as u64,
+            byte_limit,
+            pointer_bytes,
+        })
+    }
+
+    fn publish(self, session: &mut GenerationWriteSession) -> Result<(), CacheError> {
+        let name = format!("{}.json", self.envelope.generation);
+        // Conservatively reserve coexistence of old data plus the complete generation and
+        // pointer temporaries. No quota failure can advance the old current pointer.
+        session.reserve(&name, self.encoded_bytes + self.pointer_bytes.len() as u64)?;
+        session.bindings()?;
+        session.generations().publish(&name, |file| {
+            let mut writer = LimitedWriter::new(
+                std::io::BufWriter::with_capacity(16 * 1024, &mut *file),
+                self.byte_limit,
+            );
+            serde_json::to_writer(&mut writer, &self.envelope).map_err(std::io::Error::other)?;
+            writer.flush()?;
+            drop(writer);
+            file.sync_all()
+        })?;
+        // A substituted generations directory must not receive a pointer to data published
+        // through our retained original child. An orphan from a failed publication is disposable.
+        session.bindings()?;
+        session.root().publish("current.json", |file| {
+            file.write_all(&self.pointer_bytes)?;
+            file.sync_all()
+        })?;
+        Ok(())
     }
 }
 
@@ -872,8 +898,8 @@ impl InspectionReader {
                 return Err(std::io::Error::other("unrepresentable cache entry"));
             };
             // Read no content during accounting, but still admit the native object as a
-            // stable private regular file. No followed metadata or lossy-name totals.
-            let file = self.directory.read_bytes(name, 0)?;
+            // private regular file. No followed metadata or lossy-name totals.
+            let file = self.directory.accounting_metadata(name)?;
             result.count += 1;
             result.bytes = result.bytes.saturating_add(file.bytes);
             Ok(())
@@ -1517,14 +1543,14 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    struct TestTempDir {
+    pub(super) struct TestTempDir {
         // Keep the atomically created directory alive for the complete fixture lifetime.
         _directory: tempfile::TempDir,
         path: PathBuf,
     }
 
     impl TestTempDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             // Wall-clock nanoseconds are not unique across threads. create_dir_all would
             // silently share a colliding fixture, letting another test remove its live files.
             let directory = tempfile::Builder::new()
@@ -1557,14 +1583,14 @@ mod tests {
             }
         }
 
-        fn path(&self) -> &Path {
+        pub(super) fn path(&self) -> &Path {
             &self.path
         }
     }
 
     // Deliberately construct private fixtures independently of the production JSON encoder.
     // Unix permissions use the ordinary filesystem API; Windows requires explicit DACL creation.
-    fn create_fixture_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
+    pub(super) fn create_fixture_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         #[cfg(unix)]
         {
@@ -1578,7 +1604,10 @@ mod tests {
         Ok(())
     }
 
-    fn write_fixture(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    pub(super) fn write_fixture(
+        path: impl AsRef<Path>,
+        bytes: impl AsRef<[u8]>,
+    ) -> std::io::Result<()> {
         let path = path.as_ref();
         #[cfg(unix)]
         {

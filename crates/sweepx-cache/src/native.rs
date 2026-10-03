@@ -23,6 +23,20 @@ mod windows_names;
 /// Maximum native entries examined per disposable cache directory, including unknown names.
 const ENUMERATION_ENTRY_LIMIT: usize = 4096;
 
+/// Metadata-only quota observation, including native identity and a change marker for
+/// a conservative recheck before removing disposable cache metadata. This does not
+/// measure allocation or give authority over any scanned payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccountedFile {
+    pub(crate) bytes: u64,
+    /// Retention ranking only; access times do not establish freshness or ownership.
+    pub(crate) accessed: (i64, i64),
+    /// Unix device/inode/link count, or Windows volume and both halves of the file ID.
+    pub(crate) identity: [u64; 3],
+    /// Unix ctime with nanoseconds, or Windows ChangeTime in native units.
+    pub(crate) changed: (i64, i64),
+}
+
 /// Independent byte units: disk/input are encoded bytes; retained is owned-data estimates.
 #[derive(Clone, Copy)]
 pub struct Limits {

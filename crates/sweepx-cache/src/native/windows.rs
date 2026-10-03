@@ -61,7 +61,69 @@ pub struct LockGuard {
     _file: File,
 }
 
+impl LockGuard {
+    /// Accounts the held lock without reopening its share-none handle.
+    pub(crate) fn encoded_bytes(&self) -> io::Result<u64> {
+        let standard: FILE_STANDARD_INFO = query(&self._file, FileStandardInfo)?;
+        u64::try_from(standard.EndOfFile).map_err(io::Error::other)
+    }
+}
+
 impl Directory {
+    /// Duplicates retained authority without resolving a display pathname again.
+    pub(crate) fn retain(&self) -> io::Result<Self> {
+        self.private()?;
+        Ok(Self {
+            file: self.file.try_clone()?,
+            volume: self.volume,
+        })
+    }
+
+    /// Verifies that a retained child still has the same binding beneath this parent.
+    pub(crate) fn same_child(&self, name: &str, expected: &Self) -> io::Result<bool> {
+        expected.private()?;
+        let actual = self.child(name)?;
+        let actual: FILE_ID_INFO = query(&actual.file, FileIdInfo)?;
+        let expected: FILE_ID_INFO = query(&expected.file, FileIdInfo)?;
+        Ok(actual.VolumeSerialNumber == expected.VolumeSerialNumber
+            && actual.FileId.Identifier == expected.FileId.Identifier)
+    }
+
+    /// Queries relative private file attributes with NO_RECALL, without requesting data access.
+    pub(crate) fn accounting_metadata(&self, name: &str) -> io::Result<super::AccountedFile> {
+        self.private()?;
+        let file = self.open_relative(
+            &component(OsStr::new(name))?,
+            FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_NON_DIRECTORY_FILE,
+            FILE_OPEN,
+            SHARE_ALL,
+            None,
+        )?;
+        self.valid_file(&file)?;
+        let basic: FILE_BASIC_INFO = query(&file, FileBasicInfo)?;
+        let standard: FILE_STANDARD_INFO = query(&file, FileStandardInfo)?;
+        let identity: FILE_ID_INFO = query(&file, FileIdInfo)?;
+        Ok(super::AccountedFile {
+            bytes: u64::try_from(standard.EndOfFile).map_err(io::Error::other)?,
+            accessed: (basic.LastAccessTime, 0),
+            identity: [
+                identity.VolumeSerialNumber,
+                u64::from_le_bytes(
+                    identity.FileId.Identifier[..8]
+                        .try_into()
+                        .expect("fixed file id"),
+                ),
+                u64::from_le_bytes(
+                    identity.FileId.Identifier[8..]
+                        .try_into()
+                        .expect("fixed file id"),
+                ),
+            ],
+            changed: (basic.ChangeTime, 0),
+        })
+    }
+
     /// Opens an absolute no-follow cache root, optionally creating private components.
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         // Bound the complete request before walking or allocating individual components.
