@@ -305,3 +305,5 @@ Rust target 候选现通过捕获的原生身份链读取父目录 `Cargo.toml`�
 `cargoOutput.workspace` 现补充本次调用的工作区成员与默认选择：`isWorkspace`、`memberCount`、`defaultMemberCount`、`projectIsRoot`。有界原生读取支持 literal/glob 成员、raw exclude 前缀、显式 workspace 指针及传递路径依赖；共享既有 TOML 解析器，不执行 Cargo。全部输入在输出前再次检查身份、内容摘要与已枚举名称，失败保持 unknown/invalid，不返回截断成员集；非原子观察不证明构建有效。没有配置覆盖时，默认 `target` 属于解析后的工作区根或独立 package，来源分别为 `workspace_default` / `package_default`。声明路径只作为独立准入的配置输入，不扩展扫描范围，不获得回收权限；原始路径与成员名称不写入报告或缓存。自定义 cwd/CLI、原生别名及输出对象等价仍需后续补齐；所有权与活动限制继续保留。
 
 Linux/macOS 的 TUI 历史根记录共享有界私有存储，并绑定规则字节、平台、根的设备/文件/mount 身份和嵌套根范围；不接受链接祖先。历史数据不保存当前活动、Git 或删除许可，缺少变化游标保持缺失值，不能转换成命中。Linux 选中刷新可保留未刷新兄弟的旧展示，但所有回放行仍为历史；只有 macOS 有经变化历史验证的文件索引复用。v9 根记录会失效重建；每根候选在复制前受独立 4 MiB 保留数据估算限制，超额不覆盖旧缓存。这不是进程 RSS 上限，也不代表跨平台缓存与资源审计已完成。
+
+Windows 的状态目录从同一个已打开目录句柄读取 owner/DACL，拒绝最终 reparse/offline/recall 对象。私有权限仅接受可完整解释的普通 allow/deny 条目；陌生授权布局、损坏边界或不可读信息均拒绝。既有 token user/owner 及本用户确有 Administrators 组时的受控 owner 策略保留；SYSTEM/Administrators 的允许访问政策不变。令牌信息每次读取最多 256 KiB，SID 使用有界对齐存储，SDK 文本最多 32,767 个无内嵌 NUL 的原生 UTF-16 单元；这些是单项准入额度，不是 RSS 上限或系统调用期限。该检查不绑定后续路径操作，Windows 垃圾历史缓存及完整路径竞态审计仍在推进。

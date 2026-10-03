@@ -5675,6 +5675,10 @@ fn timestamp_after(timestamp: &str, duration: time::Duration) -> String {
 
 #[cfg(target_os = "windows")]
 mod windows_state_security;
+// The ACL byte-policy is portable and exercised on every host; native descriptor/token I/O
+// remains Windows-only. These tests do not qualify native Windows runtime behavior.
+#[cfg(any(target_os = "windows", test))]
+mod windows_state_policy;
 
 pub fn state_dir_from_explicit_or_default(
     explicit: Option<&Path>,
@@ -5969,9 +5973,7 @@ fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
 /// currently-correct ACL on a foreign-owned directory is not a guarantee.
 #[cfg(target_os = "windows")]
 fn ensure_private_dir(path: &Path) -> Result<(), StateError> {
-    let private = windows_state_security::is_current_user_private(path)?;
-    let owned = windows_state_security::is_owned_by_current_user(path)?;
-    if !private || !owned {
+    if !windows_state_security::is_private_owned_directory(path)? {
         return Err(StateError::InsecureStateDir(path.to_path_buf()));
     }
     Ok(())

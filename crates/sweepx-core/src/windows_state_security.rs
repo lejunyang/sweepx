@@ -25,20 +25,21 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
     SE_FILE_OBJECT,
 };
-use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, ACE_HEADER, CreateWellKnownSid, EqualSid};
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidSid, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid,
-    WinLocalSystemSid,
+    ACL, DACL_SECURITY_INFORMATION, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
+use windows_sys::Win32::Security::{CreateWellKnownSid, EqualSid};
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -66,19 +67,22 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
     if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: on success the API returns a NUL-terminated UTF-16 string.
-    let mut length = 0usize;
-    // SAFETY: walking to the terminator of the buffer the API just produced.
-    while unsafe { *raw.add(length) } != 0 {
-        length += 1;
+    if raw.is_null() {
+        return Err(io::Error::other("Windows returned no SID string"));
     }
-    // SAFETY: `length` units precede the terminator.
-    let text = OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) });
+    // A supported SID has at most 15 subauthorities. Bound even its textual scan; Windows
+    // guarantees a NUL-terminated allocation and every read stops at that terminator.
+    let length = (0..256).find(|offset| unsafe { *raw.add(*offset) } == 0);
+    let text = length.map(|length| {
+        // SAFETY: these initialized units precede the SDK-supplied terminator.
+        OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) })
+    });
     // SAFETY: freeing the buffer allocated by ConvertSidToStringSidW, exactly once.
     unsafe {
         LocalFree(raw as HLOCAL);
     }
-    text.into_string()
+    text.ok_or_else(|| io::Error::other("Windows SID text exceeds admission bounds"))?
+        .into_string()
         .map_err(|_| io::Error::other("SID string was not valid UTF-16"))
 }
 
@@ -88,13 +92,13 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
 /// [`is_current_user_private`]: an existing directory may have been created by something else, and
 /// silently rewriting its ACL would hide exactly the misconfiguration worth reporting.
 pub fn create_private_dir(path: &Path) -> io::Result<bool> {
-    let target = wide(path.as_os_str());
+    let target = wide(path.as_os_str())?;
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     let user = current_user_sid()?;
     let user_text = sid_to_string(user.as_ptr() as PSID)?;
     let sddl = wide(OsStr::new(
         &PRIVATE_DIR_SDDL_TEMPLATE.replace("{USER}", &user_text),
-    ));
+    ))?;
     // SAFETY: `sddl` is a NUL-terminated UTF-16 buffer that outlives the call, and the descriptor
     // out-parameter is freed below on every path.
     let converted = unsafe {
@@ -130,154 +134,150 @@ pub fn create_private_dir(path: &Path) -> io::Result<bool> {
     Err(error)
 }
 
-/// Whether `path`'s DACL grants access to nobody except its owner, SYSTEM and Administrators.
-///
-/// Reads the actual descriptor rather than trusting how the directory was created, because this
-/// runs against directories created by earlier runs, by other tools, or by a user following a
-/// setup guide.
-///
-/// Fails closed: any ACE that cannot be inspected, a missing DACL (which means "grant everyone"),
-/// or an unreadable owner all return `false`.
-pub fn is_current_user_private(path: &Path) -> io::Result<bool> {
-    let target = wide(path.as_os_str());
-    let mut owner: PSID = ptr::null_mut();
-    let mut dacl: *mut ACL = ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: all out-parameters are owned by the returned descriptor, freed once below.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            target.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            &mut dacl,
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(status as i32));
-    }
-    let verdict = (|| {
-        // A NULL DACL grants everyone full control. Treat it as the hard failure it is.
-        if dacl.is_null() || owner.is_null() {
-            return Ok(false);
-        }
-        let system = well_known_sid(WinLocalSystemSid)?;
-        let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
-        // The calling user is accepted alongside the recorded owner. They are normally the same,
-        // but a directory whose owner was reassigned (for example by an administrator) can still
-        // legitimately grant the user access, and ownership is separately enforced by
-        // `is_owned_by_current_user`.
-        let current_user = current_user_sid()?;
-        // SAFETY: a non-null DACL from GetNamedSecurityInfoW is a valid ACL for the descriptor's
-        // lifetime.
-        let count = unsafe { (*dacl).AceCount };
-        for index in 0..u32::from(count) {
-            let mut ace: *mut core::ffi::c_void = ptr::null_mut();
-            // SAFETY: `index` is below the reported ACE count.
-            if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
-                return Ok(false);
-            }
-            // SAFETY: GetAce yields a header-prefixed ACE within the ACL allocation.
-            let header = unsafe { &*(ace as *const ACE_HEADER) };
-            // Only allow-ACEs widen access; a deny-ACE can never grant another user anything.
-            const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
-                continue;
-            }
-            // SAFETY: an allow-ACE is laid out as ACCESS_ALLOWED_ACE with the SID inline at
-            // SidStart; taking its address is how the Win32 API defines reading the trustee.
-            let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
-            let sid = ptr::from_ref(&allowed.SidStart) as PSID;
-            // SAFETY: the SID lives inside the ACL allocation, which outlives this loop.
-            if unsafe { IsValidSid(sid) } == 0 {
-                return Ok(false);
-            }
-            if sid_equals(sid, owner)
-                || sid_equals(sid, current_user.as_ptr() as PSID)
-                || sid_equals(sid, system.as_ptr() as PSID)
-                || sid_equals(sid, administrators.as_ptr() as PSID)
-            {
-                continue;
-            }
-            // Some other trustee can reach the directory.
-            return Ok(false);
-        }
-        Ok(true)
-    })();
-    // SAFETY: freed exactly once, after every read of the borrowed pointers above.
-    unsafe {
-        LocalFree(descriptor as HLOCAL);
-    }
-    verdict
+/// A Windows-allocated descriptor and its borrowed owner/DACL pointers.
+/// All borrows end before the single LocalFree in Drop.
+struct ObjectSecurity {
+    descriptor: PSECURITY_DESCRIPTOR,
+    owner: PSID,
+    dacl: *mut ACL,
 }
 
-/// Whether `path`'s owner is a principal this user controls.
-///
-/// Separate from the DACL check because they answer different questions: the DACL says who *may*
-/// reach the directory, ownership says whether it is ours to trust. A directory owned by another
-/// *ordinary* account can have its permissions rewritten by that account at any time.
-///
-/// Accepts the token's user SID, the token's owner SID, and Administrators when the user is a
-/// member of it. The last two are not cosmetic. Measured on this host: unelevated, user and owner
-/// are both `S-1-5-21-…-1001`; elevated, the user is unchanged but the owner becomes
-/// `S-1-5-32-544` (Administrators), so **every directory an elevated run creates is owned by
-/// Administrators and keeps that owner on disk**. Comparing only against the user SID produced two
-/// failures found by running the binary rather than the tests: an elevated run rejected the state
-/// directory it had just created, and afterwards every unelevated run was permanently locked out of
-/// it.
-///
-/// Accepting Administrators concedes nothing new: [`is_current_user_private`] already allows that
-/// group for the same reason, since it can take ownership of any object regardless. Membership is
-/// checked against the token rather than assumed, so a non-member user still rejects an
-/// Administrators-owned directory it genuinely does not control.
-pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
-    let target = wide(path.as_os_str());
-    let mut owner: PSID = ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: out-parameters belong to `descriptor`, freed once below.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            target.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(status as i32));
+impl Drop for ObjectSecurity {
+    fn drop(&mut self) {
+        // SAFETY: GetSecurityInfo allocated this descriptor on success; this owner frees it once.
+        unsafe { LocalFree(self.descriptor as HLOCAL) };
     }
-    let verdict = (|| {
-        if owner.is_null() {
+}
+
+impl ObjectSecurity {
+    fn from_file(file: &std::fs::File) -> io::Result<Self> {
+        let mut result = Self {
+            descriptor: ptr::null_mut(),
+            owner: ptr::null_mut(),
+            dacl: ptr::null_mut(),
+        };
+        // SAFETY: the caller retains a READ_CONTROL handle; output borrows belong to descriptor.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut result.owner,
+                ptr::null_mut(),
+                &mut result.dacl,
+                ptr::null_mut(),
+                &mut result.descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        if result.descriptor.is_null() {
+            return Err(io::Error::other("Windows returned no security descriptor"));
+        }
+        Ok(result)
+    }
+
+    fn private(&self) -> io::Result<bool> {
+        // NULL DACL grants everyone full control. An absent owner is not trusted either.
+        if self.dacl.is_null() || self.owner.is_null() {
             return Ok(false);
         }
+        let owner = copy_sid(self.owner)?;
         let user = current_user_sid()?;
-        if sid_equals(owner, user.as_ptr() as PSID) {
-            return Ok(true);
-        }
-        let token_owner = current_token_owner_sid()?;
-        if sid_equals(owner, token_owner.as_ptr() as PSID) {
-            return Ok(true);
-        }
-        // An elevated run leaves Administrators as the owner. The same user unelevated must still
-        // be able to use that directory, otherwise one elevated run bricks durable state.
+        let system = well_known_sid(WinLocalSystemSid)?;
         let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
-        if sid_equals(owner, administrators.as_ptr() as PSID) && current_user_is_admin_member()? {
+        // SAFETY: GetSecurityInfo supplies a complete native ACL within its live allocation;
+        // AclSize is a u16, bounding the borrowed bytes to at most 65,535. The portable parser
+        // checks header, count, ACE and SID boundaries before interpreting any grant.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(self.dacl.cast::<u8>(), usize::from((*self.dacl).AclSize))
+        };
+        Ok(crate::windows_state_policy::is_private_acl(
+            bytes,
+            &[
+                owner.as_bytes(),
+                user.as_bytes(),
+                system.as_bytes(),
+                administrators.as_bytes(),
+            ],
+        ))
+    }
+
+    fn owned(&self) -> io::Result<bool> {
+        if self.owner.is_null() {
+            return Ok(false);
+        }
+        let owner = copy_sid(self.owner)?;
+        let user = current_user_sid()?;
+        if owner == user || owner == current_token_owner_sid()? {
             return Ok(true);
         }
-        Ok(false)
-    })();
-    // SAFETY: freed exactly once after the borrow above.
-    unsafe {
-        LocalFree(descriptor as HLOCAL);
+        // An elevated run leaves Administrators as owner. Accept it only when this user's
+        // filtered/elevated token actually contains that group, retaining the existing policy.
+        Ok(
+            owner == well_known_sid(WinBuiltinAdministratorsSid)?
+                && current_user_is_admin_member()?,
+        )
     }
-    verdict
+}
+
+/// Opens a directory without following its final reparse point or recalling offline content.
+/// Ancestor admission is still the state caller's separate contract; this does not turn a
+/// pathname into retained authority for later snapshot/cache operations.
+fn open_directory(path: &Path) -> io::Result<std::fs::File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OPEN_NO_RECALL,
+        )
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let refused = FILE_ATTRIBUTE_REPARSE_POINT
+        | FILE_ATTRIBUTE_OFFLINE
+        | FILE_ATTRIBUTE_RECALL_ON_OPEN
+        | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    if !metadata.is_dir() || metadata.file_attributes() & refused != 0 {
+        return Err(io::Error::other(
+            "private state is not an ordinary online directory",
+        ));
+    }
+    Ok(file)
+}
+
+/// Checks privacy and controlled ownership from the same opened directory and descriptor.
+/// A reparse/offline object is refused before the handle security query; unknown ACE types fail
+/// closed. This is an observation at this instant, not ongoing authority for later path opens.
+pub fn is_private_owned_directory(path: &Path) -> io::Result<bool> {
+    let file = open_directory(path)?;
+    is_private_owned_handle(&file)
+}
+
+/// Observes controlled owner/DACL from a retained READ_CONTROL file handle.
+/// The caller independently checks object type, reparse/provider and mount boundaries. This
+/// shared check never grants authority for another pathname or persists a permission verdict.
+pub(crate) fn is_private_owned_handle(file: &std::fs::File) -> io::Result<bool> {
+    let security = ObjectSecurity::from_file(file)?;
+    Ok(security.private()? && security.owned()?)
+}
+
+/// Test surface for independently checking the created DACL through a native handle.
+#[cfg(test)]
+pub fn is_current_user_private(path: &Path) -> io::Result<bool> {
+    ObjectSecurity::from_file(&open_directory(path)?)?.private()
+}
+
+/// Test surface for controlled owner checks, including elevated/filtered token ownership.
+#[cfg(test)]
+pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+    ObjectSecurity::from_file(&open_directory(path)?)?.owned()
 }
 
 /// Whether this user is an Administrators member, counting a filtered token's deny-only group.
@@ -291,156 +291,206 @@ pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
 /// question here is "could this user reach the directory by elevating", not "is it elevated right
 /// now". A user genuinely outside the group has no such entry and is still refused.
 fn current_user_is_admin_member() -> io::Result<bool> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::GetTokenInformation;
-    use windows_sys::Win32::Security::{TOKEN_GROUPS, TOKEN_QUERY, TokenGroups};
-
+    use windows_sys::Win32::Security::{SID_AND_ATTRIBUTES, TOKEN_GROUPS, TokenGroups};
     let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
-    let mut token = ptr::null_mut();
-    // SAFETY: the pseudo-handle needs no release; `token` is closed below on every path.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
+    let buffer = TokenBuffer::read(TokenGroups)?;
+    let offset = std::mem::offset_of!(TOKEN_GROUPS, Groups);
+    if buffer.bytes < offset {
+        return Err(io::Error::other("truncated Windows token group header"));
     }
-    let mut needed = 0u32;
-    // SAFETY: deliberate size query with a zero-length buffer.
-    unsafe {
-        GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &mut needed);
+    // SAFETY: the bounded, aligned buffer contains the u32 GroupCount header. We do not
+    // materialize TOKEN_GROUPS's one-element array before checking the actual variable count.
+    let count = unsafe { buffer.words.as_ptr().cast::<u32>().read() } as usize;
+    let needed = count
+        .checked_mul(size_of::<SID_AND_ATTRIBUTES>())
+        .and_then(|bytes| offset.checked_add(bytes));
+    if needed.is_none_or(|needed| needed > buffer.bytes) {
+        return Err(io::Error::other("truncated Windows token groups"));
     }
-    let mut buffer = vec![0u8; needed.max(1) as usize];
-    // SAFETY: `buffer` is at least `needed` bytes and outlives the call.
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenGroups,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
+    // SAFETY: native offset, pointer alignment and complete array bounds were checked above;
+    // SID pointers are the Windows-provided inline token SIDs and outlive this iteration.
+    let entries = unsafe {
+        std::slice::from_raw_parts(
+            buffer
+                .words
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<SID_AND_ATTRIBUTES>(),
+            count,
         )
     };
-    // SAFETY: closing the token opened above, exactly once.
-    unsafe {
-        CloseHandle(token);
-    }
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: on success the buffer begins with TOKEN_GROUPS, whose Groups array of GroupCount
-    // entries is laid out inline immediately after the count.
-    let groups = unsafe { &*(buffer.as_ptr() as *const TOKEN_GROUPS) };
-    let count = groups.GroupCount as usize;
-    // SAFETY: the array has `count` entries inside the buffer just filled by the API.
-    let entries = unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), count) };
     Ok(entries
         .iter()
         .any(|entry| sid_equals(entry.Sid, administrators.as_ptr() as PSID)))
 }
 
-/// Reads the SID this token assigns as owner to objects it creates.
-///
-/// Distinct from [`current_user_sid`] under elevation, where it is the Administrators group. This
-/// is read from the token rather than assumed, so a machine whose token is configured differently
-/// is judged by what it actually reports.
-fn current_token_owner_sid() -> io::Result<Vec<u8>> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::GetTokenInformation;
-    use windows_sys::Win32::Security::{TOKEN_OWNER, TOKEN_QUERY, TokenOwner};
-
-    let mut token = ptr::null_mut();
-    // SAFETY: the pseudo-handle from GetCurrentProcess needs no release; `token` is closed below.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut needed = 0u32;
-    // SAFETY: a deliberate size query; a zero-length buffer is the documented way to ask.
-    unsafe {
-        GetTokenInformation(token, TokenOwner, ptr::null_mut(), 0, &mut needed);
-    }
-    let mut buffer = vec![0u8; needed.max(1) as usize];
-    // SAFETY: `buffer` is at least `needed` bytes and outlives the call.
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenOwner,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    };
-    // SAFETY: closing the token opened above, exactly once.
-    unsafe {
-        CloseHandle(token);
-    }
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: on success the buffer starts with a TOKEN_OWNER whose SID points inside it.
-    let owner = unsafe { &*(buffer.as_ptr() as *const TOKEN_OWNER) };
-    Ok(copy_sid(owner.Owner))
+/// An aligned, bounded token information allocation. All errors release the token handle;
+/// excessive sizes and malformed returned bounds are refused before pointer interpretation.
+struct TokenBuffer {
+    words: Vec<usize>,
+    bytes: usize,
 }
 
-/// Reads the current process token's user SID into an owned buffer.
-fn current_user_sid() -> io::Result<Vec<u8>> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::GetTokenInformation;
-    use windows_sys::Win32::Security::{TOKEN_QUERY, TOKEN_USER, TokenUser};
+impl TokenBuffer {
+    fn read(class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS) -> io::Result<Self> {
+        use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY};
+        let mut raw = ptr::null_mut();
+        // SAFETY: process pseudo-handle needs no release; successful token ownership moves below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: OpenProcessToken returned a fresh valid token handle owned exactly once.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+        let mut needed = 0u32;
+        // SAFETY: zero-length size query; token stays live on every error/return path.
+        let queried = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle().cast(),
+                class,
+                ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        if queried == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(122) {
+                // ERROR_INSUFFICIENT_BUFFER
+                return Err(error);
+            }
+        }
+        let count = crate::windows_state_policy::token_buffer_words(needed).ok_or_else(|| {
+            io::Error::other("Windows token information exceeds admission bounds")
+        })?;
+        let requested = needed;
+        let mut words = vec![0usize; count];
+        // SAFETY: pointer-aligned storage has at least requested bytes; token stays owned here.
+        if unsafe {
+            GetTokenInformation(
+                token.as_raw_handle().cast(),
+                class,
+                words.as_mut_ptr().cast(),
+                requested,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if needed == 0 || needed > requested {
+            return Err(io::Error::other(
+                "Windows returned invalid token information bounds",
+            ));
+        }
+        Ok(Self {
+            words,
+            bytes: needed as usize,
+        })
+    }
 
-    let mut token = ptr::null_mut();
-    // SAFETY: the pseudo-handle from GetCurrentProcess needs no release; `token` is closed below.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
+    fn pointer<T>(&self) -> io::Result<*const T> {
+        if self.bytes < size_of::<T>() || align_of::<T>() > align_of::<usize>() {
+            return Err(io::Error::other(
+                "truncated or misaligned Windows token structure",
+            ));
+        }
+        Ok(self.words.as_ptr().cast())
     }
-    let mut needed = 0u32;
-    // SAFETY: a deliberate size query; a zero-length buffer is the documented way to ask.
-    unsafe {
-        GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
-    }
-    let mut buffer = vec![0u8; needed.max(1) as usize];
-    // SAFETY: `buffer` is at least `needed` bytes and outlives the call.
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    };
-    // SAFETY: closing the token opened above, exactly once.
-    unsafe {
-        CloseHandle(token);
-    }
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points inside it.
-    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
-    Ok(copy_sid(user.User.Sid))
 }
 
-/// Copies a SID into an owned buffer so it outlives the allocation it was read from.
-fn copy_sid(sid: PSID) -> Vec<u8> {
+/// Reads the owner SID assigned by the current token, including the elevated owner policy.
+fn current_token_owner_sid() -> io::Result<OwnedSid> {
+    use windows_sys::Win32::Security::{TOKEN_OWNER, TokenOwner};
+    let buffer = TokenBuffer::read(TokenOwner)?;
+    let owner = buffer.pointer::<TOKEN_OWNER>()?;
+    // SAFETY: the checked aligned buffer contains TOKEN_OWNER and its Windows-provided SID.
+    copy_sid(unsafe { (*owner).Owner })
+}
+
+/// Reads the current process token's user SID into bounded owned storage.
+fn current_user_sid() -> io::Result<OwnedSid> {
+    use windows_sys::Win32::Security::{TOKEN_USER, TokenUser};
+    let buffer = TokenBuffer::read(TokenUser)?;
+    let user = buffer.pointer::<TOKEN_USER>()?;
+    // SAFETY: the checked aligned buffer contains TOKEN_USER and its Windows-provided SID.
+    copy_sid(unsafe { (*user).User.Sid })
+}
+
+/// Copies a native SID while its Windows-owned allocation is live. A SID has at most 15
+/// subauthorities, so malformed/unsupported values are refused rather than retained unboundedly.
+fn copy_sid(sid: PSID) -> io::Result<OwnedSid> {
     use windows_sys::Win32::Security::GetLengthSid;
-    // SAFETY: callers pass a SID validated by the API that produced it.
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(io::Error::other("Windows returned an invalid SID"));
+    }
+    // SAFETY: Windows validated the SID; the API returns its size within its live allocation.
     let length = unsafe { GetLengthSid(sid) } as usize;
-    // SAFETY: `length` is the SID's own reported size.
-    unsafe { std::slice::from_raw_parts(sid as *const u8, length) }.to_vec()
+    if !(8..=68).contains(&length) {
+        return Err(io::Error::other("Windows SID exceeds admission bounds"));
+    }
+    let mut owned = OwnedSid {
+        words: [0; 17],
+        length,
+    };
+    // SAFETY: the validated native SID has length bytes; initialized DWORD-aligned storage
+    // holds at most 68 bytes. Copying bytes does not require source DWORD alignment.
+    unsafe {
+        ptr::copy_nonoverlapping(sid.cast::<u8>(), owned.words.as_mut_ptr().cast(), length);
+    }
+    Ok(owned)
+}
+
+/// Bounded DWORD-aligned storage for native SID APIs; Vec<u8> provides no alignment contract.
+/// Unused words stay zero so value comparison includes no uninitialized or allocator padding.
+#[derive(PartialEq, Eq)]
+struct OwnedSid {
+    words: [u32; 17],
+    length: usize,
+}
+
+impl OwnedSid {
+    fn as_ptr(&self) -> *const u8 {
+        self.words.as_ptr().cast()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: constructor validates 8..=68 bytes; all 17 words are initialized.
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.length) }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.length == 0
+    }
 }
 
 /// Materializes a well-known SID into an owned buffer.
-fn well_known_sid(kind: i32) -> io::Result<Vec<u8>> {
+fn well_known_sid(kind: i32) -> io::Result<OwnedSid> {
     let mut size = 0u32;
     // SAFETY: size query; failure with a zero buffer is expected and inspected below.
     unsafe {
         CreateWellKnownSid(kind, ptr::null_mut(), ptr::null_mut(), &mut size);
     }
-    let mut buffer = vec![0u8; size.max(1) as usize];
-    // SAFETY: the buffer matches the size the API just asked for.
+    if !(8..=68).contains(&size) {
+        return Err(io::Error::other(
+            "well-known Windows SID exceeds admission bounds",
+        ));
+    }
+    // SID's maximum native size is 68 bytes. u32 storage preserves its native alignment.
+    let mut buffer = [0u32; 17];
+    // SAFETY: the aligned fixed buffer holds the requested SID and lives through validation.
     let ok =
         unsafe { CreateWellKnownSid(kind, ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size) };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(buffer)
+    if !(8..=68).contains(&size) {
+        return Err(io::Error::other(
+            "Windows returned invalid well-known SID bounds",
+        ));
+    }
+    copy_sid(buffer.as_mut_ptr().cast())
 }
 
 /// Compares two SIDs by value.
@@ -452,19 +502,59 @@ fn sid_equals(left: PSID, right: PSID) -> bool {
     unsafe { EqualSid(left, right) != 0 }
 }
 
-fn wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(Some(0)).collect()
-}
-
-/// Renders a path for diagnostics without losing non-UTF-8 content.
-#[allow(dead_code)]
-fn display(path: &Path) -> OsString {
-    OsString::from_wide(&path.as_os_str().encode_wide().collect::<Vec<_>>())
+fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
+    crate::windows_state_policy::terminated_utf16(value.encode_wide()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows name is oversized or contains NUL",
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
+
+    /// Fixture-only OS installation of a basic foreign grant, independent of the checker.
+    fn install_everyone_read(path: &Path) {
+        use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
+        use windows_sys::Win32::Security::{
+            ACL_REVISION, AddAccessAllowedAce, InitializeAcl, WinWorldSid,
+        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+        let everyone = well_known_sid(WinWorldSid).unwrap();
+        let mut storage = [0u32; 128];
+        let acl = storage.as_mut_ptr().cast::<ACL>();
+        // SAFETY: live aligned ACL storage and SID; SDK validates the complete initialized ACL.
+        assert_ne!(unsafe { InitializeAcl(acl, 512, ACL_REVISION) }, 0);
+        assert_ne!(
+            unsafe {
+                AddAccessAllowedAce(
+                    acl,
+                    ACL_REVISION,
+                    FILE_GENERIC_READ,
+                    everyone.as_ptr().cast_mut().cast(),
+                )
+            },
+            0
+        );
+        let target = wide(path.as_os_str()).unwrap();
+        assert_eq!(
+            unsafe {
+                SetNamedSecurityInfoW(
+                    target.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    acl,
+                    ptr::null(),
+                )
+            },
+            ERROR_SUCCESS
+        );
+    }
 
     /// A directory this code creates must pass both checks it will later be judged by.
     ///
@@ -481,6 +571,136 @@ mod tests {
             "a directory created with the private DACL must be accepted by the checker"
         );
         assert!(is_owned_by_current_user(&dir).unwrap());
+        assert!(is_private_owned_directory(&dir).unwrap());
+    }
+
+    /// Install a real object allow ACE through the OS rather than manufacturing the bytes
+    /// handed to the privacy checker. The old checker skipped this granting ACE type entirely.
+    #[test]
+    fn an_os_installed_object_grant_is_not_mistaken_for_private_state() {
+        use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
+        use windows_sys::Win32::Security::{
+            ACE_HEADER, ACL_REVISION_DS, AddAccessAllowedAce, AddAccessAllowedObjectAce, GetAce,
+            InitializeAcl, WinWorldSid,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("object-grant");
+        create_private_dir(&path).unwrap();
+        let mut storage = [0u32; 128];
+        let acl = storage.as_mut_ptr().cast::<ACL>();
+        let everyone = well_known_sid(WinWorldSid).unwrap();
+        let user = current_user_sid().unwrap();
+        // SAFETY: aligned 512-byte ACL storage and live SID; SDK functions validate all bounds.
+        assert_ne!(
+            unsafe { InitializeAcl(acl, size_of_val(&storage) as u32, ACL_REVISION_DS) },
+            0
+        );
+        // Retain a basic user grant so refusal does not depend on the filesystem's effective
+        // access treatment of an object ACE. The old checker skipped the later unknown grant.
+        assert_ne!(
+            unsafe {
+                AddAccessAllowedAce(
+                    acl,
+                    ACL_REVISION_DS,
+                    FILE_ALL_ACCESS,
+                    user.as_ptr().cast_mut().cast(),
+                )
+            },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                AddAccessAllowedObjectAce(
+                    acl,
+                    ACL_REVISION_DS,
+                    0,
+                    FILE_GENERIC_READ,
+                    ptr::null(),
+                    ptr::null(),
+                    everyone.as_ptr().cast_mut().cast(),
+                )
+            },
+            0
+        );
+        let target = wide(path.as_os_str()).unwrap();
+        // SAFETY: native ACL and path remain live; only this isolated directory's DACL changes.
+        assert_eq!(
+            unsafe {
+                SetNamedSecurityInfoW(
+                    target.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    acl,
+                    ptr::null(),
+                )
+            },
+            ERROR_SUCCESS
+        );
+        // Verify what Windows actually stored through the independent named-security API.
+        let mut stored_acl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                GetNamedSecurityInfoW(
+                    target.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut stored_acl,
+                    ptr::null_mut(),
+                    &mut descriptor,
+                )
+            },
+            ERROR_SUCCESS
+        );
+        // Capture before assertions so the allocation is freed even if the fixture differs.
+        let mut stored_types = std::collections::BTreeSet::new();
+        let count = if stored_acl.is_null() {
+            0
+        } else {
+            // SAFETY: successful query returned a complete ACL inside the live descriptor.
+            unsafe { (*stored_acl).AceCount }
+        };
+        for index in 0..u32::from(count) {
+            let mut ace = ptr::null_mut();
+            if unsafe { GetAce(stored_acl, index, &mut ace) } != 0 && !ace.is_null() {
+                // SAFETY: successful GetAce returns a header inside the live descriptor.
+                stored_types.insert(unsafe { (*ace.cast::<ACE_HEADER>()).AceType });
+            }
+        }
+        // SAFETY: descriptor was allocated by the successful named-security query.
+        unsafe { LocalFree(descriptor as HLOCAL) };
+        assert_eq!(count, 2);
+        assert_eq!(
+            stored_types,
+            [0, 5].into(),
+            "fixture must contain both actual grant layouts"
+        );
+        assert!(!is_current_user_private(&path).unwrap());
+        assert!(!is_private_owned_directory(&path).unwrap());
+    }
+
+    /// A security observation must remain attached to its opened object after a pathname swap.
+    #[test]
+    fn descriptor_observation_stays_with_the_opened_directory_after_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("original");
+        let retained = temp.path().join("retained");
+        create_private_dir(&path).unwrap();
+        let file = open_directory(&path).unwrap();
+        std::fs::rename(&path, &retained).unwrap();
+        create_private_dir(&path).unwrap();
+        install_everyone_read(&path);
+        assert!(!is_private_owned_directory(&path).unwrap());
+        let security = ObjectSecurity::from_file(&file).unwrap();
+        assert!(security.private().unwrap());
+        assert!(security.owned().unwrap());
+        assert!(is_private_owned_directory(&retained).unwrap());
+        assert!(path.is_dir());
     }
 
     /// Creating over an existing directory reports "not created" rather than rewriting its ACL.
@@ -578,7 +798,7 @@ mod tests {
 
     /// Whether `path`'s owner is literally the token's user SID, used to confirm a fixture took.
     fn is_owner_the_token_user(path: &Path) -> io::Result<bool> {
-        let target = wide(path.as_os_str());
+        let target = wide(path.as_os_str())?;
         let mut owner: PSID = ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
         // SAFETY: out-parameters belong to `descriptor`, freed once below.

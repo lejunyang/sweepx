@@ -1,0 +1,180 @@
+{
+  "schema": "sweepx.windows-private-state-validation/v1",
+  "date": "2026-10-03",
+  "base_commit": "72f7861",
+  "host": {
+    "platform": "aarch64-apple-darwin",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "build": "dev/test, debug symbols=0, incremental=0"
+  },
+  "scope": [
+    "Fix shared Windows state-directory privacy decision before junk history storage reuses it",
+    "Unknown object/callback/conditional ACE layouts fail closed instead of disappearing from the DACL decision",
+    "Complete ordinary allow/deny ACL/ACE/SID boundaries are validated with the portable byte policy",
+    "Owner and DACL come from one native descriptor on the same opened directory; final reparse/offline/recall objects are refused",
+    "Existing controlled token user/owner and filtered/elevated administrator membership policy retained",
+    "Token information admits at most 256 KiB per native query; aligned allocation and variable group array bounds checked",
+    "Native SIDs retain at most 68 bytes in DWORD-aligned fixed storage, token handles/descriptors released by RAII",
+    "Bounded UTF-16 SDK conversion refuses embedded NUL, stops oversized iterators after 32768 units, and preserves opaque units",
+    "Unused second path conversion helper removed; no crate, persistent permission verdict or machine field changes",
+    "Existing directory validation calls the shared retained-handle owner/DACL check; future junk storage can reuse it without a second permission evaluator"
+  ],
+  "not_delivered": [
+    "Windows junk history storage and TUI cache first paint",
+    "Native Windows kernel/DACL/token/provider/runtime results or MSVC validation",
+    "Authority retained for later pathname snapshot/cache operations or a full ancestor/leaf substitution proof",
+    "Linux/Windows validated file indexes, full global resource audit or all discovery path budgets",
+    "Blocking native call cancellation/hard deadlines or process RSS bounds",
+    "Performance or memory benchmark claims"
+  ],
+  "proof_scopes": {
+    "portable_host": "Seven tests use literal documented ACL/SID bytes and explicit admission boundary oracles, including a private first ACE followed by an unfamiliar grant; no OS security fixture is inferred from those passes",
+    "windows_native_compiled_only": [
+      "an_os_installed_object_grant_is_not_mistaken_for_private_state: SDK installs Everyone object grant; named-security query must observe real type 5 before handle check refusal",
+      "descriptor_observation_stays_with_the_opened_directory_after_rename: original held handle stays private while a new object at the old pathname has an actual Everyone read grant",
+      "Existing private creation, foreign owner, missing path and filtered/elevated ownership fixtures remain in the Windows test module"
+    ],
+    "ci": "Existing native-cli Windows MSVC Test Windows scan stack natively includes sweepx-core. Workflow source inspected; no remote CI run triggered or success claimed"
+  },
+  "checks": {
+    "core_full": {
+      "command": "cargo test -p sweepx-core --all-features -- --test-threads=1",
+      "exit_code": 0,
+      "log_sha256": "0ab883fd17fd5e2209cd98bf1d687c607a7c9f2dffcf65a72a4a88c5f3d38525",
+      "counts": {
+        "passed": 339,
+        "failed": 0,
+        "ignored": 2
+      },
+      "summaries": [
+        "test result: ok. 339 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 36.58s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    "final_policy": {
+      "command": "cargo test -p sweepx-core --all-features windows_state_policy",
+      "exit_code": 0,
+      "log_sha256": "fa5ddcfd2fd126eb791c245044161e9127eb2dff3e507346b9e3a90832a2dab3",
+      "counts": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      "summaries": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 335 filtered out; finished in 0.00s"
+      ],
+      "note": "Seven passes; overlaps six of core_full"
+    },
+    "host_workspace_lint": {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "e0b59afd0189895db743bc1d7b5c83a5c759c7cb7c088044aeafebcc89783611"
+    },
+    "linux_workspace_lint": {
+      "command": "workspace all-targets/all-features clippy --target x86_64-unknown-linux-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "01b55e65b00c4a1adf4424395f9927a4ec94d174a990a3d1424bfb5d8f4a82c2"
+    },
+    "windows_workspace_lint": {
+      "command": "workspace all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "a79253ac5a1d76aaf84a9a1f623f04c8cb8dde82d04dd182020f20013e07f94e"
+    },
+    "final_core_host_lint": {
+      "command": "cargo clippy -p sweepx-core --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "2342524e452e489d2c1be85fb48922607d1888f7e2dc9d2075e33afd688d6fb6"
+    },
+    "final_core_windows_lint": {
+      "command": "core all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "328d814b8d376525b4dc5dfa90422a508a7fd1eb68a18eb616cd356e43f78772"
+    },
+    "final_core_linux_lint": {
+      "command": "core all-targets/all-features clippy --target x86_64-unknown-linux-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "1108e0a22930f144f2f76c9e4db689932bfc7746b1ce377ea51f5c8902ae49c0"
+    },
+    "fmt": {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "package_list": {
+      "command": "cargo package -p sweepx-core --list --allow-dirty",
+      "exit_code": 0,
+      "log_sha256": "455977b1555501c806290cebc82def05f7a8239ffc5cdaa378e06055f8a99fe6",
+      "contains": [
+        "src/windows_state_security.rs",
+        "src/windows_state_policy.rs"
+      ],
+      "note": "Inventory only, not registry dependency compilation/publication"
+    },
+    "final_native_fixture_lint": {
+      "command": "core all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "26c7a16caf339ffccca605ab3a15a6d3d8072e161fec6c30061434e984ae7d97",
+      "note": "Final fixture retains basic user access and checks the OS-stored ACE type set; no native execution claimed"
+    },
+    "docs": {
+      "command": "python scripts/lint_docs.py",
+      "exit_code": 0,
+      "log_sha256": "1caed31b5968ac77219e2b53b40afec9f1eaacde1c89a14c6d7e9253f2a9f7d1",
+      "markdown_files": 54
+    },
+    "docs_checker_tests": {
+      "command": "python -m unittest discover -s scripts/tests -p test_lint_docs.py",
+      "exit_code": 0,
+      "log_sha256": "1b1c524b37adaa81223d309dca93d247ae8ceae5883f905d7c7d3f6fd60f2b02",
+      "passed": 23
+    },
+    "diff": {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "reuse_note": "After runtime and host/Linux lint checks, only Windows native fixture refinement, deletion of an unused helper and extraction of the existing handle check changed. Final Windows cfg lint compiled the exact final native source; policy/runtime behavior tests cover unchanged implementation. Native Windows execution remains unavailable.",
+    "shared_handle_entry_lint": {
+      "command": "core all-targets/all-features clippy --target x86_64-pc-windows-gnu with Zig 0.16.0",
+      "exit_code": 0,
+      "log_sha256": "d76054baf2cad78ec8980962ee274b9c3cb2a7270f8f8319c7aa2bff2859e4aa"
+    }
+  },
+  "coverage": {
+    "core_distinct_passed": 340,
+    "core_failed": 0,
+    "core_ignored": 2,
+    "composition": "339 passing complete core cases, followed by 7 focused policy passes of which 6 overlap and 1 new text-admission case. Doctests separately report 0 cases. Unchanged CLI/other package results reused from the base delivery; not a fresh full workspace runtime matrix",
+    "windows_native_runtime_cases_executed_here": 0
+  },
+  "initial_failures": [
+    {
+      "log_sha256": "d3e825a6095295e19e31110088a23559902bd7b8a504fba3bd2163ed0ba423e4",
+      "reason": "Windows test-only named-security oracle lost its GetNamedSecurityInfoW import during production handle-query migration",
+      "repair": "Added the import only in the existing Windows tests module; no warning suppression or widened production cfg"
+    }
+  ],
+  "primary_sources": [
+    {
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/ace",
+      "access_date": "2026-10-03",
+      "used_for": "ACE types have differing layouts and can grant access; unknown types are not denials"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo",
+      "access_date": "2026-10-03",
+      "used_for": "One handle security descriptor query; READ_CONTROL requirement"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea",
+      "access_date": "2026-10-03",
+      "used_for": "Share modes and final reparse/no-recall directory open; no later pathname-authority claim"
+    }
+  ],
+  "source_sha256": {
+    "crates/sweepx-core/src/lib.rs": "946c52b14e1b244e701e0e15ae53d5d40dc5f4e93827455aab51c9eb3832c09c",
+    "crates/sweepx-core/src/windows_state_security.rs": "0dd68cff5e896dc515703858bdb9c11ac6ce5339850fa032235a776c6c4dd11f",
+    "crates/sweepx-core/src/windows_state_policy.rs": "d145fc8503a0b87a3927d9f29ed66f1a10d1f2aee93115aac395a03f5d0b5f94",
+    ".github/workflows/ci.yml": "ec6b9309b55b8271d4091b5a8eb25f230743b2aa43753e1c63cbba399fa8404f"
+  }
+}

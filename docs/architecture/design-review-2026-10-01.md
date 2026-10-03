@@ -1120,3 +1120,15 @@ macOS 文件索引保留：集中查询变更历史后，缓存逻辑长度还�
 本轮 core/CLI 完整串行检查 465 项通过、0 失败、2 项既有/opt-in ignored；随后新增实际 CLI 回归 1 项通过，未变包复用上一单元 625 项通过、1 项 ignored，共覆盖 1,091 个不同通过用例，不称第二次完整 workspace 测试。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint 通过，追加 CLI 测试的相关分支另验；fmt/diff、54 份 Markdown、23 项文档检查器和 5 项基准检查器测试及包清单检查记录在 artifact。初期签名迁移编译失败、四项旧 current 断言失败、未用代码 lint 及新增 CLI 字节字段的字符串类型断言错误分别保留；没有压制 warning 或放宽生产 cfg。交叉 lint 不证明 Linux/Windows 原生运行或 MSVC。
 
 本条关闭整根缓存虚假 current 的准入路径，未关闭所有 FSEvents 投递/旧热缓存 PTY/probe 间歇根因。接下来仍优先 Windows 私有历史存储、跨平台缓存合同及可增长容器/发现路径资源审计；Linux/Windows 验证过的文件索引、目标宿主/provider/MSVC 与最终 Trash pathname 竞态保持未完成。构建目录仍约 1.8 GiB，继续使用低占用构建；Dart/SvelteKit 扩展暂缓，整体路线图不勾选。
+
+## Windows 私有状态合同与读取资源界限（2026-10-03）
+
+准备 Windows 垃圾历史存储时发现共用权限检查存在缺口：旧实现只检查普通 `ACCESS_ALLOWED_ACE`，其他类型一律跳过。[对象/回调授权也可能扩大访问](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/ace)，不能将陌生 ACE 当成拒绝条目；这会影响现有 operation snapshot/preview 状态目录的私有判定，必须先修正再复用。当前只接受普通 allow/deny，检查完整 ACL/ACE/SID 边界，未知类型/版本、缺失 DACL/owner、损坏或读取失败均拒绝；不改写已有 ACL 以制造通过。
+
+生产 owner/DACL 改用 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)，从同一个已打开目录句柄读取同一份 descriptor，拒绝最终 reparse/offline/recall 对象，避免两个 pathname 查询拿到不同对象。仍保留当前 token user/owner 及本用户确有 Administrators 组时的受控 owner 策略；SYSTEM/Administrators 的既有允许访问政策不变。指针保留在 descriptor/token 分配生命周期内，所有错误路径由 RAII 释放句柄/descriptor。该切片没有把句柄保留到之后的路径读写，也没有完成祖先及后续 snapshot/cache 文件的竞态封闭。
+
+资源审计同时修正 token 信息的无界/未声明对齐分配：每次 native token query 最多 256 KiB，零/超量/不完整返回拒绝；用 pointer-aligned storage，检查可变 group array 数量与字节界限。SID 最多 68 字节并使用 DWORD-aligned 固定存储；SID 文本查找有界，所有 SDK UTF-16 转换最多 32,767 单元加终止符，内嵌 NUL 拒绝，保留不成对 surrogate 的原生单元而不替换。额度不等同 RSS，也不承诺 Win32 服务硬实时返回。删除了未用的第二份路径转换 helper，没有新增 crate 或持久权限 verdict。
+
+[验证记录](windows-private-state-validation-2026-10-03.json)区分七项主机可运行的纯字节/额度回归，与两项仅编译的 Windows 原生回归。字面 ACL/SID oracle 覆盖受控和外部 grant、deny、第二条陌生 grant、损坏长度与最大令牌/文本准入；不是调用生产常量制造期望值。Windows 用 SDK 安装真实 Everyone 对象 grant，再以独立 named-security API 确认实际 ACE 类型；另将保留句柄的目录重命名并在旧路径安装外部 grant，检查句柄仍观察原对象而旧路径不私有。Windows 原生用例由现有 MSVC CI 工作区测试纳入，本机尚未运行，不把纯策略通过或 GNU cross lint 当作其运行结论。
+
+本轮 core 完整串行 339 项通过、0 失败、2 项既有/opt-in ignored，之后增加文本准入回归，最终策略专项七项通过，合计覆盖 340 个不同 core 通过用例；未改 CLI/其他包沿用上一单元结果。host/Linux GNU/Windows GNU 工作区 lint、追加代码的 affected lint、fmt/diff、文档和包清单检查分别见 artifact。第一次 Windows test 编译漏引入独立 oracle 的 `GetNamedSecurityInfoW`，已仅在测试模块补导入；没有压制 warning 或扩大原生生产 cfg。没有 Windows/MSVC/provider 实际运行、完整路径 authority、Windows 历史首屏或性能测量结论。下一单元继续句柄相对的 Windows 历史存储及 TUI 接线，整体跨平台缓存/资源审计保持未完成；Dart/SvelteKit 暂缓。
