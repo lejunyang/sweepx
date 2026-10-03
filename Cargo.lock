@@ -1193,6 +1193,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sweepx-model",
+ "sweepx-platform",
  "tempfile",
  "thiserror",
  "windows-sys 0.61.2",

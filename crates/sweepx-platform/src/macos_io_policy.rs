@@ -2,8 +2,6 @@
 
 use std::{io, marker::PhantomData, rc::Rc};
 
-use crate::BoundedRegularFileReadError;
-
 // Public Darwin sys/resource.h ABI (not provided by our libc crate).
 const MATERIALIZE_DATALESS: i32 = 3;
 const THREAD_SCOPE: i32 = 1;
@@ -13,7 +11,14 @@ unsafe extern "C" {
     fn setiopolicy_np(kind: i32, scope: i32, policy: i32) -> i32;
 }
 
-pub(super) struct NoMaterialization {
+/// Disables dataless materialization on the calling OS thread until restoration.
+///
+/// Enter before opening provider-sensitive paths and retain through all data access.
+/// This guard is neither Send nor Sync; restoring another thread would leave the original
+/// thread altered. Explicit restore reports failure, while Drop attempts restoration on
+/// errors and unwinding. Kernel policy support is not qualification of every cloud provider.
+#[must_use = "retain the guard on its issuing thread until protected I/O completes"]
+pub struct NoMaterialization {
     previous: i32,
     restored: bool,
     // Restoring on a different OS thread would leave the issuing thread modified.
@@ -21,17 +26,22 @@ pub(super) struct NoMaterialization {
 }
 
 impl NoMaterialization {
-    pub(super) fn enter() -> Result<Self, BoundedRegularFileReadError> {
+    /// Observes the existing calling-thread policy and sets OFF, refusing unknown policy
+    /// values or unsupported/denied calls without permitting an unguarded fallback.
+    pub fn enter() -> io::Result<Self> {
         // SAFETY: public ABI operates on the calling thread, with no pointer arguments.
         let previous = unsafe { getiopolicy_np(MATERIALIZE_DATALESS, THREAD_SCOPE) };
+        if previous < 0 {
+            return Err(io::Error::last_os_error());
+        }
         if !(0..=2).contains(&previous) {
-            return Err(BoundedRegularFileReadError::ProviderOrOffline(format!(
-                "cannot observe no-materialization policy: {}",
-                io::Error::last_os_error()
-            )));
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("unsupported calling-thread materialization policy: {previous}"),
+            ));
         }
         if unsafe { setiopolicy_np(MATERIALIZE_DATALESS, THREAD_SCOPE, MATERIALIZE_OFF) } != 0 {
-            return Err(BoundedRegularFileReadError::ProviderOrOffline(format!(
+            return Err(io::Error::other(format!(
                 "cannot prohibit dataless materialization: {}",
                 io::Error::last_os_error()
             )));
@@ -43,10 +53,12 @@ impl NoMaterialization {
         })
     }
 
-    pub(super) fn restore(mut self) -> Result<(), BoundedRegularFileReadError> {
+    /// Restores the policy observed by enter. On failure, Drop retries, and the caller
+    /// must discard read results or refuse publication before its commit point.
+    pub fn restore(mut self) -> io::Result<()> {
         // SAFETY: !Send/!Sync guard remains on its issuing thread; previous was queried here.
         if unsafe { setiopolicy_np(MATERIALIZE_DATALESS, THREAD_SCOPE, self.previous) } != 0 {
-            return Err(BoundedRegularFileReadError::io(io::Error::last_os_error()));
+            return Err(io::Error::last_os_error());
         }
         self.restored = true;
         Ok(())
@@ -80,6 +92,29 @@ mod tests {
         {
             let _guard = NoMaterialization::enter().expect("enter again");
         }
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+    }
+    #[test]
+    fn nesting_errors_and_unwinding_restore_the_issuing_thread() {
+        let previous = unsafe { getiopolicy_np(3, 1) };
+        let outer = NoMaterialization::enter().unwrap();
+        let inner = NoMaterialization::enter().unwrap();
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+        inner.restore().unwrap();
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+        outer.restore().unwrap();
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let error: io::Result<()> = (|| {
+            let _guard = NoMaterialization::enter()?;
+            Err(io::Error::other("controlled operation failure"))
+        })();
+        assert!(error.is_err());
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = NoMaterialization::enter().unwrap();
+            panic!("controlled policy unwind");
+        });
+        assert!(panic.is_err());
         assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
     }
 }

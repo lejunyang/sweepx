@@ -20,6 +20,44 @@ use windows::{same_observation, touch_accessed};
 #[cfg(any(windows, test))]
 mod windows_names;
 
+/// Protects the complete synchronous I/O interval on macOS, including opens and reads.
+/// Success requires restoration; an original operation failure is preserved. Publication
+/// must invoke this only for its preparation stage, then commit after restoration succeeds.
+#[cfg(target_os = "macos")]
+fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let policy = sweepx_platform::macos_io_policy::NoMaterialization::enter()?;
+    let result = operation();
+    {
+        #[cfg(test)]
+        let restored = if FAIL_RESTORE_ONCE.with(|flag| flag.replace(false)) {
+            // Phase failure injection: Drop performs real native restoration; this does not
+            // claim a failed kernel setter. The original operation error keeps precedence.
+            drop(policy);
+            Err(io::Error::other(
+                "injected cache policy restoration failure",
+            ))
+        } else {
+            policy.restore()
+        };
+        #[cfg(not(test))]
+        let restored = policy.restore();
+        if result.is_ok() {
+            restored?;
+        }
+    }
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    operation()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+std::thread_local! {
+    static FAIL_RESTORE_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Maximum native entries examined per disposable cache directory, including unknown names.
 const ENUMERATION_ENTRY_LIMIT: usize = 4096;
 
@@ -89,6 +127,18 @@ impl ReadBudget {
 
     /// Refuses oversized, non-private or unstable observations before returning owned data.
     pub fn read<T: serde::de::DeserializeOwned>(
+        &mut self,
+        directory: &Directory,
+        name: &str,
+        limits: Limits,
+        estimated: impl FnOnce(&T) -> usize,
+    ) -> Option<T> {
+        with_cache_io(|| Ok(self.read_guarded(directory, name, limits, estimated)))
+            .ok()
+            .flatten()
+    }
+
+    fn read_guarded<T: serde::de::DeserializeOwned>(
         &mut self,
         directory: &Directory,
         name: &str,
@@ -175,6 +225,10 @@ pub(crate) struct BoundedRead {
 
 impl Directory {
     pub(crate) fn read_bytes(&self, name: &str, cap: u64) -> io::Result<BoundedRead> {
+        with_cache_io(|| self.read_bytes_guarded(name, cap))
+    }
+
+    fn read_bytes_guarded(&self, name: &str, cap: u64) -> io::Result<BoundedRead> {
         let mut file = self.open_file(name)?;
         let before = file.metadata()?;
         let bytes = before.len();

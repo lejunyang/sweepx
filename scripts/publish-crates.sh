@@ -97,9 +97,9 @@ publish_order=(
   sweepx-canonical
   sweepx-i18n
   sweepx-model
-  sweepx-cache
   sweepx-fixtures
   sweepx-platform
+  sweepx-cache
   sweepx-protocol
   sweepx-audit
   sweepx-catalog

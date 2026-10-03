@@ -36,7 +36,7 @@ The Scanner also now exposes a bounded locator batch reader so read-only upper l
 
 ## Crate responsibilities
 
-The workspace has 17 crates. Native implementations live in `sweepx-platform::{linux,macos,windows}`, selected with `backend-linux`, `backend-macos` and `backend-windows`; the default supplies contracts only. Scanner retains its `platform-*` features and forwards them to the backends. Native dependencies remain target-gated; pure Windows parsers can still be enabled and tested on other hosts.
+The workspace has 17 crates. Native implementations live in `sweepx-platform::{linux,macos,windows}`, selected with `backend-linux`, `backend-macos` and `backend-windows`; no scanner backend is enabled by default. The macOS thread I/O policy is available independently of backend features and is shared by content reads and caches. Cache depends on platform only on macOS with default features disabled; this adds neither a crate nor a scanner. Scanner retains its `platform-*` features and forwards them to the backends. Native dependencies remain target-gated; pure Windows parsers can still be enabled and tested on other hosts.
 
 Cleaner types and validation live in `sweepx-catalog::schema`, deterministic evaluation in `sweepx-catalog::vm`, and built-in resources and package admission in the same crate. The standalone schema/VM packages have left the workspace; machine schema IDs, rule bytes and risk values remain unchanged.
 

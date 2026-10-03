@@ -1,6 +1,6 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
-use super::{AccountedFile, EntryMetadata, write_json};
+use super::{AccountedFile, EntryMetadata, with_cache_io, write_json};
 #[cfg(test)]
 use super::{Limits, ReadBudget};
 use std::ffi::{CStr, CString};
@@ -67,6 +67,10 @@ impl Directory {
 
     /// Reads only relative no-follow metadata for complete cache quota accounting.
     pub(crate) fn accounting_metadata(&self, name: &str) -> io::Result<AccountedFile> {
+        with_cache_io(|| self.accounting_metadata_guarded(name))
+    }
+
+    fn accounting_metadata_guarded(&self, name: &str) -> io::Result<AccountedFile> {
         let parent = self.private()?;
         let name = component(name)?;
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -132,6 +136,10 @@ impl Directory {
 
     /// Opens an absolute no-follow cache root, optionally creating private components.
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
+        with_cache_io(|| Self::open_guarded(path, create))
+    }
+
+    fn open_guarded(path: &Path, create: bool) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::Error::other("cache path must be absolute"));
         }
@@ -178,6 +186,10 @@ impl Directory {
 
     /// Opens a private child directory relative to this retained handle.
     pub fn child(&self, name: &str) -> io::Result<Self> {
+        with_cache_io(|| self.child_guarded(name))
+    }
+
+    fn child_guarded(&self, name: &str) -> io::Result<Self> {
         self.private()?;
         let name = component(name)?;
         // SAFETY: no-follow basename beneath this retained directory; returned fd is owned.
@@ -202,6 +214,10 @@ impl Directory {
 
     /// Creates or admits a private child beneath this retained directory.
     pub fn create_child(&self, name: &str) -> io::Result<Self> {
+        with_cache_io(|| self.create_child_guarded(name))
+    }
+
+    fn create_child_guarded(&self, name: &str) -> io::Result<Self> {
         self.private()?;
         let native = component(name)?;
         // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
@@ -216,6 +232,10 @@ impl Directory {
     /// Nonblocking advisory serialization of publication and eviction across invocations.
     /// Contention makes this disposable cache unavailable rather than delaying a scan.
     pub fn lock(&self) -> io::Result<LockGuard> {
+        with_cache_io(|| self.lock_guarded())
+    }
+
+    fn lock_guarded(&self) -> io::Result<LockGuard> {
         self.private()?;
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
@@ -275,6 +295,18 @@ impl Directory {
                 "cache entry is not a private regular file with one link",
             ));
         }
+        #[cfg(target_os = "macos")]
+        {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: live owned descriptor, initialized stat on success; no pathname reopen.
+            if unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful fstat initialized the complete struct.
+            if unsafe { stat.assume_init() }.st_flags & 0x4000_0000 != 0 {
+                return Err(io::Error::other("dataless cache entry"));
+            }
+        }
         Ok(file)
     }
 
@@ -295,12 +327,6 @@ impl Directory {
         name: &str,
         encode: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.private()?;
-        match self.open_file(name) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let destination = component(name)?;
         let temp = component(&format!(
@@ -308,20 +334,39 @@ impl Directory {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))?;
-        // SAFETY: exclusive creation cannot truncate a pre-existing file or follow a link.
-        let fd = unsafe {
-            libc::openat(
-                self.0.as_raw_fd(),
-                temp.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        let mut file = File::from(owned(fd)?);
-        let result = (|| {
+        let mut created = false;
+        let prepared = with_cache_io(|| {
+            self.private()?;
+            match self.open_file(name) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            // SAFETY: exclusive no-follow creation cannot truncate any existing entry.
+            let fd = unsafe {
+                libc::openat(
+                    self.0.as_raw_fd(),
+                    temp.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            let mut file = File::from(owned(fd)?);
+            created = true;
             encode(&mut file)?;
-            // Disposable cache publication is atomic but does not promise crash durability.
-            // SAFETY: both names are bound to the same retained cache directory.
+            Ok(file)
+        });
+        // A restoration failure must be known before rename, including current.json. A
+        // successful encoder alone cannot turn a failed I/O-policy interval into publication.
+        let result = prepared.and_then(|_file| {
+            // Disposable cache publication is atomic but not crash durable. No data stream
+            // access occurs after policy restoration; only the retained-parent name commit.
+            self.private()?;
+            // SAFETY: both validated names live beneath the same retained directory.
             if unsafe {
                 libc::renameat(
                     self.0.as_raw_fd(),
@@ -334,9 +379,10 @@ impl Directory {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
-        })();
-        if result.is_err() {
-            // SAFETY: only our exclusively created temporary basename is removed.
+        });
+        if result.is_err() && created {
+            // SAFETY: cleanup only after this invocation's exclusive temporary creation.
+            // A pre-existing temp collision must never be removed.
             unsafe {
                 libc::unlinkat(self.0.as_raw_fd(), temp.as_ptr(), 0);
             }
@@ -346,6 +392,10 @@ impl Directory {
 
     /// Removes a managed cache basename without following its target.
     pub fn remove(&self, name: &str) -> io::Result<()> {
+        with_cache_io(|| self.remove_guarded(name))
+    }
+
+    fn remove_guarded(&self, name: &str) -> io::Result<()> {
         self.private()?;
         let name = component(name)?;
         // SAFETY: unlink only removes this entry beneath the retained parent, never follows it.
@@ -357,6 +407,10 @@ impl Directory {
 
     /// Reads native encoded length and LRU time for a managed cache basename.
     pub fn metadata(&self, name: &str) -> io::Result<EntryMetadata> {
+        with_cache_io(|| self.metadata_guarded(name))
+    }
+
+    fn metadata_guarded(&self, name: &str) -> io::Result<EntryMetadata> {
         self.private()?;
         let name = component(name)?;
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -386,6 +440,13 @@ impl Directory {
     }
 
     pub(crate) fn entries_all(
+        &self,
+        visit: impl FnMut(Option<&str>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        with_cache_io(|| self.entries_all_guarded(visit))
+    }
+
+    fn entries_all_guarded(
         &self,
         mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
     ) -> io::Result<()> {
@@ -491,6 +552,112 @@ pub(super) fn touch_accessed(file: &File) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn getiopolicy_np(kind: i32, scope: i32) -> i32;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cache_encoders_readers_and_enumeration_observe_native_off_policy() {
+        use std::io::Write;
+        let (_guard, path, directory) = directory();
+        let previous = unsafe { getiopolicy_np(3, 1) };
+        directory
+            .publish("data", |file| {
+                assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+                file.write_all(b"\"independent bytes\"")
+            })
+            .unwrap();
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let read = ReadBudget::new(Limits::default())
+            .read::<String>(&directory, "data", Limits::default(), |value| {
+                assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+                value.capacity()
+            })
+            .unwrap();
+        assert_eq!(read, "independent bytes");
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let mut observed = std::collections::BTreeSet::new();
+        directory
+            .entries_all(|name| {
+                assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+                observed.insert(name.unwrap().to_owned());
+                Ok(())
+            })
+            .unwrap();
+        let ordinary: std::collections::BTreeSet<_> = std::fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(observed, ordinary);
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn restoration_phase_failure_cannot_advance_pointer_or_keep_a_temporary() {
+        use std::io::Write;
+        let (_guard, path, directory) = directory();
+        directory
+            .publish("current.json", |file| file.write_all(b"old pointer bytes"))
+            .unwrap();
+        let before = std::fs::read(path.join("current.json")).unwrap();
+        let previous = unsafe { getiopolicy_np(3, 1) };
+        let error = directory
+            .publish("current.json", |file| {
+                file.write_all(b"new pointer bytes")?;
+                assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
+                super::super::FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "injected cache policy restoration failure"
+        );
+        assert_eq!(std::fs::read(path.join("current.json")).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let error = directory
+            .publish("current.json", |_| {
+                super::super::FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "controlled encoder error",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "controlled encoder error");
+        assert_eq!(std::fs::read(path.join("current.json")).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn restoration_phase_failure_discards_both_cache_reader_results() {
+        let (_guard, path, directory) = directory();
+        directory.write_json("data", &"payload", 64).unwrap();
+        let before = std::fs::read(path.join("data")).unwrap();
+        let previous = unsafe { getiopolicy_np(3, 1) };
+        super::super::FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+        assert!(directory.read_bytes("data", 64).is_err());
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+        let read = ReadBudget::new(Limits::default()).read::<String>(
+            &directory,
+            "data",
+            Limits::default(),
+            |value| {
+                super::super::FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+                value.capacity()
+            },
+        );
+        assert!(read.is_none());
+        assert_eq!(std::fs::read(path.join("data")).unwrap(), before);
+        assert_eq!(unsafe { getiopolicy_np(3, 1) }, previous);
+    }
 
     #[test]
     fn parent_lock_release_does_not_wait_for_an_inherited_child_descriptor() {

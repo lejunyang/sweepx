@@ -15,6 +15,11 @@ pub mod macos;
 #[cfg(feature = "backend-windows")]
 pub mod windows;
 
+/// Calling-thread macOS I/O policy shared by native content and disposable caches.
+/// Available independently of scanner backend features; it performs no scan or classification.
+#[cfg(target_os = "macos")]
+pub mod macos_io_policy;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};

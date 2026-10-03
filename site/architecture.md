@@ -36,7 +36,7 @@ Scanner 还新增了一个有界 locator batch reader，供只读上层在已 ad
 
 ## Crate 职责
 
-当前 workspace 共 17 个 crate。平台实现位于 `sweepx-platform::{linux,macos,windows}`，通过 `backend-linux` / `backend-macos` / `backend-windows` 选择；默认只提供契约。scanner 继续保留原有 `platform-*` feature，并转发到对应后端；原生依赖仍按目标平台编译。Windows 纯解析器仍可在其他平台启用并测试。
+当前 workspace 共 17 个 crate。平台实现位于 `sweepx-platform::{linux,macos,windows}`，通过 `backend-linux` / `backend-macos` / `backend-windows` 选择；默认不启用扫描后端；macOS 的线程 I/O 策略原语独立于后端 feature 提供，供内容读取与 cache 共用。cache 仅在 macOS 依赖关闭默认 feature 的 platform，不新增 crate 或扫描器。scanner 继续保留原有 `platform-*` feature，并转发到对应后端；原生依赖仍按目标平台编译。Windows 纯解析器仍可在其他平台启用并测试。
 
 规则类型与校验位于 `sweepx-catalog::schema`，纯规则评估位于 `sweepx-catalog::vm`，内置资源与 package 准入由同一个 crate 管理。原独立 schema/VM 包已退出 workspace；机器 schema ID、规则内容和风险值保持不变。
 

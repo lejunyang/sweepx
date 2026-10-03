@@ -5,8 +5,6 @@ use crate::{
 #[cfg(target_os = "macos")]
 mod bulk_directory;
 #[cfg(target_os = "macos")]
-mod content_guard;
-#[cfg(target_os = "macos")]
 pub mod fsevents;
 #[cfg(target_os = "macos")]
 use crate::{DirectoryHandleAdmission, OpenedDirectory};
@@ -592,6 +590,8 @@ mod backend {
             let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
             let observed_before = Self::read_regular_file_observation(&fd)
                 .map_err(BoundedRegularFileReadError::io)?;
+            let native_before = Self::fstat(&fd).map_err(BoundedRegularFileReadError::io)?;
+            Self::validate_regular_file_preview_kind(&native_before)?;
             Self::validate_regular_file_expectation(request, &observed_before)?;
             Self::compare_regular_file_observations(&preview_observed, &observed_before)?;
             Ok((fd, observed_before))
@@ -631,6 +631,14 @@ mod backend {
         fn validate_regular_file_preview_kind(
             observed: &ObservedMetadata,
         ) -> Result<(), BoundedRegularFileReadError> {
+            // Reject the known provider flag before content, both at the no-follow preview
+            // and on the opened descriptor. The calling-thread policy closes the hydration
+            // race between these observations; the flag alone would not be sufficient.
+            if observed.stat.st_flags & 0x4000_0000 != 0 {
+                return Err(BoundedRegularFileReadError::ProviderOrOffline(
+                    "file is a dataless object".into(),
+                ));
+            }
             match kind_from_mode(observed.stat.st_mode) {
                 EntryKind::File => Ok(()),
                 EntryKind::Symlink | EntryKind::ReparsePoint => {
@@ -857,6 +865,12 @@ mod backend {
                 link_target,
             }) = action
             {
+                // Independent SDK observation at the actual pre-open failure seam. This
+                // catches a bounded reader that forgets the policy used by streaming reads.
+                unsafe extern "C" {
+                    fn getiopolicy_np(kind: i32, scope: i32) -> i32;
+                }
+                assert_eq!(unsafe { getiopolicy_np(3, 1) }, 1);
                 let child = parent.join(Path::new(std::ffi::OsStr::from_bytes(&child_name)));
                 fs::remove_file(&child).unwrap();
                 std::os::unix::fs::symlink(link_target, child).unwrap();
@@ -1208,7 +1222,9 @@ mod backend {
             consume: &mut dyn FnMut(&[u8]) -> Result<(), BoundedRegularFileReadError>,
         ) -> Result<crate::RegularFileStreamResult, BoundedRegularFileReadError> {
             Self::ensure_not_cancelled_read(cancel)?;
-            let policy = super::content_guard::NoMaterialization::enter()?;
+            let policy = crate::macos_io_policy::NoMaterialization::enter().map_err(|error| {
+                BoundedRegularFileReadError::ProviderOrOffline(error.to_string())
+            })?;
             let result = (|| {
                 let binding = BoundedRegularFileReadRequest::new(
                     request.child_name().clone(),
@@ -1216,13 +1232,6 @@ mod backend {
                     0,
                 )?;
                 let (fd, before) = Self::open_bound_regular_file(parent, &binding, cancel)?;
-                let observed = Self::fstat(&fd).map_err(BoundedRegularFileReadError::io)?;
-                // Public sys/stat.h SF_DATALESS; libc does not expose this Darwin flag.
-                if observed.stat.st_flags & 0x4000_0000 != 0 {
-                    return Err(BoundedRegularFileReadError::ProviderOrOffline(
-                        "file is a dataless object".into(),
-                    ));
-                }
                 crate::content::stream_observed_file(
                     request,
                     cancel,
@@ -1258,7 +1267,7 @@ mod backend {
             })();
             // Surface restoration errors on success; preserve the original failure otherwise.
             // RAII also restores after opening, read, consumer, cancellation and panic failures.
-            let restored = policy.restore();
+            let restored = policy.restore().map_err(BoundedRegularFileReadError::io);
             match result {
                 Ok(value) => {
                     restored?;
@@ -1274,59 +1283,72 @@ mod backend {
             request: &BoundedRegularFileReadRequest,
             cancel: &CancellationToken,
         ) -> Result<PresentRegularFileRead, BoundedRegularFileReadError> {
-            let (fd, observed_before) = Self::open_bound_regular_file(parent, request, cancel)?;
-            if observed_before.logical_bytes > DecimalU128::new(request.max_bytes() as u128) {
-                return Err(BoundedRegularFileReadError::LimitExceeded {
-                    max_bytes: request.max_bytes(),
-                    observed_logical_bytes: observed_before.logical_bytes,
-                });
-            }
-            Self::ensure_not_cancelled_read(cancel)?;
-
-            let probe_limit = request.max_bytes().saturating_add(1);
-            let mut bytes = Vec::with_capacity(probe_limit.min(REGULAR_FILE_READ_CHUNK_BYTES));
-            while bytes.len() < probe_limit {
+            let policy = crate::macos_io_policy::NoMaterialization::enter().map_err(|error| {
+                BoundedRegularFileReadError::ProviderOrOffline(error.to_string())
+            })?;
+            let result = (|| {
+                let (fd, observed_before) = Self::open_bound_regular_file(parent, request, cancel)?;
+                if observed_before.logical_bytes > DecimalU128::new(request.max_bytes() as u128) {
+                    return Err(BoundedRegularFileReadError::LimitExceeded {
+                        max_bytes: request.max_bytes(),
+                        observed_logical_bytes: observed_before.logical_bytes,
+                    });
+                }
                 Self::ensure_not_cancelled_read(cancel)?;
-                let remaining = probe_limit - bytes.len();
-                let mut chunk = vec![0u8; remaining.min(REGULAR_FILE_READ_CHUNK_BYTES)];
-                // SAFETY: `fd` is a live descriptor and `chunk` provides writable storage.
-                let read = unsafe {
-                    libc::read(
-                        fd.as_raw_fd(),
-                        chunk.as_mut_ptr().cast::<libc::c_void>(),
-                        chunk.len(),
-                    )
-                };
-                if read < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.kind() == io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    return Err(BoundedRegularFileReadError::io(error));
-                }
-                let read = read as usize;
-                if read == 0 {
-                    break;
-                }
-                chunk.truncate(read);
-                bytes.extend_from_slice(&chunk);
-            }
 
-            Self::ensure_not_cancelled_read(cancel)?;
-            let observed_after = Self::read_regular_file_observation(&fd)
-                .map_err(BoundedRegularFileReadError::io)?;
-            if bytes.len() > request.max_bytes() {
-                Self::compare_regular_file_observations(&observed_before, &observed_after)?;
-                return Err(BoundedRegularFileReadError::LimitExceeded {
-                    max_bytes: request.max_bytes(),
-                    observed_logical_bytes: observed_after.logical_bytes,
-                });
+                let probe_limit = request.max_bytes().saturating_add(1);
+                let mut bytes = Vec::with_capacity(probe_limit.min(REGULAR_FILE_READ_CHUNK_BYTES));
+                while bytes.len() < probe_limit {
+                    Self::ensure_not_cancelled_read(cancel)?;
+                    let remaining = probe_limit - bytes.len();
+                    let mut chunk = vec![0u8; remaining.min(REGULAR_FILE_READ_CHUNK_BYTES)];
+                    // SAFETY: `fd` is a live descriptor and `chunk` provides writable storage.
+                    let read = unsafe {
+                        libc::read(
+                            fd.as_raw_fd(),
+                            chunk.as_mut_ptr().cast::<libc::c_void>(),
+                            chunk.len(),
+                        )
+                    };
+                    if read < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(BoundedRegularFileReadError::io(error));
+                    }
+                    let read = read as usize;
+                    if read == 0 {
+                        break;
+                    }
+                    chunk.truncate(read);
+                    bytes.extend_from_slice(&chunk);
+                }
+
+                Self::ensure_not_cancelled_read(cancel)?;
+                let observed_after = Self::read_regular_file_observation(&fd)
+                    .map_err(BoundedRegularFileReadError::io)?;
+                if bytes.len() > request.max_bytes() {
+                    Self::compare_regular_file_observations(&observed_before, &observed_after)?;
+                    return Err(BoundedRegularFileReadError::LimitExceeded {
+                        max_bytes: request.max_bytes(),
+                        observed_logical_bytes: observed_after.logical_bytes,
+                    });
+                }
+                Ok(PresentRegularFileRead {
+                    bytes,
+                    observed_before,
+                    observed_after,
+                })
+            })();
+            let restored = policy.restore().map_err(BoundedRegularFileReadError::io);
+            match result {
+                Ok(value) => {
+                    restored?;
+                    Ok(value)
+                }
+                Err(error) => Err(error),
             }
-            Ok(PresentRegularFileRead {
-                bytes,
-                observed_before,
-                observed_after,
-            })
         }
     }
 }

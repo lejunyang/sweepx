@@ -1,0 +1,166 @@
+{
+  "schema": "sweepx.cache-no-materialization-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "eddfddd",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2528412
+  },
+  "scope": [
+    "reuse the existing macOS thread guard from a backend-independent public platform module; cache has a macOS-only no-default-feature platform dependency",
+    "cover native cache opens, child creation, locks, enumeration, metadata/accounting, removals, read/parse and publication preparation",
+    "bounded whole-file platform reader now guarded like the existing range stream; shared preview/open-FD dataless refusal",
+    "restore checked before cache rename; restoration-phase failure retains old pointer and removes only own exclusively-created temporary",
+    "publisher ordering reflects the new platform -> cache edge, no publishing performed"
+  ],
+  "nativeEvidence": {
+    "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/resource.h and sys/stat.h read on host",
+    "materializationType": 3,
+    "threadScope": 1,
+    "off": 1,
+    "default": 0,
+    "on": 2,
+    "origBit": 4,
+    "datalessFlag": "0x40000000",
+    "oracle": "independent native getiopolicy_np literal ABI observation in encoder, read estimator, enumeration and platform replacement-before-open hook; nested/success/error/unwind restoration",
+    "qualification": "actual thread policy observed, not a real cloud provider/dataless payload test; unknown queried policy values refuse unguarded fallback"
+  },
+  "failureSemantics": {
+    "reader": "successful result requires restoration; restoration failure discards bytes/owned value, charged budget stays spent; original operation error takes precedence",
+    "publication": "protected preparation and checked restoration precede metadata/name commit; no further data stream reads/writes after restore; only our successfully-created temporary is cleaned on failure",
+    "injection": "test-only thread-local restoration-phase failure; Drop uses the real restoration syscall. Does not claim an actual failed kernel setter.",
+    "destructiveAuthority": "disposable cache metadata only; no new payload deletion authority or permanent-delete fallback"
+  },
+  "initialCorrections": [
+    {
+      "event": "test insertion patch rejected stale context",
+      "effect": "no mutation; reread context and add regressions precisely"
+    },
+    {
+      "event": "diff inspection found opened-FD check inserted at directory-root location",
+      "effect": "moved to file-open helper before runtime or lint verification; no product test failure on that intermediate edit"
+    },
+    {
+      "event": "final affected invocation used restricted sandbox unlike prior successful workspace run",
+      "effect": "existing FSEvents native service unavailable (zero current cursor, stream start failure); inspected exact assertion/start paths, preserve failure and compare in service-enabled environment without code changes"
+    },
+    {
+      "event": "final log/graph/package verifier had a missing Python closing parenthesis",
+      "effect": "syntax error before any validation ran; corrected temporary read-only verifier; all counts, graph and package assertions then passed"
+    }
+  ],
+  "checks": [
+    {
+      "name": "initial-affected-tests",
+      "result": "passed",
+      "passed": 183,
+      "ignored": 1,
+      "command": "cargo test -p sweepx-platform -p sweepx-cache --all-features --locked -- --test-threads=1",
+      "note": "cache87/platform96 before final new tests; superseded by final workspace and affected checks"
+    },
+    {
+      "name": "cache-native-focused",
+      "result": "passed",
+      "passed": 9,
+      "command": "cargo test -p sweepx-cache --all-features --locked native::unix::tests -- --test-threads=1"
+    },
+    {
+      "name": "backend-independent-policy",
+      "result": "passed",
+      "passed": 2,
+      "command": "cargo test -p sweepx-platform --no-default-features --locked macos_io_policy -- --test-threads=1"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "passed": 1150,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "note": "final behavior including opened-FD flag and live pre-open policy hook; later helper cfg split is behavior-neutral on macOS, final affected tests verify that source"
+    },
+    {
+      "name": "final-affected-tests-restricted-environment",
+      "result": "failed",
+      "command": "cargo test -p sweepx-platform -p sweepx-cache --all-features --locked -- --test-threads=1",
+      "passed": 184,
+      "failed": 3,
+      "ignored": 1,
+      "note": "cache90 passed; platform94 passed,3 failed,1 ignored. FSEvents current_event_id returned zero; fixture and zero-deadline tests failed at FSEventStreamStart. Native policy tests passed. This invocation stopped before later doc tests; compare with service-enabled native invocation, no production changes or test exclusions."
+    },
+    {
+      "name": "final-affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-platform -p sweepx-cache --all-features --locked -- --test-threads=1",
+      "passed": 187,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 0,
+      "note": "service-enabled native invocation, unchanged code: cache90/platform97,1 ignored; docs continue and complete. Restricted FSEvents failure retained separately."
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "note": "compilation only, not native runtime"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "note": "GNU compilation only, not Windows runtime/MSVC"
+    },
+    {
+      "name": "publisher-order",
+      "result": "passed",
+      "command": "bash -n scripts/publish-crates.sh; cargo metadata --no-deps --format-version 1 --locked; independent Python normal/build workspace dependency order comparison",
+      "note": "17 packages once, all normal/build edges preceding consumers including target-specific platform -> cache. No registry publication/build qualification."
+    },
+    {
+      "name": "no-backend-feature-edge",
+      "result": "passed",
+      "command": "cargo tree -p sweepx-cache --no-default-features -e features -i sweepx-platform"
+    },
+    {
+      "name": "fmt-diff-docs-packages",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check; Python scripts/lint_docs.py; cargo package -p sweepx-platform --list --allow-dirty --locked; cargo package -p sweepx-cache --list --allow-dirty --locked",
+      "note": "54 Markdown files; new shared policy module present and old private module absent in platform package list; registry build not attempted"
+    }
+  ],
+  "excluded": [
+    {
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "status": "explicitly skipped",
+      "reason": "previous independent macOS Foundation ordinary Trash success hang diagnosis remains; test preserved; no fully green native Trash matrix claim"
+    },
+    {
+      "tests": "3 existing ignored workspace tests",
+      "status": "ignored",
+      "reason": "preserved existing declarations, not counted as pass"
+    },
+    {
+      "check": "docs checker 23 regression tests",
+      "status": "reused",
+      "reason": "unchanged script; passing previous generation-state-retention unit result reused"
+    }
+  ],
+  "remaining": [
+    "Linux cache mount identity including same-device bind mounts; retained ancestors and noncooperating substitutions",
+    "other SnapshotStore/journal state paths and remaining discovery/candidate/fingerprint/legacy resource audit",
+    "validated Linux/Windows current file indexes",
+    "native Linux/Windows, MSVC, real provider/dataless, system Trash and Linux quarantine qualification",
+    "no new end-to-end scan, SweepX hot-cache, OS-cache comparison, RSS or latency percentile measurement; Dart/SvelteKit new work deferred"
+  ],
+  "diskCleanup": "previous 43.323 GiB debug payloads moved using SweepX to OS Trash; Trash not emptied; all compilation uses lean profile configuration"
+}
