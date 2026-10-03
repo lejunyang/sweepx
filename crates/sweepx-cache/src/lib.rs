@@ -7,6 +7,8 @@ mod windows_state_policy;
 #[cfg(windows)]
 pub mod windows_state_security;
 
+mod json_budget;
+
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::ffi::OsString;
@@ -281,17 +283,30 @@ pub enum CacheInspectionWarning {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CacheInspectionError {
-    CurrentPointerTooLarge { bytes: u64 },
+    CurrentPointerTooLarge {
+        bytes: u64,
+    },
     MalformedCurrentPointer,
     InvalidCurrentGenerationName,
     MissingCurrentGenerationData,
-    CurrentGenerationTooLarge { bytes: u64 },
+    CurrentGenerationTooLarge {
+        bytes: u64,
+    },
+    /// Typed JSON storage reservations exceed the cap; the original cache is retained.
+    CurrentGenerationParseLimit {
+        /// Deserialization storage reservation cap, excluding encoded input/parser scratch.
+        reservation_cap_bytes: usize,
+    },
     MalformedGenerationEnvelope,
     GenerationChecksumMismatch,
     GenerationPointerMismatch,
     InvalidStoredGenerationName,
-    InvalidStoredSchema { schema: String },
-    InvalidStoredProvenance { entry_id: String },
+    InvalidStoredSchema {
+        schema: String,
+    },
+    InvalidStoredProvenance {
+        entry_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +422,8 @@ impl AtomicGenerationStore {
     /// Loads one bounded historical generation through retained private native directories.
     /// Missing storage stays absent. Oversize or unstable files are refused before parsing;
     /// corruption is copied into the same retained namespace, never a re-resolved display path.
+    /// Typed parsing uses a separate 256 MiB storage-reservation ledger. Exhaustion preserves
+    /// the original generation rather than quarantining it; this is not a process RSS cap.
     pub fn load_current(&self) -> Result<LoadResult, CacheError> {
         let directory = match native::Directory::open(&self.root, false) {
             Ok(directory) => directory,
@@ -417,6 +434,14 @@ impl AtomicGenerationStore {
     }
 
     fn load_from_directory(&self, directory: &native::Directory) -> Result<LoadResult, CacheError> {
+        self.load_from_directory_with_parse_cap(directory, json_budget::PARSE_RESERVATION_CAP)
+    }
+
+    fn load_from_directory_with_parse_cap(
+        &self,
+        directory: &native::Directory,
+        parse_cap: usize,
+    ) -> Result<LoadResult, CacheError> {
         let pointer_bytes = match read_generation_bytes(
             directory,
             "current.json",
@@ -451,9 +476,14 @@ impl AtomicGenerationStore {
             None => return Ok(LoadResult::Miss),
         };
 
-        let envelope: StoredEnvelope = match serde_json::from_slice(&bytes) {
+        let envelope: StoredEnvelope = match json_budget::parse_generation(&bytes, parse_cap) {
             Ok(envelope) => envelope,
-            Err(_) => {
+            Err(json_budget::ParseError::ResourceLimit) => {
+                return Err(CacheError::ResourceLimit {
+                    reason: ReasonCode::ResourceLimit,
+                });
+            }
+            Err(json_budget::ParseError::Json) => {
                 self.quarantine_generation(directory, &pointer.generation, &bytes)?;
                 return Ok(LoadResult::Miss);
             }
@@ -487,7 +517,13 @@ impl AtomicGenerationStore {
     /// give the equivalent property. Everything after opening — the size accounting, the byte
     /// limits, the parse and checksum decisions — is shared, so the two platforms cannot drift in
     /// what they consider healthy.
+    /// Parsing shares the loader's storage-reservation budget; exhaustion is a typed diagnostic,
+    /// independent of encoded size, malformed JSON or a checksum mismatch.
     pub fn inspect(&self) -> Result<CacheInspection, CacheError> {
+        self.inspect_with_parse_cap(json_budget::PARSE_RESERVATION_CAP)
+    }
+
+    fn inspect_with_parse_cap(&self, parse_cap: usize) -> Result<CacheInspection, CacheError> {
         let Some(reader) = InspectionReader::open_root(&self.root)? else {
             return Ok(CacheInspection {
                 exists: false,
@@ -617,16 +653,26 @@ impl AtomicGenerationStore {
             }
         };
 
-        let envelope: StoredEnvelope = match serde_json::from_slice(&generation_bytes) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                inspection.schema_health = CacheInspectionHealth::Error;
-                inspection
-                    .errors
-                    .push(CacheInspectionError::MalformedGenerationEnvelope);
-                return Ok(inspection);
-            }
-        };
+        let envelope: StoredEnvelope =
+            match json_budget::parse_generation(&generation_bytes, parse_cap) {
+                Ok(envelope) => envelope,
+                Err(json_budget::ParseError::ResourceLimit) => {
+                    inspection.schema_health = CacheInspectionHealth::Error;
+                    inspection
+                        .errors
+                        .push(CacheInspectionError::CurrentGenerationParseLimit {
+                            reservation_cap_bytes: parse_cap,
+                        });
+                    return Ok(inspection);
+                }
+                Err(json_budget::ParseError::Json) => {
+                    inspection.schema_health = CacheInspectionHealth::Error;
+                    inspection
+                        .errors
+                        .push(CacheInspectionError::MalformedGenerationEnvelope);
+                    return Ok(inspection);
+                }
+            };
 
         let checksum = checksum_hex(&envelope.payload)?;
         if checksum != envelope.checksum_sha256 {
@@ -2622,6 +2668,55 @@ mod tests {
         store.write_generation(&generation).unwrap();
         let loaded = store.load_current().unwrap();
         assert_eq!(loaded, LoadResult::Hit(generation));
+    }
+
+    #[test]
+    fn parsed_storage_limit_preserves_generation_and_reports_read_only_diagnostics() {
+        let fixture = TestTempDir::new();
+        let store = AtomicGenerationStore::new(fixture.path());
+        let generation = StoredGeneration {
+            generation: "parse-fixture".into(),
+            schema: STORED_PREVIEW_SCHEMA.into(),
+            created_at: "2026-10-03T00:00:00Z".into(),
+            preview: compact_preview(
+                vec![summary(
+                    "parent",
+                    "file",
+                    PreviewKind::Directory,
+                    1,
+                    stale_preview(),
+                )],
+                &PreviewBudgets::default(),
+            ),
+            validity: Vec::new(),
+        };
+        store.write_generation(&generation).unwrap();
+        let pointer_before = fs::read(store.root().join("current.json")).unwrap();
+        let generation_before = fs::read(store.generation_path("parse-fixture")).unwrap();
+        let directory = native::Directory::open(store.root(), false).unwrap();
+        // Same production loader/inspector with a controlled cap, without a huge host fixture.
+        assert!(matches!(
+            store.load_from_directory_with_parse_cap(&directory, 1024),
+            Err(CacheError::ResourceLimit { .. })
+        ));
+        let inspection = store.inspect_with_parse_cap(1024).unwrap();
+        assert_eq!(inspection.schema_health, CacheInspectionHealth::Error);
+        assert_eq!(
+            inspection.errors,
+            [CacheInspectionError::CurrentGenerationParseLimit {
+                reservation_cap_bytes: 1024
+            }]
+        );
+        assert_eq!(
+            fs::read(store.root().join("current.json")).unwrap(),
+            pointer_before
+        );
+        assert_eq!(
+            fs::read(store.generation_path("parse-fixture")).unwrap(),
+            generation_before
+        );
+        assert!(!store.quarantine_dir().exists());
+        assert_eq!(store.load_current().unwrap(), LoadResult::Hit(generation));
     }
 
     #[test]

@@ -175,6 +175,7 @@ cargo run -p sweepx-cli -- \
 - 输出 kind 是 `cache.status.result`，并报告 `exists`、`currentGeneration`、`generationCount`、`quarantineCount`、`approxBytes`、`approxBytesComplete`、`storedSchema`、`currentHealth`、`schemaHealth` 以及 typed `warnings[]` / `errors[]`。
 - 该命令不会触发 scan、repair、quarantine、rebuild，也不会暴露缓存条目、display path、预览内容或 live filesystem 事实。
 - `available` 只表示受限缓存结构与校验可读；任意 warning、error 或 quarantine presence 都会把结果降为 `degraded`，并返回 exit 4。
+- generation 解析另有 256 MiB 的存储预留预算，限制复制字符串、集合容量与内部枚举缓冲；它不是整个进程的内存上限。超额报告 `current_generation_parse_limit` 和十进制字符串 `reservationCapBytes`，不修改或隔离缓存文件。普通扫描报告缓存资源缺口并继续当前观察。
 
 ## 从 scan JSON 解释
 

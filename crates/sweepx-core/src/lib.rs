@@ -5292,6 +5292,12 @@ fn cache_inspection_error_json(error: &CacheInspectionError) -> Value {
             "kind": "current_generation_too_large",
             "bytes": DecimalU128::new(*bytes as u128),
         }),
+        CacheInspectionError::CurrentGenerationParseLimit {
+            reservation_cap_bytes,
+        } => json!({
+            "kind": "current_generation_parse_limit",
+            "reservationCapBytes": DecimalU128::new(*reservation_cap_bytes as u128),
+        }),
         CacheInspectionError::MalformedGenerationEnvelope => json!({
             "kind": "malformed_generation_envelope",
         }),
@@ -5389,6 +5395,15 @@ fn cache_status_error_message(error: &CacheInspectionError) -> ProtocolMessage {
             "cache.preview.inspect.current_generation_too_large",
             false,
             [("bytes", bytes.to_string())],
+        ),
+        CacheInspectionError::CurrentGenerationParseLimit {
+            reservation_cap_bytes,
+        } => protocol_error(
+            "cache.preview.inspect.current_generation_parse_limit",
+            "cache",
+            "cache.preview.inspect.current_generation_parse_limit",
+            false,
+            [("reservationCapBytes", reservation_cap_bytes.to_string())],
         ),
         CacheInspectionError::MalformedGenerationEnvelope => protocol_error(
             "cache.preview.inspect.malformed_generation_envelope",
@@ -6767,6 +6782,32 @@ mod tests {
         assert!(loaded.preview.is_none());
         assert!(loaded.generation.is_none());
         assert!(!store.root().join("quarantine").exists());
+    }
+
+    #[test]
+    fn cache_parse_resource_diagnostic_has_stable_machine_fields_and_parameters() {
+        let error = CacheInspectionError::CurrentGenerationParseLimit {
+            reservation_cap_bytes: 1024,
+        };
+        assert_eq!(
+            cache_inspection_error_json(&error),
+            json!({
+                "kind": "current_generation_parse_limit", "reservationCapBytes": "1024"
+            })
+        );
+        let message = cache_status_error_message(&error);
+        assert_eq!(
+            message.code,
+            "cache.preview.inspect.current_generation_parse_limit"
+        );
+        assert_eq!(
+            message
+                .params
+                .get("reservationCapBytes")
+                .map(String::as_str),
+            Some("1024")
+        );
+        assert_eq!(message.class, "cache");
     }
 
     #[test]

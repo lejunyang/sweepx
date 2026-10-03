@@ -973,7 +973,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 这次 oracle 提交只提供生产模型的独立输入；当时 `cargoOutput` 仍返回 `workspace_default_not_resolved`。工作区成员和默认输出的生产求解随后接入，见下节；更广配置、原生输出匹配、独占归属及活动仍开放，不能因 oracle 成功勾选规则扩展。
 
-## 当前未完成摘要（2026-10-03）
+## 当前未完成摘要（2026-10-04）
 
 前文按交付顺序保留历史叙述；下面汇总当前缺口，避免把后续已完成的内容再次当作待办。
 
@@ -982,7 +982,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览解析/投影预算、provider 与 state 目录审计；未来复用仍需独立事实有效性合同 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；普通预览已撤回未经证明的 USN 有效性升级及额外卷探测，保持历史；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览首次投影与写入准入、provider 与 state 目录审计；未来复用仍需独立事实有效性合同 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；generation 解析另有 visitor 存储预留账本，非全进程内存证明；普通预览已撤回未经证明的 USN 有效性升级及额外卷探测，保持历史；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1217,3 +1217,20 @@ generation 和 current 指针各自经独占私有 temporary 原子发布；保�
 这次删除无证据升级及附加 IO 路径，不宣称新的端到端提速或验证过的 Linux/Windows 文件索引。解析前 owned-data admission、首次 row/aggregate 投影、state pathname/额度/代次淘汰、provider/no-materialization、其他发现/指纹路径及目标宿主/MSVC/Trash 资格仍未完成，按用户顺序继续优先；Dart/SvelteKit 新扩展暂缓。构建仍采用关闭 incremental/debug symbols 的 lean 配置；没有清空回收站。
 
 [本单元验证记录](historical-preview-validity-validation-2026-10-03.json)保留初次夹具字段编译错误、两处新链接失败和实际修复后的结果。完整工作区串行测试 1,107 项通过、0 个执行用例失败、3 项既有 opt-in ignored；已独立诊断的系统 Trash 成功挂起用例继续显式 skip，不能称原生资格矩阵全绿。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 和 cache/core/platform 包清单通过；未改文档检查器复用上一单元 23 项通过结果。交叉 lint 不证明 Linux/Windows 运行或 MSVC，包清单不证明 registry 构建。target 实际占用 2,289,152 KiB（约 2.2 GiB），没有清空回收站。
+
+
+## 普通 generation 解析存储预留与只读诊断（2026-10-04）
+
+编码文件上限与拥有对象的内存准入不同：先前 loader/inspect 限制 generation 为 65 MiB，随后仍直接派生反序列化所有行、字符串、集合与 serde 内部枚举 Content。密集输入或嵌套元数据可在该 byte cap 内引发额外分配。现在现有 cache crate 的私有 `json_budget` 模块为固定 generation DTO 包装同一个 serde JSON decoder，不增加 crate、依赖、第二个 JSON parser、通用 AST 或规则实现。
+
+所有嵌套 seed 共用 256 MiB 的单调预留账本，失败不退款。在拥有数据的 visitor 运行前，以当前 seed value 的实际 `size_of` 预留集合存储和增长余量；字符串按解码后长度计入复制、NativeName base64 解码/规范校验重新编码及 UTF-16 转换余量。禁止消费 parser size hint 来提前分配。已计入父对象的 struct inline fields 不再逐字段重复计费；固定 DTO 的 `deserialize_any` map 是 serde 枚举 Content pair Vec，单独按向量预留，真正 BTreeMap 通过 `deserialize_map` 按树节点预留。sequence visitor 开始前另预留 128 bytes 的小节点/容器余量：角色 BTreeSet 只有六个不同的 unit variant，最多一个 leaf；不能只按 enum seed 大小把它当 Vec。入口只暴露 generation envelope；新增自定义 collector/JSON Value 或变更 serde/模型必须重新审计这些存储形状，不能当作任意类型的通用 heap quota。
+
+核对实际固定工具链的 rust-src：alloc 的首次 Vec 容量按元素大小采用 8/4/1，BTreeMap node 有 11 个 key/value slot、非根最低占用 5 个；首次预留 8 个 Vec slot，树首次 12 slot、后续 3 slot 及 header/edge 余量。核对锁定 serde 1.0.229 的 Content/TaggedContent visitor 实际使用 pair Vec，以及 BTreeMap collector 调用 `deserialize_map`。不是由测试复用同一预算常量来制造 oracle。普通独立 serde decoder 对照原生 name 两种编码/非 Unicode、u128、内部/外部 enum、escape、嵌套 map/Vec/Option 的结果；另从实际 Vec/String capacity 独立计算 retained storage，检查多个增长边界的预留覆盖。资源失败标记即使被 fallback visitor 吞掉仍终止整个解析。解析器原有 recursion/type/trailing-input 规则保留。
+
+输入 buffer/JSON unescape scratch 已由独立编码上限约束，不计入此账本；allocator overhead、全局 scanner/TUI/其他操作和 RSS 也不是本账本的证明。较大或复杂 generation 可以在编码文件未超额时因保守预留被拒绝；保持原文件并报告资源缺口，不截断为看似有效的 preview，也不把预算失败当 corruption 复制到 quarantine。首次全部行投影、aggregate index、拥有数据的 writer 准入及其与 decoder 的代次兼容仍开放，不能由这次 loader guard 称整体缓存内存预算完成。
+
+加载与只读 inspect 使用同一准入路径。加载超额返回既有 `CacheError::ResourceLimit`，普通 scan 沿既有缓存资源缺口路径继续当前观察；inspect 保持只读，新增 `current_generation_parse_limit` / `reservationCapBytes` 十进制字符串诊断，退出 degraded/4。旧 JSON/checksum、schema/provenance 验证、损坏隔离、原生保留句柄权限和文件界限保持不变。低层实际 generation/指针夹具通过控制解析 cap 触发失败，再独立读取原文件逐字节确认未改、未隔离，恢复默认 cap 可以完整载入；没有创建巨型 host 夹具或改变生产 cfg。
+
+generation DTO 样本验证覆盖 1、1,000、10,000 行，最后一组编码 6,367,992 bytes、预留 139,080,040 bytes，逐项等价普通 decoder；这些是 arm64 macOS、Rust 1.98.0、lean test build 的 JSON 对象预留测量，不是堆峰值、OS/SweepX cache 热扫描或端到端提速。初版没有区分 inline struct / Content pair Vec，最后一组曾预留 223,901,584 bytes；核对真实存储形状后减少重复预留，没有放宽 cap 或修改语义 oracle。Dart/SvelteKit 新工作继续暂缓，跨平台缓存及余下资源审计继续优先。
+
+[本单元验证记录](generation-parse-admission-validation-2026-10-04.json)保留首次 enum 穷尽匹配/未用错误字段的 check 失败、实际修正及预留模型调整记录。首次完整工作区串行测试 1,117 项通过、3 项既有 ignored，已诊断系统 Trash 挂起用例显式 skip；最终增加角色小树节点余量及回归后，完整 cache 68、core 328（2 ignored）及 CLI 132（上述用例 skip）共 528 项再通过，未改包复用原通过结果，组合覆盖 1,118 个不同通过用例、3 ignored、1 explicit skip，不称新完整 workspace invocation 或原生资格全绿。最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 与 cache/core 包清单通过；文档检查器未改，复用前单元 23 项通过。交叉 lint 不证明目标宿主/MSVC，包清单不证明 registry 构建。target 为 2,307,248 KiB（约 2.2 GiB），没有清空回收站。

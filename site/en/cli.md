@@ -174,6 +174,7 @@ cargo run -p sweepx-cli -- \
 - The output kind is `cache.status.result`, reporting `exists`, `currentGeneration`, `generationCount`, `quarantineCount`, `approxBytes`, `approxBytesComplete`, `storedSchema`, `currentHealth`, `schemaHealth`, and typed `warnings[]` / `errors[]`.
 - The command does not trigger a scan, repair, quarantine, rebuild, or reveal cached entries, display paths, preview contents, or live filesystem facts.
 - `available` means only that bounded cache structure and validation are readable; any warning, error, or quarantine presence degrades the result to exit 4.
+- Generation parsing has a separate 256 MiB storage-reservation budget for copied strings, collection capacity and internal enum buffers. This is not a process memory cap. Exhaustion reports `current_generation_parse_limit` with decimal-string `reservationCapBytes`, preserving the cache without quarantine. Ordinary scans report a cache resource gap and continue current observations.
 
 ## Explain from scan JSON
 
