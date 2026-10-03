@@ -28,6 +28,7 @@ pub fn scan_duplicates_with_store<S: SnapshotStore>(
             cancel,
             sink: None,
         }),
+        ScanProjection::Materialized,
     )
     .map(|result| result.scan)
 }

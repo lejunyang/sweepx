@@ -33,6 +33,7 @@ pub fn scan_large_files_with_store<S: SnapshotStore>(
             cancel,
             sink: None,
         }),
+        ScanProjection::Materialized,
     )
     .map(|result| result.scan)
 }
@@ -92,6 +93,7 @@ pub fn scan_file_analysis_with_observer<S: SnapshotStore>(
             cancel,
             sink: Some(sink),
         }),
+        ScanProjection::Materialized,
     )
     .map(|result| result.scan)
 }
@@ -439,6 +441,7 @@ mod tests {
                 cancel,
                 sink: None,
             }),
+            ScanProjection::Materialized,
         )
         .unwrap()
         .scan

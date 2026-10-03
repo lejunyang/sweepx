@@ -32,6 +32,8 @@ Global options:
 
 Locale resolution considers the explicit override, locale environment, and system locale; an unrecognized result falls back to `en-US`. Machine keys and values are not translated.
 
+Ordinary `scan` selects the human table's first 40 rows directly from typed scan facts. JSON is one compact document, writing every retained fact row incrementally with stable fields, native path encodings and evidence states. Export happens after scanning; this is not a live event stream or a total-output byte limit. A stdout write or flush failure returns 8. Interrupted JSON is not a completed result; a completed scan's persisted state is not rolled back by export failure.
+
 ### P4a.2 qualification records are not a new command
 
 The protocol can now express one exact capability/platform tuple and its evidence as a typed, validated record. Mutation does not use a broad delete flag: it is split into `trash.local.file`, `trash.local.directory`, `permanent.local.file`, `permanent.local.directory`, and `permanent.local.link`. The current host's Trash cells and Linux file/directory Permanent cells are `degraded` previews; link and every non-Linux Permanent cell remain `disabled`.

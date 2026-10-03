@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io::IsTerminal;
-#[cfg(target_os = "linux")]
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode as ProcessExitCode;
 use std::sync::mpsc;
@@ -42,8 +40,8 @@ use sweepx_core::{
     ScanRequest, StateError, StatusRequest, cache_status_usage_error, cancel_with_store,
     capabilities, cleaner_cargo_detect_with_invocation_and_cancel, cleaner_list, cleaner_show,
     core_error_exit_code, durable_store, explain_from_scan_json, parse_locale_override,
-    scan_for_tui_with_store, scan_junk_with_store, scan_ndjson_supported, scan_with_store,
-    serialize_json, serialize_ndjson, state_dir_from_explicit_or_default, status_with_store,
+    scan_for_output_with_store, scan_for_tui_with_store, scan_junk_with_store,
+    scan_ndjson_supported, serialize_json, state_dir_from_explicit_or_default, status_with_store,
     usage_error_output, validate_absolute_root,
 };
 #[cfg(target_os = "linux")]
@@ -484,80 +482,48 @@ fn main() -> ProcessExitCode {
                 tui,
                 format == OutputFormat::Human,
             );
-            let scan = if duplicates {
-                sweepx_core::scan_duplicates_with_store(
+            if tui {
+                let scan = scan_for_tui_with_store(
                     &context,
                     &ScanRequest {
                         roots,
                         state_dir: state_dir.clone(),
                     },
                     store.as_ref(),
-                    &sweepx_core::DuplicateOptions {
-                        minimum_logical_bytes: min_duplicate_bytes.into(),
-                        max_read_bytes: duplicate_read_bytes,
-                        max_files: duplicate_max_files as usize,
-                        max_duration_ms: duplicate_deadline_ms,
-                        max_read_operations: duplicate_max_files as usize * 4,
-                        ..Default::default()
-                    },
-                    &CancellationToken::new(),
-                )
-            } else if large_files {
-                let request = ScanRequest {
-                    roots,
-                    state_dir: state_dir.clone(),
-                };
-                sweepx_core::scan_large_files_with_store(
-                    &context,
-                    &request,
-                    store.as_ref(),
-                    &sweepx_core::LargeFileOptions {
-                        minimum_logical_bytes: sweepx_model::DecimalU128::new(min_file_bytes),
-                        max_files: top_files as usize,
-                        ..Default::default()
-                    },
-                    &CancellationToken::new(),
-                )
-            } else {
-                match store.as_ref() {
-                    Some(store) if tui => scan_for_tui_with_store(
-                        &context,
-                        &ScanRequest {
-                            roots,
-                            state_dir: state_dir.clone(),
-                        },
-                        Some(store),
-                    ),
-                    Some(store) => scan_with_store(
-                        &context,
-                        &ScanRequest {
-                            roots,
-                            state_dir: state_dir.clone(),
-                        },
-                        Some(store),
-                    ),
-                    None if tui => scan_for_tui_with_store(
-                        &context,
-                        &ScanRequest {
-                            roots,
-                            state_dir: None,
-                        },
-                        Option::<&sweepx_core::MemorySnapshotStore>::None,
-                    ),
-                    None => scan_with_store(
-                        &context,
-                        &ScanRequest {
-                            roots,
-                            state_dir: None,
-                        },
-                        Option::<&sweepx_core::MemorySnapshotStore>::None,
-                    ),
-                }
-            };
-            progress.finish();
-            if tui {
+                );
+                progress.finish();
                 return finish_tui_scan(&context, scan, size_unit, sort);
             }
+            let duplicate_options = sweepx_core::DuplicateOptions {
+                minimum_logical_bytes: min_duplicate_bytes.into(),
+                max_read_bytes: duplicate_read_bytes,
+                max_files: duplicate_max_files as usize,
+                max_duration_ms: duplicate_deadline_ms,
+                max_read_operations: duplicate_max_files as usize * 4,
+                ..Default::default()
+            };
+            let large_options = sweepx_core::LargeFileOptions {
+                minimum_logical_bytes: min_file_bytes.into(),
+                max_files: top_files as usize,
+                ..Default::default()
+            };
+            let analysis = if duplicates {
+                Some(sweepx_core::FileAnalysisOptions::Duplicates(
+                    &duplicate_options,
+                ))
+            } else if large_files {
+                Some(sweepx_core::FileAnalysisOptions::Large(&large_options))
+            } else {
+                None
+            };
+            let scan = scan_for_output_with_store(
+                &context,
+                &ScanRequest { roots, state_dir },
+                store.as_ref(),
+                analysis,
+                &CancellationToken::new(),
+            );
+            progress.finish();
             scan.map(RenderedResult::Scan)
         }
         Commands::Explain {
@@ -613,13 +579,16 @@ fn main() -> ProcessExitCode {
                     match result {
                         Ok(result) => {
                             let exit_code = replay_exit_code(&result);
-                            print_output(
+                            if let Err(error) = print_output(
                                 &context,
                                 format,
                                 size_unit,
                                 sort,
                                 &RenderedResult::Replay(result),
-                            );
+                            ) {
+                                eprintln!("{error}");
+                                return ProcessExitCode::from(8);
+                            }
                             return ProcessExitCode::from(exit_code);
                         }
                         Err(error) => {
@@ -850,7 +819,12 @@ fn main() -> ProcessExitCode {
                         &context,
                         "cache status does not support --format ndjson",
                     ));
-                    print_output(&context, OutputFormat::Json, size_unit, sort, &result);
+                    if let Err(error) =
+                        print_output(&context, OutputFormat::Json, size_unit, sort, &result)
+                    {
+                        eprintln!("{error}");
+                        return ProcessExitCode::from(8);
+                    }
                     return ProcessExitCode::from(result.exit_code());
                 }
                 let state_dir = match state_dir_from_explicit_or_default(cli.state_dir.as_deref()) {
@@ -859,7 +833,11 @@ fn main() -> ProcessExitCode {
                         let result =
                             RenderedResult::CacheStatus(cache_status_state_error(&context, &error));
                         let code = result.exit_code();
-                        print_output(&context, format, size_unit, sort, &result);
+                        if let Err(error) = print_output(&context, format, size_unit, sort, &result)
+                        {
+                            eprintln!("{error}");
+                            return ProcessExitCode::from(8);
+                        }
                         return ProcessExitCode::from(code);
                     }
                 };
@@ -908,7 +886,10 @@ fn main() -> ProcessExitCode {
     match result {
         Ok(result) => {
             let code = result.exit_code();
-            print_output(&context, format, size_unit, sort, &result);
+            if let Err(error) = print_output(&context, format, size_unit, sort, &result) {
+                eprintln!("{error}");
+                return ProcessExitCode::from(8);
+            }
             ProcessExitCode::from(code)
         }
         Err(error) => {
@@ -2997,46 +2978,56 @@ fn print_output(
     size_unit: HumanSizeUnit,
     sort: ScanSort,
     result: &RenderedResult,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = std::io::stdout();
+    let mut writer = std::io::BufWriter::with_capacity(16 * 1024, stdout.lock());
     match format {
         OutputFormat::Human => {
-            println!(
-                "{}",
-                sweepx_core::render_human_output_with_size_unit(
+            let text = match result {
+                RenderedResult::Scan(scan) => scan.render_human(context, size_unit, sort),
+                _ => sweepx_core::render_human_output_with_size_unit(
                     context,
                     result.output(),
                     size_unit,
                     sort,
-                )
-            );
+                ),
+            };
+            writeln!(writer, "{text}")?;
         }
         OutputFormat::Json => {
-            println!("{}", serialize_json(result.output()));
+            match result {
+                RenderedResult::Scan(scan) => scan.write_json(&mut writer)?,
+                _ => writer.write_all(serialize_json(result.output()).as_bytes())?,
+            }
+            writer.write_all(b"\n")?;
         }
         OutputFormat::Ndjson => match result {
             RenderedResult::Scan(scan) => {
-                print!("{}", serialize_ndjson(&scan.events));
+                for event in scan.events() {
+                    serde_json::to_writer(&mut writer, event)?;
+                    writer.write_all(b"\n")?;
+                }
             }
             #[cfg(target_os = "linux")]
             RenderedResult::Replay(replay) => {
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
                 for event in &replay.events {
-                    serde_json::to_writer(&mut lock, event).expect("event serializable");
-                    lock.write_all(b"\n").expect("newline write");
-                    lock.flush().expect("stdout flush");
+                    serde_json::to_writer(&mut writer, event)?;
+                    writer.write_all(b"\n")?;
+                    writer.flush()?;
                 }
             }
             _ => {
-                let line = serde_json::to_string(result.output()).expect("output serializable");
-                println!("{line}");
+                serde_json::to_writer(&mut writer, result.output())?;
+                writer.write_all(b"\n")?;
             }
         },
     }
+    writer.flush()?;
+    Ok(())
 }
 
 enum RenderedResult {
-    Scan(sweepx_core::ScanSuccess),
+    Scan(sweepx_core::ScanOutput),
     Explanation(sweepx_core::ExplanationSuccess),
     #[cfg(target_os = "linux")]
     Replay(sweepx_core::CompletedReplaySuccess),
@@ -3049,7 +3040,7 @@ enum RenderedResult {
 impl RenderedResult {
     fn output(&self) -> &OutputEnvelope {
         match self {
-            Self::Scan(scan) => &scan.output,
+            Self::Scan(scan) => scan.metadata(),
             Self::Explanation(explanation) => &explanation.output,
             #[cfg(target_os = "linux")]
             Self::Replay(replay) => &replay.output,

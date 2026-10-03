@@ -50,6 +50,7 @@ fn scan(
             cancel,
             sink: None,
         }),
+        ScanProjection::Materialized,
     )
     .unwrap()
     .scan

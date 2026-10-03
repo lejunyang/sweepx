@@ -980,7 +980,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开、指纹及输出投影路径的资源审计 | 用户当前优先项；现有发现快照有界，完整 Value/JSON 导出另有实测膨胀，不能把已审路径推广成全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开、指纹、持久化及分析 TUI/legacy API 投影的资源审计 | 用户当前优先项；普通 CLI scan 已改为 typed facts 筛选摘要及逐行 JSON 导出，现有发现快照有界；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1078,3 +1078,17 @@ scanner 新入口复用 manifest 的 provider-safe zero/full stream 和父目录
 - 普通 scan 仍为所有格式先把 typed summary 投影到完整 `serde_json::Value`，递归转换键，再由 human 重新索引/排序全部行；JSON 另分配整份 pretty 字符串。scanner 的记录数/批次估算边界没有覆盖这些投影副本与导出展开。下一资源单元需要按格式直接消费 typed facts、有界 human 选择和 writer 输出，保留稳定机器字段、partial/unknown/下限与最终错误；不能因输出变小而漏报资源缺口或扩大执行权限。
 
 本节记录实际边界和后续次序，没有把上述跨平台缓存或输出资源改造算作已经实现。Dart/SvelteKit 扩展继续暂缓。
+
+## 普通扫描输出的资源收敛（2026-10-03）
+
+普通 CLI `scan`（含非 TUI 大文件/重复内容分析）现使用同一个扫描流程返回 `ScanOutput`，直接保留 typed facts 和小型协议元数据。JSON 保留原字段、枚举、十进制字节、原生编码与所有已记录边界，改为紧凑单文档；每次只投影一个事实行，通过 16 KiB stdout 缓冲写出，不再构建整个 scan Value 和 pretty String。写入或 flush 失败返回 8，不把截断文档当作结果；持久化的扫描 terminal 状态与随后的导出失败独立。仍在扫描完成后导出，没有启用 scan NDJSON、实时事件、总输出字节限制或阻塞 writer 的硬期限。
+
+human 使用借用的路径/汇总索引以及至多 40 个行引用的堆，沿用原 locale、证据格式、size/path 排序、root-first 去重、汇总优先和省略行计数。索引仍随已保留事实数量增长，单行 Value 仍有瞬时分配；分析报告仍遵守原收集器预算。scanner 的保留估算不是进程 RSS 上限。没有第二套分类/遍历、新 crate、丢弃原生事实或扩大回收权限；旧 `ScanSuccess` API 保持完整 JSON 投影兼容，分析 TUI 的旧投影及持久化等路径继续列入资源审计。
+
+[受控测量记录](scan-output-resource-validation-2026-10-03.json)使用本机 arm64 macOS 26.5.2、固定 Rust 1.98.0、all-features 未优化 debug 构建，关闭调试符号和 incremental，baseline 为 `55e8ff0`。32 个子目录、8,192 个普通文件、69,632 payload 字节，`--no-state` 禁用 SweepX preview 持久化，OS cache 未控制。先独立 walk/stat 核对文件长度与类型，再比较全部机器原生事实/证据（仅规范化本次 scan ID 和观察时间）及 human 字节，输入未改变。每种格式各三次完整 CLI 计时，第二轮反转先后顺序，stdout 指向 `/dev/null`；等价性导出另记，未计入三轮统计，其中新 JSON 的首轮导出 3.10 秒也保留，不能称为所有场景均提速。
+
+三轮 human 为原 1.42–1.44 秒、新 0.12–0.13 秒；JSON 为原 2.39–2.42 秒、新 2.08–2.10 秒。最大 RSS human 原约 248–250 MB、JSON 原约 300–301 MB，新各约 62–64 MB（十进制 MB）。等价 JSON 导出约 51.6 MB → 30.5 MB，缩小主要来自紧凑格式；事实没有减少。原生已关闭管道验证退出 8。仅是该主机/工作负载/构建/缓存状态的端到端测量，没有 release、热缓存、p95/p99 或 Linux/Windows 运行性能结论；现场 132,723 行的 partial 扫描并非本次基准。
+
+本轮 affected 完整测试：core 324、CLI 132 项通过，0 失败、2 项既有 ignored；最后只更改测试的 Linux fixture 与中途 writer 失败断言，9 项相关回归另行通过。host、Linux GNU、Windows GNU 工作区 all-targets/all-features lint 通过，最后测试变更的 core 两个 cross-target 分支另行 lint 通过；fmt/diff、54 份 Markdown 及 core package list 通过，列表包含新模块及测试。未改动包的运行结果沿用前次记录，不称为一次新完整 workspace 测试。旧 2 秒工具缓存探测本轮通过，但未修复或关闭其间歇根因；Windows GNU 不代表 MSVC，交叉 lint 不代表目标宿主运行。沙箱首次测量无法读取 `kern.clockrate`，改在宿主重新采集统计；初期测试编译漏接 projection 参数、ReasonCode/单位名错误已修正，记录保留。
+
+下一单元按用户优先序推进可移植历史呈现和平台变化历史/文件重用合同；Dart/SvelteKit 仍暂缓。

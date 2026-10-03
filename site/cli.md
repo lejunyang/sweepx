@@ -32,6 +32,8 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 语言解析会依次考虑显式 override、locale 环境与系统 locale，无法识别时回退到 `en-US`。机器字段和值不翻译。
 
+普通 `scan` 的 human 摘要直接从扫描事实筛选前 40 行；JSON 为紧凑单文档，逐行写出全部已保留事实，字段、原生路径编码和证据状态保持稳定。这仍是扫描结束后的导出，不是实时事件流，也不限制总导出字节。stdout 写入或 flush 失败返回 8；中断的 JSON 不能作为完整结果使用，已完成扫描的持久状态不因此回滚。
+
 ### P4a.2 资格记录不是新命令
 
 协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前主机的两个 Trash cell 与 Linux file/directory Permanent 为 `degraded` preview；link 和其他平台 Permanent 仍为 `disabled`。

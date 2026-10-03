@@ -5,7 +5,9 @@ mod cargo_cleaner_evidence;
 mod duplicates;
 pub mod junk;
 mod large_files;
+mod scan_output;
 pub use duplicates::scan_duplicates_with_store;
+pub use scan_output::ScanOutput;
 pub mod tools;
 pub use large_files::{
     FileAnalysisOptions, FileAnalysisSink, scan_file_analysis_with_observer,
@@ -375,9 +377,9 @@ impl ScanSuccess {
     /// Split an interactive result into the small values needed after the TUI
     /// exits and the owned scan rows consumed by the browser. This releases
     /// the JSON envelope and retained event stream before terminal setup.
-    /// During the scan itself, the typed summary and protocol JSON coexist;
-    /// that construction-time peak is bounded by the scanner's resource
-    /// limits. The interactive phase does not add another full row copy.
+    /// Legacy entry points retain both typed facts and a full protocol projection, whose
+    /// allocation overhead is not included in scanner retention estimates. The ordinary
+    /// output seam avoids that projection; the root-only TUI seam keeps it small.
     pub fn into_tui_parts(self) -> TuiScanParts {
         let exit_code = self.output.conservative_exit_code() as u8;
         let status = self.output.status;
@@ -861,8 +863,48 @@ pub fn scan_with_store<S: SnapshotStore>(
         None,
         None,
         None,
+        ScanProjection::Materialized,
     )
     .map(|result| result.scan)
+}
+
+/// Runs the existing metadata traversal with optional independent file analysis, retaining
+/// typed facts for bounded human rendering or incremental machine export. Invalid analysis
+/// limits fail before filesystem IO. Cancellation preserves incomplete evidence; exporting
+/// results subsequently does not change the scan's terminal state or grant deletion authority.
+pub fn scan_for_output_with_store<S: SnapshotStore>(
+    context: &CoreContext,
+    request: &ScanRequest,
+    store: Option<&S>,
+    analysis: Option<FileAnalysisOptions<'_>>,
+    cancel: &CancellationToken,
+) -> Result<ScanOutput, CoreError> {
+    if let Some(options) = analysis {
+        match options {
+            FileAnalysisOptions::Large(options) => {
+                sweepx_analysis::LargeFileCollector::new(options.clone())?;
+            }
+            FileAnalysisOptions::Duplicates(options) => {
+                sweepx_analysis::DuplicateCollector::new(options.clone())?;
+            }
+        }
+    }
+    scan_with_store_options(
+        context,
+        request,
+        store,
+        ScannerOptions::default(),
+        None,
+        None,
+        None,
+        analysis.map(|options| large_files::FileAnalysisObservation {
+            options,
+            cancel,
+            sink: None,
+        }),
+        ScanProjection::Borrowed(cancel),
+    )
+    .map(|result| ScanOutput::new(result.scan))
 }
 
 /// Runs the junk scan: traversal classifies each directory against `classifier` while walking,
@@ -887,6 +929,7 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         reuse,
         None,
         None,
+        ScanProjection::Materialized,
     )
     .map(Into::into)
 }
@@ -917,6 +960,7 @@ pub fn scan_junk_with_observer<S: SnapshotStore>(
         reuse,
         Some(JunkScanObservation { cancel, observer }),
         None,
+        ScanProjection::Materialized,
     )
     .map(Into::into)
 }
@@ -1083,6 +1127,13 @@ struct JunkScanObservation<'a> {
     observer: &'a mut dyn sweepx_scanner::ClassifiedScanObserver,
 }
 
+// Metadata-only work results must be converted to ScanOutput before crossing the public
+// boundary. Legacy ScanSuccess consumers continue to receive the complete materialized data.
+enum ScanProjection<'a> {
+    Materialized,
+    Borrowed(&'a CancellationToken),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_with_store_options<'a, S: SnapshotStore>(
     context: &CoreContext,
@@ -1093,6 +1144,7 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
     reuse: Option<&dyn sweepx_scanner::SubtreeReuse>,
     live: Option<JunkScanObservation<'a>>,
     large_files: Option<large_files::FileAnalysisObservation<'a>>,
+    projection: ScanProjection<'a>,
 ) -> Result<ScanWorkResult, CoreError> {
     if request.state_dir.is_some() && !durable_state_supported() {
         return Err(StateError::DurableStateUnsupportedOnWindows.into());
@@ -1178,8 +1230,12 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
             })
             .transpose()?;
         let mut live = live;
-        let cancel = large_cancel
-            .unwrap_or_else(|| live.as_ref().map_or(&default_cancel, |live| live.cancel));
+        let cancel = large_cancel.unwrap_or_else(|| match &projection {
+            ScanProjection::Borrowed(cancel) => cancel,
+            ScanProjection::Materialized => {
+                live.as_ref().map_or(&default_cancel, |live| live.cancel)
+            }
+        });
         let observer: Option<&mut dyn sweepx_scanner::ClassifiedScanObserver> =
             if let Some(observer) = large_observer.as_mut() {
                 Some(observer)
@@ -1275,7 +1331,8 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
             "acceleration": acceleration_summary(&summary),
             "cachePreview": camelize_json_keys(serde_json::to_value(&cache_metadata).expect("cache preview metadata serializable"))
         });
-        output.data = camelize_json_keys(json!({
+        if matches!(projection, ScanProjection::Materialized) {
+            output.data = camelize_json_keys(json!({
             "scanId": scan_id,
             "roots": summary.roots,
             "entries": summary.entries,
@@ -1286,7 +1343,8 @@ fn scan_with_store_options<'a, S: SnapshotStore>(
                 "reason": boundary.reason,
                 "detail": boundary.detail
             })).collect::<Vec<_>>()
-        }));
+            }));
+        }
         if let Some(report) = large_report {
             let (key, data) = report.into_data();
             output.data[key] = data;
@@ -2874,6 +2932,17 @@ fn render_human_scan_output(
     size_unit: HumanSizeUnit,
     sort: ScanSort,
 ) -> String {
+    render_human_scan_output_selected(context, output, max_rows, size_unit, sort, 0)
+}
+
+fn render_human_scan_output_selected(
+    context: &CoreContext,
+    output: &OutputEnvelope,
+    max_rows: usize,
+    size_unit: HumanSizeUnit,
+    sort: ScanSort,
+    additional_omitted: usize,
+) -> String {
     let catalog = Catalog::new(context.locale());
     let mut lines = vec![
         format!(
@@ -3019,15 +3088,16 @@ fn render_human_scan_output(
             coverage
         ));
     }
-    if items.len() > max_rows {
+    let omitted = items.len().saturating_sub(max_rows) + additional_omitted;
+    if omitted > 0 {
         lines.push(match context.locale() {
             Locale::ZhCn => format!(
                 "… 另有 {} 行未显示；使用 --format json 获取机器输出。",
-                items.len() - max_rows
+                omitted
             ),
             Locale::EnUs => format!(
                 "… {} more rows omitted; use --format json for machine output.",
-                items.len() - max_rows
+                omitted
             ),
         });
     }
