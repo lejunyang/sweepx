@@ -982,7 +982,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览首次投影与写入准入、provider 与 state 目录审计；未来复用仍需独立事实有效性合同 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；generation 解析另有 visitor 存储预留账本，非全进程内存证明；普通预览已撤回未经证明的 USN 有效性升级及额外卷探测，保持历史；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览写入准入与解析预算对齐、provider 与 state 目录审计；未来复用仍需独立事实有效性合同 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；generation 解析另有 visitor 存储预留账本，首次投影也在复制行/建索引前预留 192 MiB，超额保留当前事实及旧代次，均非全进程内存证明；普通预览已撤回未经证明的 USN 有效性升级及额外卷探测，保持历史；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1234,3 +1234,18 @@ generation 和 current 指针各自经独占私有 temporary 原子发布；保�
 generation DTO 样本验证覆盖 1、1,000、10,000 行，最后一组编码 6,367,992 bytes、预留 139,080,040 bytes，逐项等价普通 decoder；这些是 arm64 macOS、Rust 1.98.0、lean test build 的 JSON 对象预留测量，不是堆峰值、OS/SweepX cache 热扫描或端到端提速。初版没有区分 inline struct / Content pair Vec，最后一组曾预留 223,901,584 bytes；核对真实存储形状后减少重复预留，没有放宽 cap 或修改语义 oracle。Dart/SvelteKit 新工作继续暂缓，跨平台缓存及余下资源审计继续优先。
 
 [本单元验证记录](generation-parse-admission-validation-2026-10-04.json)保留首次 enum 穷尽匹配/未用错误字段的 check 失败、实际修正及预留模型调整记录。首次完整工作区串行测试 1,117 项通过、3 项既有 ignored，已诊断系统 Trash 挂起用例显式 skip；最终增加角色小树节点余量及回归后，完整 cache 68、core 328（2 ignored）及 CLI 132（上述用例 skip）共 528 项再通过，未改包复用原通过结果，组合覆盖 1,118 个不同通过用例、3 ignored、1 explicit skip，不称新完整 workspace invocation 或原生资格全绿。最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 与 cache/core 包清单通过；文档检查器未改，复用前单元 23 项通过。交叉 lint 不证明目标宿主/MSVC，包清单不证明 registry 构建。target 为 2,307,248 KiB（约 2.2 GiB），没有清空回收站。
+
+
+## 普通预览首次投影准入与借用索引（2026-10-04）
+
+首次普通预览原先在 `admit_preview` 前复制全部行，并为每个有效 aggregate 解析/复制身份建立索引；后续压缩额度不能限制这些先行分配。现在 core 的私有 projection 模块先检查一百万个行/aggregate 上限，再预留索引、单项身份验证临时空间、行 slots、实际保留的动态字段与 boundary 格式化临时空间。共享账本默认 192 MiB，完整预检查通过后才拥有全部行。额度不足不发布部分 generation，返回 `cache.preview.resource_limit`，当前原生扫描与上一代缓存继续保留。state accounting 也提前到投影之前，避免已知计费读取失败后仍复制行；它原有 pathname/目录额度缺口没有在本单元关闭。
+
+aggregate 索引只借用源身份和聚合；保留模型的 `scan_entry_id()` 验证，包括 scan-id 绑定和旧 path 身份拒绝，单项解析临时空间在调用前预留。有效重复身份沿用 last-wins，无效尾项不能遮住有效项。核对 pinned Rust 1.98.0 的 BTreeMap FromIterator 会先收集排序 Vec，因此改为逐项 insert，避免未计入的排序副本；树节点的 11 slots 与分裂/edge/header 余量沿前单元原生源码审计估算。aggregate 逐字段投影，不先 clone 旧 coverage provenance 再替换，未保留的原生 lineage、活动/指纹和推导 inputs 不计入本次行存储。此预留是辅助存储估算，排除原有 ScanSummary、allocator/RSS 与整个 scanner/TUI 的预算证明。
+
+目录缺少可连接聚合时，旧代码给 direct/recursive count 填 0/1；现在二者保持 unknown，普通叶子仍为 0/1。Known/LowerBound 数值与原因、身份、父级和覆盖沿既有历史投影语义保留。Windows boundary 原先经 lossy 文本转成 Unix bytes；现在从原生 OsStr 保存 UTF-16，保留未配对 surrogate。Unix 原生 bytes 保持。显示文本只生成一次用于历史展示和不具执行权限的 boundary label；所有行都不可选择并保持 stale provenance。本单元没有新增 crate、分类器或删除权限。
+
+独立回归从具体整数事实核对全部行、父级、聚合与历史标记；覆盖错 scan-id、畸形/path aggregate、缺失聚合、byte/cardinality/index 拒绝、保留容量增长边界及巨大未保留 provenance。容量 oracle 读取实际 String/Vec capacities，不调用生产计费 helper。原生小目录经普通 metadata 独立确认文件长度，低投影 cap 拒绝后扫描事实未改；普通读取逐字节确认 pointer/generation 未替换，代次数未增加，旧预览仍可加载。非 Unicode Unix bytes 与 Windows 未配对 UTF-16 夹具不依赖 host filesystem 支持；Windows 分支仅交叉编译，未取得 Windows 原生运行。
+
+写入前拥有数据准入与 256 MiB decoder reservation 对齐仍未完成，65 MiB encoded cap 不能保证下次载入一定准入。provider/no-materialization、state pathname/额度/代次淘汰、已验证 Linux/Windows 当前文件索引与其余跨平台资源审计继续开放。没有新的端到端扫描、堆峰值或缓存热扫描提速测量；Dart/SvelteKit 新工作继续暂缓。构建沿用关闭 incremental/debug symbols 的配置，没有清空回收站。
+
+[本单元验证记录](preview-projection-admission-validation-2026-10-04.json)保留初期提取/夹具编译失败及具体修正，随后新增 7 项专项通过，完整 core 335 项通过、2 项既有 ignored，affected lint 通过。完整工作区串行测试 1,125 项通过、0 个执行用例失败、3 项既有 ignored；已诊断系统 Trash 成功挂起用例继续明确 skip，不称原生资格全绿。最终 host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown 与 core 包清单通过；未改文档检查器复用前单元 23 项通过结果。交叉 lint 不证明 Linux/Windows 原生运行或 MSVC，包清单不证明 registry 构建。target 实际占用 2,308,268 KiB（约 2.2 GiB），没有清空回收站。

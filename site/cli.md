@@ -90,6 +90,8 @@ sweepx scan --no-state --tui --duplicates --min-duplicate-bytes 1024 /absolute/r
 
 普通预览与垃圾历史缓存现在共用原生目录句柄，读取、发布、损坏数据隔离和只读诊断不再逐次从显示路径打开文件。加载前限制 current 指针为 64 KiB、generation 为 65 MiB，超大输入不读取内容、不复制到隔离区，并报告缓存资源缺口；当前扫描结果仍保留。Unix 检查 owner、私有权限、普通文件与单硬链接，Windows 使用相对句柄、显式私有 DACL 和 reparse/offline/recall 拒绝。旧 JSON/checksum 兼容，原生缓存 backend 对权限不合格的对象直接拒绝；core state 入口的旧权限整备仍需独立审计。此改造没有删除权限，也未闭合完整预览 freshness、provider 宿主行为或整体内存预算。
 
+普通预览首次投影另有 192 MiB 的辅助存储预留及一百万行/聚合上限，在复制行和建立索引前检查；超额报告 `cache.preview.resource_limit`，跳过缓存更新，保留当前扫描和上一代缓存。目录缺少聚合时保留未知计数，Windows 边界名称保留原生 UTF-16。该预留不是进程内存上限；写入准入与解析预算对齐、状态目录额度仍需继续审计。
+
 ## 安装
 
 正式 release 会为 Linux x86_64/aarch64、macOS Intel/Apple Silicon 和 Windows x86_64 生成归档和统一 `SHA256SUMS`。安装器会校验 checksum，并要求归档内只有根级 `sweepx` 或 `sweepx.exe`。

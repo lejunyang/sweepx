@@ -89,6 +89,8 @@ Ordinary `scan` sparse previews retain the existing top-K, mandatory boundaries 
 
 Ordinary previews and junk history now share retained native directory handles for loading, publication, corruption copies and read-only diagnostics. Loading admits at most a 64 KiB current pointer and a 65 MiB generation before reading content. Oversized input is neither read nor copied into quarantine; it reports a cache resource gap while retaining current scan results. Unix checks ownership, private permissions, regular files and a single hard link. Windows uses relative handles, explicit private DACLs and reparse/offline/recall rejection. Older JSON/checksums remain compatible; the native cache backend refuses insecure objects, while the older core state preparation still needs its own audit. This does not grant deletion authority or close full preview freshness, native provider behavior or overall memory accounting.
 
+Initial ordinary preview projection has a separate 192 MiB auxiliary storage reservation and one-million row/aggregate cap, checked before row copying and index construction. Exhaustion reports `cache.preview.resource_limit`, skips the cache update and preserves current scan facts and the previous generation. Directories without aggregates keep unknown counts; Windows boundary names retain native UTF-16. This is not a process memory cap. Writer admission alignment with decoding and state-directory quotas remain under audit.
+
 ## Install
 
 A release produces archives plus one `SHA256SUMS` for Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64. The installers verify the checksum and require the archive to contain only a root-level `sweepx` or `sweepx.exe`.

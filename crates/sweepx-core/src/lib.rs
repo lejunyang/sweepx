@@ -13,6 +13,9 @@ pub use large_files::{
     scan_file_analysis_completion_with_observer, scan_file_analysis_with_observer,
     scan_large_files_with_store,
 };
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod preview_projection;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -38,8 +41,8 @@ use sweepx_audit::{AuditStore, ProjectionError};
 use sweepx_cache::CompactedPreview;
 use sweepx_cache::{
     AtomicGenerationStore, BudgetUsage, CacheError, CacheInspection, CacheInspectionError,
-    CacheInspectionHealth, CacheInspectionWarning, LoadResult, PreviewBudgets, PreviewCoverage,
-    PreviewKind, PreviewSummary, STORED_PREVIEW_SCHEMA, StoredGeneration, admit_preview,
+    CacheInspectionHealth, CacheInspectionWarning, LoadResult, PreviewBudgets,
+    STORED_PREVIEW_SCHEMA, StoredGeneration, admit_preview,
 };
 use sweepx_canonical::canonicalize_value;
 use sweepx_catalog::vm::{EvaluationContext, evaluate_rule};
@@ -3302,6 +3305,21 @@ fn store_stale_preview(
     scan_id: &ScanId,
     summary: &ScanSummary,
 ) -> CachePreviewStoreResult {
+    store_stale_preview_with_projection_limits(
+        state_dir,
+        scan_id,
+        summary,
+        &preview_projection::Limits::default(),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn store_stale_preview_with_projection_limits(
+    state_dir: Option<&Path>,
+    scan_id: &ScanId,
+    summary: &ScanSummary,
+    projection_limits: &preview_projection::Limits,
+) -> CachePreviewStoreResult {
     let Some(store) = preview_generation_store(state_dir).ok().flatten() else {
         return CachePreviewStoreResult {
             status: CACHE_STORE_MODE_SKIPPED,
@@ -3317,7 +3335,6 @@ fn store_stale_preview(
         unix_timestamp_nanos(),
         &digest_hex(scan_id.as_ref())[..12]
     );
-    let preview_rows = preview_summaries_from_scan(summary);
     let state_directory_bytes = match state_dir_bytes(store.root()) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -3327,6 +3344,18 @@ fn store_stale_preview(
                 preview_bytes: 0,
                 resource_limit: true,
                 warnings: vec!["cache.preview.state_accounting_failed".to_string()],
+            };
+        }
+    };
+    let preview_rows = match preview_projection::project(summary, projection_limits) {
+        Ok(rows) => rows,
+        Err(_) => {
+            return CachePreviewStoreResult {
+                status: CACHE_STORE_MODE_SKIPPED,
+                generation: None,
+                preview_bytes: 0,
+                resource_limit: true,
+                warnings: vec!["cache.preview.resource_limit".to_string()],
             };
         }
     };
@@ -3461,162 +3490,10 @@ fn preview_generation_store(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn preview_summaries_from_scan(summary: &ScanSummary) -> Vec<PreviewSummary> {
-    let aggregate_by_id = summary
-        .aggregates
-        .iter()
-        .filter_map(|aggregate| {
-            aggregate
-                .scan_entry_id()
-                .ok()
-                .map(|entry_id| (entry_id.to_string(), aggregate))
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut rows = Vec::new();
-    for entry in summary.roots.iter().chain(summary.entries.iter()) {
-        let Some(identity) = entry.identity.as_ref() else {
-            continue;
-        };
-        let kind = match entry.object_type {
-            ObjectType::Directory if identity.parent_id.is_none() => PreviewKind::Root,
-            ObjectType::Directory => PreviewKind::Directory,
-            _ => PreviewKind::Leaf,
-        };
-        rows.push(PreviewSummary {
-            kind,
-            parent_id: identity.parent_id.as_ref().map(ToString::to_string),
-            entry_id: identity.entry_id.to_string(),
-            native_name: entry.native_basename.clone(),
-            display_name: entry.display_path.clone(),
-            logical_bytes: stale_preview_value(&entry.logical_bytes),
-            allocated_bytes: stale_preview_value(&entry.allocated_bytes),
-            direct_child_count: aggregate_by_id
-                .get(identity.entry_id.as_str())
-                .map(|aggregate| stale_preview_count(&aggregate.direct_child_count))
-                .unwrap_or_else(|| sweepx_platform::known_count(0)),
-            recursive_entry_count: aggregate_by_id
-                .get(identity.entry_id.as_str())
-                .map(|aggregate| stale_preview_count(&aggregate.recursive_entry_count))
-                .unwrap_or_else(|| sweepx_platform::known_count(1)),
-            aggregate: aggregate_by_id
-                .get(identity.entry_id.as_str())
-                .map(|aggregate| stale_preview_aggregate(aggregate)),
-            coverage: PreviewCoverage {
-                complete: entry.coverage.complete,
-                details_lost: !entry.coverage.complete,
-                incomplete_reasons: entry.coverage.incomplete_reasons.clone(),
-            },
-            selectable: false,
-            roles: BTreeSet::new(),
-            provenance: FieldProvenance::StalePreview {
-                observed_at: timestamp_now(),
-            },
-        });
-    }
-
-    for boundary in &summary.boundaries {
-        if let Some(native_name) = boundary_native_name(&boundary.path) {
-            rows.push(PreviewSummary {
-                kind: PreviewKind::Boundary,
-                parent_id: None,
-                entry_id: format!(
-                    "boundary:{}",
-                    sanitize_cache_id(&boundary.path.display().to_string())
-                ),
-                native_name,
-                display_name: boundary.path.display().to_string(),
-                logical_bytes: EvidenceValue::Unknown {
-                    reason: boundary.reason.clone(),
-                },
-                allocated_bytes: EvidenceValue::Unknown {
-                    reason: boundary.reason.clone(),
-                },
-                direct_child_count: sweepx_platform::known_count(0),
-                recursive_entry_count: sweepx_platform::known_count(0),
-                aggregate: None,
-                coverage: PreviewCoverage {
-                    complete: false,
-                    details_lost: true,
-                    incomplete_reasons: vec![boundary.reason.clone()],
-                },
-                selectable: false,
-                roles: {
-                    let mut roles = BTreeSet::new();
-                    roles.insert(sweepx_cache::PreviewRole::Boundary);
-                    roles
-                },
-                provenance: FieldProvenance::StalePreview {
-                    observed_at: timestamp_now(),
-                },
-            });
-        }
-    }
-
-    rows
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn stale_preview_value(value: &sweepx_model::ByteValue) -> sweepx_model::ByteValue {
-    match value {
-        sweepx_model::EvidenceValue::Known { value } => {
-            sweepx_model::EvidenceValue::Known { value: *value }
-        }
-        sweepx_model::EvidenceValue::LowerBound { value, reason } => {
-            sweepx_model::EvidenceValue::LowerBound {
-                value: *value,
-                reason: reason.clone(),
-            }
-        }
-        sweepx_model::EvidenceValue::Unknown { reason }
-        | sweepx_model::EvidenceValue::Unsupported { reason }
-        | sweepx_model::EvidenceValue::NotChecked { reason } => {
-            sweepx_model::EvidenceValue::Unknown {
-                reason: reason.clone(),
-            }
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn stale_preview_count(value: &sweepx_model::CountValue) -> sweepx_model::CountValue {
-    match value {
-        sweepx_model::EvidenceValue::Known { value } => {
-            sweepx_model::EvidenceValue::Known { value: *value }
-        }
-        sweepx_model::EvidenceValue::LowerBound { value, reason } => {
-            sweepx_model::EvidenceValue::LowerBound {
-                value: *value,
-                reason: reason.clone(),
-            }
-        }
-        sweepx_model::EvidenceValue::Unknown { reason }
-        | sweepx_model::EvidenceValue::Unsupported { reason }
-        | sweepx_model::EvidenceValue::NotChecked { reason } => {
-            sweepx_model::EvidenceValue::Unknown {
-                reason: reason.clone(),
-            }
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn stale_preview_aggregate(
     aggregate: &sweepx_model::DirectoryAggregate,
 ) -> sweepx_model::DirectoryAggregate {
-    let mut aggregate = aggregate.clone();
-    aggregate.apparent_logical_bytes = stale_preview_value(&aggregate.apparent_logical_bytes);
-    aggregate.unique_logical_bytes = stale_preview_value(&aggregate.unique_logical_bytes);
-    aggregate.filesystem_reported_allocated_bytes =
-        stale_preview_value(&aggregate.filesystem_reported_allocated_bytes);
-    aggregate.potentially_reclaimable_bytes =
-        stale_preview_value(&aggregate.potentially_reclaimable_bytes);
-    aggregate.direct_child_count = stale_preview_count(&aggregate.direct_child_count);
-    aggregate.recursive_entry_count = stale_preview_count(&aggregate.recursive_entry_count);
-    aggregate.coverage.provenance = FieldProvenance::StalePreview {
-        observed_at: timestamp_now(),
-    };
-    aggregate
+    preview_projection::historical_aggregate(aggregate, &timestamp_now())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -3651,35 +3528,6 @@ fn state_dir_bytes(path: &Path) -> io::Result<u64> {
     let mut visited_dirs = 0;
     visit(path, &mut total, &mut visited_dirs)?;
     Ok(total)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn sanitize_cache_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn boundary_native_name(path: &Path) -> Option<sweepx_model::NativeName> {
-    let name = path.file_name()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        Some(sweepx_model::NativeName::unix(name.as_bytes().to_vec()))
-    }
-    #[cfg(not(unix))]
-    {
-        let text = name.to_string_lossy().into_owned();
-        Some(sweepx_model::NativeName::unix(text.into_bytes()))
-    }
 }
 
 #[cfg(unix)]
@@ -7063,6 +6911,86 @@ mod tests {
         );
         let state_dir = second.output.summary["cachePreview"].as_object().is_some();
         assert!(state_dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn preview_projection_refusal_preserves_live_facts_and_previous_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fs::canonicalize(temp.path()).unwrap();
+        #[cfg(windows)]
+        let base = temp.path().to_path_buf();
+        let root = base.join("root");
+        fs::create_dir(&root).unwrap();
+        let file = root.join("current.bin");
+        fs::write(&file, b"independent current facts").unwrap();
+        let context = CoreContext::new(LocaleResolution::new(
+            Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let result = scan_with_store::<MemorySnapshotStore>(
+            &context,
+            &ScanRequest {
+                roots: vec![root],
+                state_dir: Some(base.clone()),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.output.summary["cachePreview"]["storeStatus"],
+            "written"
+        );
+        let preview_root = base.join(PREVIEW_GENERATION_POINTER_DIR);
+        let pointer_path = preview_root.join("current.json");
+        let pointer = fs::read(&pointer_path).unwrap();
+        let pointer_value: Value = serde_json::from_slice(&pointer).unwrap();
+        let generation = pointer_value["generation"].as_str().unwrap();
+        let generation_path = preview_root
+            .join("generations")
+            .join(format!("{generation}.json"));
+        let old_generation = fs::read(&generation_path).unwrap();
+        let before = result.summary.clone();
+        let refused = store_stale_preview_with_projection_limits(
+            Some(&base),
+            &result.summary.roots[0].scan_id,
+            &result.summary,
+            &preview_projection::Limits {
+                retained_bytes: 1,
+                records: 1_000_000,
+            },
+        );
+        assert_eq!(refused.status, CACHE_STORE_MODE_SKIPPED);
+        assert!(refused.resource_limit);
+        assert!(refused.generation.is_none());
+        assert_eq!(refused.warnings, ["cache.preview.resource_limit"]);
+        assert_eq!(result.summary, before);
+        assert_eq!(fs::read(&pointer_path).unwrap(), pointer);
+        assert_eq!(fs::read(&generation_path).unwrap(), old_generation);
+        assert_eq!(
+            fs::read_dir(preview_root.join("generations"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let current = result
+            .summary
+            .entries
+            .iter()
+            .find(|entry| entry.object_type == ObjectType::File)
+            .unwrap();
+        assert_eq!(
+            current.logical_bytes,
+            EvidenceValue::Known {
+                value: DecimalU128::new(fs::metadata(&file).unwrap().len() as u128)
+            }
+        );
+        assert!(matches!(
+            current.provenance,
+            FieldProvenance::LiveObservation { .. }
+        ));
+        assert_eq!(load_stale_preview(Some(&base)).status, CACHE_LOAD_MODE_HIT);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
