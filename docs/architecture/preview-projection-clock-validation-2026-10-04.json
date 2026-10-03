@@ -1,0 +1,25 @@
+{
+  "schema": "sweepx.preview-projection-clock-validation/v1",
+  "date": "2026-10-04",
+  "scope": "test fixture only; production projection/clock/admission unchanged",
+  "failure": {
+    "test": "preview_projection::tests::obsolete_provenance_and_unused_fingerprints_do_not_consume_row_budget",
+    "observed": "exact independent owned-capacity assertion 1710 != 1713 in initial workspace matrix; 345 core passes, 1 failure, 2 ignored; later workspace crates/doc tests not reached",
+    "cause": "each project call generates RFC3339 timestamp independently; pinned time 0.3.55 formatter emits variable fractional precision. Two row timestamps plus one aggregate timestamp can change total by three bytes; old source data is not the cause",
+    "evidence": "production project captures super::timestamp_now; core uses time Rfc3339; installed pinned time/src/formatting/formattable.rs Rfc3339 formatter delegates to time/src/num_fmt.rs truncated_subsecond_from_nanos, whose documented behavior truncates trailing zeros"
+  },
+  "fix": "normalize only generated StalePreview timestamp fields in both test outputs to the same owned literal before comparing every retained capacity exactly. No weaker inequality/membership check, production cfg or excluded test",
+  "focused": {
+    "result": "passed",
+    "passed": 6,
+    "command": "cargo test -p sweepx-core --all-features --locked preview_projection::tests -- --test-threads=1"
+  },
+  "delivery": "final workspace and cross-target results are recorded in snapshot-native-io-validation-2026-10-04.json; this file is a separate test-only functional unit",
+  "checks": {
+    "workspace": "1166 passed, 0 executed failures, 3 existing ignored, 1 diagnosed Trash hang explicitly excluded",
+    "affectedLint": "cache/core/CLI all-targets/all-features passed after all fixes",
+    "hostLint": "workspace all-targets/all-features passed",
+    "crossLint": "Linux GNU and Windows GNU workspace all-targets/all-features passed; not native runtime/MSVC",
+    "fmtDiff": "passed"
+  }
+}

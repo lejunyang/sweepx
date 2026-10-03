@@ -648,7 +648,7 @@ mod tests {
             retained_bytes: 32 * 1024,
             records: 10,
         };
-        let before = project(&summary, &limits).unwrap();
+        let mut before = project(&summary, &limits).unwrap();
         let obsolete = FieldProvenance::DerivedFromCurrent {
             inputs: vec!["x".repeat(128 * 1024)],
             algorithm: "unused".to_owned(),
@@ -659,7 +659,24 @@ mod tests {
             entry.coverage.provenance = obsolete.clone();
             entry.metadata_fingerprint = "unused".repeat(32 * 1024);
         }
-        let after = project(&summary, &limits).unwrap();
+        let mut after = project(&summary, &limits).unwrap();
+        // Separate projections use clock strings with variable fractional precision. Hold
+        // only that generated field constant so the exact independent capacity comparison
+        // measures obsolete source data, including every other retained field unchanged.
+        for row in before.iter_mut().chain(&mut after) {
+            let FieldProvenance::StalePreview { observed_at } = &mut row.provenance else {
+                panic!("expected historical projection");
+            };
+            *observed_at = "2026-10-04T00:00:00Z".to_owned();
+            if let Some(aggregate) = &mut row.aggregate {
+                let FieldProvenance::StalePreview { observed_at } =
+                    &mut aggregate.coverage.provenance
+                else {
+                    panic!("expected historical aggregate");
+                };
+                *observed_at = "2026-10-04T00:00:00Z".to_owned();
+            }
+        }
         assert_eq!(
             owned_capacity(&before, before.capacity()),
             owned_capacity(&after, after.capacity())
