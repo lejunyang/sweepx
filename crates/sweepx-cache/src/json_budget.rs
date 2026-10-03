@@ -9,7 +9,8 @@
 //! contains no JSON Value or custom any-map collector. Audit that assumption when adding fields.
 //! Sequence visitors also reserve a small-node allowance: the DTO's role BTreeSet has only
 //! six distinct unit variants and therefore at most one leaf. Other sequence collectors are
-//! Vecs or fixed inline tuples. This private adapter is exposed only for the generation DTO.
+//! Vecs or fixed inline tuples. This private adapter serves the generation DTO and its bounded
+//! writer fragments; it is not an admission contract for arbitrary serde collectors.
 //! Strings charge four times their
 //! decoded length before the owning visitor can copy them: native names also decode, re-encode
 //! for canonical validation and sometimes convert to UTF-16. Nested seeds share one ledger;
@@ -22,6 +23,28 @@ use serde::{Deserializer, de};
 
 /// Reservation cap excluding the already bounded input and JSON parser scratch.
 pub(crate) const PARSE_RESERVATION_CAP: usize = 256 * 1024 * 1024;
+
+/// Shared outer-container costs used when composing bounded writer fragments.
+pub(super) fn root_reservation<T>() -> usize {
+    std::mem::size_of::<T>().saturating_mul(2)
+}
+
+/// A sequence seed is charged even on the unsuccessful terminal call.
+pub(super) fn sequence_reservation<T>(entries: usize) -> usize {
+    std::mem::size_of::<T>().saturating_mul(if entries == 0 { 8 } else { 2 })
+}
+
+/// B-tree key/value seed costs, including node/header/edge allowance.
+pub(super) fn tree_reservation<T>(entries: usize) -> usize {
+    std::mem::size_of::<T>()
+        .saturating_mul(MapStorage::Tree.factor(entries))
+        .saturating_add(MapStorage::Tree.overhead())
+}
+
+/// Decoded string storage, including name decoding and canonical-validation copies.
+pub(super) fn string_reservation(bytes: usize) -> usize {
+    bytes.saturating_mul(4)
+}
 
 #[derive(Debug)]
 /// Coarse admission failure: callers keep resource pressure separate from corrupt JSON.
@@ -65,7 +88,9 @@ fn parse<T: DeserializeOwned>(bytes: &[u8], cap: usize) -> Result<T, ParseError>
     parse_with_usage(bytes, cap).map(|(value, _)| value)
 }
 
-fn parse_with_usage<T: DeserializeOwned>(
+/// Measure a fixed writer fragment with the same owning decoder as generation loading.
+/// The caller bounds encoded scratch and drops each fragment before measuring another.
+pub(super) fn parse_with_usage<T: DeserializeOwned>(
     bytes: &[u8],
     cap: usize,
 ) -> Result<(T, usize), ParseError> {
@@ -74,7 +99,7 @@ fn parse_with_usage<T: DeserializeOwned>(
         exhausted: false,
     };
     let result = budget
-        .reserve::<serde_json::Error>(std::mem::size_of::<T>().saturating_mul(2))
+        .reserve::<serde_json::Error>(root_reservation::<T>())
         .and_then(|()| {
             let mut json = serde_json::Deserializer::from_slice(bytes);
             let value = T::deserialize(Decoder {
@@ -202,15 +227,15 @@ impl<'de, V: Visitor<'de>> Visitor<'de> for Guard<'_, V> {
         visit_f32(f32); visit_f64(f64); visit_char(char);
     }
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        self.budget.reserve(value.len().saturating_mul(4))?;
+        self.budget.reserve(string_reservation(value.len()))?;
         self.inner.visit_str(value)
     }
     fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
-        self.budget.reserve(value.len().saturating_mul(4))?;
+        self.budget.reserve(string_reservation(value.len()))?;
         self.inner.visit_borrowed_str(value)
     }
     fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
-        self.budget.reserve(value.capacity().saturating_mul(4))?;
+        self.budget.reserve(string_reservation(value.capacity()))?;
         self.inner.visit_string(value)
     }
     fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
@@ -299,9 +324,8 @@ impl<'de, A: SeqAccess<'de>> SeqAccess<'de> for Sequence<'_, A> {
     ) -> Result<Option<S::Value>, A::Error> {
         // Rust's small initial Vec allocation can exceed twice the first element. Charge
         // eight initial slots, then growth slack, rather than trusting a length hint.
-        let factor = if self.entries == 0 { 8 } else { 2 };
         self.budget
-            .reserve(std::mem::size_of::<S::Value>().saturating_mul(factor))?;
+            .reserve(sequence_reservation::<S::Value>(self.entries))?;
         self.entries = self.entries.saturating_add(1);
         self.inner.next_element_seed(Seed {
             inner: seed,

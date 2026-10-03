@@ -8,6 +8,7 @@ mod windows_state_policy;
 pub mod windows_state_security;
 
 mod json_budget;
+mod writer_admission;
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
@@ -358,8 +359,9 @@ impl AtomicGenerationStore {
 
     /// Publishes a bounded generation before advancing its pointer. JSON uses compact encoding;
     /// its payload checksum is compatible with existing generations. Oversized encodings are
-    /// refused before creating a generation file. Filesystem/IO failures never publish a
-    /// partially encoded file through the current pointer.
+    /// refused before creating a generation file. Loader reservations are admitted with
+    /// bounded per-fragment scratch, without duplicating the complete preview. Filesystem/IO
+    /// failures never publish a partially encoded file through the current pointer.
     pub fn write_generation(&self, generation: &StoredGeneration) -> Result<(), CacheError> {
         self.write_generation_with_limit(generation, INSPECT_GENERATION_BYTE_LIMIT as usize)
     }
@@ -369,7 +371,21 @@ impl AtomicGenerationStore {
         generation: &StoredGeneration,
         byte_limit: usize,
     ) -> Result<(), CacheError> {
+        self.write_generation_with_limits(
+            generation,
+            byte_limit,
+            json_budget::PARSE_RESERVATION_CAP,
+        )
+    }
+
+    fn write_generation_with_limits(
+        &self,
+        generation: &StoredGeneration,
+        byte_limit: usize,
+        parse_cap: usize,
+    ) -> Result<(), CacheError> {
         validate_generation_id(&generation.generation)?;
+        writer_admission::admit(generation, parse_cap)?;
         validate_stored_generation(generation)?;
         let (checksum_sha256, payload_bytes) = checksum_and_len(generation)?;
         let envelope = StoredEnvelope {
