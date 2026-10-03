@@ -13,10 +13,10 @@ pub use detail_rescan::{
 pub use locator_reader::{
     CargoConfigMemberObservation, CargoConfigMemberPresenceObservation, CargoConfigPairConsistency,
     CargoConfigPairObservation, CargoConfigPairPresenceObservation, CargoManifestObservation,
-    LocatorBatchReadRequest, LocatorBatchReadResult, LocatorDirectoryComparison,
-    LocatorDirectoryComparisonFailure, LocatorDirectoryIdentity, LocatorDirectoryLookupFailure,
-    LocatorFileRead, LocatorFileRequest, LocatorReadError, LocatorReadFailure, LocatorReadLimits,
-    LocatorReader,
+    DirectoryPathAbsence, DirectoryPathObservation, LocatorBatchReadRequest,
+    LocatorBatchReadResult, LocatorDirectoryComparison, LocatorDirectoryComparisonFailure,
+    LocatorDirectoryIdentity, LocatorDirectoryLookupFailure, LocatorFileRead, LocatorFileRequest,
+    LocatorReadError, LocatorReadFailure, LocatorReadLimits, LocatorReader,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

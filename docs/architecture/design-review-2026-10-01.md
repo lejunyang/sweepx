@@ -977,7 +977,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 
 | 项目 | 仍缺的内容 | 当前边界 |
 | --- | --- | --- |
-| 项目规则的有效上下文 | relative/missing home、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出模型和真实 SDK 样本；53 场景 Cargo oracle 已用于纯模型及原生输入对照 |
+| 项目规则的有效上下文 | 无 home 环境时的系统用户目录回退、include、自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义 | 已有有界原生配置观察、工作区成员/默认输出、相对/空/不存在 Cargo home 模型和真实 SDK 样本；53 场景 workspace 与 17 场景 home Cargo oracle 已用于独立对照 |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
 | 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开及指纹路径的资源审计 | 现有发现快照有界；不能把已审路径推广成全局审计完成 |
@@ -998,3 +998,17 @@ JSON 新增固定大小 `cargoOutput.workspace`：`isWorkspace`、`memberCount`�
 工作区输入索引只存在于本调用/revision，最多 256 个目录和 8 MiB capacity/payload 估算；模型最多 256 个成员、1,024 个待处理依赖、4,096 个 glob 状态、16,384 个步骤及 64 层祖先。文件读取和最终 reread 沿用上下文共享 32 MiB 最坏请求预留/5 秒合作期限，失败不退额度；更严调用者限额保留。配置模型另有原祖先/来源额度。无常驻 handle/线程或持久化配置答案，估算不等于 RSS，合作期限不承诺中断内核阻塞。
 
 原始 53 场景 artifact 移入 fixtures 包的资源目录，保持字节不变并由文档链接；纯模型与真实原生目录对照都从 raw Cargo metadata 推导 root/member/default-member 集合，40 条成功与 13 条语义拒绝全部需要匹配，不将 unknown 当作拒绝通过。额外回归覆盖工作区/package/empty virtual 计数、个人文件保留、链接、目录替换、内容变化、取消与资源上限。[交付验证记录](cargo-workspace-production-validation-2026-10-03.json)保留初期测试/fixture/lint 失败及修正范围。完整工作区串行 1,050 项通过、0 失败、3 项既有 ignored；之后新增真实中英文 CLI 契约 1 项通过，共覆盖 1,051 个不同通过用例，未称为第二次完整矩阵。最终 affected/host/Linux GNU/Windows GNU 工作区 all-targets/all-features clippy、fmt/diff、54 份 Markdown、23 项检查器测试与四包清单通过。原始 artifact 字节与旧提交独立对照完全一致，fixtures 包包含资源，core/scanner 包包含新源码与测试；package list 不证明 registry 依赖构建。系统 Trash 成功挂起用例仍显式排除；没有目标宿主/MSVC、真实 provider、实际 Trash/隔离成功或端到端提速验收。更广配置、所有权/活动、跨平台缓存、旧间歇根因及 pathname 竞态仍未完成。
+
+
+## Cargo home 的相对、空值及缺失目录（2026-10-03）
+
+受限 `project_parent_current_env_no_cli` 输出模型现支持 cwd-relative `CARGO_HOME`、空值退回本次捕获的用户 home，以及不存在或普通非目录 home 时的默认输出。无可用 home 环境变量仍为 unknown，尚不读取系统用户数据库补 home。输出环境优先级、原工作区默认选择和项目独占归属/活动阻碍保持；没有新增 crate、配置缓存或生产 Cargo 子进程。
+
+scanner 新增 opaque `DirectoryPathObservation`：绝对路径独立准入最深可用 literal 前缀，再用已有 bound child lookup；generic root admission 失败不代表不存在。只有 revalidated parent 下的 typed NotFound/非目录构成 `AbsentDuringLookup`，保留 parent/name/type 的有界私有证据。链接、provider、拒绝、取消、额度和未知错误仍失败；`missing/../home` 必须先观察 missing，不做 lexical parent collapse。home 在输出前再次观察，变化拒绝；这是两次非原子时间点检查，不能封闭 ABA 或证明全局没有配置。绝对/相对输入分别至多 64 KiB/4 KiB、64 组件，prefix 尝试与后续步骤共用单次 reader 请求上限；调用总量继续受配置范围和合作期限约束。
+
+Cargo 对 home 配置中的相对 `target-dir` 先取原始 home spelling 的 parent，而不是 resolved home 的 parent：`home/..` 与 `.` 的基点不同。新接口分别保留原生输入基点与原始 dot/parent 是否可比较；不可比较时 `candidatePath=not_checked`，不把同对象别名或父级字符串归一化当作精确拼写一致。没有打开或创建输出目录，所有项目候选继续 report-only。
+
+[固定 Cargo 1.98.0 的 17 场景原始记录](../../crates/sweepx-fixtures/resources/project-junk/cargo/cargo-home-oracle-2026-10-03.json)由 `scripts/cargo-home-oracle.py` 在隔离 HOME、offline/no-deps 条件下采集，复用既有有界子进程 runner。覆盖绝对/相对、空/未设置、缺失 home、普通文件、点/父级、相对 HOME 和双配置文件；17 次成功、输入字节全部保留，没有构建、发布或回收。原生回归直接由 raw metadata 推导来源/拼写预期；相对 HOME 场景的 metadata 输出本身为 relative，测试将其相对于录制 cwd 比较，保留 dot/parent。首次新 oracle 回归误假定所有输出均绝对，保留失败并修正这项测试预期，不改写原录制。另覆盖缺失目录出现、链接/悬空链接、取消/资源拒绝、无环境回退及个人文件保留。
+
+
+[交付验证记录](cargo-home-production-validation-2026-10-03.json)保留初期编译/新 oracle 失败与修正。host、Linux GNU、Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown、23 项文档检查器测试、2 项采集拒绝回归与三包清单通过；交叉编译包括测试代码，不证明目标宿主运行，package list 不证明 registry 依赖构建。完整 workspace 在 core 停止：572 项通过、1 项旧 `captures_complete_answer_and_exit_status` 失败、2 项既有 ignored；launch/setup 约 0.77 ms 返回，301.77 ms 内没有 stdout、EOF 或退出，未到最终接受分支。后续未运行包及早期 doctest 单独补验，合计 1,056 个不同用例通过、1 个失败、3 个 ignored，不称为全绿矩阵。保留失败测试，没有延长期限、移除断言、排除或反复重试；clippy 编译曾与部分运行重叠，不据此归因。本单元不改变探测实现，系统 Trash 成功挂起仍显式排除。原生 Linux/Windows、MSVC、真实 provider、实际 Trash/隔离成功、旧稳定性根因及最终 pathname 竞态继续开放，没有性能计时。

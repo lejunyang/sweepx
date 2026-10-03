@@ -703,6 +703,164 @@ fn output_scope_keeps_package_defaults_resource_gaps_and_bad_sources_distinct() 
     );
 }
 
+// This recording supplies POSIX HOME semantics; Windows has independently compiled native
+// path/absence regressions rather than treating a POSIX run as Windows runtime evidence.
+#[cfg(unix)]
+#[test]
+fn native_home_output_matches_all_pinned_cargo_metadata_observations_without_authority() {
+    use std::path::PathBuf;
+    let oracle: serde_json::Value =
+        serde_json::from_str(sweepx_fixtures::project_junk::CARGO_HOME_ORACLE).unwrap();
+    assert_eq!(oracle["complete"], true);
+    let records = oracle["records"].as_array().unwrap();
+    assert_eq!(records.len(), 17);
+    for record in records {
+        let (_owner, project, mut candidate) = fixture();
+        let root = project.parent().unwrap();
+        for directory in record["directories"].as_array().unwrap() {
+            std::fs::create_dir_all(root.join(directory.as_str().unwrap())).unwrap();
+        }
+        let mut originals = Vec::new();
+        for input in record["inputs"].as_array().unwrap() {
+            let path = root.join(input["path"].as_str().unwrap());
+            let bytes = input["utf8"].as_str().unwrap().as_bytes();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            originals.push((path, bytes));
+        }
+        let home = record["homeValue"].as_str().map(|value| {
+            if record["homeKind"] == "absolute" {
+                root.join(value)
+            } else {
+                PathBuf::from(value)
+            }
+        });
+        let fallback = if record["fallbackRelative"] == true {
+            PathBuf::from(record["fallbackHome"].as_str().unwrap())
+        } else {
+            root.join(record["fallbackHome"].as_str().unwrap())
+        };
+        let environment = CargoOutputEnvironment::from_values(
+            None,
+            None,
+            home.as_deref().map(|path| path.as_os_str()),
+            Some(fallback.as_os_str()),
+        );
+        ProjectFormatSession::with_cargo_environment(
+            sweepx_scanner::HostPlatformScanner::new(),
+            Default::default(),
+            CancellationToken::new(),
+            environment,
+        )
+        .refresh(&mut candidate);
+        let output = candidate.project_context.unwrap().cargo_output.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(record["cargo"]["stdout"].as_str().unwrap()).unwrap();
+        assert_eq!(record["cargo"]["status"], 0);
+        assert_eq!(record["cargo"]["boundedFailure"], serde_json::Value::Null);
+        assert_eq!(record["inputChanges"].as_array().unwrap().len(), 0);
+        let raw_target = raw["target_directory"].as_str().unwrap();
+        // Relative HOME can make metadata report a relative target. Resolve only against the
+        // recorded invocation cwd, preserving its dot components for the spelling contract.
+        let relative_target = if let Some(absolute) =
+            raw_target.strip_prefix(record["fixtureRoot"].as_str().unwrap())
+        {
+            absolute.strip_prefix('/').unwrap().to_owned()
+        } else {
+            assert!(
+                !std::path::Path::new(raw_target).is_absolute(),
+                "{}",
+                record["name"]
+            );
+            format!(
+                "{}/{raw_target}",
+                record["fixtureRelativeCwd"].as_str().unwrap()
+            )
+        };
+        let is_default = relative_target == "project/target";
+        let comparison = if relative_target
+            .split('/')
+            .any(|part| matches!(part, "." | ".."))
+        {
+            CargoOutputPathComparison::NotChecked
+        } else if is_default {
+            CargoOutputPathComparison::SameSpelling
+        } else {
+            CargoOutputPathComparison::DifferentSpelling
+        };
+        assert_eq!(
+            output.status,
+            ProjectContextStatus::Observed,
+            "{}: {output:?}",
+            record["name"]
+        );
+        assert!(output.source_locations_observed);
+        assert_eq!(
+            output.source,
+            Some(if is_default {
+                CargoOutputSource::PackageDefault
+            } else {
+                CargoOutputSource::CargoHomeConfig
+            }),
+            "{}",
+            record["name"]
+        );
+        assert_eq!(
+            output.candidate_path, comparison,
+            "{}: {output:?}",
+            record["name"]
+        );
+        assert!(candidate.project_execution_blocker().is_some());
+        for (path, bytes) in originals {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        for output_name in [
+            "home-output",
+            "fallback-output",
+            "dot-output",
+            "legacy-output",
+            "unused-output",
+        ] {
+            assert!(!root.join(output_name).exists());
+            assert!(!project.join(output_name).exists());
+        }
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert!(!encoded.contains(root.to_str().unwrap()));
+    }
+}
+
+#[test]
+fn unavailable_home_environment_never_becomes_absent_configuration() {
+    let (_owner, project, mut candidate) = fixture();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname='home_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    for home in [
+        None,
+        Some(std::ffi::OsStr::new("")),
+        Some(std::ffi::OsStr::new("bad\0home")),
+    ] {
+        ProjectFormatSession::with_cargo_environment(
+            sweepx_scanner::HostPlatformScanner::new(),
+            Default::default(),
+            CancellationToken::new(),
+            CargoOutputEnvironment::from_values(None, None, home, None),
+        )
+        .refresh(&mut candidate);
+        let output = candidate.project_context.unwrap().cargo_output.unwrap();
+        assert_eq!(output.status, ProjectContextStatus::Unknown, "{output:?}");
+        assert!(!output.source_locations_observed);
+        assert_eq!(output.source, None);
+        assert!(candidate.project_execution_blocker().is_some());
+    }
+    assert_eq!(
+        std::fs::read(project.join("target/personal")).unwrap(),
+        b"preserved"
+    );
+}
+
 #[test]
 fn default_workspace_report_counts_packages_and_rejects_missing_members_without_authority() {
     let (owner, project, mut candidate) = fixture();

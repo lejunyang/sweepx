@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use sweepx_model::ScannedEntry;
 use sweepx_platform::{CancellationToken, PlatformScanner};
 use sweepx_scanner::{
-    CargoConfigMemberObservation, CargoConfigPairObservation, LocatorDirectoryIdentity,
-    LocatorReadError, LocatorReader,
+    CargoConfigMemberObservation, CargoConfigPairObservation, DirectoryPathObservation,
+    LocatorDirectoryIdentity, LocatorDirectoryLookupFailure, LocatorReadError, LocatorReader,
 };
 
 /// Source selected in the explicitly modeled project-parent/no-CLI invocation.
@@ -154,8 +154,9 @@ impl CargoOutputEnvironment {
     }
 
     /// Admits explicit values for independent callers/tests, without changing process environment.
-    /// Path values are capped before copying; non-Unicode output inputs and relative/empty Cargo
-    /// home remain unsupported. `user_home` only supplies the default `<home>/.cargo` location.
+    /// Path values are capped before copying; non-Unicode output inputs remain unsupported.
+    /// Empty Cargo home falls back to user home; relative home uses the explicitly modeled cwd.
+    /// `user_home` only supplies the default `<home>/.cargo` location.
     pub fn from_values(
         target: Option<&OsStr>,
         build: Option<&OsStr>,
@@ -174,15 +175,16 @@ impl CargoOutputEnvironment {
             Ok(Some(value.to_owned()))
         }
         let home = (|| {
-            let value = home.or(user_home).ok_or("cargo_home_unavailable")?;
+            let explicit = home.filter(|value| !value.is_empty());
+            let value = explicit.or(user_home).ok_or("cargo_home_unavailable")?;
             if value.as_encoded_bytes().len() > 64 * 1024 {
                 return Err("resource_limit");
             }
-            if value.is_empty() || !Path::new(value).is_absolute() {
-                return Err("cargo_home_not_absolute");
+            if value.is_empty() || value.as_encoded_bytes().contains(&0) {
+                return Err("cargo_home_invalid");
             }
             let mut path = PathBuf::from(value);
-            if home.is_none() {
+            if explicit.is_none() {
                 path.push(".cargo")
             }
             if path.as_os_str().as_encoded_bytes().len() > 64 * 1024 {
@@ -320,6 +322,7 @@ impl CargoOutputSession {
                         CargoOutputSource::AncestorConfig
                     },
                     Some(depth),
+                    true,
                 ));
             }
             match reader
@@ -339,26 +342,42 @@ impl CargoOutputSession {
                 None => break,
             }
         }
-        let home_path = self.environment.home.as_ref().map_err(|reason| *reason)?;
+        // One bounded invocation-local copy avoids holding an environment borrow while indexing
+        // observed configuration sources. The admission cap was checked before environment copy.
+        let home_path = self
+            .environment
+            .home
+            .as_ref()
+            .map_err(|reason| *reason)?
+            .clone();
         budget.check(cancel)?;
-        let home = reader
-            .capture_directory_identity(home_path, cancel)
-            .map_err(|error| {
-                if error == LocatorReadError::InvalidRequest {
-                    "cargo_home_binding_unavailable"
+        let home_observation = reader
+            .observe_directory_path(&project, &home_path, cancel)
+            .map_err(directory_reason)?;
+        if let DirectoryPathObservation::Present(home) = &home_observation {
+            let home_value = self.source(reader, home, false, None, cancel, budget)?;
+            if selected.is_none()
+                && let Some(value) = home_value
+            {
+                let (origin, comparable) = if Path::new(&value).is_absolute() {
+                    (home.clone(), true)
                 } else {
-                    read_error(error)
-                }
-            })?;
-        let home_value = self.source(reader, &home, false, None, cancel, budget)?;
-        if selected.is_none()
-            && let Some(value) = home_value
-        {
-            let origin = reader
-                .capture_parent_directory(&home, cancel)
-                .map_err(read_error)?
-                .ok_or("cargo_home_path_base_unavailable")?;
-            selected = Some((origin, value, CargoOutputSource::CargoHomeConfig, None));
+                    let (base, comparable) = reader
+                        .observe_cargo_home_output_base(&project, &home_path, cancel)
+                        .map_err(directory_reason)?;
+                    let DirectoryPathObservation::Present(origin) = base else {
+                        return Err("cargo_home_path_base_unavailable");
+                    };
+                    (origin, comparable)
+                };
+                selected = Some((
+                    origin,
+                    value,
+                    CargoOutputSource::CargoHomeConfig,
+                    None,
+                    comparable,
+                ));
+            }
         }
         // The special variable is outside generic config merging; preserve its measured priority.
         if let Some(value) = self.environment.target.as_ref().map_err(|reason| *reason)? {
@@ -367,6 +386,7 @@ impl CargoOutputSession {
                 value.clone(),
                 CargoOutputSource::CargoTargetDir,
                 None,
+                true,
             ));
         } else if let Some(value) = self.environment.build.as_ref().map_err(|reason| *reason)? {
             selected = Some((
@@ -374,6 +394,7 @@ impl CargoOutputSession {
                 value.clone(),
                 CargoOutputSource::CargoBuildTargetDir,
                 None,
+                true,
             ));
         }
         budget.check(cancel)?;
@@ -408,8 +429,16 @@ impl CargoOutputSession {
                 return Ok(evidence);
             }
         };
+        budget.check(cancel)?;
+        if reader
+            .observe_directory_path(&project, &home_path, cancel)
+            .map_err(directory_reason)?
+            != home_observation
+        {
+            return Err("cargo_home_binding_changed");
+        }
         let default_output = selected.is_none();
-        let (origin, value, source, depth) = selected.unwrap_or_else(|| {
+        let (origin, value, source, depth, base_comparable) = selected.unwrap_or_else(|| {
             (
                 root,
                 "target".to_owned(),
@@ -419,6 +448,7 @@ impl CargoOutputSession {
                     CargoOutputSource::PackageDefault
                 },
                 None,
+                true,
             )
         });
         // A non-comparable lexical path is separate from failed native revalidation. Do not
@@ -427,9 +457,10 @@ impl CargoOutputSession {
             .revalidate_captured_directory(&origin, cancel)
             .map_err(read_error)?;
         let path = Path::new(&value);
-        let unresolved = value
-            .split(|ch| ch == '/' || (cfg!(windows) && ch == '\\'))
-            .any(|part| matches!(part, "." | ".."))
+        let unresolved = !base_comparable
+            || value
+                .split(|ch| ch == '/' || (cfg!(windows) && ch == '\\'))
+                .any(|part| matches!(part, "." | ".."))
             || (path.has_root() && !path.is_absolute())
             || (!path.is_absolute()
                 && matches!(
@@ -558,5 +589,13 @@ pub(super) fn read_error(error: LocatorReadError) -> &'static str {
         LocatorReadError::Cancelled => "cancelled",
         LocatorReadError::ResourceLimit => "resource_limit",
         LocatorReadError::InvalidRequest => "native_binding_unavailable",
+    }
+}
+
+fn directory_reason(error: LocatorDirectoryLookupFailure) -> &'static str {
+    match error {
+        LocatorDirectoryLookupFailure::Read(reason) => super::super::format::read_reason(reason),
+        LocatorDirectoryLookupFailure::NotDirectory => "cargo_home_not_directory",
+        LocatorDirectoryLookupFailure::NotFoundDuringLookup => "cargo_home_lookup_changed",
     }
 }

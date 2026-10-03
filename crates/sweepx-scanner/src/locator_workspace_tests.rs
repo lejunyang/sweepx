@@ -194,3 +194,138 @@ fn linked_manifest_and_linked_intermediate_never_follow_targets() {
     ));
     assert_eq!(std::fs::read(root.join("personal")).unwrap(), b"preserved");
 }
+
+#[test]
+fn configured_home_lookup_distinguishes_missing_components_and_current_directories() {
+    let (_owner, root) = fixture();
+    std::fs::create_dir(root.join("home")).unwrap();
+    std::fs::write(root.join("ordinary"), b"personal").unwrap();
+    let reader = reader();
+    let cancel = CancellationToken::new();
+    let cwd = reader.capture_directory_identity(&root, &cancel).unwrap();
+    for path in [
+        root.join("missing/deep"),
+        PathBuf::from("missing/../home"),
+        PathBuf::from("ordinary/config"),
+    ] {
+        assert!(
+            matches!(
+                reader.observe_directory_path(&cwd, &path, &cancel).unwrap(),
+                DirectoryPathObservation::AbsentDuringLookup(_)
+            ),
+            "{path:?}"
+        );
+    }
+    let before = reader
+        .observe_directory_path(&cwd, Path::new("missing/deep"), &cancel)
+        .unwrap();
+    std::fs::create_dir_all(root.join("missing/deep")).unwrap();
+    // Directory mutations require a fresh cwd snapshot, independent of the old absent result.
+    let cwd = reader.capture_directory_identity(&root, &cancel).unwrap();
+    let after = reader
+        .observe_directory_path(&cwd, Path::new("missing/deep"), &cancel)
+        .unwrap();
+    assert_ne!(before, after);
+    let DirectoryPathObservation::Present(after) = after else {
+        panic!("new directory was not observed")
+    };
+    let ordinary = reader
+        .capture_directory_identity(&root.join("missing/deep"), &cancel)
+        .unwrap();
+    assert!(
+        reader
+            .captured_directories_same_native_object(&after, &ordinary, &cancel)
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(root.join("ordinary")).unwrap(), b"personal");
+}
+
+#[test]
+fn cargo_home_output_base_preserves_lexical_parent_before_native_resolution() {
+    let (_owner, root) = fixture();
+    std::fs::create_dir_all(root.join("project/home")).unwrap();
+    let reader = reader();
+    let cancel = CancellationToken::new();
+    let cwd = reader
+        .capture_directory_identity(&root.join("project"), &cancel)
+        .unwrap();
+    for (input, expected, comparable) in [
+        ("home", root.join("project"), true),
+        (".", root.clone(), true),
+        ("home/..", root.join("project/home"), true),
+        ("../home", root.clone(), false),
+    ] {
+        let (base, actual_comparable) = reader
+            .observe_cargo_home_output_base(&cwd, Path::new(input), &cancel)
+            .unwrap();
+        assert_eq!(actual_comparable, comparable, "{input}");
+        let DirectoryPathObservation::Present(base) = base else {
+            panic!("base missing: {input}")
+        };
+        let independent = reader
+            .capture_directory_identity(&expected, &cancel)
+            .unwrap();
+        assert!(
+            reader
+                .captured_directories_same_native_object(&base, &independent, &cancel)
+                .unwrap(),
+            "{input}"
+        );
+    }
+    assert!(!root.join("project/home/target").exists());
+}
+
+#[test]
+fn configured_home_lookup_keeps_cancellation_and_resource_refusal_distinct_from_absence() {
+    let (_owner, root) = fixture();
+    let reader = reader();
+    let cancel = CancellationToken::new();
+    let cwd = reader.capture_directory_identity(&root, &cancel).unwrap();
+    let limited = LocatorReader::new(
+        HostPlatformScanner::new(),
+        LocatorReadLimits {
+            max_requests: 2,
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        limited.observe_directory_path(&cwd, &root.join("a/b/c"), &cancel),
+        Err(LocatorDirectoryLookupFailure::Read(
+            LocatorReadFailure::ResourceLimit
+        ))
+    ));
+    cancel.cancel();
+    assert!(matches!(
+        reader.observe_directory_path(&cwd, Path::new("missing"), &cancel),
+        Err(LocatorDirectoryLookupFailure::Read(
+            LocatorReadFailure::Cancelled
+        ))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_home_lookup_rejects_linked_and_dangling_ancestors() {
+    let (_owner, root) = fixture();
+    std::fs::create_dir(root.join("home")).unwrap();
+    std::os::unix::fs::symlink("home", root.join("linked")).unwrap();
+    std::os::unix::fs::symlink("unavailable", root.join("dangling")).unwrap();
+    let reader = reader();
+    let cancel = CancellationToken::new();
+    let cwd = reader.capture_directory_identity(&root, &cancel).unwrap();
+    for path in [
+        root.join("linked/missing"),
+        root.join("dangling/config"),
+        PathBuf::from("linked/../home"),
+    ] {
+        assert!(
+            matches!(
+                reader.observe_directory_path(&cwd, &path, &cancel),
+                Err(LocatorDirectoryLookupFailure::Read(
+                    LocatorReadFailure::SymlinkOrReparse
+                ))
+            ),
+            "{path:?}"
+        );
+    }
+}

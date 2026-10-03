@@ -235,6 +235,25 @@ pub enum LocatorDirectoryLookupFailure {
     NotFoundDuringLookup,
 }
 
+/// Current bounded observation of a configured directory path, without execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryPathObservation {
+    /// Complete independently admitted native directory identity.
+    Present(LocatorDirectoryIdentity),
+    /// A bound component was missing or an ordinary non-directory at that time point. Neither
+    /// implies sealed absence; the opaque anchor can be compared with a later observation.
+    AbsentDuringLookup(DirectoryPathAbsence),
+}
+
+/// Opaque time-local anchor for a directory path that could not continue through one component.
+/// This contains no executable locator and exposes no absolute path or authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryPathAbsence {
+    parent: LocatorDirectoryIdentity,
+    name: NativeName,
+    not_directory: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocatorDirectoryIdentity {
     native_absolute_path: NativeAbsolutePath,
@@ -1156,6 +1175,170 @@ impl<P: PlatformScanner> LocatorReader<P> {
         self.reopen_captured_directory(&current, cancel)
             .map_err(map_directory_attempt)?;
         Ok(current)
+    }
+
+    /// Observes a configured absolute or cwd-relative directory without lexical parent collapse.
+    /// Absolute paths independently admit their deepest available literal prefix; failed root
+    /// admissions never mean absence. Remaining components use bound no-follow child lookups.
+    /// Only typed NotFound/non-directory at a revalidated parent yields time-local absence;
+    /// links, denials, mount changes and uncertain failures stay errors. Dot/parent steps retain
+    /// their ordinary native walk semantics, including a missing `a` in `a/../b`.
+    ///
+    /// Inputs are capped at 64 KiB absolute/4 KiB relative and 64 components. Prefix attempts plus
+    /// walk steps share max_requests, and the existing component/enumeration bounds still apply.
+    /// The result is a configuration observation, never added scan coverage or permission.
+    pub fn observe_directory_path(
+        &self,
+        cwd: &LocatorDirectoryIdentity,
+        path: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<DirectoryPathObservation, LocatorDirectoryLookupFailure> {
+        use std::path::Component;
+        self.validate_captured_cargo_pair_budget(cwd)
+            .map_err(map_directory_operation_error)?;
+        if native_path_bytes(path) > if path.is_absolute() { 64 * 1024 } else { 4096 } {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        if (path.has_root() && !path.is_absolute())
+            || (!path.is_absolute()
+                && matches!(path.components().next(), Some(Component::Prefix(_))))
+        {
+            return Err(LocatorReadFailure::InvalidBinding.into());
+        }
+        let count = path.components().count();
+        if count > 64 || count > self.limits.max_components_per_request {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        let mut requests = 0usize;
+        let (mut current, remaining) = if path.is_absolute() {
+            let mut prefix = PathBuf::new();
+            let mut remaining = PathBuf::new();
+            let mut relative = false;
+            for component in path.components() {
+                relative |= matches!(component, Component::ParentDir | Component::CurDir);
+                if relative {
+                    remaining.push(component);
+                } else {
+                    prefix.push(component);
+                }
+            }
+            let mut failed = Vec::new();
+            let directory = loop {
+                requests += 1;
+                if requests > self.limits.max_requests {
+                    return Err(LocatorReadFailure::ResourceLimit.into());
+                }
+                if cancel.is_cancelled() {
+                    return Err(LocatorReadFailure::Cancelled.into());
+                }
+                match self.capture_directory_identity(&prefix, cancel) {
+                    Ok(captured) => break captured,
+                    Err(LocatorReadError::InvalidRequest) => {
+                        // No string/error-kind inference here. Admit a parent, then observe the
+                        // failed component through its retained native handle before concluding.
+                        let name = prefix
+                            .file_name()
+                            .ok_or(LocatorReadFailure::Unavailable)?
+                            .to_os_string();
+                        failed.push(name);
+                        prefix = prefix
+                            .parent()
+                            .ok_or(LocatorReadFailure::Unavailable)?
+                            .to_path_buf();
+                    }
+                    Err(error) => return Err(map_directory_operation_error(error)),
+                }
+            };
+            let mut suffix = PathBuf::new();
+            for name in failed.into_iter().rev() {
+                suffix.push(name);
+            }
+            suffix.push(remaining);
+            (directory, suffix)
+        } else {
+            self.reopen_captured_directory(cwd, cancel)
+                .map_err(map_directory_attempt)?;
+            (cwd.clone(), path.to_path_buf())
+        };
+        if remaining.as_os_str().is_empty() {
+            return Ok(DirectoryPathObservation::Present(current));
+        }
+        let mut limits = self.limits;
+        limits.max_requests = limits.max_requests.saturating_sub(requests);
+        let steps = parse_relative_directory_steps(&remaining, limits)?;
+        for step in steps {
+            if cancel.is_cancelled() {
+                return Err(LocatorReadFailure::Cancelled.into());
+            }
+            current = match step {
+                RelativeDirectoryStep::Child(name) => {
+                    match self.capture_child_directory(&current, &name, cancel) {
+                        Ok(child) => child,
+                        Err(LocatorDirectoryLookupFailure::NotFoundDuringLookup) => {
+                            self.reopen_captured_directory(&current, cancel)
+                                .map_err(map_directory_attempt)?;
+                            return Ok(DirectoryPathObservation::AbsentDuringLookup(
+                                DirectoryPathAbsence {
+                                    parent: current,
+                                    name,
+                                    not_directory: false,
+                                },
+                            ));
+                        }
+                        Err(LocatorDirectoryLookupFailure::NotDirectory) => {
+                            self.reopen_captured_directory(&current, cancel)
+                                .map_err(map_directory_attempt)?;
+                            return Ok(DirectoryPathObservation::AbsentDuringLookup(
+                                DirectoryPathAbsence {
+                                    parent: current,
+                                    name,
+                                    not_directory: true,
+                                },
+                            ));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                RelativeDirectoryStep::Current => {
+                    self.reopen_captured_directory(&current, cancel)
+                        .map_err(map_directory_attempt)?;
+                    current
+                }
+                RelativeDirectoryStep::Parent => self
+                    .capture_parent_directory(&current, cancel)
+                    .map_err(map_directory_operation_error)?
+                    .ok_or(LocatorReadFailure::InvalidBinding)?,
+            };
+        }
+        self.reopen_captured_directory(&current, cancel)
+            .map_err(map_directory_attempt)?;
+        Ok(DirectoryPathObservation::Present(current))
+    }
+
+    /// Observes the lexical parent used as the base for a Cargo-home relative target-dir.
+    /// Cargo resolves home against cwd before taking its parent; `home/..` therefore differs
+    /// from taking the parent of the physically resolved home. The boolean permits exact
+    /// spelling comparison only when this raw base has no dot/parent components. Neither
+    /// path is exposed or opened as an output, and the returned input directory grants no scope.
+    pub fn observe_cargo_home_output_base(
+        &self,
+        cwd: &LocatorDirectoryIdentity,
+        home: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<(DirectoryPathObservation, bool), LocatorDirectoryLookupFailure> {
+        self.validate_captured_cargo_pair_budget(cwd)
+            .map_err(map_directory_operation_error)?;
+        self.reopen_captured_directory(cwd, cancel)
+            .map_err(map_directory_attempt)?;
+        let cwd_path =
+            native_absolute_path_buf(&cwd.native_absolute_path).map_err(map_directory_attempt)?;
+        let joined = cwd_path.join(home);
+        if native_path_bytes(&joined) > 64 * 1024 {
+            return Err(LocatorReadFailure::ResourceLimit.into());
+        }
+        let base = joined.parent().ok_or(LocatorReadFailure::Unavailable)?;
+        let observation = self.observe_directory_path(cwd, base, cancel)?;
+        Ok((observation, !native_path_has_dot_components(base)))
     }
 
     fn observe_cargo_config_members(

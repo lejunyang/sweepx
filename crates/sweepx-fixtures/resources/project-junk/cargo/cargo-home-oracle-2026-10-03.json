@@ -1,0 +1,1581 @@
+{
+  "schema": "sweepx.cargo-home-oracle.v1",
+  "baseCommit": "d5a181daff6562b8a68f416a16db9b20cf6abb5b",
+  "recordedAtUtc": "2026-10-03T02:54:24Z",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64"
+  },
+  "scope": "Pinned offline/no-deps Cargo home observations; no build, user config, ownership/activity, Trash or performance claim",
+  "bounds": {
+    "cases": 64,
+    "fixtureFilesPerCase": 64,
+    "fixtureBytesPerCase": 131072,
+    "secondsPerInvocation": 5,
+    "combinedOutputBytes": 262144
+  },
+  "harness": {
+    "path": "scripts/cargo-home-oracle.py",
+    "sha256": "d25cd0497899ff6f57e1b7630012a1e91792023f1200c6f1d7e28551b7e4a3cc",
+    "runnerSha256": "bd7b5f4dc54c80e521cd71c458fd3530de89d4cce01f62b17256f2bbbd562891"
+  },
+  "python": {
+    "path": "/Users/bytedance/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+    "version": "3.12.14"
+  },
+  "cargoBinary": {
+    "path": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+    "sha256": "1de2e84c15443b70444eecfa959ff9099dd8c1a5606b6d9ef5bc0ea9c25bc7f9"
+  },
+  "rustcBinary": {
+    "path": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+    "sha256": "a11618eca0956a8aa4372c2bc898690b513cbdfa2cb9125b2a5301e360ed5b49"
+  },
+  "plannedCases": [
+    "absolute_existing",
+    "absolute_missing",
+    "relative_existing",
+    "relative_missing",
+    "relative_parent",
+    "dot",
+    "empty",
+    "unset",
+    "fallback_missing",
+    "parent_steps",
+    "missing_parent_step",
+    "regular_home",
+    "parent_end",
+    "dot_prefix",
+    "absolute_parent_steps",
+    "relative_fallback",
+    "legacy_home_config"
+  ],
+  "records": [
+    {
+      "name": "absolute_existing",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "home",
+      "homeKind": "absolute",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_existing/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1340
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "absolute_missing",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "missing/deep",
+      "homeKind": "absolute",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/missing/deep"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project/target\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project/target\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_missing/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1338
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "relative_existing",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "home",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project/home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project/home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_existing/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1356
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "relative_missing",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "missing",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "missing"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project/target\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project/target\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_missing/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1338
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "relative_parent",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "../home",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "../home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project/../home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project/../home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_parent/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1346
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "dot",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": ".",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "."
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot/dot-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot/dot-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1226
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "empty",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/empty",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/empty/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/empty/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": ""
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/empty/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/empty/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/empty/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/empty/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/empty/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/empty/user-home/fallback-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/empty/user-home/fallback-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/empty/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1272
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "unset",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/unset",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/unset/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": null,
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/unset/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/unset/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/unset/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/unset/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/unset/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/unset/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/unset/user-home/fallback-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/unset/user-home/fallback-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/unset/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1272
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "fallback_missing",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": null,
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project/target\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project/target\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/fallback_missing/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1338
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "parent_steps",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "tmp/../home",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "tmp/../home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project/tmp/../home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project/tmp/../home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_steps/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1330
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "missing_parent_step",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "missing/../home",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "missing/../home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project/target\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project/target\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/missing_parent_step/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1362
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "regular_home",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "regular",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "regular"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project/target\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project/target\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/regular_home/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1306
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "parent_end",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "home/..",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "home/.."
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project/home/dot-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project/home/dot-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/parent_end/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1308
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "dot_prefix",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "./home",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "./home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project/home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project/home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/dot_prefix/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1300
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "absolute_parent_steps",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "project/tmp/../home",
+      "homeKind": "absolute",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project/tmp/../home"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project/tmp/../home-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project/tmp/../home-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/absolute_parent_steps/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1402
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "relative_fallback",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": null,
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": true,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "project/user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "project/user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"user-home/fallback-output\",\"build_directory\":\"user-home/fallback-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/relative_fallback/project\",\"metadata\":null}\n",
+        "stderr": "",
+        "retainedOutputBytes": 1252
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    },
+    {
+      "name": "legacy_home_config",
+      "fixtureRoot": "/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config",
+      "cwd": "/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project",
+      "fixtureRelativeCwd": "project",
+      "homeValue": "legacy",
+      "homeKind": "relative",
+      "fallbackHome": "user-home",
+      "fallbackRelative": false,
+      "inputs": [
+        {
+          "path": "home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/Cargo.toml",
+          "utf8": "[package]\nname=\"home_oracle\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+          "sha256": "0a149be8cc0477eed25323591714cac14e46dd3a3128cad65ff6ffcec7ef901e"
+        },
+        {
+          "path": "project/config.toml",
+          "utf8": "[build]\ntarget-dir=\"dot-output\"\n",
+          "sha256": "d2281cf72e4f6957876a4670a18c81b6a9e1db57aa84bb0a2ce9e18001e0a4b6"
+        },
+        {
+          "path": "project/home/config.toml",
+          "utf8": "[build]\ntarget-dir=\"home-output\"\n",
+          "sha256": "bec7d95acc4b9bcc94a8968555227bdcd9fc5db625f21ee4779b4b3fbba9f245"
+        },
+        {
+          "path": "project/legacy/config",
+          "utf8": "[build]\ntarget-dir=\"legacy-output\"\n",
+          "sha256": "da0361d6df20c2123a2326fe0063844e820bc414a8a4b33150ac1cd282b89e72"
+        },
+        {
+          "path": "project/legacy/config.toml",
+          "utf8": "[build]\ntarget-dir=\"unused-output\"\n",
+          "sha256": "d786fbfff983f68577f9733ee40fa58988169c3d9586d77480c8f9eb0944043e"
+        },
+        {
+          "path": "project/regular",
+          "utf8": "personal file used as configured home\n",
+          "sha256": "d036daf9ebc29e6363e9a1c66cb2e00a08caa75d2eddee124a2c5bd32a5df275"
+        },
+        {
+          "path": "project/src/lib.rs",
+          "utf8": "pub fn answer() -> u8 { 42 }\n",
+          "sha256": "ee54963dd71aa0a4288ecbad2cf17d9aad5fb5401dc75dbba9ca2338a3c778a7"
+        },
+        {
+          "path": "project/target/personal",
+          "utf8": "personal fixture bytes, preserved\n",
+          "sha256": "696e88c72254dd8e4b6bed81f9fbe22dd171c9ab2292342cc431ac9d0bc44167"
+        },
+        {
+          "path": "user-home/.cargo/config.toml",
+          "utf8": "[build]\ntarget-dir=\"fallback-output\"\n",
+          "sha256": "d7dd25b7458629d26a1d270875840b574950de570c91be2a7b997a303524a858"
+        }
+      ],
+      "directories": [
+        "project/tmp",
+        "user-home"
+      ],
+      "command": [
+        "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/cargo",
+        "metadata",
+        "--offline",
+        "--no-deps",
+        "--format-version=1"
+      ],
+      "environment": {
+        "HOME": "/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/user-home",
+        "RUSTC": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc",
+        "PATH": "/Users/bytedance/Library/Application Support/osdk/rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:/usr/bin:/bin",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_HOME": "legacy"
+      },
+      "cargo": {
+        "status": 0,
+        "boundedFailure": null,
+        "stdout": "{\"packages\":[{\"name\":\"home_oracle\",\"version\":\"0.1.0\",\"id\":\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project#home_oracle@0.1.0\",\"license\":null,\"license_file\":null,\"description\":null,\"source\":null,\"dependencies\":[],\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"home_oracle\",\"src_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/src/lib.rs\",\"edition\":\"2024\",\"doc\":true,\"doctest\":true,\"test\":true}],\"features\":{},\"manifest_path\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/Cargo.toml\",\"metadata\":null,\"publish\":null,\"authors\":[],\"categories\":[],\"keywords\":[],\"readme\":null,\"repository\":null,\"homepage\":null,\"documentation\":null,\"edition\":\"2024\",\"links\":null,\"default_run\":null,\"rust_version\":null}],\"workspace_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project#home_oracle@0.1.0\"],\"workspace_default_members\":[\"path+file:///private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project#home_oracle@0.1.0\"],\"resolve\":null,\"target_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/legacy-output\",\"build_directory\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/legacy-output\",\"version\":1,\"workspace_root\":\"/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project\",\"metadata\":null}\n",
+        "stderr": "warning: both `/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/legacy/config` and `/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/legacy/config.toml` exist. Using `/private/tmp/sweepx-cargo-home-mzy16xt8/legacy_home_config/project/legacy/config`\n",
+        "retainedOutputBytes": 1653
+      },
+      "inputChanges": [],
+      "createdFiles": []
+    }
+  ],
+  "complete": true,
+  "cargoVersion": {
+    "status": 0,
+    "boundedFailure": null,
+    "stdout": "cargo 1.98.0 (797e8a9bc 2026-08-05)\n",
+    "stderr": "",
+    "retainedOutputBytes": 36
+  },
+  "rustcVersion": {
+    "status": 0,
+    "boundedFailure": null,
+    "stdout": "rustc 1.98.0 (88d9e12ae 2026-08-18)\n",
+    "stderr": "",
+    "retainedOutputBytes": 36
+  },
+  "summary": {
+    "recorded": 17,
+    "cargoSucceeded": 17,
+    "inputChanges": 0
+  }
+}

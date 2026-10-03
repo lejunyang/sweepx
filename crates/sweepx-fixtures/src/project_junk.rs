@@ -184,3 +184,8 @@ pub fn generate(root: &Path) -> std::io::Result<Vec<(&'static ProjectJunkLayoutC
 /// These observations cover membership/default selection, not builds or deletion authority.
 pub const CARGO_WORKSPACE_ORACLE: &str =
     include_str!("../resources/project-junk/cargo/cargo-workspace-oracle-2026-10-03.json");
+
+/// Raw pinned POSIX Cargo 1.98 home/config inputs and metadata outputs.
+/// These observations supply output selection/path oracles, never ownership or Trash authority.
+pub const CARGO_HOME_ORACLE: &str =
+    include_str!("../resources/project-junk/cargo/cargo-home-oracle-2026-10-03.json");
