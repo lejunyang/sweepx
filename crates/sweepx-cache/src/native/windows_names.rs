@@ -4,10 +4,20 @@ use std::io;
 
 /// Walks the documented 12-byte header and counted UTF-16 name, charging even unknown names.
 /// Cache basenames are ASCII. Other names are ignored without lossy replacement or large copies.
+#[cfg(test)]
 pub(super) fn visit_names(
     bytes: &[u8],
     remaining: &mut usize,
     mut visit: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    visit_names_all(bytes, remaining, |name| name.map_or(Ok(()), &mut visit))
+}
+
+/// Inspection must see unrepresentable names as unknown, not silently omit them from totals.
+pub(super) fn visit_names_all(
+    bytes: &[u8],
+    remaining: &mut usize,
+    mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
 ) -> io::Result<()> {
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
         return Err(io::Error::other("invalid cache directory page size"));
@@ -44,7 +54,9 @@ pub(super) fn visit_names(
                 .iter()
                 .map(|unit| char::from(unit[0]))
                 .collect();
-            visit(&text)?;
+            visit(Some(&text))?;
+        } else {
+            visit(None)?;
         }
         if next == 0 {
             return Ok(());
@@ -84,6 +96,21 @@ mod tests {
         })
         .unwrap();
         assert!(visit_names(&surrogate, &mut 0, |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn inspection_receives_unknown_names_instead_of_inventing_complete_totals() {
+        // Literal native unpaired surrogate: not a managed ASCII basename.
+        let page = [0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0xd8];
+        let mut observed = Vec::new();
+        let mut budget = 1;
+        visit_names_all(&page, &mut budget, |name| {
+            observed.push(name.map(str::to_owned));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(observed, [None]);
+        assert_eq!(budget, 0);
     }
 
     #[test]

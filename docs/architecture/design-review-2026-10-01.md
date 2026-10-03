@@ -982,7 +982,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览加载、原生存储与 validity 范围/游标时机 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Linux/Windows 文件索引有效性；其余发现、候选展开、指纹及 legacy API 投影；普通预览 validity 范围/游标时机、解析/投影预算、provider 与 state 目录审计 | 用户当前优先项；Linux/Windows 垃圾 TUI 已接通私有历史首屏，随后仍全量观察文件；普通 CLI scan 已使用 typed facts/逐行导出，分析 TUI 省去重复 JSON，稀疏预览额度压缩及 generation 编码已收敛，普通缓存加载/发布/诊断已复用保留句柄并限制输入；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1179,3 +1179,19 @@ scanner/collector 的原 typed 元数据保留、cache preview 持久化和普�
 这次审计还确认了独立缺口：ordinary `AtomicGenerationStore::load_current` 的 `read_checked` 仍使用未经限额的 path `fs::read`，与只读 inspect 的有界 helper 不同。旧 writer/inspection 的原生路径替换、Windows permissions/reparse 边界及 core state 目录遍历需继续审计；不能把新的 junk history retained-handle backend 当作这条路径的证据。普通预览 validity 当前在 scan 后捕获 USN，且缺失卷会被跳过；不能由局部 token 的未变化推断整个预览从扫描开始至复用时都未改变。这些缺口、首次 preview row/aggregate 索引投影预算与持久代次淘汰仍未关闭，下一单元优先处理 loading/native/freshness 合同。已有 preview 仍不提供删除权限；Linux/Windows 已验证文件索引、目标宿主运行及整体路线图继续开放，Dart/SvelteKit 扩展暂缓。
 
 [本单元验证记录](preview-compaction-validation-2026-10-03.json)保存逐次结果、原始系统统计及初期夹具/构建失败。独立 exhaustive eviction + ordinary JSON 大小 oracle 在 30 组 byte/record cap 上核对排序、tie、mandatory、未知及 Others 的完整结果；另核对特殊字符长度、旧 payload checksum、借用/拥有 envelope 编码一致、实际限额及原 IO 失败、虚假 counter/拒绝发布保留 pointer。完整 affected cache 38、core 346、CLI 133 共 517 项通过、0 失败、2 项既有 opt-in benchmark ignored。计时后只添加固定 hash buffer，压缩函数/夹具不变，cache 38 项再次通过；其余运行结果复用，不称为第二轮完整矩阵。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown/23 项检查器及 cache package list 通过。注释中关于 scan 后捕获游标的错误解释已纠正，运行行为尚未修复；交叉编译不证明目标宿主 IO，package list 不证明 registry 依赖构建。target 仍约 1.9 GiB，没有清空回收站。
+
+
+## 普通预览有界加载与原生存储复用（2026-10-03）
+
+普通 `AtomicGenerationStore` 的 path `fs::read` 与旧 pathname publication/Windows inspection 已移除。垃圾缓存的 Unix/Windows 原生存储和 Windows owner/DACL 策略移入现有 `sweepx-cache`，core 复用相同能力；17 个 crate 数量保持，没有第二套分类或权限判定。Unix 以保留父 fd 的 no-follow/nonblocking basename 操作，子目录另核对设备；Windows 延续 NtCreateFile 相对 handle、显式 protected DACL、普通本地卷及 reparse/offline/recall 拒绝。状态目录入口仍有独立的 core pathname 检查，不能据此宣称全部 state IO 已重构。
+
+`load_current` 不创建缺失 root，pointer 在读取前限制为 64 KiB，generation 为 65 MiB。长度来自同一已准入文件句柄，读取后重验变化；多余字节用固定栈缓冲观察，不因 racing append 扩大 Vec。超额拒绝解析及隔离复制，core 报 `cache.preview.resource_limit` 并继续当前扫描。正常损坏内容的隔离复制使用同一保留 root，不重新打开 display path。这里限制 encoded input，不是 JSON parser/owned rows 的进程 RSS 上限；解析前 record/shape/owned-data admission 仍需审计。
+
+generation 和 current 指针各自经独占私有 temporary 原子发布；保留原文件 flush/sync 和旧 compact-payload checksum，不承诺原子双文件事务或目录 crash durability。编码/IO 失败清理本调用的 temporary，不推进指针。existing linked/shared/special/aliased 文件拒绝，原生 cache backend 不修复既有对象权限；core state 入口仍有旧 pathname 权限整备，需要独立审计。旧 pretty JSON 兼容以合格原生对象为前提。只读诊断共用 handle reader，浅层最多 256 个结果，超过额度显式 truncated；无法表示的原生未知名称不能静默漏出 total，返回拒绝。垃圾缓存仍保留原全局 4,096 native observations、input/retained/disk/root 额度。
+
+独立 sparse `set_len` 夹具分别构造 4 GiB pointer/generation，以普通 metadata 交叉核对长度，验证加载资源拒绝、无隔离复制及只读诊断错误；没有写出 4 GiB fixture 内容。目录改名并放入替代 display root 后，保留句柄仍加载原 generation，损坏数据只复制到原目录。另覆盖缺失目录不创建、公开/硬链接/FIFO pointer 不解析、opaque Unix name 不被漏计，以及 literal Windows UTF-16 unknown name 的纯解析契约。APFS 对 invalid UTF-8 fixture 返回 EILSEQ，Linux opaque-name 回归只在交叉分支编译，未取得原生 Linux 运行证据。旧预算、锁、句柄替换、格式/checksum、排序和 CLI 只读诊断断言保留。
+
+这次共享存储只闭合列出的 IO 切面。USN 游标仍在扫描后捕获，缺失卷仍可被跳过，旧 `verified_preview` 升级缺少完整范围及时机证明，下一单元应撤销未经证明的升级并处理完整 scope/cursor 合同。macOS/Linux 缓存 provider/no-materialization 与文件系统准入、首次 preview row/aggregate 投影、state 目录额度/代次淘汰及 JSON 解析前 admission 仍开放。没有目标宿主/MSVC、真实云 provider、系统 Trash/隔离成功或端到端扫描提速的新验收，Dart/SvelteKit 扩展继续暂缓。
+
+
+[本单元验证记录](native-preview-storage-validation-2026-10-03.json)保留初期 compile/权限夹具/跨 cfg 失败与修正。cache 58、core 332、CLI 132（既有系统 Trash 成功挂起用例仍显式 skip）共 522 项通过。按未改变的通过前缀、修正 core/后续包及失败之后补跑的尾部组合，工作区 1,112 项通过、1 项原生 FSEvents 失败、3 项既有 opt-in ignored；不是全绿矩阵。FSEvents 孤立诊断再次得到空历史，生产模块已声明 HistoryDone 不是当前写入屏障，旧测试的即时可见前提需单独修正，实际缓存 freshness 缺口仍开放。host/Linux GNU/Windows GNU 工作区 all-targets/all-features lint、fmt/diff、54 份 Markdown/23 项检查器和 cache/core/CLI package list 通过；交叉 lint 不证明宿主 IO，package list 不证明 registry 构建。target 约 2.2 GiB，继续使用 lean 构建，没有清空回收站。

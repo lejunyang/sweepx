@@ -312,4 +312,6 @@ Windows 的状态目录从同一个已打开目录句柄读取 owner/DACL，拒�
 
 Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿保留目录/文件句柄进行，复用受保护 DACL 与权限解释器，拒绝 reparse、offline/recall、远程设备、跨卷及多硬链接文件。仅支持普通绝对 drive 路径（含 verbatim drive），UNC/device 与未知文件系统回退现场扫描；这些记录仍是历史展示，没有 Linux/Windows 当前文件索引命中。各平台每缓存目录最多观察 4,096 条枚举项（含未知名称）；Windows 单页固定 64 KiB，零进度、截断和超额报缓存不可用，当前扫描继续。成功发布后沿用原磁盘淘汰额度；淘汰失败可能留下已发布代次，不保证崩溃耐久或进程 RSS。Windows 原生运行/MSVC/provider 验收仍待完成。
 
-普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限；普通预览加载及原生存储边界的审计仍未完成。测量与边界见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
+普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限。测量与边界见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
+
+普通预览与垃圾历史缓存现在共用原生目录句柄，读取、发布、损坏数据隔离和只读诊断不再逐次从显示路径打开文件。加载前限制 current 指针为 64 KiB、generation 为 65 MiB，超大输入不读取内容、不复制到隔离区，并报告缓存资源缺口；当前扫描结果仍保留。Unix 检查 owner、私有权限、普通文件与单硬链接，Windows 使用相对句柄、显式私有 DACL 和 reparse/offline/recall 拒绝。旧 JSON/checksum 兼容，原生缓存 backend 对权限不合格的对象直接拒绝；core state 入口的旧权限整备仍需独立审计。此改造没有删除权限，也未闭合完整预览 freshness、provider 宿主行为或整体内存预算。

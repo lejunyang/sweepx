@@ -2763,7 +2763,9 @@ fn cache_status_json_reports_degraded_for_invalid_current_pointer() {
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(preview_root.join("current.json"), b"{not-json").unwrap();
+    let pointer = preview_root.join("current.json");
+    fs::write(&pointer, b"{not-json").unwrap();
+    fs::set_permissions(&pointer, fs::Permissions::from_mode(0o600)).unwrap();
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -2817,6 +2819,7 @@ fn cache_status_quarantine_presence_is_degraded_and_read_only() {
     fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
     let quarantined = quarantine.join("old.corrupt.json");
     fs::write(&quarantined, b"broken").unwrap();
+    fs::set_permissions(&quarantined, fs::Permissions::from_mode(0o600)).unwrap();
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())
@@ -2865,7 +2868,9 @@ fn cache_status_human_output_includes_degraded_reason() {
     fs::create_dir_all(&preview_root).unwrap();
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&preview_root, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(preview_root.join("current.json"), b"{not-json").unwrap();
+    let pointer = preview_root.join("current.json");
+    fs::write(&pointer, b"{not-json").unwrap();
+    fs::set_permissions(&pointer, fs::Permissions::from_mode(0o600)).unwrap();
 
     let mut cmd = cli_command();
     cmd.current_dir(cli_crate_dir())

@@ -48,18 +48,21 @@ const REFUSED: u32 = FILE_ATTRIBUTE_REPARSE_POINT
     | FILE_ATTRIBUTE_RECALL_ON_OPEN
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
 
-pub(crate) struct Directory {
+/// A private cache directory retained by native handle; display paths are not reopened.
+pub struct Directory {
     file: File,
     volume: u64,
 }
 
 /// A non-inheritable, share-none lock file. Closing the handle releases publication exclusion;
 /// readers need no lock and deny data-write/delete sharing while reading an existing generation.
-pub(crate) struct LockGuard {
+/// Releases this invocation's cache publication exclusion when dropped.
+pub struct LockGuard {
     _file: File,
 }
 
 impl Directory {
+    /// Opens an absolute no-follow cache root, optionally creating private components.
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         // Bound the complete request before walking or allocating individual components.
         crate::windows_state_policy::terminated_utf16(path.as_os_str().encode_wide())
@@ -172,6 +175,7 @@ impl Directory {
         )
     }
 
+    /// Opens a private child directory relative to this retained handle.
     pub fn child(&self, name: &str) -> io::Result<Self> {
         self.private()?;
         let file = self.open_relative(
@@ -190,6 +194,28 @@ impl Directory {
         })
     }
 
+    /// Creates or admits a private child beneath this retained directory.
+    pub fn create_child(&self, name: &str) -> io::Result<Self> {
+        self.private()?;
+        let descriptor = PrivateSecurityDescriptor::new()?;
+        let file = self.open_relative(
+            &component(OsStr::new(name))?,
+            DIR_ACCESS,
+            FILE_DIRECTORY_FILE,
+            FILE_OPEN_IF,
+            SHARE_ALL,
+            Some(&descriptor),
+        )?;
+        ordinary(&file, true, Some(self.volume))?;
+        let child = Self {
+            file,
+            volume: self.volume,
+        };
+        child.private()?;
+        Ok(child)
+    }
+
+    /// Nonblocking publication exclusion; contention makes the cache unavailable.
     pub fn lock(&self) -> io::Result<LockGuard> {
         self.private()?;
         let descriptor = PrivateSecurityDescriptor::new()?;
@@ -225,14 +251,30 @@ impl Directory {
         revalidate_file(file)
     }
 
+    /// Atomically publishes bounded JSON; this disposable cache write is not crash durable.
     pub fn write_json(
         &self,
         name: &str,
         value: &impl serde::Serialize,
         cap: usize,
     ) -> io::Result<()> {
+        self.publish(name, |file| write_json(file, value, cap))
+    }
+
+    /// Runs the encoder on an exclusively created private temporary, then publishes it
+    /// beneath the same retained parent. Failure removes only this invocation's temporary.
+    pub(crate) fn publish(
+        &self,
+        name: &str,
+        encode: impl FnOnce(&mut File) -> io::Result<()>,
+    ) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         self.private()?;
+        match self.open_file(name) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let destination = component(OsStr::new(name))?;
         let temp = component(OsStr::new(&format!(
             ".sweepx-{}-{}.tmp",
@@ -250,7 +292,7 @@ impl Directory {
         )?;
         let result = (|| {
             self.valid_file(&file)?;
-            write_json(&mut file, value, cap)?;
+            encode(&mut file)?;
             self.private()?;
             self.valid_file(&file)?;
             rename(&file, &self.file, &destination)
@@ -263,6 +305,7 @@ impl Directory {
         result
     }
 
+    /// Removes a managed cache basename without following its target.
     pub fn remove(&self, name: &str) -> io::Result<()> {
         self.private()?;
         let file = self.open_relative(
@@ -278,6 +321,7 @@ impl Directory {
         dispose(&file)
     }
 
+    /// Reads native encoded length and LRU time for a managed cache basename.
     pub fn metadata(&self, name: &str) -> io::Result<EntryMetadata> {
         let file = self.open_file(name)?;
         let basic: FILE_BASIC_INFO = query(&file, FileBasicInfo)?;
@@ -289,7 +333,18 @@ impl Directory {
         })
     }
 
+    /// Visits managed UTF-8 names within a fixed native enumeration budget.
     pub fn entries(&self, mut visit: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+        self.entries_all(|name| match name {
+            Some(".lock") | None => Ok(()),
+            Some(name) => visit(name),
+        })
+    }
+
+    pub(crate) fn entries_all(
+        &self,
+        mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
+    ) -> io::Result<()> {
         self.private()?;
         // ReOpenFile creates an independent cursor on the same retained object. A duplicate
         // handle would share the cursor, and reopening a display path could reach a replacement.
@@ -350,8 +405,8 @@ impl Directory {
             }
             // SAFETY: the successful native call reported initialized bytes within this buffer.
             let bytes = unsafe { std::slice::from_raw_parts(page.as_ptr().cast::<u8>(), length) };
-            super::windows_names::visit_names(bytes, &mut remaining, |name| {
-                if matches!(name, "." | ".." | ".lock") {
+            super::windows_names::visit_names_all(bytes, &mut remaining, |name| {
+                if matches!(name, Some("." | "..")) {
                     return Ok(());
                 }
                 visit(name)
@@ -613,8 +668,8 @@ fn dispose(file: &File) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Limits, ReadBudget};
     use super::*;
-    use crate::junk::cache::storage::{Limits, ReadBudget};
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::windows::ffi::OsStringExt;

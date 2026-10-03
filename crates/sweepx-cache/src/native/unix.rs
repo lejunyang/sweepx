@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The publishing process owns the critical section. CLOEXEC prevents inheritance after exec,
 /// but an in-progress fork/spawn can still hold a duplicate open file description. Closing only
 /// our descriptor would leave its flock alive in that child until exec/exit.
-pub(crate) struct LockGuard {
+/// Releases this invocation's cache publication exclusion when dropped.
+pub struct LockGuard {
     file: File,
     owner: libc::pid_t,
 }
@@ -40,9 +41,25 @@ pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
-pub(crate) struct Directory(OwnedFd);
+/// A private cache directory retained by native handle; display paths are not reopened.
+pub struct Directory(OwnedFd);
 
 impl Directory {
+    fn private(&self) -> io::Result<Metadata> {
+        let metadata = File::from(self.0.try_clone()?).metadata()?;
+        // SAFETY: geteuid has no pointer arguments. The retained descriptor remains authority.
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(io::Error::other(
+                "cache directory is not current-user private",
+            ));
+        }
+        Ok(metadata)
+    }
+
+    /// Opens an absolute no-follow cache root, optionally creating private components.
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::Error::other("cache path must be absolute"));
@@ -88,7 +105,9 @@ impl Directory {
         Ok(current)
     }
 
+    /// Opens a private child directory relative to this retained handle.
     pub fn child(&self, name: &str) -> io::Result<Self> {
+        self.private()?;
         let name = component(name)?;
         // SAFETY: no-follow basename beneath this retained directory; returned fd is owned.
         let fd = unsafe {
@@ -100,6 +119,9 @@ impl Directory {
         };
         let child = Self(owned(fd)?);
         let meta = File::from(child.0.try_clone()?).metadata()?;
+        if meta.dev() != self.private()?.dev() {
+            return Err(io::Error::other("cache child crossed a volume boundary"));
+        }
         // SAFETY: geteuid has no pointer arguments.
         if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
             return Err(io::Error::other("cache child directory is not private"));
@@ -107,9 +129,23 @@ impl Directory {
         Ok(child)
     }
 
+    /// Creates or admits a private child beneath this retained directory.
+    pub fn create_child(&self, name: &str) -> io::Result<Self> {
+        self.private()?;
+        let native = component(name)?;
+        // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
+        if unsafe { libc::mkdirat(self.0.as_raw_fd(), native.as_ptr(), 0o700) } < 0
+            && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(io::Error::last_os_error());
+        }
+        self.child(name)
+    }
+
     /// Nonblocking advisory serialization of publication and eviction across invocations.
     /// Contention makes this disposable cache unavailable rather than delaying a scan.
     pub fn lock(&self) -> io::Result<LockGuard> {
+        self.private()?;
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
             libc::openat(
@@ -144,6 +180,7 @@ impl Directory {
     }
 
     pub(super) fn open_file(&self, name: &str) -> io::Result<File> {
+        self.private()?;
         let name = component(name)?;
         // Nonblocking prevents a substituted FIFO from stalling before the type check.
         // SAFETY: validated basename and a live retained parent; the opened fd is checked below.
@@ -169,12 +206,29 @@ impl Directory {
         Ok(file)
     }
 
+    /// Atomically publishes bounded JSON; this disposable cache write is not crash durable.
     pub fn write_json(
         &self,
         name: &str,
         value: &impl serde::Serialize,
         cap: usize,
     ) -> io::Result<()> {
+        self.publish(name, |file| write_json(file, value, cap))
+    }
+
+    /// Runs the encoder on an exclusively created private temporary, then publishes it
+    /// beneath the same retained parent. Failure removes only this invocation's temporary.
+    pub(crate) fn publish(
+        &self,
+        name: &str,
+        encode: impl FnOnce(&mut File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.private()?;
+        match self.open_file(name) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let destination = component(name)?;
         let temp = component(&format!(
@@ -193,7 +247,7 @@ impl Directory {
         };
         let mut file = File::from(owned(fd)?);
         let result = (|| {
-            write_json(&mut file, value, cap)?;
+            encode(&mut file)?;
             // Disposable cache publication is atomic but does not promise crash durability.
             // SAFETY: both names are bound to the same retained cache directory.
             if unsafe {
@@ -218,7 +272,9 @@ impl Directory {
         result
     }
 
+    /// Removes a managed cache basename without following its target.
     pub fn remove(&self, name: &str) -> io::Result<()> {
+        self.private()?;
         let name = component(name)?;
         // SAFETY: unlink only removes this entry beneath the retained parent, never follows it.
         if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } < 0 {
@@ -227,7 +283,9 @@ impl Directory {
         Ok(())
     }
 
+    /// Reads native encoded length and LRU time for a managed cache basename.
     pub fn metadata(&self, name: &str) -> io::Result<EntryMetadata> {
+        self.private()?;
         let name = component(name)?;
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: validated basename and live parent; success initializes the native stat.
@@ -250,7 +308,16 @@ impl Directory {
         })
     }
 
+    /// Visits managed UTF-8 names within a fixed native enumeration budget.
     pub fn entries(&self, mut visit: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+        self.entries_all(|name| name.map_or(Ok(()), &mut visit))
+    }
+
+    pub(crate) fn entries_all(
+        &self,
+        mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.private()?;
         // Opening '.' gives an independent directory offset; dup would share offsets between callers.
         // SAFETY: this is the already retained directory, not a display path.
         let fd = unsafe {
@@ -308,13 +375,10 @@ impl Directory {
                 .checked_sub(1)
                 .ok_or_else(|| io::Error::other("cache enumeration budget exceeded"))?;
             let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-            let Ok(name) = std::str::from_utf8(bytes) else {
-                continue;
-            };
-            if name == "." || name == ".." {
+            if bytes == b"." || bytes == b".." {
                 continue;
             }
-            visit(name)?;
+            visit(std::str::from_utf8(bytes).ok())?;
         }
         Ok(())
     }

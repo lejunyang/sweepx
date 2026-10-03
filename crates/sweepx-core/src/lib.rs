@@ -3297,6 +3297,12 @@ fn load_stale_preview(state_dir: Option<&Path>) -> CachePreviewLoad {
             preview: None,
             warnings: vec!["cache.preview.quarantined".to_string()],
         },
+        Err(CacheError::ResourceLimit { .. }) => CachePreviewLoad {
+            status: CACHE_LOAD_MODE_MISS,
+            generation: None,
+            preview: None,
+            warnings: vec!["cache.preview.resource_limit".to_string()],
+        },
         Err(_) => CachePreviewLoad {
             status: CACHE_LOAD_MODE_MISS,
             generation: None,
@@ -5687,11 +5693,7 @@ fn timestamp_after(timestamp: &str, duration: time::Duration) -> String {
 }
 
 #[cfg(target_os = "windows")]
-mod windows_state_security;
-// The ACL byte-policy is portable and exercised on every host; native descriptor/token I/O
-// remains Windows-only. These tests do not qualify native Windows runtime behavior.
-#[cfg(any(target_os = "windows", test))]
-mod windows_state_policy;
+use sweepx_cache::windows_state_security;
 
 pub fn state_dir_from_explicit_or_default(
     explicit: Option<&Path>,
@@ -6286,10 +6288,9 @@ mod tests {
         let store = DurableSnapshotStore::new(&state).expect("durable state is supported");
         assert!(state.is_dir());
         assert!(
-            windows_state_security::is_current_user_private(&state).unwrap(),
+            windows_state_security::is_private_owned_directory(&state).unwrap(),
             "the created state directory must satisfy the check that guards every later open"
         );
-        assert!(windows_state_security::is_owned_by_current_user(&state).unwrap());
         drop(store);
 
         assert!(durable_store(Some(&state)).unwrap().is_some());
@@ -6759,6 +6760,34 @@ mod tests {
         assert!(matches!(error, CoreError::State(_)), "{error:?}");
     }
 
+    #[test]
+    fn overlarge_preview_input_reports_resource_gap_without_rows() {
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = fixture.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = fixture.path().to_path_buf();
+        let state = base.join("state");
+        let store = preview_generation_store(Some(&state)).unwrap().unwrap();
+        sweepx_cache::native::Directory::open(store.root(), false)
+            .unwrap()
+            .write_json("current.json", &"fixture", 64)
+            .unwrap();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(store.root().join("current.json"))
+            .unwrap();
+        // Independent documented 64 KiB pointer cap, with no parser-shaped expected value.
+        file.set_len(65_537).unwrap();
+        drop(file);
+        let loaded = load_stale_preview(Some(&state));
+        assert_eq!(loaded.status, "miss");
+        assert_eq!(loaded.warnings, vec!["cache.preview.resource_limit"]);
+        assert!(loaded.preview.is_none());
+        assert!(loaded.generation.is_none());
+        assert!(!store.root().join("quarantine").exists());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn scan_persists_then_loads_stale_preview_without_replacing_live_authority() {
@@ -6844,6 +6873,17 @@ mod tests {
         )
         .unwrap();
         fs::write(preview_dir.join("generations/bad_gen.json"), b"{not-json").unwrap();
+        // Corruption and privacy are independent contracts. Admit private native objects
+        // before testing JSON quarantine; public files/directories are a separate refusal.
+        for directory in [&preview_dir, &preview_dir.join("generations")] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for file in [
+            preview_dir.join("current.json"),
+            preview_dir.join("generations/bad_gen.json"),
+        ] {
+            fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let context = CoreContext::new(LocaleResolution::new(
             Locale::EnUs,

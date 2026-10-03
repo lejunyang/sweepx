@@ -1,17 +1,20 @@
+/// Retained native directory handles and resource admission for private cache namespaces.
+#[cfg(any(unix, windows))]
+pub mod native;
+#[cfg(any(windows, test))]
+mod windows_state_policy;
+/// Windows state-directory security checks, shared with application state admission.
+#[cfg(windows)]
+pub mod windows_state_security;
+
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::ffi::OsString;
-#[cfg(unix)]
-use std::ffi::{CStr, CString};
-use std::fs::{self, OpenOptions};
+#[cfg(test)]
+use std::fs;
 use std::io::{ErrorKind, Write};
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-#[cfg(unix)]
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
-use std::path::Component;
+#[cfg(all(test, unix))]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -360,8 +363,6 @@ impl AtomicGenerationStore {
     ) -> Result<(), CacheError> {
         validate_generation_id(&generation.generation)?;
         validate_stored_generation(generation)?;
-        self.prepare_secure_root()?;
-        self.prepare_private_subdir(&self.generations_dir())?;
         let (checksum_sha256, payload_bytes) = checksum_and_len(generation)?;
         let envelope = StoredEnvelope {
             generation: generation.generation.clone(),
@@ -384,34 +385,58 @@ impl AtomicGenerationStore {
                 reason: ReasonCode::ResourceLimit,
             });
         }
-        let generation_path = self.generation_path(&generation.generation);
-        let tmp_generation = temp_path(&generation_path, "tmp");
-        self.atomic_write_json(&tmp_generation, &envelope, byte_limit)?;
-        self.rename_checked(&tmp_generation, &generation_path)?;
-
+        let directory = native::Directory::open(&self.root, true)
+            .map_err(|error| directory_error(error, &self.root))?;
+        let generations = directory
+            .create_child("generations")
+            .map_err(|error| directory_error(error, &self.generations_dir()))?;
+        generations.publish(&format!("{}.json", generation.generation), |file| {
+            let mut writer = LimitedWriter::new(
+                std::io::BufWriter::with_capacity(16 * 1024, &mut *file),
+                byte_limit,
+            );
+            serde_json::to_writer(&mut writer, &envelope).map_err(std::io::Error::other)?;
+            writer.flush()?;
+            drop(writer);
+            file.sync_all()
+        })?;
         let pointer = CurrentPointer {
             generation: generation.generation.clone(),
         };
-        let pointer_path = self.current_pointer_path();
-        let tmp_pointer = temp_path(&pointer_path, "tmp");
-        self.atomic_write_file(&tmp_pointer, &serde_json::to_vec_pretty(&pointer)?)?;
-        self.rename_checked(&tmp_pointer, &pointer_path)?;
+        let pointer_bytes = serde_json::to_vec_pretty(&pointer)?;
+        directory.publish("current.json", |file| {
+            file.write_all(&pointer_bytes)?;
+            file.sync_all()
+        })?;
         Ok(())
     }
 
+    /// Loads one bounded historical generation through retained private native directories.
+    /// Missing storage stays absent. Oversize or unstable files are refused before parsing;
+    /// corruption is copied into the same retained namespace, never a re-resolved display path.
     pub fn load_current(&self) -> Result<LoadResult, CacheError> {
-        self.prepare_secure_root()?;
-        let pointer_path = self.current_pointer_path();
-        let pointer_bytes = match self.read_checked(&pointer_path) {
-            Ok(bytes) => bytes,
+        let directory = match native::Directory::open(&self.root, false) {
+            Ok(directory) => directory,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(LoadResult::Miss),
-            Err(error) => return Err(CacheError::Io(error)),
+            Err(error) => return Err(directory_error(error, &self.root)),
+        };
+        self.load_from_directory(&directory)
+    }
+
+    fn load_from_directory(&self, directory: &native::Directory) -> Result<LoadResult, CacheError> {
+        let pointer_bytes = match read_generation_bytes(
+            directory,
+            "current.json",
+            INSPECT_CURRENT_POINTER_BYTE_LIMIT,
+        )? {
+            Some(bytes) => bytes,
+            None => return Ok(LoadResult::Miss),
         };
 
         let pointer: CurrentPointer = match serde_json::from_slice(&pointer_bytes) {
             Ok(pointer) => pointer,
             Err(_) => {
-                self.quarantine("current.json", &pointer_bytes)?;
+                self.quarantine(directory, "current.json", &pointer_bytes)?;
                 return Err(CacheError::Quarantined {
                     path: self.quarantine_path("current.json"),
                 });
@@ -419,17 +444,24 @@ impl AtomicGenerationStore {
         };
         validate_generation_id(&pointer.generation)?;
 
-        let generation_path = self.generation_path(&pointer.generation);
-        let bytes = match self.read_checked(&generation_path) {
-            Ok(bytes) => bytes,
+        let generations = match directory.child("generations") {
+            Ok(generations) => generations,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(LoadResult::Miss),
-            Err(error) => return Err(CacheError::Io(error)),
+            Err(error) => return Err(directory_error(error, &self.generations_dir())),
+        };
+        let bytes = match read_generation_bytes(
+            &generations,
+            &format!("{}.json", pointer.generation),
+            INSPECT_GENERATION_BYTE_LIMIT,
+        )? {
+            Some(bytes) => bytes,
+            None => return Ok(LoadResult::Miss),
         };
 
         let envelope: StoredEnvelope = match serde_json::from_slice(&bytes) {
             Ok(envelope) => envelope,
             Err(_) => {
-                self.quarantine_generation(&pointer.generation, &bytes)?;
+                self.quarantine_generation(directory, &pointer.generation, &bytes)?;
                 return Ok(LoadResult::Miss);
             }
         };
@@ -439,11 +471,11 @@ impl AtomicGenerationStore {
             || pointer.generation != envelope.generation
             || envelope.generation != envelope.payload.generation
         {
-            self.quarantine_generation(&pointer.generation, &bytes)?;
+            self.quarantine_generation(directory, &pointer.generation, &bytes)?;
             return Ok(LoadResult::Miss);
         }
         if validate_stored_generation(&envelope.payload).is_err() {
-            self.quarantine_generation(&pointer.generation, &bytes)?;
+            self.quarantine_generation(directory, &pointer.generation, &bytes)?;
             return Ok(LoadResult::Miss);
         }
 
@@ -453,7 +485,7 @@ impl AtomicGenerationStore {
     /// Reports the health of the on-disk preview cache without modifying it.
     ///
     /// Inspection never creates directories, never repairs, and never quarantines: it is the
-    /// read-only counterpart to [`Self::load_current`], which does all three. A caller diagnosing a
+    /// read-only counterpart to [`Self::load_current`], which may quarantine corrupt data. A caller diagnosing a
     /// broken cache must be able to look at it without changing what they are looking at.
     ///
     /// The traversal is platform-specific because the anti-substitution guarantee is. Unix walks
@@ -672,203 +704,80 @@ impl AtomicGenerationStore {
         self.quarantine_dir().join(name)
     }
 
-    fn quarantine(&self, name: &str, bytes: &[u8]) -> Result<(), CacheError> {
-        self.prepare_private_subdir(&self.quarantine_dir())?;
-        let path = self.quarantine_path(name);
-        self.atomic_write_file(&path, bytes)?;
-        Ok(())
-    }
-
-    fn quarantine_generation(&self, generation: &str, bytes: &[u8]) -> Result<(), CacheError> {
-        self.quarantine(&format!("{generation}.corrupt.json"), bytes)
-    }
-
-    fn prepare_secure_root(&self) -> Result<(), CacheError> {
-        ensure_no_symlink_ancestors(&self.root)?;
-        if self.root.exists() {
-            let metadata = fs::symlink_metadata(&self.root)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(CacheError::InsecurePath(self.root.clone()));
-            }
-            #[cfg(unix)]
-            if !is_private_owned_directory(&metadata) {
-                return Err(CacheError::InsecurePath(self.root.clone()));
-            }
-        } else {
-            fs::create_dir_all(&self.root)?;
-            #[cfg(unix)]
-            fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
-
-    fn prepare_private_subdir(&self, path: &Path) -> Result<(), CacheError> {
-        ensure_no_symlink_ancestors(path)?;
-        if path.exists() {
-            let metadata = fs::symlink_metadata(path)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(CacheError::InsecurePath(path.to_path_buf()));
-            }
-            #[cfg(unix)]
-            if !is_private_owned_directory(&metadata) {
-                return Err(CacheError::InsecurePath(path.to_path_buf()));
-            }
-        } else {
-            fs::create_dir_all(path)?;
-            #[cfg(unix)]
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
-
-    fn atomic_write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
-        let mut file = self.create_temporary_file(path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    fn atomic_write_json<T: Serialize>(
+    fn quarantine(
         &self,
-        path: &Path,
-        value: &T,
-        byte_limit: usize,
+        directory: &native::Directory,
+        name: &str,
+        bytes: &[u8],
     ) -> Result<(), CacheError> {
-        let file = self.create_temporary_file(path)?;
-        // No complete encoded generation or cloned payload is retained alongside the model.
-        // Preflight is independent of this final guard; neither permits truncated publication.
-        let mut writer = LimitedWriter::new(
-            std::io::BufWriter::with_capacity(16 * 1024, file),
-            byte_limit,
-        );
-        let result = serde_json::to_writer(&mut writer, value);
-        if writer.exhausted {
-            return Err(CacheError::ResourceLimit {
-                reason: ReasonCode::ResourceLimit,
-            });
-        }
-        result?;
-        writer.flush()?;
-        writer.inner.get_ref().sync_all()?;
+        let quarantine = directory
+            .create_child("quarantine")
+            .map_err(|error| directory_error(error, &self.quarantine_dir()))?;
+        quarantine.publish(name, |file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })?;
         Ok(())
     }
 
-    fn create_temporary_file(&self, path: &Path) -> Result<fs::File, CacheError> {
-        if let Some(parent) = path.parent() {
-            self.prepare_private_subdir(parent)?;
-        }
-        if path.exists() && fs::symlink_metadata(path)?.file_type().is_symlink() {
-            return Err(CacheError::InsecurePath(path.to_path_buf()));
-        }
-        #[cfg(unix)]
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        #[cfg(not(unix))]
-        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        Ok(file)
-    }
-
-    fn rename_checked(&self, from: &Path, to: &Path) -> Result<(), CacheError> {
-        if to.exists() {
-            let metadata = fs::symlink_metadata(to)?;
-            if metadata.file_type().is_symlink() {
-                return Err(CacheError::InsecurePath(to.to_path_buf()));
-            }
-            #[cfg(unix)]
-            if !is_private_owned_regular_file(&metadata) {
-                return Err(CacheError::InsecurePath(to.to_path_buf()));
-            }
-        }
-        fs::rename(from, to)?;
-        Ok(())
-    }
-
-    fn read_checked(&self, path: &Path) -> Result<Vec<u8>, std::io::Error> {
-        if path.exists() && fs::symlink_metadata(path)?.file_type().is_symlink() {
-            return Err(std::io::Error::other("preview cache path is symlink"));
-        }
-        fs::read(path)
-    }
-}
-
-/// A directory opened for read-only inspection, with substitution already ruled out.
-///
-/// Exists so [`AtomicGenerationStore::inspect`] can express its decisions once. Holding an open
-/// handle rather than a path is the point: a path would have to be re-resolved for every read, and
-/// each re-resolution is a window in which a component could be replaced by something else.
-#[cfg(unix)]
-struct InspectionReader {
-    directory: OwnedFd,
-}
-
-#[cfg(unix)]
-impl InspectionReader {
-    /// Opens `path` component by component, refusing anything that is not a private directory.
-    ///
-    /// Returns `Ok(None)` when the directory simply does not exist, which is a healthy state for a
-    /// cache that has never been written, and an error only when something exists but is not
-    /// trustworthy.
-    fn open_root(path: &Path) -> Result<Option<Self>, CacheError> {
-        Ok(open_existing_inspection_root(path)?.map(|directory| Self { directory }))
-    }
-
-    fn open_optional_dir(&self, name: &str, display: &Path) -> Result<Option<Self>, CacheError> {
-        Ok(
-            open_optional_inspection_directory(&self.directory, name.as_bytes(), display)?
-                .map(|directory| Self { directory }),
-        )
-    }
-
-    fn read_optional_file(
+    fn quarantine_generation(
         &self,
-        name: &str,
-        display: &Path,
-        byte_limit: u64,
-    ) -> Result<Option<InspectedFile>, CacheError> {
-        inspect_optional_file_at(&self.directory, name.as_bytes(), display, byte_limit)
-    }
-
-    fn scan_flat(&self, path: &Path) -> Result<InspectedDir, CacheError> {
-        inspect_flat_directory_fd(path, &self.directory)
+        directory: &native::Directory,
+        generation: &str,
+        bytes: &[u8],
+    ) -> Result<(), CacheError> {
+        self.quarantine(directory, &format!("{generation}.corrupt.json"), bytes)
     }
 }
 
-/// A directory opened for read-only inspection on Windows.
-///
-/// Windows has no `openat`, so each entry is reopened by path under the directory. The
-/// anti-substitution property comes from a different mechanism instead: every handle is opened
-/// with `FILE_FLAG_OPEN_REPARSE_POINT`, so a junction or symlink planted in the cache is opened as
-/// the link itself and then rejected for not being the expected kind, rather than silently
-/// followed somewhere else.
-#[cfg(windows)]
+fn directory_error(error: std::io::Error, display: &Path) -> CacheError {
+    // Admission errors carry no authority. Keep genuine I/O failures distinct from a
+    // linked, public or unsupported directory without trying to repair its permissions.
+    match error.kind() {
+        ErrorKind::Other | ErrorKind::PermissionDenied | ErrorKind::NotADirectory => {
+            CacheError::InsecurePath(display.to_path_buf())
+        }
+        _ => CacheError::Io(error),
+    }
+}
+
+fn read_generation_bytes(
+    directory: &native::Directory,
+    name: &str,
+    cap: u64,
+) -> Result<Option<Vec<u8>>, CacheError> {
+    match directory.read_bytes(name, cap) {
+        Ok(native::BoundedRead {
+            contents: Some(bytes),
+            ..
+        }) => Ok(Some(bytes)),
+        Ok(native::BoundedRead { contents: None, .. }) => Err(CacheError::ResourceLimit {
+            reason: ReasonCode::ResourceLimit,
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+/// Read-only inspection retains the same native authority as generation loading and publication.
 struct InspectionReader {
-    path: PathBuf,
+    directory: native::Directory,
 }
 
-#[cfg(windows)]
 impl InspectionReader {
     fn open_root(path: &Path) -> Result<Option<Self>, CacheError> {
-        match windows_inspection::classify_directory(path, path)? {
-            windows_inspection::DirectoryState::Missing => Ok(None),
-            windows_inspection::DirectoryState::Directory => Ok(Some(Self {
-                path: path.to_path_buf(),
-            })),
+        match native::Directory::open(path, false) {
+            Ok(directory) => Ok(Some(Self { directory })),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(directory_error(error, path)),
         }
     }
 
-    /// Opens a child directory, reporting refusals against `display`.
-    ///
-    /// `display` is passed explicitly rather than derived from the child path because the Unix
-    /// implementation opens relative to a descriptor and has no path to report; keeping the
-    /// signatures identical is what lets `inspect` stay platform-neutral.
     fn open_optional_dir(&self, name: &str, display: &Path) -> Result<Option<Self>, CacheError> {
-        let child = self.path.join(name);
-        match windows_inspection::classify_directory(&child, display)? {
-            windows_inspection::DirectoryState::Missing => Ok(None),
-            windows_inspection::DirectoryState::Directory => Ok(Some(Self { path: child })),
+        match self.directory.child(name) {
+            Ok(directory) => Ok(Some(Self { directory })),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(directory_error(error, display)),
         }
     }
 
@@ -878,451 +787,49 @@ impl InspectionReader {
         display: &Path,
         byte_limit: u64,
     ) -> Result<Option<InspectedFile>, CacheError> {
-        windows_inspection::read_optional_file(&self.path.join(name), display, byte_limit)
-    }
-
-    fn scan_flat(&self, path: &Path) -> Result<InspectedDir, CacheError> {
-        windows_inspection::scan_flat_directory(&self.path, path)
-    }
-}
-
-/// Read-only inspection primitives for Windows.
-///
-/// Kept apart from the shared decision logic so the platform-specific reasoning — which handle
-/// flags rule out substitution, which error codes mean "absent" rather than "hostile" — lives in
-/// one place and can be audited without reading the health rules around it.
-#[cfg(windows)]
-mod windows_inspection {
-    use super::{
-        CacheError, INSPECT_DIRECTORY_ENTRY_LIMIT, InspectFileContents, InspectedDir, InspectedFile,
-    };
-    use std::fs;
-    use std::io::{ErrorKind, Read as _};
-    use std::path::Path;
-
-    /// Whether a directory is present, distinguished from being untrustworthy.
-    pub(super) enum DirectoryState {
-        /// Nothing exists at this path, which is normal for a cache never written.
-        Missing,
-        /// A real directory that is not a reparse point.
-        Directory,
-    }
-
-    /// Classifies a path without following links.
-    ///
-    /// `symlink_metadata` is required rather than `metadata`: the latter resolves the link, which
-    /// would report on the target and defeat the check entirely. Rust reports a directory junction
-    /// as a symlink here — measured, not assumed — so one rejection covers junctions, directory
-    /// symlinks and file symlinks alike.
-    pub(super) fn classify_directory(
-        path: &Path,
-        display: &Path,
-    ) -> Result<DirectoryState, CacheError> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    Err(CacheError::InsecurePath(display.to_path_buf()))
-                } else {
-                    Ok(DirectoryState::Directory)
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(DirectoryState::Missing),
-            Err(error) => Err(CacheError::Io(error)),
-        }
-    }
-
-    /// Reads one cache file, refusing anything that is not a plain file.
-    ///
-    /// Size is taken from the same handle the bytes are read through, and the file is re-checked
-    /// afterwards, so a file swapped mid-read is detected rather than reported with a stale size.
-    /// Oversized files report their size without being read, since inspection must stay bounded
-    /// even when the cache is corrupt.
-    pub(super) fn read_optional_file(
-        path: &Path,
-        display: &Path,
-        byte_limit: u64,
-    ) -> Result<Option<InspectedFile>, CacheError> {
-        let opened = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(CacheError::Io(error)),
-        };
-        if opened.file_type().is_symlink() || !opened.is_file() {
-            return Err(CacheError::InsecurePath(display.to_path_buf()));
-        }
-        let bytes = opened.len();
-        if bytes > byte_limit {
-            return Ok(Some(InspectedFile {
+        match self.directory.read_bytes(name, byte_limit) {
+            Ok(native::BoundedRead { bytes, contents }) => Ok(Some(InspectedFile {
                 bytes,
-                contents: InspectFileContents::TooLarge { bytes },
-            }));
+                contents: match contents {
+                    Some(contents) => InspectFileContents::Bytes(contents),
+                    None => InspectFileContents::TooLarge { bytes },
+                },
+            })),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(directory_error(error, display)),
         }
-
-        let mut file = fs::File::open(path)?;
-        let mut contents = Vec::with_capacity(bytes as usize);
-        (&mut file)
-            .take(byte_limit.saturating_add(1))
-            .read_to_end(&mut contents)?;
-        let after = file.metadata()?;
-        if !after.is_file() || after.len() != bytes || contents.len() as u64 != bytes {
-            return Err(CacheError::InsecurePath(display.to_path_buf()));
-        }
-        Ok(Some(InspectedFile {
-            bytes,
-            contents: InspectFileContents::Bytes(contents),
-        }))
     }
 
-    /// Counts and sizes the entries of one flat cache directory.
-    ///
-    /// Bounded by [`INSPECT_DIRECTORY_ENTRY_LIMIT`] so a directory with a pathological number of
-    /// entries cannot turn a status query into an unbounded walk; hitting the bound is reported as
-    /// truncation rather than silently capping the total.
-    pub(super) fn scan_flat_directory(
-        directory: &Path,
-        display: &Path,
-    ) -> Result<InspectedDir, CacheError> {
-        let mut count = 0usize;
-        let mut bytes = 0u64;
-        let mut truncated = false;
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            if count == INSPECT_DIRECTORY_ENTRY_LIMIT {
-                truncated = true;
-                break;
-            }
-            let metadata = entry.metadata()?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CacheError::InsecurePath(display.join(entry.file_name())));
-            }
-            count += 1;
-            bytes = bytes.saturating_add(metadata.len());
-        }
-        Ok(InspectedDir {
-            count,
-            bytes,
-            truncated,
-        })
-    }
-}
-
-#[cfg(unix)]
-fn open_directory_at(parent: &OwnedFd, name: &[u8], display: &Path) -> Result<OwnedFd, CacheError> {
-    let name = CString::new(name).map_err(|_| CacheError::InsecurePath(display.to_path_buf()))?;
-    let raw = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    let directory = unsafe { OwnedFd::from_raw_fd(raw) };
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
-    if unsafe { libc::fstat(directory.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    let stat = unsafe { stat.assume_init() };
-    if !is_private_owned_directory_stat(&stat) {
-        return Err(CacheError::InsecurePath(display.to_path_buf()));
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn open_existing_inspection_root(path: &Path) -> Result<Option<OwnedFd>, CacheError> {
-    let start = CString::new(if path.is_absolute() { "/" } else { "." }).unwrap();
-    let raw = unsafe {
-        libc::open(
-            start.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    let mut current = unsafe { OwnedFd::from_raw_fd(raw) };
-    let mut display = if path.is_absolute() {
-        PathBuf::from("/")
-    } else {
-        PathBuf::from(".")
-    };
-    for component in path.components() {
-        let Component::Normal(name) = component else {
-            if matches!(component, Component::RootDir | Component::CurDir) {
-                continue;
-            }
-            return Err(CacheError::InsecurePath(path.to_path_buf()));
+    fn scan_flat(&self, path: &Path) -> Result<InspectedDir, CacheError> {
+        let mut result = InspectedDir {
+            count: 0,
+            bytes: 0,
+            truncated: false,
         };
-        display.push(name);
-        match open_directory_at_unchecked(&current, name.as_bytes()) {
-            Ok(next) => {
-                current = next;
+        let mut insecure = None;
+        let scanned = self.directory.entries_all(|name| {
+            if result.count == INSPECT_DIRECTORY_ENTRY_LIMIT {
+                result.truncated = true;
+                return Err(std::io::Error::from(ErrorKind::Interrupted));
             }
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
-            Err(error)
-                if matches!(
-                    error.raw_os_error(),
-                    Some(libc::ELOOP) | Some(libc::ENOTDIR)
-                ) =>
-            {
-                return Err(CacheError::InsecurePath(display));
-            }
-            Err(error) => return Err(CacheError::Io(error)),
+            let Some(name) = name else {
+                insecure = Some(path.to_path_buf());
+                return Err(std::io::Error::other("unrepresentable cache entry"));
+            };
+            // Read no content during accounting, but still admit the native object as a
+            // stable private regular file. No followed metadata or lossy-name totals.
+            let file = self.directory.read_bytes(name, 0)?;
+            result.count += 1;
+            result.bytes = result.bytes.saturating_add(file.bytes);
+            Ok(())
+        });
+        match scanned {
+            Ok(()) => Ok(result),
+            Err(_) if result.truncated => Ok(result),
+            Err(_) if insecure.is_some() => Err(CacheError::InsecurePath(insecure.unwrap())),
+            Err(error) => Err(directory_error(error, path)),
         }
     }
-    let metadata = fstat_metadata(&current)?;
-    if !is_private_owned_directory(&metadata) {
-        return Err(CacheError::InsecurePath(path.to_path_buf()));
-    }
-    Ok(Some(current))
-}
-
-#[cfg(unix)]
-fn open_directory_at_unchecked(parent: &OwnedFd, name: &[u8]) -> Result<OwnedFd, std::io::Error> {
-    let name = CString::new(name).map_err(|_| std::io::Error::from(ErrorKind::InvalidInput))?;
-    let raw = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
-    }
-}
-
-#[cfg(unix)]
-fn open_optional_inspection_directory(
-    parent: &OwnedFd,
-    name: &[u8],
-    display: &Path,
-) -> Result<Option<OwnedFd>, CacheError> {
-    match open_directory_at(parent, name, display) {
-        Ok(directory) => Ok(Some(directory)),
-        Err(CacheError::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
-        Err(CacheError::Io(error))
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ELOOP) | Some(libc::ENOTDIR)
-            ) =>
-        {
-            Err(CacheError::InsecurePath(display.to_path_buf()))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(unix)]
-fn inspect_optional_file_at(
-    parent: &OwnedFd,
-    name: &[u8],
-    display: &Path,
-    byte_limit: u64,
-) -> Result<Option<InspectedFile>, CacheError> {
-    let name = CString::new(name).map_err(|_| CacheError::InsecurePath(display.to_path_buf()))?;
-    let raw = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        let error = std::io::Error::last_os_error();
-        return match error.raw_os_error() {
-            Some(libc::ENOENT) => Ok(None),
-            Some(libc::ELOOP) => Err(CacheError::InsecurePath(display.to_path_buf())),
-            _ => Err(CacheError::Io(error)),
-        };
-    }
-    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-    let mut file = fs::File::from(owned);
-    let opened = file.metadata()?;
-    if !is_private_owned_regular_file(&opened) {
-        return Err(CacheError::InsecurePath(display.to_path_buf()));
-    }
-    let bytes = opened.len();
-    let contents = if bytes > byte_limit {
-        let after = file.metadata()?;
-        if !same_inspected_file(&opened, &after) {
-            return Err(CacheError::InsecurePath(display.to_path_buf()));
-        }
-        InspectFileContents::TooLarge { bytes }
-    } else {
-        let mut contents = Vec::with_capacity(bytes as usize);
-        use std::io::Read as _;
-        (&mut file)
-            .take(byte_limit.saturating_add(1))
-            .read_to_end(&mut contents)?;
-        if contents.len() as u64 != bytes {
-            return Err(CacheError::InsecurePath(display.to_path_buf()));
-        }
-        let after = file.metadata()?;
-        if !same_inspected_file(&opened, &after) {
-            return Err(CacheError::InsecurePath(display.to_path_buf()));
-        }
-        InspectFileContents::Bytes(contents)
-    };
-    Ok(Some(InspectedFile { bytes, contents }))
-}
-
-#[cfg(unix)]
-fn fstat_metadata(directory: &OwnedFd) -> Result<fs::Metadata, CacheError> {
-    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(fs::File::from(unsafe { OwnedFd::from_raw_fd(duplicate) }).metadata()?)
-}
-
-#[cfg(unix)]
-struct InspectionDirectoryStream(*mut libc::DIR);
-
-#[cfg(unix)]
-impl Drop for InspectionDirectoryStream {
-    fn drop(&mut self) {
-        unsafe {
-            libc::closedir(self.0);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn inspect_flat_directory_fd(path: &Path, directory: &OwnedFd) -> Result<InspectedDir, CacheError> {
-    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    let raw_stream = unsafe { libc::fdopendir(duplicate) };
-    if raw_stream.is_null() {
-        unsafe {
-            libc::close(duplicate);
-        }
-        return Err(CacheError::Io(std::io::Error::last_os_error()));
-    }
-    let stream = InspectionDirectoryStream(raw_stream);
-    let mut count = 0usize;
-    let mut bytes = 0u64;
-    let mut truncated = false;
-    loop {
-        unsafe {
-            *inspection_errno_location() = 0;
-        }
-        let raw_entry = unsafe { libc::readdir(stream.0) };
-        if raw_entry.is_null() {
-            let errno = unsafe { *inspection_errno_location() };
-            if errno != 0 {
-                return Err(CacheError::Io(std::io::Error::from_raw_os_error(errno)));
-            }
-            break;
-        }
-        let name = unsafe { CStr::from_ptr((*raw_entry).d_name.as_ptr()) }.to_bytes();
-        if name == b"." || name == b".." {
-            continue;
-        }
-        if count == INSPECT_DIRECTORY_ENTRY_LIMIT {
-            truncated = true;
-            break;
-        }
-        let name_c = std::ffi::CString::new(name)
-            .map_err(|_| CacheError::InsecurePath(path.join(OsString::from_vec(name.to_vec()))))?;
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
-        if unsafe {
-            libc::fstatat(
-                directory.as_raw_fd(),
-                name_c.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } != 0
-        {
-            return Err(CacheError::Io(std::io::Error::last_os_error()));
-        }
-        let stat = unsafe { stat.assume_init() };
-        let entry_path = path.join(OsString::from_vec(name.to_vec()));
-        if !is_private_owned_regular_file_stat(&stat) {
-            return Err(CacheError::InsecurePath(entry_path));
-        }
-        count += 1;
-        bytes = bytes.saturating_add(u64::try_from(stat.st_size).unwrap_or(u64::MAX));
-    }
-    Ok(InspectedDir {
-        count,
-        bytes,
-        truncated,
-    })
-}
-
-#[cfg(target_os = "linux")]
-unsafe fn inspection_errno_location() -> *mut libc::c_int {
-    unsafe { libc::__errno_location() }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn inspection_errno_location() -> *mut libc::c_int {
-    unsafe { libc::__error() }
-}
-
-/// Fallback for the remaining unix targets.
-///
-/// The caller is gated on `unix`, but the accessor above only covers linux and macos, so any other
-/// unix host failed to compile rather than failing to inspect. `libc::errno` is not a portable
-/// symbol — each platform exposes its own thread-local accessor — so this reports the location as
-/// unavailable instead of guessing one. A caller writing through this pointer would fault, which is
-/// why the sentinel is only ever read back as "no errno reported".
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-unsafe fn inspection_errno_location() -> *mut libc::c_int {
-    // A dedicated cell, so clearing and reading errno stay well-defined operations on memory this
-    // process owns. It just never reflects a real kernel error on this platform.
-    use std::cell::UnsafeCell;
-    thread_local! {
-        static UNSUPPORTED_ERRNO: UnsafeCell<libc::c_int> = const { UnsafeCell::new(0) };
-    }
-    UNSUPPORTED_ERRNO.with(|cell| cell.get())
-}
-
-#[cfg(unix)]
-fn is_private_owned_directory_stat(stat: &libc::stat) -> bool {
-    stat.st_mode & libc::S_IFMT == libc::S_IFDIR
-        && stat.st_uid == unsafe { libc::geteuid() }
-        && stat.st_mode & 0o077 == 0
-}
-
-#[cfg(unix)]
-fn is_private_owned_regular_file_stat(stat: &libc::stat) -> bool {
-    stat.st_mode & libc::S_IFMT == libc::S_IFREG
-        && stat.st_uid == unsafe { libc::geteuid() }
-        && stat.st_nlink == 1
-}
-
-#[cfg(unix)]
-fn is_private_owned_directory(metadata: &fs::Metadata) -> bool {
-    metadata.is_dir()
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o077 == 0
-}
-
-#[cfg(unix)]
-fn is_private_owned_regular_file(metadata: &fs::Metadata) -> bool {
-    metadata.is_file() && metadata.uid() == unsafe { libc::geteuid() } && metadata.nlink() == 1
-}
-
-#[cfg(unix)]
-fn same_inspected_file(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    is_private_owned_regular_file(after)
-        && after.dev() == before.dev()
-        && after.ino() == before.ino()
-        && after.len() == before.len()
-        && after.mtime() == before.mtime()
-        && after.mtime_nsec() == before.mtime_nsec()
-        && after.ctime() == before.ctime()
-        && after.ctime_nsec() == before.ctime_nsec()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1342,22 +849,6 @@ struct InspectedFile {
 enum InspectFileContents {
     Bytes(Vec<u8>),
     TooLarge { bytes: u64 },
-}
-
-fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), CacheError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CacheError::InsecurePath(current));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(CacheError::Io(error)),
-        }
-    }
-    Ok(())
 }
 
 pub fn admit_preview(
@@ -1945,16 +1436,6 @@ fn validate_stored_generation(generation: &StoredGeneration) -> Result<(), Cache
     Ok(())
 }
 
-fn temp_path(path: &Path, suffix: &str) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("tmp"));
-    let mut temp_name = file_name;
-    temp_name.push(format!(".{suffix}"));
-    path.with_file_name(temp_name)
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1996,26 +1477,21 @@ mod tests {
                 .tempdir()
                 .expect("test temp dir must be atomically creatable");
             let path = directory.path().to_path_buf();
+            #[cfg(windows)]
+            let path = {
+                let path = path.join("cache");
+                native::Directory::open(&path, true).expect("private fixture root");
+                path
+            };
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
                     .expect("test temp dir permissions must be private");
             }
-            // Resolve the path before any store is rooted at it.
+            // Resolve Unix symlinked temporary ancestors before native no-follow admission.
             //
-            // `ensure_no_symlink_ancestors` refuses a state root reached through a link, which is
-            // what keeps a redirected ancestor from silently relocating the cache. On macOS
-            // `TMPDIR` is `/var/folders/…` and `/var` is a symlink to `/private/var`, so an
-            // unresolved fixture path is `InsecurePath` before a test reaches its subject.
-            // Measured on Windows with a junction standing in for that symlink: 10 of these tests
-            // failed with `InsecurePath`, and resolving the root fixed all 10.
-            //
-            // Unix only, deliberately. `canonicalize` on Windows returns a `\\?\` verbatim path,
-            // and rooting the store there made the same 10 tests fail with
-            // `ERROR_INVALID_FUNCTION` from the write path — trading one broken platform for
-            // another. Windows temp directories are not reached through a link in practice, and
-            // the guard's negative tests build their links *below* this root either way.
+            // Windows keeps the ordinary absolute drive path; no verbatim canonicalization.
             #[cfg(unix)]
             let path = path
                 .canonicalize()
@@ -2028,6 +1504,180 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+    }
+
+    // Deliberately construct private fixtures independently of the production JSON encoder.
+    // Unix permissions use the ordinary filesystem API; Windows requires explicit DACL creation.
+    fn create_fixture_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(windows)]
+        {
+            native::Directory::open(path, true)?;
+        }
+        Ok(())
+    }
+
+    fn write_fixture(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        #[cfg(unix)]
+        {
+            fs::write(path, bytes)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(windows)]
+        {
+            let directory = native::Directory::open(path.parent().unwrap(), false)?;
+            directory.publish(path.file_name().unwrap().to_str().unwrap(), |file| {
+                file.write_all(bytes.as_ref())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn load_missing_cache_stays_absent() {
+        let fixture = TestTempDir::new();
+        let root = fixture.path().join("missing");
+        assert_eq!(
+            AtomicGenerationStore::new(&root).load_current().unwrap(),
+            LoadResult::Miss
+        );
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn loading_refuses_oversize_files_without_quarantine_or_publication() {
+        for pointer in [true, false] {
+            let fixture = TestTempDir::new();
+            let store = AtomicGenerationStore::new(fixture.path());
+            create_fixture_dir(store.generations_dir()).unwrap();
+            write_fixture(store.current_pointer_path(), br#"{"generation":"huge"}"#).unwrap();
+            let path = if pointer {
+                store.current_pointer_path()
+            } else {
+                store.generation_path("huge")
+            };
+            if !pointer {
+                write_fixture(&path, b"").unwrap();
+            }
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            // Literal independent length, well above either documented cap. Sparse set_len
+            // avoids allocating or writing a giant fixture, especially on Windows.
+            file.set_len(4 * 1024 * 1024 * 1024).unwrap();
+            drop(file);
+            assert_eq!(fs::metadata(&path).unwrap().len(), 4_294_967_296);
+            assert!(matches!(
+                store.load_current(),
+                Err(CacheError::ResourceLimit { .. })
+            ));
+            assert!(!store.quarantine_dir().exists());
+            assert_eq!(
+                fs::read_dir(store.generations_dir()).unwrap().count(),
+                usize::from(!pointer)
+            );
+            let inspection = store.inspect().unwrap();
+            assert_eq!(
+                inspection.errors,
+                if pointer {
+                    vec![CacheInspectionError::CurrentPointerTooLarge {
+                        bytes: 4_294_967_296,
+                    }]
+                } else {
+                    vec![CacheInspectionError::CurrentGenerationTooLarge {
+                        bytes: 4_294_967_296,
+                    }]
+                }
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_generation_load_and_quarantine_ignore_replaced_display_root() {
+        let fixture = TestTempDir::new();
+        let root = fixture.path().join("cache");
+        let store = AtomicGenerationStore::new(&root);
+        let generation = StoredGeneration {
+            generation: "original".into(),
+            schema: STORED_PREVIEW_SCHEMA.into(),
+            created_at: "2026-10-03T00:00:00Z".into(),
+            preview: compact_preview(Vec::new(), &PreviewBudgets::default()),
+            validity: Vec::new(),
+        };
+        store.write_generation(&generation).unwrap();
+        let retained = native::Directory::open(&root, false).unwrap();
+        let old = fixture.path().join("retained");
+        fs::rename(&root, &old).unwrap();
+        create_fixture_dir(&root).unwrap();
+        write_fixture(root.join("current.json"), b"replacement sentinel").unwrap();
+        assert_eq!(
+            store.load_from_directory(&retained).unwrap(),
+            LoadResult::Hit(generation)
+        );
+        // The public path now denotes another object. Corruption must be quarantined into
+        // the retained namespace, even when the display path still looks healthy.
+        write_fixture(old.join("generations/original.json"), b"broken generation").unwrap();
+        assert_eq!(
+            store.load_from_directory(&retained).unwrap(),
+            LoadResult::Miss
+        );
+        assert_eq!(
+            fs::read(old.join("quarantine/original.corrupt.json")).unwrap(),
+            b"broken generation"
+        );
+        assert!(!root.join("quarantine").exists());
+        assert_eq!(
+            fs::read(root.join("current.json")).unwrap(),
+            b"replacement sentinel"
+        );
+    }
+
+    // APFS rejects raw invalid UTF-8 filenames with EILSEQ before enumeration. Linux's
+    // native byte-name fixture covers this branch; Windows unknown UTF-16 has a portable oracle.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspection_cannot_silently_omit_opaque_native_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let fixture = TestTempDir::new();
+        let store = AtomicGenerationStore::new(fixture.path());
+        create_fixture_dir(store.generations_dir()).unwrap();
+        let path = store.generations_dir().join(OsString::from_vec(vec![0xff]));
+        write_fixture(&path, b"private unknown").unwrap();
+        assert!(matches!(store.inspect(), Err(CacheError::InsecurePath(_))));
+        assert_eq!(fs::read(path).unwrap(), b"private unknown");
+        assert!(!store.quarantine_dir().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loading_refuses_public_aliased_and_special_pointer_files() {
+        use std::ffi::CString;
+        for case in ["public", "alias", "fifo"] {
+            let fixture = TestTempDir::new();
+            let store = AtomicGenerationStore::new(fixture.path());
+            let path = store.current_pointer_path();
+            if case == "fifo" {
+                let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: the fixture owns this literal path; no producer is started. Native
+                // nonblocking open must reject the type instead of waiting for a writer.
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            } else {
+                write_fixture(&path, br#"{"generation":"missing"}"#).unwrap();
+                if case == "public" {
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+                } else {
+                    fs::hard_link(&path, fixture.path().join("alias")).unwrap();
+                }
+            }
+            assert!(store.load_current().is_err(), "{case} must not be parsed");
+            assert!(fs::symlink_metadata(&path).is_ok());
+            assert!(!store.quarantine_dir().exists());
         }
     }
 
@@ -2226,7 +1876,7 @@ mod tests {
             .expect("the field must be present before it is removed");
         let legacy: StoredGeneration = serde_json::from_value(envelope["payload"].clone()).unwrap();
         envelope["checksum_sha256"] = json!(checksum_hex(&legacy).unwrap());
-        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        write_fixture(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
 
         let loaded = store.load_current().unwrap();
         let LoadResult::Hit(generation) = loaded else {
@@ -2310,7 +1960,7 @@ mod tests {
             "the field this test edits must exist, or the edit proves nothing"
         );
         envelope["payload"]["validity"][0]["position"] = json!("999");
-        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        write_fixture(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
 
         assert!(
             matches!(store.load_current(), Ok(LoadResult::Miss)),
@@ -2332,7 +1982,7 @@ mod tests {
         store.write_generation(&generation).unwrap();
 
         let generation_path = store.generation_path("gen-1");
-        fs::write(&generation_path, b"{not-json").unwrap();
+        write_fixture(&generation_path, b"{not-json").unwrap();
 
         let loaded = store.load_current().unwrap();
         assert_eq!(loaded, LoadResult::Miss);
@@ -2343,7 +1993,7 @@ mod tests {
     fn generation_must_match_current_pointer_and_referenced_path() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        create_fixture_dir(temp.path().join("generations")).unwrap();
         let generation = StoredGeneration {
             generation: "gen-b".to_string(),
             schema: STORED_PREVIEW_SCHEMA.to_string(),
@@ -2357,8 +2007,8 @@ mod tests {
             payload: generation,
         };
         let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
-        fs::write(temp.path().join("generations/gen-a.json"), &envelope_bytes).unwrap();
-        fs::write(
+        write_fixture(temp.path().join("generations/gen-a.json"), &envelope_bytes).unwrap();
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"gen-a"}"#,
         )
@@ -2381,7 +2031,7 @@ mod tests {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
         let target = temp.path().join("target.json");
-        fs::write(&target, br#"{"generation":"gen-1"}"#).unwrap();
+        write_fixture(&target, br#"{"generation":"gen-1"}"#).unwrap();
         symlink(&target, temp.path().join("current.json")).unwrap();
 
         let error = store.load_current().unwrap_err();
@@ -2404,22 +2054,22 @@ mod tests {
         };
 
         let real_generations = temp.path().join("real-generations");
-        fs::create_dir(&real_generations).unwrap();
+        create_fixture_dir(&real_generations).unwrap();
         let generations = store.generations_dir();
         symlink(&real_generations, &generations).unwrap();
         let error = store.write_generation(&generation).unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
 
         fs::remove_file(store.generations_dir()).unwrap();
-        fs::create_dir(store.generations_dir()).unwrap();
-        fs::write(store.generation_path("gen-1"), b"{not-json").unwrap();
-        fs::write(
+        create_fixture_dir(store.generations_dir()).unwrap();
+        write_fixture(store.generation_path("gen-1"), b"{not-json").unwrap();
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"gen-1"}"#,
         )
         .unwrap();
         let real_quarantine = temp.path().join("real-quarantine");
-        fs::create_dir(&real_quarantine).unwrap();
+        create_fixture_dir(&real_quarantine).unwrap();
         symlink(&real_quarantine, store.quarantine_dir()).unwrap();
         let error = store.load_current().unwrap_err();
         assert!(matches!(error, CacheError::InsecurePath(_)));
@@ -2432,7 +2082,7 @@ mod tests {
 
         let temp = TestTempDir::new();
         let real = temp.path().join("real");
-        fs::create_dir(&real).unwrap();
+        create_fixture_dir(&real).unwrap();
         let link = temp.path().join("linked");
         symlink(&real, &link).unwrap();
         let store = AtomicGenerationStore::new(link.join("preview"));
@@ -2499,14 +2149,14 @@ mod tests {
             validity: Vec::new(),
         };
         store.write_generation(&generation).unwrap();
-        fs::create_dir_all(temp.path().join("quarantine")).unwrap();
+        create_fixture_dir(temp.path().join("quarantine")).unwrap();
         #[cfg(unix)]
         fs::set_permissions(
             temp.path().join("quarantine"),
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        fs::write(temp.path().join("quarantine/old.corrupt.json"), b"broken").unwrap();
+        write_fixture(temp.path().join("quarantine/old.corrupt.json"), b"broken").unwrap();
 
         let inspection = store.inspect().unwrap();
 
@@ -2531,10 +2181,10 @@ mod tests {
     fn inspect_malformed_current_is_read_only_and_typed() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir_all(temp.path()).unwrap();
+        create_fixture_dir(temp.path()).unwrap();
         let current_path = temp.path().join("current.json");
         let original = b"{not-json".to_vec();
-        fs::write(&current_path, &original).unwrap();
+        write_fixture(&current_path, &original).unwrap();
 
         let inspection = store.inspect().unwrap();
 
@@ -2565,7 +2215,7 @@ mod tests {
     fn oversized_generation_pointer_is_rejected_before_path_lookup() {
         let temp = TestTempDir::new();
         let current = temp.path().join("current.json");
-        fs::write(
+        write_fixture(
             &current,
             serde_json::to_vec(&CurrentPointer {
                 generation: "a".repeat(MAX_GENERATION_ID_BYTES + 1),
@@ -2596,7 +2246,7 @@ mod tests {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
         let real = temp.path().join("real-generations");
-        fs::create_dir(&real).unwrap();
+        create_fixture_dir(&real).unwrap();
         let link = temp.path().join("generations");
 
         let created = std::process::Command::new("cmd")
@@ -2636,7 +2286,7 @@ mod tests {
     fn inspect_rejects_a_directory_in_place_of_a_cache_file() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir(temp.path().join("current.json")).unwrap();
+        create_fixture_dir(temp.path().join("current.json")).unwrap();
 
         let error = store.inspect().unwrap_err();
         assert!(
@@ -2654,14 +2304,14 @@ mod tests {
     fn inspect_reports_an_oversized_generation_without_reading_it() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir_all(temp.path().join("generations")).unwrap();
-        fs::write(
+        create_fixture_dir(temp.path().join("generations")).unwrap();
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"gen-big"}"#,
         )
         .unwrap();
         let oversized = vec![b'x'; (INSPECT_GENERATION_BYTE_LIMIT + 1) as usize];
-        fs::write(temp.path().join("generations/gen-big.json"), &oversized).unwrap();
+        write_fixture(temp.path().join("generations/gen-big.json"), &oversized).unwrap();
 
         let inspection = store.inspect().unwrap();
 
@@ -2722,7 +2372,7 @@ mod tests {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
         let real_generations = temp.path().join("real-generations");
-        fs::create_dir(&real_generations).unwrap();
+        create_fixture_dir(&real_generations).unwrap();
         symlink(&real_generations, temp.path().join("generations")).unwrap();
 
         let error = store.inspect().unwrap_err();
@@ -2742,7 +2392,7 @@ mod tests {
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let current = temp.path().join("current.json");
         let alias = temp.path().join("current-alias.json");
-        fs::write(&current, br#"{"generation":"gen-1"}"#).unwrap();
+        write_fixture(&current, br#"{"generation":"gen-1"}"#).unwrap();
         fs::hard_link(&current, &alias).unwrap();
         assert!(matches!(store.inspect(), Err(CacheError::InsecurePath(_))));
     }
@@ -2754,7 +2404,7 @@ mod tests {
 
         let temp = TestTempDir::new();
         let generations = temp.path().join("generations");
-        fs::create_dir(&generations).unwrap();
+        create_fixture_dir(&generations).unwrap();
         fs::set_permissions(&generations, fs::Permissions::from_mode(0o777)).unwrap();
 
         let error = AtomicGenerationStore::new(temp.path())
@@ -2770,7 +2420,7 @@ mod tests {
 
         let temp = TestTempDir::new();
         let generations = temp.path().join("generations");
-        fs::create_dir(&generations).unwrap();
+        create_fixture_dir(&generations).unwrap();
         fs::set_permissions(&generations, fs::Permissions::from_mode(0o755)).unwrap();
         let store = AtomicGenerationStore::new(temp.path());
         let generation = StoredGeneration {
@@ -2810,11 +2460,11 @@ mod tests {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
         let generations = temp.path().join("generations");
-        fs::create_dir_all(&generations).unwrap();
+        create_fixture_dir(&generations).unwrap();
         #[cfg(unix)]
         fs::set_permissions(&generations, fs::Permissions::from_mode(0o700)).unwrap();
         for index in 0..=INSPECT_DIRECTORY_ENTRY_LIMIT {
-            fs::write(generations.join(format!("gen-{index}.json")), b"{}").unwrap();
+            write_fixture(generations.join(format!("gen-{index}.json")), b"{}").unwrap();
         }
 
         let inspection = store.inspect().unwrap();
@@ -2834,14 +2484,14 @@ mod tests {
     fn inspect_reports_invalid_schema_without_quarantine() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        create_fixture_dir(temp.path().join("generations")).unwrap();
         #[cfg(unix)]
         fs::set_permissions(
             temp.path().join("generations"),
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        fs::write(
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"gen-1"}"#,
         )
@@ -2858,7 +2508,7 @@ mod tests {
             checksum_sha256: checksum_hex(&generation).unwrap(),
             payload: generation,
         };
-        fs::write(
+        write_fixture(
             temp.path().join("generations/gen-1.json"),
             serde_json::to_vec(&envelope).unwrap(),
         )
@@ -2996,7 +2646,7 @@ mod tests {
         let error = store.write_generation(&generation).unwrap_err();
         assert!(matches!(error, CacheError::InvalidGenerationName));
 
-        fs::write(
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"../escape"}"#,
         )
@@ -3009,7 +2659,7 @@ mod tests {
     fn invalid_schema_is_not_loaded_as_hit() {
         let temp = TestTempDir::new();
         let store = AtomicGenerationStore::new(temp.path());
-        fs::create_dir_all(temp.path().join("generations")).unwrap();
+        create_fixture_dir(temp.path().join("generations")).unwrap();
         let generation = StoredGeneration {
             generation: "genbad".to_string(),
             schema: "wrong.schema".to_string(),
@@ -3022,12 +2672,12 @@ mod tests {
             checksum_sha256: checksum_hex(&generation).unwrap(),
             payload: generation,
         };
-        fs::write(
+        write_fixture(
             temp.path().join("generations/genbad.json"),
             serde_json::to_vec(&envelope).unwrap(),
         )
         .unwrap();
-        fs::write(
+        write_fixture(
             temp.path().join("current.json"),
             br#"{"generation":"genbad"}"#,
         )
