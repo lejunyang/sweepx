@@ -406,7 +406,14 @@ impl Directory {
         loop {
             // SAFETY: stream is live; each d_name is read before the next readdir invalidates it.
             unsafe {
-                *libc::__error() = 0;
+                #[cfg(target_os = "macos")]
+                {
+                    *libc::__error() = 0;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    *libc::__errno_location() = 0;
+                }
             }
             let entry = unsafe { libc::readdir(stream.0) };
             if entry.is_null() {

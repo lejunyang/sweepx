@@ -606,7 +606,7 @@ fn discovered_root_admission_is_bounded_and_preserves_link_sensitive_spelling() 
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history() {
     let _serial = SESSION_TESTS
@@ -718,7 +718,7 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
     ));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id() {
     let _serial = SESSION_TESTS
@@ -740,6 +740,7 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
     let rows = current(&drain(&cold, JunkSessionRevision(1)));
     let (&key, original) = rows.first_key_value().unwrap();
     shutdown(&cold);
+    #[cfg(target_os = "macos")]
     assert!(
         crate::junk::cache::CacheReader::new(&cache)
             .index(&root)
@@ -822,6 +823,7 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
             ..
         }
     )));
+    #[cfg(target_os = "macos")]
     assert!(
         crate::junk::cache::CacheReader::new(&cache)
             .index(&root)

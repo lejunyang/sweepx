@@ -1,0 +1,232 @@
+{
+  "schema": "sweepx.portable-junk-history-validation/v1",
+  "date": "2026-10-03",
+  "base_commit": "cf188e7",
+  "host": {
+    "platform": "aarch64-apple-darwin",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "build": "unoptimized dev/test; debug symbols=0; incremental=0"
+  },
+  "scope": [
+    "Linux junk TUI historical first paint; every file remains freshly observed",
+    "Shared Unix private bounded storage and historical recovery policy; separate macOS indexes",
+    "v10 platform/device/file/mount/rule/scope binding; missing cursor/context is null",
+    "Per-root session candidate projection precharged to a 4 MiB owned-data estimate; selected merge moves the old record",
+    "History is display-only; original complete coverage is retained with stale provenance, missing transient interpretation and Historical event state"
+  ],
+  "not_delivered": [
+    "Native Linux/Windows runtime verification",
+    "Windows private historical storage and MSVC build",
+    "Linux/Windows validated file indexes",
+    "macOS recent-write observation barrier",
+    "Complete discovery/analysis/legacy API retained-container audit",
+    "Any end-to-end performance or RSS claim"
+  ],
+  "checks": {
+    "core_cli_tests": {
+      "command": "cargo test -p sweepx-core -p sweepx-cli --all-features -- --test-threads=1",
+      "exit_code": 101,
+      "passed": 462,
+      "failed": 1,
+      "ignored": 2,
+      "filtered": 0,
+      "result_lines": 4,
+      "summaries": [
+        "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s",
+        "test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.75s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: FAILED. 330 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 43.28s"
+      ],
+      "log_sha256": "651ea515bc361a79f8b13925dd2f34bbc73ee42ae8f13dd770a2fb9c0b03a9ad",
+      "failure": "junk::cache::tests::a_change_under_the_root_invalidates_the_record: a new file must invalidate",
+      "note": "No exclusion was applied. CLI ordinary system Trash integration actually passed. Core failure leaves subsequent core doctests unrun; those were checked separately."
+    },
+    "other_workspace_tests": {
+      "command": "cargo test --workspace --exclude sweepx-core --exclude sweepx-cli --all-features -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "exit_code": 0,
+      "passed": 625,
+      "failed": 0,
+      "ignored": 1,
+      "filtered": 0,
+      "result_lines": 34,
+      "summaries": [
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.41s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s",
+        "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.06s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s",
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 97 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.23s",
+        "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+        "test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.58s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "log_sha256": "7e1943374784f3b5ef13764f88063b3271a96a8ebc758f6d48c6b54e7f47c6c2",
+      "note": "The supplied --skip name belongs to the excluded CLI and matched no test in this run (filtered count=0). One existing platform microbenchmark was ignored."
+    },
+    "core_doctests": {
+      "command": "cargo test -p sweepx-core --doc --all-features",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "result_lines": 1,
+      "summaries": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "log_sha256": "bcb092b5341bf8623c60efb76fe96fceb8f5d2cd1347fe561699f3588833ff84"
+    },
+    "combined_different_passing_tests": 1087,
+    "combined_failures": 1,
+    "combined_ignored": 3,
+    "focused_history_reader": {
+      "passed": 4,
+      "failed": 0,
+      "note": "Native macOS fixtures exercise portable Unix policy; cross-target Linux compilation is distinct from runtime."
+    },
+    "focused_history_publication": {
+      "passed": 4,
+      "failed": 0,
+      "note": "Includes existing legacy allocation case. Cases overlap the core matrix and are not additional unique tests."
+    },
+    "affected_clippy": {
+      "crates": [
+        "sweepx-core",
+        "sweepx-cli"
+      ],
+      "all_targets": true,
+      "all_features": true,
+      "warnings": "deny",
+      "exit_code": 0
+    },
+    "workspace_clippy": {
+      "targets": [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnu"
+      ],
+      "all_targets": true,
+      "all_features": true,
+      "warnings": "deny",
+      "exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "cross_C_toolchain": "Zig 0.16.0; task-local helper maps Linux GNU and Windows GNU",
+      "note": "Final portable temporary-domain exclusion and rustdoc edits followed the matrix; final affected host and Linux-core lint checked that code. Windows cache module remains disabled. GNU compile does not prove MSVC or target runtime."
+    },
+    "fmt_diff": {
+      "cargo_fmt_all_check": 0,
+      "git_diff_check": 0
+    },
+    "core_package_list": {
+      "exit_code": 0,
+      "contains": [
+        "src/junk/cache/history_tests.rs",
+        "src/junk/cache/index.rs"
+      ],
+      "note": "A file list does not prove registry dependency builds."
+    },
+    "help_observation": {
+      "command": "cargo run -p sweepx-cli -- junk --help",
+      "exit_code": 0,
+      "contains": "Linux/macOS show historical caches first; Linux reobserves all files, macOS validates indexes. Only freshly verified rows can be moved; Windows currently scans fresh."
+    },
+    "docs": {
+      "markdown_files": 54,
+      "checker_tests_passed": 23,
+      "checker_tests_failed": 0,
+      "exit_codes": [
+        0,
+        0
+      ]
+    },
+    "final_mount_oracle": {
+      "passed": 1,
+      "failed": 0,
+      "note": "After adding an explicit native-path validity assertion, reran the single unknown-mount fixture. It rejects absent mount evidence rather than merely malformed locator data."
+    }
+  },
+  "initial_failures_and_repairs": [
+    {
+      "step": "Focused compilation",
+      "detail": "Two existing macOS cursor assertions expected u64; the API now returns Option<u64>. Updated assertions and merge input to Some values without fabricating absent evidence."
+    },
+    {
+      "step": "Historical policy test",
+      "detail": "The new test incorrectly equated historical state with incomplete original coverage. Inspected complete(), stale_preview_aggregate and TUI history gates: preserved complete coverage is valid historical data. Corrected the oracle to require complete original coverage, StalePreview, Historical state, historical_cache blocker, NotChecked execution and absent activity/Git. Production coverage semantics and execution gates were not weakened."
+    },
+    {
+      "step": "Affected clippy",
+      "detail": "One question-mark suggestion and ten cloned-reference slice suggestions; applied idiomatic code without suppressions."
+    },
+    {
+      "step": "Initial Linux workspace clippy",
+      "detail": "Linux candidate reconstruction required native_path=None; macOS-only BTreeMap import needed matching cfg. Added the missing non-authoritative field and gated imports; no production cfg was widened merely for lint."
+    }
+  ],
+  "fsevents_validity_gap": {
+    "status": "open; directly observed macOS immediate historical query missed a completed file write",
+    "failed_existing_test_retained": true,
+    "failure_retries": 0,
+    "diagnostic": "Separate temporary probe calls the unchanged public FSEvents API after one controlled write; scheduled query observations at 0/100/350/1000 ms. Actual starts/finishes below; a scheduled stage can run late when the prior native call has not returned.",
+    "probe_source_sha256": "1b0f5eef521e059a61bf2e238743f276aad07be60f18aa9bed7eddd2409998e7",
+    "probe_trace": [
+      "stage=0 started_us=658 finished_us=299104 since=814668458 log=Ok(ChangeLog { events: [], must_rescan: false })",
+      "stage=100 started_us=299196 finished_us=313248 since=814668458 log=Ok(ChangeLog { events: [ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003\", id: 814668482, flags: 164096 }, ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003/controlled-write\", id: 814668491, flags: 102656 }], must_rescan: false })",
+      "stage=350 started_us=360014 finished_us=372258 since=814668458 log=Ok(ChangeLog { events: [ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003\", id: 814668482, flags: 164096 }, ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003/controlled-write\", id: 814668491, flags: 102656 }], must_rescan: false })",
+      "stage=1000 started_us=1004809 finished_us=1017674 since=814668458 log=Ok(ChangeLog { events: [ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003\", id: 814668482, flags: 164096 }, ChangeEvent { path: \"/private/tmp/sweepx-fsevents-delay-fixture-20261003/controlled-write\", id: 814668491, flags: 102656 }], must_rescan: false })"
+    ],
+    "interpretation": "First query started 658 us after baseline and returned at 299104 us with empty history; next started 299196 us and returned at 313248 us with both root and controlled-write events. This is an observation-visibility gap, not a safe atomic freshness oracle. It does not explain every prior FSEvents/PTTY/probe incident.",
+    "primary_reference": "https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html",
+    "next_action": "Audit/fix macOS current-root reuse evidence before broadening cache reuse; do not claim correctness from a fixed sleep or eventual passing retry."
+  },
+  "resource_observation": {
+    "target_directory": "approximately 1.8 GiB at final observation (du: 1883884 KiB)",
+    "free_space": "approximately 42 GiB at observation",
+    "not_performance_measurement": true,
+    "trash": "Previously moved real debug directories remain recoverable; no empty-Trash or permanent removal was performed.",
+    "target_allocated_kib": 1883884
+  },
+  "source_sha256": {
+    "crates/sweepx-cli/src/main.rs": "7f7d8c3bd32918ac4f869883819d4fda2f0ff29b74aa53c989c3d294eaff706a",
+    "crates/sweepx-core/src/junk.rs": "56ade87c87cbae4c138d330ac45a72fa56ed8e21ff0931fd07ede67d9182b47d",
+    "crates/sweepx-core/src/junk/cache.rs": "b959746febaf6da7f55959830013c3e753193758f32910476be8eca5a65e63b6",
+    "crates/sweepx-core/src/junk/cache/grouping.rs": "50bcb504ca88d155b8687b96466136991ece9fadc0831870939ae430356746b8",
+    "crates/sweepx-core/src/junk/cache/grouping_contract_tests.rs": "c2ddba1fc602cd41dc3f1bdd7e661c386f861213c730d154e1c21b4792f24b90",
+    "crates/sweepx-core/src/junk/cache/provider.rs": "cc8af1ccb8f235f46aac659e2fbf596e5dc5b5e126f9176feab7a4459a80248b",
+    "crates/sweepx-core/src/junk/cache/storage.rs": "57f0a482241b1f72895232e03d38a5a4a6cf4493d23a832cb964745309f1ba3d",
+    "crates/sweepx-core/src/junk/session.rs": "ba215b475d45eeb250a01e3aafa482173475adb607a84e85e43f09b57917a5d9",
+    "crates/sweepx-core/src/junk/session/cache.rs": "7f546755f2e00898543c4038817f95653cffc1efb8f9725d732e0375a7128512",
+    "crates/sweepx-core/src/junk/session/presentation.rs": "c6c173047a5e950880b97efbaf82c7a20bf7f3323697328a5ef70d0335468693",
+    "crates/sweepx-core/src/junk/session/tests.rs": "355a4092af77f92f5916ffa75ef12ffa7c63f81e4e0e335260cabba39bf3401f",
+    "crates/sweepx-core/src/junk/cache/history_tests.rs": "c2a95c3e0d5d6a63819a79b46168889db8576536c3098131c50ea1a2ea918a14",
+    "crates/sweepx-core/src/junk/cache/index.rs": "3bcaabdb30baddbd17dfef8784117334840be195b87f34d30d38b2bee8413173"
+  }
+}

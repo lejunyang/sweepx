@@ -187,7 +187,7 @@ impl SubtreeCacheProvider {
         let since = records
             .iter()
             .flatten()
-            .map(StoredJunkRoot::since_event_id)
+            .filter_map(StoredJunkRoot::since_event_id)
             .chain(indexes.values().map(StoredSubtreeIndex::since_event_id))
             .min();
         let paths: Vec<&Path> = roots
@@ -586,7 +586,7 @@ impl SubtreeCacheProvider {
         }
         junk_cache::write_subtree_index(&self.cache_dir, &merged)?;
         if let Some(preview) = state.preview {
-            let preview = preview.merge_preview(&paths, candidates, cursor);
+            let preview = preview.merge_preview(&paths, candidates, Some(cursor));
             if !preview.matches_observed_root(source) {
                 return Err(std::io::Error::other(
                     "fragment preview root binding changed",

@@ -4,11 +4,11 @@ use super::*;
 use crate::junk::cache::{
     CacheReader, StoredJunkCandidate, StoredJunkRoot,
     grouping::{
-        DEFAULT_GROUPING_BYTES, GroupingBudget, RootGroups, RootScope, group_listings,
-        group_native, group_sources,
+        DEFAULT_GROUPING_BYTES, GroupingBudget, RootGroups, RootScope, group_native, group_sources,
     },
-    provider::SubtreeCacheProvider,
 };
+#[cfg(target_os = "macos")]
+use crate::junk::cache::{grouping::group_listings, provider::SubtreeCacheProvider};
 use sweepx_model::{
     ArithmeticState, ByteValue, CountValue, Coverage, CoverageState, DecimalU128, FieldProvenance,
     ReasonCode,
@@ -16,6 +16,7 @@ use sweepx_model::{
 
 /// A single root can project directly and stop at its optional wire limit. Only multiple roots
 /// need a shared partition; unavailable views must never be treated as successfully empty facts.
+#[cfg(target_os = "macos")]
 enum ListingPublication<'a> {
     SingleRoot,
     Grouped(RootGroups<(&'a String, &'a sweepx_scanner::DirListing)>),
@@ -37,7 +38,7 @@ impl Worker {
             Vec::new()
         };
         for record in reader
-            .historical_roots(&self.scan_roots)
+            .historical_roots_scoped_with_cancel(&self.scan_roots, &self.scan_roots, &job.cancel)
             .into_iter()
             .flatten()
         {
@@ -113,7 +114,127 @@ impl Worker {
         Ok(())
     }
 
+    /// Historical-only publication does not qualify a root/file index as unchanged. This policy
+    /// is exercised with native Unix fixtures on macOS too; Linux storage/runtime remains distinct.
+    #[cfg(any(target_os = "linux", test))]
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn store_history(
+        &self,
+        directory: &Path,
+        reader: &mut CacheReader,
+        scanned: &sweepx_scanner::ClassifiedScan,
+        pending: &Rows,
+        service: &JunkService,
+        platform: &PlatformJunkSetup,
+        job: &Job,
+        partial: bool,
+        writer: &mut Writer,
+    ) -> Result<(), JunkSessionFailure> {
+        if partial || job.cancel.is_cancelled() || scanned.observed_roots.is_empty() {
+            return Ok(());
+        }
+        let selected = job.selected.as_ref().map(|keys| {
+            keys.iter()
+                .map(|key| {
+                    self.current
+                        .get(key)
+                        .and_then(|row| row.observed_native_path())
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let selected = match selected {
+            Some(None) => {
+                cache_grouping_warning(writer, &job.cancel)?;
+                return Ok(());
+            }
+            Some(Some(paths)) => Some(paths),
+            None => None,
+        };
+        let mut budget = GroupingBudget::new(DEFAULT_GROUPING_BYTES);
+        let prepared = RootScope::new(&self.scan_roots, &mut budget).and_then(|scope| {
+            let sources = group_sources(&scope, &scanned.observed_roots, &mut budget, &job.cancel)?;
+            let candidates = group_candidates(
+                &scope,
+                pending,
+                selected.as_deref(),
+                &mut budget,
+                &job.cancel,
+            )?;
+            Some((sources, candidates))
+        });
+        let Some((sources, candidates)) = prepared else {
+            cache_grouping_warning(writer, &job.cancel)?;
+            return Ok(());
+        };
+        if sources.is_empty() {
+            return Ok(());
+        }
+        // Old siblings are presentation only. No filesystem-history claim is needed to retain
+        // them as historical; root/rules/scope still have to match under the shared read budget.
+        let mut old = if selected.is_some() {
+            reader.historical_roots_scoped_with_cancel(
+                &self.scan_roots,
+                &self.scan_roots,
+                &job.cancel,
+            )
+        } else {
+            Vec::new()
+        };
+        let context = service
+            .with_platform(&platform.rules, &platform.evidence)
+            .classification_context_digest();
+        for (ordinal, root) in self.scan_roots.iter().enumerate() {
+            if job.cancel.is_cancelled() {
+                break;
+            }
+            let Some(source) = sources.get(ordinal).first() else {
+                continue;
+            };
+            let Some(stored) = stored_candidates(candidates.get(ordinal), &job.cancel) else {
+                cache_grouping_warning(writer, &job.cancel)?;
+                continue;
+            };
+            let mut record = StoredJunkRoot::capture_historical_with_rule_bytes(
+                source,
+                stored,
+                context,
+                &self.request.project_rule_bytes,
+                super::super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
+            );
+            if let Some(paths) = &selected {
+                let previous = old.get_mut(ordinal).and_then(Option::take);
+                record = match (record, previous) {
+                    (Ok(fresh), Some(previous)) => {
+                        Ok(previous.merge_preview(paths, fresh.into_candidates(), None))
+                    }
+                    (result, _) => result,
+                };
+            }
+            let result = record.and_then(|mut record| {
+                if !record.matches_observed_root(source) {
+                    return Err(std::io::Error::other(
+                        "historical root changed after traversal",
+                    ));
+                }
+                record.bind_scope(&self.scan_roots);
+                if job.cancel.is_cancelled() {
+                    return Ok(());
+                }
+                crate::junk::cache::write(directory, &record)
+            });
+            if let Err(error) = result {
+                writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
+                    "cache_write_failed",
+                    error.to_string(),
+                )))?;
+            }
+            debug_assert!(root.is_absolute() && budget.used_bytes() <= DEFAULT_GROUPING_BYTES);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(target_os = "macos")]
     pub(super) fn store_cache(
         &self,
         directory: &Path,
@@ -351,7 +472,10 @@ fn group_candidates<'a>(
 ) -> Option<RootGroups<&'a JunkSessionCandidate>> {
     group_native(
         scope,
-        pending.values().map(Arc::as_ref),
+        pending
+            .values()
+            .map(Arc::as_ref)
+            .filter(|row| row.directory_aggregate().is_some()),
         |row| row.observed_native_path(),
         selected,
         budget,
@@ -367,11 +491,20 @@ fn stored_candidates(
     if cancel.is_cancelled() {
         return None;
     }
+    // One root's projection has an independent owned-data allowance. A wire cap applied after
+    // cloning is too late to bound these copies; rejection preserves the previous cache record.
+    let mut remaining = crate::junk::cache::Limits::default().entry_bytes;
+    remaining = remaining.checked_sub(
+        rows.len()
+            .saturating_mul(std::mem::size_of::<StoredJunkCandidate>()),
+    )?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
         if cancel.is_cancelled() {
             return None;
         }
+        let next = remaining.checked_sub(row.cost())?;
+        remaining = next;
         let mut stored = StoredJunkCandidate::from_candidate(&row.candidate);
         stored.aggregate = row.directory_aggregate().cloned();
         result.push(stored);
@@ -379,7 +512,7 @@ fn stored_candidates(
     (!cancel.is_cancelled()).then_some(result)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[path = "cache_benchmark.rs"]
 mod benchmark;
 
@@ -429,6 +562,267 @@ fn historical_aggregate(stored: &StoredJunkCandidate, entry: &ScannedEntry) -> D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        #[cfg(target_os = "linux")]
+        let fixture = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(target_os = "macos")]
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let root = base.join("projects");
+        for (name, payload) in [("a", &b"aaaa"[..]), ("b", &b"bbbbbbbb"[..])] {
+            let project = root.join(name);
+            fs::create_dir_all(project.join("target")).unwrap();
+            fs::write(project.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+            fs::write(project.join("target/payload"), payload).unwrap();
+        }
+        (fixture, root, base.join("cache"))
+    }
+
+    fn scan(root: &Path) -> (sweepx_scanner::ClassifiedScan, Rows) {
+        let service = JunkService::built_in().unwrap();
+        let scanned = Scanner::new(HostPlatformScanner::new(), ScannerOptions::default())
+            .scan_classified(
+                &[ScanRoot::new(root.to_path_buf()).unwrap()],
+                &CancellationToken::new(),
+                &service,
+                None,
+            )
+            .unwrap();
+        let aggregates = scanned
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect::<BTreeMap<_, _>>();
+        let rows = scanned
+            .summary
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let id = &entry.validated_identity().unwrap()?.entry_id;
+                let candidate = service.interpret(
+                    scanned.decisions.get(id)?,
+                    entry,
+                    &aggregates,
+                    &[],
+                    &Default::default(),
+                )?;
+                let path = native_path(entry)?;
+                Some((
+                    candidate_key(&candidate, &path)?,
+                    Arc::new(JunkSessionCandidate {
+                        candidate,
+                        facts: JunkSessionFacts::Directory(Box::new(
+                            (*aggregates.get(id.as_str())?).clone(),
+                        )),
+                    }),
+                ))
+            })
+            .collect::<Rows>();
+        assert_eq!(rows.len(), 2);
+        (scanned, rows)
+    }
+
+    fn make_worker(root: &Path, cache: &Path) -> Worker {
+        let mut request = JunkSessionRequest::new(vec![root.to_path_buf()]);
+        request.cache_dir = Some(cache.to_path_buf());
+        Worker {
+            request,
+            session_id: "historical-policy-contract".into(),
+            current: Rows::new(),
+            presentations: PresentationIndex::default(),
+            scan_roots: vec![root.to_path_buf()],
+        }
+    }
+
+    fn publish(
+        worker: &Worker,
+        cache: &Path,
+        scanned: &sweepx_scanner::ClassifiedScan,
+        rows: &Rows,
+        job: &Job,
+        partial: bool,
+    ) -> Vec<JunkSessionEvent> {
+        let shared = Arc::new(Shared::new(worker.request.limits));
+        let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+        worker
+            .store_history(
+                cache,
+                &mut CacheReader::new(cache),
+                scanned,
+                rows,
+                &JunkService::built_in().unwrap(),
+                &PlatformJunkSetup::default(),
+                job,
+                partial,
+                &mut writer,
+            )
+            .unwrap();
+        let session = JunkSession { shared };
+        std::iter::from_fn(|| session.try_next_event()).collect()
+    }
+
+    fn job() -> Job {
+        Job {
+            revision: JunkSessionRevision(1),
+            selected: None,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    fn restore(
+        worker: &mut Worker,
+        cache: &Path,
+    ) -> Vec<(JunkSessionCandidateState, Arc<JunkSessionCandidate>)> {
+        let job = job();
+        let shared = Arc::new(Shared::new(worker.request.limits));
+        let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
+        worker
+            .restore_history(
+                &mut CacheReader::new(cache),
+                &JunkService::built_in().unwrap(),
+                [7; 32],
+                &job,
+                &mut writer,
+            )
+            .unwrap();
+        let session = JunkSession { shared };
+        std::iter::from_fn(|| session.try_next_event())
+            .filter_map(|event| match event.kind {
+                JunkSessionEventKind::Candidate { state, row, .. } => Some((state, row)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn historical_policy_publishes_and_restores_only_stale_non_executable_rows() {
+        let (_guard, root, cache) = fixture();
+        let (scanned, rows) = scan(&root);
+        let worker = make_worker(&root, &cache);
+        assert!(publish(&worker, &cache, &scanned, &rows, &job(), false).is_empty());
+        let restored = restore(&mut make_worker(&root, &cache), &cache);
+        assert_eq!(restored.len(), 2);
+        for (state, row) in restored {
+            assert_eq!(state, JunkSessionCandidateState::Historical);
+            // Coverage describes the original observation; freshness and execution are separate.
+            // Preserving that coverage must not strip the stale provenance or the history gate.
+            assert!(row.complete());
+            assert!(matches!(
+                row.directory_aggregate().unwrap().coverage.provenance,
+                FieldProvenance::StalePreview { .. }
+            ));
+            assert!(
+                row.candidate
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker == "historical_cache")
+            );
+            assert_eq!(
+                row.candidate.execution_policy,
+                crate::junk::candidate::JunkExecutionPolicy::NotChecked
+            );
+            assert!(row.candidate.git.is_none() && row.candidate.activity.is_none());
+            let payload = row.observed_native_path().unwrap().join("payload");
+            assert_eq!(
+                row.logical_bytes(),
+                &sweepx_platform::known_u128(u128::from(fs::metadata(payload).unwrap().len()))
+            );
+        }
+    }
+
+    #[test]
+    fn selected_historical_merge_keeps_old_siblings_explicitly_stale_even_when_changed() {
+        let (_guard, root, cache) = fixture();
+        let (old_scan, old_rows) = scan(&root);
+        let mut worker = make_worker(&root, &cache);
+        publish(&worker, &cache, &old_scan, &old_rows, &job(), false);
+        worker.current = old_rows;
+        let key = *worker
+            .current
+            .iter()
+            .find(|(_, row)| row.observed_native_path() == Some(root.join("a/target")))
+            .unwrap()
+            .0;
+        fs::write(root.join("a/target/payload"), b"new-selected-payload").unwrap();
+        fs::write(
+            root.join("b/target/payload"),
+            b"changed-unselected-payload-is-longer",
+        )
+        .unwrap();
+        let (fresh_scan, fresh_rows) = scan(&root);
+        let mut selected = job();
+        selected.selected = Some(vec![key]);
+        assert!(publish(&worker, &cache, &fresh_scan, &fresh_rows, &selected, false).is_empty());
+        let restored = restore(&mut make_worker(&root, &cache), &cache);
+        let facts = restored
+            .into_iter()
+            .map(|(state, row)| {
+                assert_eq!(state, JunkSessionCandidateState::Historical);
+                (
+                    row.observed_native_path().unwrap(),
+                    row.logical_bytes().clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            facts[&root.join("a/target")],
+            sweepx_platform::known_u128(u128::from(
+                fs::metadata(root.join("a/target/payload")).unwrap().len()
+            ))
+        );
+        assert_eq!(
+            facts[&root.join("b/target")],
+            sweepx_platform::known_u128(8)
+        );
+        assert_ne!(
+            facts[&root.join("b/target")],
+            sweepx_platform::known_u128(u128::from(
+                fs::metadata(root.join("b/target/payload")).unwrap().len()
+            ))
+        );
+    }
+
+    #[test]
+    fn partial_cancelled_and_oversized_projections_preserve_previous_history() {
+        let (_guard, root, cache) = fixture();
+        let (scanned, mut rows) = scan(&root);
+        let worker = make_worker(&root, &cache);
+        publish(&worker, &cache, &scanned, &rows, &job(), false);
+        let snapshot = || {
+            fs::read_dir(&cache)
+                .unwrap()
+                .filter_map(|item| {
+                    let item = item.unwrap();
+                    let path = item.path();
+                    (path.extension() == Some(std::ffi::OsStr::new("json")))
+                        .then(|| (path.clone(), fs::read(path).unwrap()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        assert_eq!(before.len(), 1);
+        publish(&worker, &cache, &scanned, &rows, &job(), true);
+        assert_eq!(snapshot(), before);
+        let cancelled = job();
+        cancelled.cancel.cancel();
+        publish(&worker, &cache, &scanned, &rows, &cancelled, false);
+        assert_eq!(snapshot(), before);
+        let (&key, row) = rows.first_key_value().unwrap();
+        let mut candidate = row.candidate.clone();
+        candidate.references = vec!["x".repeat(5 * 1024 * 1024)];
+        let facts = row.facts.clone();
+        rows.insert(key, Arc::new(JunkSessionCandidate { candidate, facts }));
+        let events = publish(&worker, &cache, &scanned, &rows, &job(), false);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, JunkSessionEventKind::CacheWarning(_)))
+        );
+        assert_eq!(snapshot(), before);
+    }
 
     #[test]
     fn legacy_allocation_does_not_turn_into_recursive_logical_size_or_known_counts() {

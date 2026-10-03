@@ -6,6 +6,7 @@ use crate::junk::git::native_path;
 use crate::junk::session::{JunkSessionCandidate, JunkSessionFacts};
 use std::collections::BTreeSet;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use sweepx_platform::{CancellationToken, ScanRoot};
@@ -134,6 +135,7 @@ fn ordinary_file_lengths(path: &Path) -> BTreeMap<String, u128> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn cache_file_snapshot(cache: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     if !cache.exists() {
@@ -491,6 +493,7 @@ fn native_non_utf8_aliases_remain_distinct_for_attribution() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn selected_scan_preserves_original_root_ownership_and_excludes_shallow_ancestors() {
     struct Observer;
     impl sweepx_scanner::ClassifiedScanObserver for Observer {}
@@ -650,6 +653,7 @@ fn a_full_auxiliary_budget_refuses_growth_without_discarding_admitted_items() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn grouped_native_facts_do_not_authorize_publication_after_root_replacement() {
     let fixture = NativeFixture::new();
     let scan = fixture.scan();
@@ -687,6 +691,7 @@ fn grouped_native_facts_do_not_authorize_publication_after_root_replacement() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn batch_publication_preserves_disk_on_omission_cancel_and_root_replacement() {
     use super::super::CacheReader;
     use super::super::provider::SubtreeCacheProvider;
@@ -831,6 +836,7 @@ fn batch_publication_preserves_disk_on_omission_cancel_and_root_replacement() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn single_root_batch_matches_direct_capture_with_a_small_auxiliary_allowance() {
     use super::super::provider::SubtreeCacheProvider;
     use super::super::{CacheReader, StoredSubtreeIndex};

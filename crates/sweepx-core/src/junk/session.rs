@@ -4,7 +4,7 @@
 //! the session. Progress/statistics are coalesced. Drop closes the queue and cancels native work
 //! without joining on the UI thread: blocking OS calls remain cooperative, not interruptible.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cache;
 #[cfg(target_os = "linux")]
 mod linux_temp;
@@ -358,7 +358,8 @@ pub struct JunkSessionRequest {
     pub project_rule_bytes: Vec<u8>,
     /// Discover current platform context on the worker for each revision; false avoids tool probes.
     pub include_platform_rules: bool,
-    /// Optional private macOS cache directory. Other platforms scan fresh; no UI-thread I/O.
+    /// Optional private Linux/macOS history directory; filesystem reuse requires macOS history.
+    /// Windows currently scans fresh. All cache IO stays on the worker.
     pub cache_dir: Option<PathBuf>,
     /// Storage, traversal and Git bounds.
     pub limits: JunkSessionLimits,
@@ -658,11 +659,12 @@ impl Worker {
         if !self.request.system {
             self.scan_roots = self.request.roots.clone();
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut cache = if let Some(directory) = self.request.cache_dir.clone() {
             writer.phase(JunkSessionPhase::Cache)?;
             // Capture before preview reads, validation and traversal. Racing changes belong to
             // the next cache generation even if this revision later publishes complete facts.
+            #[cfg(target_os = "macos")]
             let cursor = crate::current_event_id();
             let mut reader = super::cache::CacheReader::with_rule_bytes(
                 &directory,
@@ -672,7 +674,14 @@ impl Worker {
             if job.revision.0 == 1 && !self.request.system {
                 self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
             }
-            Some((directory, cursor, reader))
+            #[cfg(target_os = "macos")]
+            {
+                Some((directory, cursor, reader))
+            }
+            #[cfg(target_os = "linux")]
+            {
+                Some((directory, reader))
+            }
         } else {
             None
         };
@@ -712,6 +721,14 @@ impl Worker {
         if self.request.system
             && job.revision.0 == 1
             && let Some((_, _, reader)) = &mut cache
+        {
+            writer.phase(JunkSessionPhase::Cache)?;
+            self.restore_history(reader, &service, rules_digest, job, writer)?;
+        }
+        #[cfg(target_os = "linux")]
+        if self.request.system
+            && job.revision.0 == 1
+            && let Some((_, reader)) = &mut cache
         {
             writer.phase(JunkSessionPhase::Cache)?;
             self.restore_history(reader, &service, rules_digest, job, writer)?;
@@ -966,6 +983,21 @@ impl Worker {
                 directory,
                 *cursor,
                 provider,
+                &scanned,
+                &pending,
+                &service,
+                &platform,
+                job,
+                partial || writer.error_count > 0,
+                writer,
+            )?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some((directory, reader)) = &mut cache {
+            writer.phase(JunkSessionPhase::CacheWrite)?;
+            self.store_history(
+                directory,
+                reader,
                 &scanned,
                 &pending,
                 &service,

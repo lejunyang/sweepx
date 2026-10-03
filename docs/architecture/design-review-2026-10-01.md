@@ -980,7 +980,7 @@ core 会话新增私有呈现索引，保留已经可靠发布的稳定键、无
 | 项目规则的有效上下文 | 自定义 cwd/CLI、原生路径别名与输出对象关系；更广 Dart/SvelteKit 版本、配置、依赖样本及完整 YAML/URI/语言语义（按用户调序暂缓） | 已有有界原生配置观察、工作区成员/默认输出、Cargo home 与固定 1.98 include 模型；53 场景 workspace、17 场景 home、9 场景受控系统 home 与 64 场景 include oracle 已用于独立对照；首次 Cargo 观察按本次预算延后求解系统 home |
 | 项目独占归属与活动 | 独立确认候选目录全部内容的归属及当前活动，不能由名称、格式、Git ignore 或工具报告位置推断 | 相关项目候选继续展示，缺证据拒绝回收；规则扩展验收未完成 |
 | 性能与稳定性根因 | 旧 300 ms/2 s 工具探测、单 target/8192 文件 debug 热缓存 PTY 偶发停顿、FSEvents settle；本轮多根缓存准备还需对应端到端测量 | 已完成多项确定性优化及工具进程回收身份修复；通过或未复现不关闭旧根因，准备微基准不代表完整扫描 |
-| 跨平台缓存与发现审计 | Linux/Windows 与 macOS 等同的历史缓存/文件索引；其余发现、候选展开、指纹、持久化及分析 TUI/legacy API 投影的资源审计 | 用户当前优先项；普通 CLI scan 已改为 typed facts 筛选摘要及逐行 JSON 导出，现有发现快照有界；这些切面不代表全局审计完成 |
+| 跨平台缓存与发现审计 | Windows 私有历史存储、Linux/Windows 文件索引有效性；其余发现、候选展开、指纹、持久化及分析 TUI/legacy API 投影的资源审计 | 用户当前优先项；Linux 垃圾 TUI 已接通历史首屏，随后仍全量观察文件，共用 Unix 私有存储/恢复策略；普通 CLI scan 已改为 typed facts 筛选摘要及逐行 JSON 导出；这些切面不代表全局审计完成 |
 | 原生验收 | Linux/Windows 宿主运行、MSVC、真实云 provider、Linux/Windows 实际系统 Trash 与 Linux 隔离成功 | 本机 macOS Foundation 普通文件及三个真实 debug 目录回收成功，Finder 可见；回收站 inode 独立枚举被 TCC 拒绝。GNU 交叉 lint 只证明编译；不据单机样本取得整体验收或发布资格 |
 | 最终回收竞态 | pathname 最终检查至系统 Trash 调用之间的替换窗口 | 现有 no-follow/身份重验与失败拒绝保留，没有永久删除兜底 |
 
@@ -1092,3 +1092,15 @@ human 使用借用的路径/汇总索引以及至多 40 个行引用的堆，沿
 本轮 affected 完整测试：core 324、CLI 132 项通过，0 失败、2 项既有 ignored；最后只更改测试的 Linux fixture 与中途 writer 失败断言，9 项相关回归另行通过。host、Linux GNU、Windows GNU 工作区 all-targets/all-features lint 通过，最后测试变更的 core 两个 cross-target 分支另行 lint 通过；fmt/diff、54 份 Markdown 及 core package list 通过，列表包含新模块及测试。未改动包的运行结果沿用前次记录，不称为一次新完整 workspace 测试。旧 2 秒工具缓存探测本轮通过，但未修复或关闭其间歇根因；Windows GNU 不代表 MSVC，交叉 lint 不代表目标宿主运行。沙箱首次测量无法读取 `kern.clockrate`，改在宿主重新采集统计；初期测试编译漏接 projection 参数、ReasonCode/单位名错误已修正，记录保留。
 
 下一单元按用户优先序推进可移植历史呈现和平台变化历史/文件重用合同；Dart/SvelteKit 仍暂缓。
+
+## Linux 垃圾 TUI 历史首屏与候选复制预算（2026-10-03）
+
+本单元复用现有模块，不增加 crate 或第二套解释器。Linux/macOS 共享私有 Unix 缓存存储、历史候选 DTO 和恢复策略；macOS 的 FSEvents/provider/逐文件索引实现单独放在既有 cache 的 `index` 子模块，Linux 不编译或复用它。Linux 显式根第一轮先恢复历史；系统第一轮先发现当前范围再恢复。工作线程随后重新观察目录和每个文件，并替换本次结果，不用历史行跳过子树。独立 Linux 临时对象不写入目录候选历史。
+
+根记录升级为 `sweepx.junk-cache/v10`：绑定实际规则字节、源平台、设备/文件/mount 身份和嵌套根范围，原生根准入拒绝链接祖先；缺少 mount 身份不保存，篡改/不匹配不读取。历史记录的变化游标及分类上下文使用 Option；Linux 游标保持 `null`，不能捏造 0。v9 根记录冷扫重建，macOS 文件索引仍为独立 v4。恢复清掉 activity、Git、项目上下文和执行判断，保留旧统计并标 `StalePreview`、`Historical` 和 `historical_cache`。上次完整覆盖可以保留，不能当作当前完整或删除许可；现有 TUI 历史门禁继续拒绝回收。
+
+Linux 选中刷新只替换所选原生子树的候选，保留范围/规则/根身份仍匹配的旧兄弟展示；整个混合记录只能作历史。取消、不完整扫描、根替换或复制超额不覆盖上一代。除现有 8 MiB 分组估算、4 MiB 单文件编码、16 MiB 共享读取、128 MiB 保留估算和 64 MiB 管理磁盘额度外，会话每根候选现在在复制前独立计入最多 4 MiB 保留数据估算，选中合并移动旧记录而不再克隆它。这些数值不代表 allocator RSS。公共 reader/provider 的请求/结果容器、其他发现与分析 API 仍需继续审计。
+
+[验证记录](portable-junk-history-validation-2026-10-03.json)区分原生 Unix 策略检查与 Linux cfg 编译：新历史/发布策略测试及已有身份、私有存储、片段刷新、TUI 门禁检查使用本机 macOS；组合检查 1,087 项通过、1 项失败、3 项既有/opt-in ignored，未排除 CLI 普通系统 Trash 集成用例且本轮通过；core doctest 0 项单独检查通过，其他包在 core 失败后补验，不称全绿工作区；Linux GNU、Windows GNU 和 host 工作区 lint 编译包含测试分支。没有原生 Linux/Windows 或 MSVC 运行结论，不把 Windows 历史缓存、Linux 文件索引或跨平台整体验收标为完成。构建继续关闭 debug symbols 和 incremental，最终 target 约 1.8 GiB，无提速/RSS 计时。
+
+本轮 core/CLI 检查有一项既有 macOS `a_change_under_the_root_invalidates_the_record` 失败：刚创建文件后，根记录被判为 current。未排除/反复重试/改变生产事件逻辑来获得通过。独立受控写入直接查询 FSEvents：约 0.7 ms 发起的查询到约 299 ms 返回空历史，约 299 ms 发起的下一次查询到约 313 ms 返回根与该文件的事件；后续观测也包含它们。这个样本证实 HistoryDone 与刚发生写入的可见性之间有缺口，未证明所有旧 settle/热缓存故障的根因都已关闭。[Apple 的事件指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)也说明通知投递存在不确定延迟。下一项先处理 macOS 当前根记录的有效性门槛，再推进 Windows 原生私有存储；不能仅加固定等待就宣称正确。此交付保留一个验证失败，不能称全绿。

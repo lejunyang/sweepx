@@ -1,9 +1,11 @@
 //! Optional cache publication views. Borrowed facts are assigned once to their original scope.
 
+#[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use sweepx_platform::CancellationToken;
+#[cfg(any(target_os = "macos", test))]
 use sweepx_scanner::DirListing;
 
 /// Independent capacity allowance for publication views; this is an estimate, not allocator RSS.
@@ -209,6 +211,7 @@ pub(crate) fn group_sources<'a>(
 
 /// Partitions fully enumerated listings once, preserving each root's previous BTree order.
 /// Exhaustion or cancellation omits optional cache publication; it does not lose live facts.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn group_listings<'a>(
     scope: &RootScope<'_>,
     covered: &BTreeMap<String, bool>,

@@ -3,8 +3,9 @@
 //! Rules live in the catalog and their predicates use the existing cleaner VM. The service does
 //! no filesystem I/O and starts no subprocesses. Platform root discovery remains a separate input.
 
-/// Bounded macOS filesystem caches; cached reports never grant execution authority.
-#[cfg(target_os = "macos")]
+/// Bounded historical caches on Linux/macOS, with separately validated macOS file reuse.
+/// Historical reports never establish current classification or execution authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod cache;
 /// Candidate report types and interpretation over captured facts.
 pub mod candidate;
