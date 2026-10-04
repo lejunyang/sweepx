@@ -105,16 +105,17 @@ impl Directory {
     }
 
     /// Duplicates retained authority without resolving a display pathname again.
-    pub(crate) fn retain(&self) -> io::Result<Self> {
+    /// The caller owns one additional directory descriptor and must bound its lifetime/count.
+    pub fn retain(&self) -> io::Result<Self> {
         self.private()?;
         Self::from_owned(self.fd.try_clone()?)
     }
 
-    /// Verifies that a retained child still has the same binding beneath this parent.
-    pub(crate) fn same_child(&self, name: &str, expected: &Self) -> io::Result<bool> {
-        let actual = self.child(name)?.private()?;
-        let expected = expected.private()?;
-        Ok(actual.dev() == expected.dev() && actual.ino() == expected.ino())
+    /// Verifies a retained child's current binding and private authority beneath this parent.
+    /// Linux also compares captured mount identity; other Unix uses the device/inode contract.
+    /// This observation does not make a later namespace operation atomic.
+    pub fn same_child(&self, name: &str, expected: &Self) -> io::Result<bool> {
+        self.child(name)?.same_object(expected)
     }
 
     /// Reads only relative no-follow metadata for complete cache quota accounting.
@@ -548,7 +549,7 @@ impl Directory {
         name: &str,
         encode: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.publish_mode(name, encode, false)
+        self.publish_mode(name, encode, false, false)
     }
 
     /// Publishes bounded, already encoded state bytes with file and retained-parent sync.
@@ -559,7 +560,21 @@ impl Directory {
         if bytes.len() > cap {
             return Err(io::Error::other("state encoded byte budget exceeded"));
         }
-        self.publish_mode(name, |file| file.write_all(bytes), true)
+        self.publish_mode(name, |file| file.write_all(bytes), true, false)
+    }
+
+    /// Encodes bounded JSON into a private temporary, then exclusively publishes and syncs it.
+    /// An existing or racing destination is never overwritten. Encoding/restoration refusal
+    /// removes only this invocation's temporary; a post-commit sync error retains the new file.
+    /// Native no-replace rename support is required; there is no overwrite fallback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn create_synced_json(
+        &self,
+        name: &str,
+        value: &impl serde::Serialize,
+        cap: usize,
+    ) -> io::Result<()> {
+        self.publish_mode(name, |file| write_json(file, value, cap), true, true)
     }
 
     fn publish_mode(
@@ -567,6 +582,7 @@ impl Directory {
         name: &str,
         encode: impl FnOnce(&mut File) -> io::Result<()>,
         sync: bool,
+        exclusive: bool,
     ) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let destination = component(name)?;
@@ -579,6 +595,12 @@ impl Directory {
         let prepared = with_cache_io(|| {
             self.private()?;
             match self.open_file(name) {
+                Ok(_) if exclusive => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "state destination exists",
+                    ));
+                }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -609,8 +631,9 @@ impl Directory {
         // A restoration failure must be known before rename, including current.json. A
         // successful encoder alone cannot turn a failed I/O-policy interval into publication.
         let result = prepared.and_then(|_file| {
-            // Disposable cache publication is atomic but not crash durable. No data stream
-            // access occurs after policy restoration; only the retained-parent name commit.
+            // Commit only after checked restoration; no data stream access occurs here.
+            // Synced state requests a retained-parent flush after rename, while disposable
+            // cache mode omits it. Neither establishes power-loss recovery on its own.
             self.private()?;
             #[cfg(target_os = "linux")]
             {
@@ -625,16 +648,48 @@ impl Directory {
                     return Err(io::Error::other("cache temporary binding changed"));
                 }
             }
-            // SAFETY: both validated names live beneath the same retained directory.
-            if unsafe {
-                libc::renameat(
-                    self.fd.as_raw_fd(),
-                    temp.as_ptr(),
-                    self.fd.as_raw_fd(),
-                    destination.as_ptr(),
-                )
-            } < 0
-            {
+            let renamed = if exclusive {
+                // SAFETY: validated basenames under one retained parent; native exclusive
+                // rename atomically refuses a racing destination without a check-then-replace.
+                #[cfg(target_os = "linux")]
+                let result = unsafe {
+                    libc::renameat2(
+                        self.fd.as_raw_fd(),
+                        temp.as_ptr(),
+                        self.fd.as_raw_fd(),
+                        destination.as_ptr(),
+                        libc::RENAME_NOREPLACE,
+                    )
+                };
+                #[cfg(target_os = "macos")]
+                let result = unsafe {
+                    libc::renameatx_np(
+                        self.fd.as_raw_fd(),
+                        temp.as_ptr(),
+                        self.fd.as_raw_fd(),
+                        destination.as_ptr(),
+                        libc::RENAME_EXCL,
+                    )
+                };
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "exclusive state rename unavailable",
+                ));
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                result
+            } else {
+                // SAFETY: both validated names live beneath the same retained directory.
+                unsafe {
+                    libc::renameat(
+                        self.fd.as_raw_fd(),
+                        temp.as_ptr(),
+                        self.fd.as_raw_fd(),
+                        destination.as_ptr(),
+                    )
+                }
+            };
+            if renamed < 0 {
                 return Err(io::Error::last_os_error());
             }
             if sync {

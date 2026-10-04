@@ -39,6 +39,7 @@ fn all_shipped_namespaces_and_unknown_files_match_ordinary_walk() {
     for name in [
         "operations",
         "audit",
+        "permanent-delete-audit",
         "plans",
         "selection",
         "manifests",

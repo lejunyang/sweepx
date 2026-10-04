@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode as ProcessExitCode;
 use std::time::{Duration, Instant, SystemTime};
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Serialize;
 use serde_json::json;
 use sweepx_audit::{
-    ActionId, ActionOutcome, AuditStore, AuthorizationBinding, AuthorizationId,
+    ActionId, ActionOutcome, AuditNamespace, AuditStore, AuthorizationBinding, AuthorizationId,
     AuthorizationSource, BatchId, DigestString, HostId, IntentRequest, ItemId, Observation, PlanId,
     RegisterAuthorization, RequestedMode, RiskTier, SessionId, UserId, hash_native_path,
 };
@@ -1383,51 +1383,40 @@ fn root_path_from_relative(root: &Path, components: &[Vec<u8>]) -> PathBuf {
     path
 }
 
-fn persist_plan(audit_root: &Path, plan: &PermanentPlan, digest: &str) -> Result<(), DeleteError> {
-    let path = audit_root.join(format!("plan-{digest}.json"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| DeleteError::Audit(format!("create {}: {error}", path.display())))?;
-    serde_json::to_writer_pretty(
-        &mut file,
-        &json!({
-            "plan": plan,
-            "canonicalDigest": digest,
-            "risk": "r4",
-            "recoverable": false,
-            "secureErase": false,
-        }),
-    )
-    .map_err(|error| DeleteError::Audit(format!("write {}: {error}", path.display())))?;
-    file.write_all(b"\n")
-        .and_then(|()| file.sync_all())
-        .map_err(|error| DeleteError::Audit(format!("sync {}: {error}", path.display())))?;
-    File::open(audit_root)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            DeleteError::Audit(format!(
-                "sync audit directory {}: {error}",
-                audit_root.display()
-            ))
-        })
-}
-
 fn prepare_audit(
     audit_root: &Path,
     state_dir: &Path,
     plan: &PermanentPlan,
     digest: &str,
 ) -> Result<AuditStore, DeleteError> {
-    // Reuse Core's no-follow, owner-private state admission before creating the audit child.
-    sweepx_core::durable_store(Some(state_dir))
-        .map_err(|error| DeleteError::Audit(error.to_string()))?;
-    let audit =
-        AuditStore::open(audit_root).map_err(|error| DeleteError::Audit(error.to_string()))?;
-    persist_plan(audit_root, plan, digest)?;
+    // The captured namespace, quota and immutable publication belong to the audit store;
+    // do not reconstruct display-path authority or materialize another JSON plan copy.
+    if audit_root != state_dir.join("permanent-delete-audit") {
+        return Err(DeleteError::Audit("unexpected audit namespace".into()));
+    }
+    let audit = AuditStore::open_in_state_dir(state_dir, AuditNamespace::PermanentDelete)
+        .map_err(audit_error)?;
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Manifest<'a> {
+        plan: &'a PermanentPlan,
+        canonical_digest: &'a str,
+        risk: &'static str,
+        recoverable: bool,
+        secure_erase: bool,
+    }
+    audit
+        .save_plan_manifest(
+            digest,
+            &Manifest {
+                plan,
+                canonical_digest: digest,
+                risk: "r4",
+                recoverable: false,
+                secure_erase: false,
+            },
+        )
+        .map_err(audit_error)?;
     Ok(audit)
 }
 
@@ -2157,6 +2146,63 @@ mod tests {
         assert!(!projection.batches[0].needs_reconciliation);
         assert_eq!(projection.batches[0].items.len(), 1);
         assert!(plan_path.is_file());
+    }
+
+    #[test]
+    fn shared_quota_refusal_keeps_target_and_does_not_create_audit_namespace() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let path = root.join("file");
+        let state = root.join("state");
+        fs::write(&path, b"keep target").unwrap();
+        let directory = sweepx_cache::native::Directory::open(&state, true).unwrap();
+        directory
+            .create_state_file("unknown-note")
+            .unwrap()
+            .set_len(452_984_832)
+            .unwrap();
+        assert_eq!(
+            fs::symlink_metadata(state.join("unknown-note"))
+                .unwrap()
+                .len(),
+            452_984_832
+        );
+        let candidate = PermanentFileCandidate::capture(path.clone(), Some(&state)).unwrap();
+        let plan = PermanentPlan::File(Box::new(candidate.plan()));
+        let digest = sweepx_canonical::plan_digest_hex(&plan).unwrap();
+        let result = prepare_audit(
+            &state.join("permanent-delete-audit"),
+            &state,
+            &plan,
+            &digest,
+        );
+        assert!(
+            matches!(result, Err(DeleteError::Audit(ref message)) if message.contains("state_bytes"))
+        );
+        assert!(!state.join("permanent-delete-audit").exists());
+        assert_eq!(fs::read(&path).unwrap(), b"keep target");
+    }
+
+    #[test]
+    fn retrying_prepared_plan_never_replaces_its_manifest_or_mutates_target() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let path = root.join("file");
+        let state = root.join("state");
+        fs::write(&path, b"keep target").unwrap();
+        let candidate = PermanentFileCandidate::capture(path.clone(), Some(&state)).unwrap();
+        let plan = PermanentPlan::File(Box::new(candidate.plan()));
+        let digest = sweepx_canonical::plan_digest_hex(&plan).unwrap();
+        let audit_root = state.join("permanent-delete-audit");
+        let audit = prepare_audit(&audit_root, &state, &plan, &digest).unwrap();
+        let manifest = audit_root.join(format!("plan-{digest}.json"));
+        let original = fs::read(&manifest).unwrap();
+        assert!(
+            matches!(prepare_audit(&audit_root, &state, &plan, &digest), Err(DeleteError::Audit(ref message)) if message.contains("destination exists"))
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), original);
+        assert_eq!(fs::read(&path).unwrap(), b"keep target");
+        audit.verify_integrity().unwrap();
     }
 
     #[test]

@@ -3,6 +3,8 @@
 #[cfg(all(test, unix))]
 mod native_lock_tests;
 mod native_state;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod state_quota_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -41,6 +43,12 @@ const MAX_PAGE_COUNT: u64 = 16_384;
 const MAX_DATABASE_BYTES: u64 = PAGE_SIZE * MAX_PAGE_COUNT;
 const MAX_WAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_DATABASE_BYTES: u64 = MAX_DATABASE_BYTES + MAX_WAL_BYTES + 1024 * 1024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PLAN_MANIFEST_BYTE_CAP: usize = 8 * 1024 * 1024;
+#[cfg(unix)]
+type StateReservation = Option<sweepx_cache::state_directory::StateWriteSession>;
+#[cfg(unix)]
+type HeldStateReservation = Option<Arc<sweepx_cache::state_directory::StateWriteSession>>;
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const MAX_BINDING_BYTES: usize = 192 * 1024;
 const MAX_ID_BYTES: usize = 160;
@@ -262,9 +270,8 @@ fn release_live_claim(live_claim: &LiveClaimAuthority) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    if let Some(file) = file {
-        let _ = FileExt::unlock(&file);
-    }
+    // The owned guard unlocks/closes the component before dropping its state reservation.
+    drop(file);
     live_claim.active.store(false, Ordering::Release);
     live_claim
         .coordinator
@@ -380,7 +387,7 @@ impl Eq for DurableIntentToken {}
 struct LiveClaimAuthority {
     active: AtomicBool,
     coordinator: Arc<SessionCoordinator>,
-    lock_file: Mutex<Option<File>>,
+    lock_file: Mutex<Option<ShortStoreLock>>,
     root_native: Arc<native_state::Root>,
     database_id: String,
     database_identity: FileIdentity,
@@ -1246,6 +1253,24 @@ pub struct AuditStore {
     coordinator: Arc<SessionCoordinator>,
 }
 
+/// Fixed audit namespaces admitted beneath a shared SweepX state root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditNamespace {
+    /// General library audit/recovery records beneath `audit/`.
+    General,
+    /// Native bounded Permanent preview records beneath `permanent-delete-audit/`.
+    PermanentDelete,
+}
+impl AuditNamespace {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn name(self) -> &'static str {
+        match self {
+            Self::General => "audit",
+            Self::PermanentDelete => "permanent-delete-audit",
+        }
+    }
+}
+
 impl Clone for AuditStore {
     fn clone(&self) -> Self {
         Self {
@@ -1465,6 +1490,17 @@ pub enum AuditError {
     UnsupportedPlatform,
     #[error("audit store filesystem is remote or has unsupported locality")]
     UnsupportedFilesystem,
+    /// Cooperating aggregate state admission exhausted a logical byte/name limit.
+    #[error("SweepX state exceeds {resource} limit ({limit})")]
+    StateResourceLimit {
+        /// Stable admission unit: `state_bytes` or `state_entries`.
+        resource: &'static str,
+        /// Logical encoded lengths or entry visits, not physical space or RSS.
+        limit: u64,
+    },
+    /// Immutable plan manifests must use a store with explicit state-root admission.
+    #[error("plan manifest requires shared state-root admission")]
+    SharedStateRequired,
     #[error("state directory must be absolute")]
     StateDirNotAbsolute,
     #[error("state directory {0} contains unsafe components")]
@@ -1573,6 +1609,8 @@ pub enum AuditError {
 }
 
 impl AuditStore {
+    /// Opens a standalone component with its DB/WAL/index limits. This legacy API does not
+    /// infer or charge a parent state root; use `open_in_state_dir` for aggregate admission.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, AuditError> {
         #[cfg(not(unix))]
         {
@@ -1584,62 +1622,156 @@ impl AuditStore {
             let root = root.as_ref().to_path_buf();
             ensure_private_state_dir(&root)?;
             let root_native = Arc::new(native_state::Root::open(&root)?);
-            let lock_path = root.join(LOCK_FILE);
-            let lock_file = open_lock_file(&lock_path)?;
-            ensure_local_filesystem(&lock_file)?;
-            let lock_identity = lock_identity(&lock_file, &lock_path)?;
-            let database_path = root.join(DATABASE_FILE);
-            let database_preexisting = match root_native.identity() {
-                Ok(_) => true,
-                Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(error),
-            };
-            if !database_preexisting {
-                lock_file
-                    .try_lock_exclusive()
-                    .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-                root_native.create_database()?;
-            } else {
-                lock_file
-                    .try_lock_shared()
-                    .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-            }
-            root_native.binding()?;
-            root_native.sidecars()?;
-            let database_identity = root_native.identity()?;
-            check_native_size_budget(&root_native, true)?;
-            let database_id = root_native.with_connection(&database_identity, |connection| {
-                if database_preexisting {
-                    verify_initialized_database(connection)?;
-                } else {
-                    initialize_database(connection, &root_native)?;
-                }
-                let database_id: String = connection.query_row(
-                    "SELECT database_id FROM store_meta WHERE singleton = 1",
-                    [],
-                    |row| row.get(0),
-                )?;
-                validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
-                root_native.lock_filesystem(&lock_file)?;
-                Ok(database_id)
-            })?;
-            FileExt::unlock(&lock_file)?;
-            Ok(Self {
-                root,
-                root_native,
-                database_path,
-                lock_path,
-                database_id,
-                lock_identity,
-                database_identity,
-                owner_pid: std::process::id(),
-                coordinator: Arc::new(SessionCoordinator {
-                    active: AtomicBool::new(false),
-                    observer_phase: AtomicBool::new(false),
-                    mutation_lock: Mutex::new(()),
-                }),
-            })
+            Self::open_root(root, root_native, None)
         }
+    }
+
+    /// Opens a fixed audit child with the cooperating 512 MiB/4,090-entry state allowance.
+    /// Admission reserves all remaining DB/WAL/index/rollback growth and names before records
+    /// are created. Short SQL intervals and live claims retain the state lock through close;
+    /// active claims therefore refuse competing cache/state writes without blocking them.
+    /// This neither infers global quota for legacy callers nor bounds noncooperating writers.
+    pub fn open_in_state_dir(
+        state_dir: impl AsRef<Path>,
+        namespace: AuditNamespace,
+    ) -> Result<Self, AuditError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use sweepx_cache::state_directory::StateWriteSession;
+            let state_dir = state_dir.as_ref();
+            if !state_dir.is_absolute() {
+                return Err(AuditError::StateDirNotAbsolute);
+            }
+            let mut state =
+                StateWriteSession::open(state_dir, true).map_err(state_admission_error)?;
+            let name = namespace.name();
+            match state.root().child(name) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Child + component lock + four SQLite names; the control lock is already
+                    // charged. Reserve before mkdir or first DB/lock creation.
+                    state
+                        .reserve(MAX_TOTAL_DATABASE_BYTES, 6)
+                        .map_err(state_admission_error)?;
+                    state.root().create_child(name)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let root = state_dir.join(name);
+            let root_native = Arc::new(native_state::Root::from_state(&root, state.root(), name)?);
+            Self::open_root(root, root_native, Some(state))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (state_dir, namespace);
+            Err(AuditError::UnsupportedPlatform)
+        }
+    }
+
+    /// Exclusively publishes a bounded JSON plan manifest through retained authority and
+    /// aggregate state admission. The 64-character lowercase hex digest selects its basename;
+    /// bytes are report data, never execution authority. Existing plans are never overwritten.
+    /// Refusal preserves older records; a post-commit sync error may retain the new record.
+    /// This requires `open_in_state_dir` and must precede a live execution claim.
+    pub fn save_plan_manifest(
+        &self,
+        digest: &str,
+        value: &impl Serialize,
+    ) -> Result<(), AuditError> {
+        self.ensure_process()?;
+        self.ensure_not_in_observer_phase()?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(AuditError::InvalidStableId {
+                field: "plan_manifest_digest",
+            });
+        }
+        let _guard = self
+            .coordinator
+            .mutation_lock
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?;
+        if self.coordinator.active.load(Ordering::Acquire) {
+            return Err(AuditError::ConcurrentWriterDenied);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.root_native
+                .write_plan_manifest(&format!("plan-{digest}.json"), value)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = value;
+            Err(AuditError::UnsupportedPlatform)
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_root(
+        root: PathBuf,
+        root_native: Arc<native_state::Root>,
+        mut state: StateReservation,
+    ) -> Result<Self, AuditError> {
+        let lock_path = root.join(LOCK_FILE);
+        root_native.reserve_sql(&mut state)?;
+        let _state = root_native.hold_state(state)?;
+        let lock_file = root_native.open_lock()?;
+        ensure_local_filesystem(&lock_file)?;
+        let lock_identity = lock_identity(&lock_file, &lock_path)?;
+        let database_path = root.join(DATABASE_FILE);
+        let database_preexisting = match root_native.identity() {
+            Ok(_) => true,
+            Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        if !database_preexisting {
+            lock_file
+                .try_lock_exclusive()
+                .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+            root_native.create_database()?;
+        } else {
+            lock_file
+                .try_lock_shared()
+                .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+        }
+        root_native.binding()?;
+        root_native.sidecars()?;
+        let database_identity = root_native.identity()?;
+        check_native_size_budget(&root_native, true)?;
+        let database_id = root_native.with_connection(&database_identity, |connection| {
+            if database_preexisting {
+                verify_initialized_database(connection)?;
+            } else {
+                initialize_database(connection, &root_native)?;
+            }
+            let database_id: String = connection.query_row(
+                "SELECT database_id FROM store_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
+            root_native.lock_filesystem(&lock_file)?;
+            Ok(database_id)
+        })?;
+        FileExt::unlock(&lock_file)?;
+        Ok(Self {
+            root,
+            root_native,
+            database_path,
+            lock_path,
+            database_id,
+            lock_identity,
+            database_identity,
+            owner_pid: std::process::id(),
+            coordinator: Arc::new(SessionCoordinator {
+                active: AtomicBool::new(false),
+                observer_phase: AtomicBool::new(false),
+                mutation_lock: Mutex::new(()),
+            }),
+        })
     }
 
     pub fn register_authorization(&self, request: RegisterAuthorization) -> Result<(), AuditError> {
@@ -1759,7 +1891,7 @@ impl AuditStore {
 
     fn claim_session(
         &self,
-        lock_file: File,
+        lock_file: ShortStoreLock,
         authorization_id: &AuthorizationId,
         expected_plan_digest: &DigestString,
         recovery: bool,
@@ -2461,33 +2593,34 @@ impl AuditStore {
     }
 
     fn short_lock(&self) -> Result<ShortStoreLock, AuditError> {
-        self.ensure_process()?;
-        self.root_native.binding()?;
-        let file = open_lock_file(&self.lock_path)?;
-        if lock_identity(&file, &self.lock_path)? != self.lock_identity {
-            return Err(AuditError::LockReplaced);
-        }
-        file.try_lock_exclusive()
-            .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-        self.validate_lock_path_identity(&file)?;
-        self.root_native.lock_filesystem(&file)?;
-        self.root_native.sidecars()?;
-        Ok(ShortStoreLock { file })
+        self.acquire_lifetime_lock()
     }
 
-    fn acquire_lifetime_lock(&self) -> Result<File, AuditError> {
-        self.ensure_process()?;
-        self.root_native.binding()?;
-        let file = open_lock_file(&self.lock_path)?;
-        if lock_identity(&file, &self.lock_path)? != self.lock_identity {
-            return Err(AuditError::LockReplaced);
+    fn acquire_lifetime_lock(&self) -> Result<ShortStoreLock, AuditError> {
+        #[cfg(not(unix))]
+        {
+            Err(AuditError::UnsupportedPlatform)
         }
-        file.try_lock_exclusive()
-            .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-        self.validate_lock_path_identity(&file)?;
-        self.root_native.lock_filesystem(&file)?;
-        self.root_native.sidecars()?;
-        Ok(file)
+        #[cfg(unix)]
+        {
+            self.ensure_process()?;
+            self.root_native.binding()?;
+            let state = self.root_native.sql_reservation()?;
+            let file = self.root_native.open_lock()?;
+            if lock_identity(&file, &self.lock_path)? != self.lock_identity {
+                return Err(AuditError::LockReplaced);
+            }
+            file.try_lock_exclusive()
+                .map_err(|_| AuditError::ConcurrentWriterDenied)?;
+            self.validate_lock_path_identity(&file)?;
+            self.root_native.lock_filesystem(&file)?;
+            self.root_native.sidecars()?;
+            Ok(ShortStoreLock {
+                file,
+                _state: state,
+                owner_pid: std::process::id(),
+            })
+        }
     }
 
     fn validate_claim_guard(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
@@ -2513,6 +2646,7 @@ impl AuditStore {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn validate_lock_path_identity(&self, held_file: &File) -> Result<(), AuditError> {
         let held = lock_identity(held_file, &self.lock_path)?;
         let current = open_existing_lock_file(&self.lock_path)?;
@@ -2588,11 +2722,39 @@ fn check_native_size_budget(
 }
 
 struct ShortStoreLock {
+    // Drop order closes the component file before the state-root lock. Claims own this same
+    // guard, so all later SQL, terminal outcomes, recovery observers and close keep admission.
     file: File,
+    #[cfg(unix)]
+    _state: HeldStateReservation,
+    owner_pid: u32,
+}
+impl std::ops::Deref for ShortStoreLock {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.file
+    }
 }
 impl Drop for ShortStoreLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        // An inherited child must close only its copy, not explicitly unlock the parent.
+        if self.owner_pid == std::process::id() {
+            let _ = FileExt::unlock(&self.file);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn state_admission_error(error: std::io::Error) -> AuditError {
+    if let Some(limit) = sweepx_cache::state_directory::resource_limit(&error) {
+        AuditError::StateResourceLimit {
+            resource: limit.resource,
+            limit: limit.limit,
+        }
+    } else if error.kind() == std::io::ErrorKind::WouldBlock {
+        AuditError::ConcurrentWriterDenied
+    } else {
+        AuditError::Io(error)
     }
 }
 
@@ -2829,34 +2991,6 @@ fn ensure_same_local_filesystem(first: &File, second: &File) -> Result<(), Audit
         }
     }
     Ok(())
-}
-
-fn open_lock_file(path: &Path) -> Result<File, AuditError> {
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(AuditError::SymlinkRejected(path.display().to_string()));
-    }
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path)?
-    };
-    #[cfg(not(unix))]
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
-    ensure_private_file_handle(&file, path)?;
-    Ok(file)
 }
 
 fn open_existing_lock_file(path: &Path) -> Result<File, AuditError> {
@@ -4798,7 +4932,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn binding(index: u8, mode: RequestedMode) -> AuthorizationBinding {
+    pub(super) fn binding(index: u8, mode: RequestedMode) -> AuthorizationBinding {
         let item = ItemId::new(format!("item-{index:02}-sqlite")).unwrap();
         let action = ActionId::new(format!("action-{index:02}-sqlite")).unwrap();
         let mut items = BTreeSet::new();
@@ -4844,7 +4978,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn register(store: &AuditStore, binding: &AuthorizationBinding) {
+    pub(super) fn register(store: &AuditStore, binding: &AuthorizationBinding) {
         store
             .register_authorization(RegisterAuthorization {
                 binding: binding.clone(),
@@ -4853,7 +4987,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn reserve(
+    pub(super) fn reserve(
         store: &AuditStore,
         claim: &ClaimedExecution,
         binding: &AuthorizationBinding,
@@ -4872,7 +5006,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn permanent_success() -> SimulatedOutcome {
+    pub(super) fn permanent_success() -> SimulatedOutcome {
         SimulatedOutcome {
             actual_platform_operation: "simulated_permanent_delete".to_string(),
             adapter_version: "adapter-v1".to_string(),
@@ -4957,7 +5091,9 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn refused_closed_interval_never_publishes_claim_and_recovery_can_fence() {
-        let (_temp, store) = store();
+        let temp = TempDir::new().unwrap();
+        let state = temp.path().canonicalize().unwrap().join("state");
+        let store = AuditStore::open_in_state_dir(&state, AuditNamespace::General).unwrap();
         let binding = binding(61, RequestedMode::Permanent);
         register(&store, &binding);
         let worker_store = store.clone();
@@ -4975,6 +5111,8 @@ mod tests {
         assert!(received.recv_timeout(Duration::from_secs(10)).unwrap());
         worker.join().unwrap();
         assert!(!store.coordinator.active.load(Ordering::Acquire));
+        // Failed capability publication must release the global lease as well as audit.lock.
+        sweepx_cache::state_directory::StateWriteSession::open(&state, false).unwrap();
         let recovery = store
             .claim_recovery(&binding.authorization_id, &binding.plan_digest)
             .unwrap();
@@ -5969,7 +6107,7 @@ mod tests {
         let token = reserve(&store, &claim, &binding);
         {
             let guard = claim.live_claim.lock_file.lock().unwrap();
-            FileExt::unlock(guard.as_ref().unwrap()).unwrap();
+            FileExt::unlock(&guard.as_ref().unwrap().file).unwrap();
         }
         assert!(matches!(
             token.validate_current_process(),

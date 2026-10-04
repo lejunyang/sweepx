@@ -63,6 +63,7 @@ pub struct StateWriteSession {
     root: Directory,
     lock: LockGuard,
     usage: StateUsage,
+    owner_pid: u32,
 }
 impl StateWriteSession {
     /// Captures private authority, then acquires a nonblocking control lock. Only this zero-
@@ -79,6 +80,7 @@ impl StateWriteSession {
             root,
             lock,
             usage: StateUsage::default(),
+            owner_pid: std::process::id(),
         };
         session.usage = session.observe(None)?;
         Ok(session)
@@ -92,6 +94,18 @@ impl StateWriteSession {
     /// Last complete metadata observation; reservations do not fabricate future file lengths.
     pub fn usage(&self) -> StateUsage {
         self.usage
+    }
+
+    /// Revalidates the held control lock's current native binding and process owner.
+    /// Long-lived clients must check this before later I/O. This does not renew a length
+    /// reservation, enumerate state again or make the following namespace operation atomic.
+    pub fn validate_exclusion(&self) -> io::Result<()> {
+        if self.owner_pid != std::process::id() {
+            return Err(io::Error::other(
+                "state reservation belongs to another process",
+            ));
+        }
+        crate::native::with_io_policy(|| self.root.held_lock_bytes(&self.lock).map(|_| ()))
     }
 
     /// Checks a captured top-level child against this root before using its reservation.
@@ -152,7 +166,9 @@ impl StateWriteSession {
         entries: usize,
         held: Option<(&Directory, &LockGuard)>,
     ) -> io::Result<()> {
+        self.validate_exclusion()?;
         self.usage = self.observe(held)?;
+        self.validate_exclusion()?;
         if self
             .usage
             .bytes
@@ -243,8 +259,16 @@ impl Layout {
                 "preview-cache" => Some(Self::Preview),
                 "junk-cache" => Some(Self::Junk),
                 "event-journals" => Some(Self::Journals),
-                "operations" | "audit" | "selection" | "manifests" | "plans" | "cursors"
-                | "approval" | "recovery" | "spill" => Some(Self::Flat),
+                "operations"
+                | "audit"
+                | "permanent-delete-audit"
+                | "selection"
+                | "manifests"
+                | "plans"
+                | "cursors"
+                | "approval"
+                | "recovery"
+                | "spill" => Some(Self::Flat),
                 _ => None,
             },
             Self::Preview if matches!(name, "generations" | "quarantine") => Some(Self::Flat),

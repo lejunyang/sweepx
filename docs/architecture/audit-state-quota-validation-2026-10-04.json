@@ -1,0 +1,209 @@
+{
+  "schema": "sweepx.audit-state-quota-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "5a3222d",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "Explicit state-root AuditStore admission with a real Linux Permanent CLI consumer; legacy open(root) remains component-only",
+    "Reserve remaining SQL peak and missing names before creation; state exclusion survives claims, observers, close and restoration",
+    "Bounded borrowed plan JSON and retained-parent exclusive native publication with immutable existing/racing destinations",
+    "No new crate/dependency, deletion authority, scan timing claim or RSS qualification"
+  ],
+  "sources": [
+    {
+      "url": "https://man7.org/linux/man-pages/man2/renameat2.2.html",
+      "checkedDate": "2026-10-04",
+      "use": "RENAME_NOREPLACE refuses a racing destination; filesystem support required, no overwrite fallback"
+    },
+    {
+      "localPackage": "libc 0.2.189 src/unix/bsd/apple/mod.rs",
+      "use": "RENAME_EXCL=0x4 and renameatx_np declaration; actual macOS native racing-destination test verifies refusal and preserved bytes"
+    },
+    {
+      "url": "https://developer.apple.com/documentation/foundation/urlresourcevalues/volumesupportsexclusiverenaming",
+      "checkedDate": "2026-10-04",
+      "use": "official search result identifies native exclusive rename volume support; page content JavaScript-only, not used as a detailed syscall contract"
+    }
+  ],
+  "limits": {
+    "sharedStateBytes": 536870912,
+    "sharedStateEntries": 4090,
+    "sqlComponentPeakBytes": 84934656,
+    "initialMissingNames": 6,
+    "planEncodedBytes": 8388608,
+    "planAdditionalNames": 1,
+    "jsonWriteBufferBytes": 65536,
+    "cooperatingWritersOnly": true
+  },
+  "semantics": {
+    "bootstrap": "Explicit state root owns a retained parent. Missing fixed child reserves81MiB+6 names before mkdir; the zero-length control lock may already exist on refusal. Existing DB/WAL/rollback/SHM are charged by the shared inventory and only remaining peak growth/missing names are reserved. Unknown ordinary files count; no record eviction or permission repair",
+    "legacy": "AuditStore::open does not infer a global root from arbitrary parent paths. save_plan_manifest requires explicit state binding. Unsupported audit platforms stay unsupported",
+    "ownership": "ShortStoreLock owns strong Arc<StateWriteSession>; Root stores Weak, SQL pins a strong lease through C close/VFS teardown. Component file closes before global lease release. Claimed operations/observer intervals retain exclusion. State control binding and issuing PID validated before/after SQL",
+    "restoration": "Live claims still publish only after successful protected SQL close/restoration. Refused publication cannot reenter the mutation mutex via a claim Drop. Recovery fence2 remains possible; state exclusion releases after refusal",
+    "plans": "Borrowed typed Manifest with stable camelCase fields and unchanged canonical plan digest; compact JSON; at most8MiB encoded with shared writer, no extra Value tree. One temporary/final additional name. Native RENAME_NOREPLACE/RENAME_EXCL, no overwrite fallback. Precommit encoding/restoration refusal removes only owned temp. Postcommit sync failure may retain the new record",
+    "linuxConsumer": "Real bounded Permanent CLI prepare_audit uses the explicit state API and native manifest writer; removes display-path creator and redundant operation-store preparation. Admission refusal precedes target submission; no claim that all later errors leave a target untouched",
+    "independentOracles": "ordinary metadata/bytes/serde decode and separate FD kernel flock; literal byte/name boundaries, competing destination through serializer mutation, actual after-C-close hook. Fixtures use existing canonical private child; production privacy unchanged",
+    "noncooperating": "Control substitution is refused when observed. Long claims do not re-enumerate arbitrary external changes; no global cap against actors ignoring the lock, atomic check-and-unlink or ABA proof",
+    "serializeBounds": "Encoded stream and writer buffer bounded, not arbitrary custom Serialize CPU/heap/stack. CLI uses a fixed borrowed typed shape",
+    "nativeQualification": "macOS race/policy tests executed; new Linux CLI cases and renameat2 only compiled, not run. No native Linux/Windows/MSVC/provider/Trash qualification",
+    "changesAfterTests": "Only unsupported Windows branch cfg gates and publication comment clarification changed after host suites; Unix behavior and Linux test contents unchanged"
+  },
+  "initialFailures": [
+    {
+      "name": "first-compile",
+      "result": "exit101; no tests executed",
+      "log": "/private/tmp/sweepx-audit-state-first-tests.log",
+      "reason": "retained Directory ownership/binding methods needed cross-crate visibility and a test unlock call needed the new guard file field; document public authority APIs and correct test borrow"
+    },
+    {
+      "name": "private-fixture-contract",
+      "result": "exit101; audit64 passed, cache111 passed/2 failed; later integration step untested",
+      "log": "/private/tmp/sweepx-audit-state-contract-tests.log",
+      "reason": "new JSON tests used a non-private temp root. Reuse existing canonical private child fixture; no production permission relaxation"
+    },
+    {
+      "name": "windows-unit-alias",
+      "result": "exit101; audit compilation failed, later workspace steps untested",
+      "log": "/private/tmp/sweepx-audit-state-windows-first-lint.log",
+      "reason": "unsupported-platform HeldStateReservation alias was unit and tripped let_unit_value; gate Unix lifetime acquisition and state fields/helpers instead of lint suppression"
+    },
+    {
+      "name": "windows-unused-helper",
+      "result": "exit101; audit compilation failed, later workspace steps untested",
+      "log": "/private/tmp/sweepx-audit-state-windows-final-lint.log",
+      "reason": "validate_lock_path_identity used only by Unix acquisition; correctly gate helper to Unix without widening support"
+    }
+  ],
+  "checks": [
+    {
+      "name": "affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit -p sweepx-cache -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "passed": 185,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "successfulChildObservations": 19,
+      "expectedSigabrtChildren": 2,
+      "expectedSigkillChildren": 5,
+      "log": "/private/tmp/sweepx-audit-state-final-affected-tests.log",
+      "note": "65 audit unit +4 crash +113 cache unit +3 host journal. Later changes add Linux-only CLI tests and narrow unsupported Windows cfg; Unix behavior unchanged"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1221,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "successfulChildObservations": 19,
+      "expectedSigabrtChildren": 2,
+      "expectedSigkillChildren": 5,
+      "log": "/private/tmp/sweepx-audit-state-workspace-tests.log",
+      "note": "host service access. Subsequent changes only narrow Windows unsupported helper/type cfg and documentation; host behavior unchanged"
+    },
+    {
+      "name": "parallel-audit-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit --lib --all-features --locked",
+      "passed": 65,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/private/tmp/sweepx-audit-state-parallel-audit-tests.log",
+      "note": "default parallel harness; later one helper cfg matches its existing Unix consumers"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-audit -p sweepx-cache -p sweepx-cli -p sweepx-event-journal --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-state-first-lint.log",
+      "note": "final workspace lint covers subsequent narrow unsupported cfg fix"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-state-host-final-fixed-lint.log",
+      "note": "Final unsupported-platform cfg gates compiled; later Rust change only clarifies an existing publication comment"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-audit-state-linux-first-lint.log",
+      "note": "Zig0.16 installed helper follows repo cross-lint. Subsequent Unix helper cfg changes equivalent on Linux; includes both new Linux CLI tests. Compile only"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-audit-state-windows-final-fixed-lint.log",
+      "note": "GNU mapping in installed helper; final unsupported cfg compiled. Not MSVC/runtime"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list -p sweepx-audit -p sweepx-cache -p sweepx-cli -p sweepx-event-journal --allow-dirty --locked",
+      "log": "/private/tmp/sweepx-audit-state-package-files.log",
+      "note": "must include new audit state_quota_tests.rs. No manifest/dependency change; reuse validated17packages/50target-specific normal-build rows/47pairs. List is not registry build"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "command": "PYTHONDONTWRITEBYTECODE=1 <bundled-python> scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-audit-state-docs.log",
+      "note": "unchanged checker self-tests reuse prior23 passes",
+      "markdownFiles": 54
+    },
+    {
+      "name": "format-and-diff",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check"
+      ],
+      "note": "final Rust formatting and tracked diff checked; staged diff also checked before commit"
+    }
+  ],
+  "validationGaps": [
+    {
+      "name": "known-Foundation-Trash-success",
+      "result": "explicitly skipped",
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previous independently diagnosed Foundation service hang; preserved test. Prior artifact carries original evidence; no permanent deletion fallback"
+    },
+    {
+      "name": "opt-in-benchmarks",
+      "result": "3 existing ignored",
+      "tests": [
+        "benchmark_batched_historical_root_reads",
+        "benchmark_multi_root_cache_preparation",
+        "native_bulk_enumeration_benchmark_smoke"
+      ],
+      "reason": "no new timing/performance claim"
+    },
+    {
+      "name": "native-targets",
+      "result": "not executed",
+      "reason": "no native Linux/Windows/MSVC runner in prior setup inventory; GNU lint compiles cfg/tests only. New CLI cases, Linux OFD/bind mount/rename and real provider/target Trash behavior not runtime-qualified"
+    },
+    {
+      "name": "resource-completeness",
+      "result": "open",
+      "reason": "legacy component APIs, future spill/other producers, owner FD admission, aggregate retention, noncooperating changes and RSS/end-to-end measurement remain work"
+    }
+  ],
+  "disk": {
+    "buildEnvironment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "targetKiB": 3142796,
+    "debugKiB": 2126416,
+    "measurement": "du -sk target target/debug after tests and GNU lints; not scan performance",
+    "trash": "previously moved43.323 GiB remains in OS Trash; not emptied/permanently deleted; relocation is not physical volume free-space recovery"
+  },
+  "deferred": "new Dart/SvelteKit work remains deferred per user priority"
+}

@@ -319,6 +319,63 @@ impl Directory {
 mod synced_tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exclusive_json_commit_preserves_a_racing_destination_and_discards_refused_temp() {
+        let (_fixture, path, root) = fixture();
+        assert!(
+            root.create_synced_json("oversized", &"too long", 2)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        struct Race<'a>(&'a Directory);
+        impl serde::Serialize for Race<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use std::io::Write;
+                // Synchronized after preflight and before native commit, without sleeps.
+                let mut file = self.0.create_state_file("record").unwrap();
+                file.write_all(b"competitor").unwrap();
+                serde::Serialize::serialize(&7_u8, serializer)
+            }
+        }
+        let error = root
+            .create_synced_json("record", &Race(&root), 32)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(path.join("record")).unwrap(), b"competitor");
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+        root.create_synced_json("fresh", &serde_json::json!({"value":[7,9]}), 64)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(path.join("fresh")).unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({"value":[7,9]})
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exclusive_json_restoration_phase_refusal_never_publishes_manifest() {
+        let (_fixture, path, root) = fixture();
+        struct Refuse;
+        impl serde::Serialize for Refuse {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+                serde::Serialize::serialize(&7_u8, serializer)
+            }
+        }
+        let error = root
+            .create_synced_json("manifest", &Refuse, 64)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "injected cache policy restoration failure"
+        );
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+    }
+
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Directory) {
         let temp = tempfile::tempdir().unwrap();
         #[cfg(unix)]

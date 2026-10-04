@@ -19,6 +19,18 @@ pub(super) struct Root {
     display: PathBuf,
     #[cfg(unix)]
     directory: Directory,
+    #[cfg(unix)]
+    state: Option<StateBinding>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct StateBinding {
+    root: Directory,
+    name: &'static str,
+    // The component guard owns the lease. Weak storage cannot prolong exclusion after an
+    // unsuccessful claim/drop, while SQL pins it through its own complete close interval.
+    lease: std::sync::Mutex<std::sync::Weak<sweepx_cache::state_directory::StateWriteSession>>,
 }
 
 impl Root {
@@ -29,7 +41,29 @@ impl Root {
         Ok(Self {
             display: display.to_path_buf(),
             directory,
+            state: None,
         })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn from_state(
+        display: &Path,
+        state: &Directory,
+        name: &'static str,
+    ) -> Result<Self, AuditError> {
+        let directory = state.child(name)?;
+        super::ensure_local_filesystem(&directory.directory_file()?)?;
+        let root = Self {
+            display: display.to_path_buf(),
+            directory,
+            state: Some(StateBinding {
+                root: state.retain()?,
+                name,
+                lease: std::sync::Mutex::new(std::sync::Weak::new()),
+            }),
+        };
+        root.binding()?;
+        Ok(root)
     }
 
     pub(super) fn binding(&self) -> Result<(), AuditError> {
@@ -40,9 +74,147 @@ impl Root {
             if !self.directory.same_object(&current)? {
                 return Err(AuditError::StoreMismatch);
             }
+            if let Some(state) = &self.state
+                && !state.root.same_child(state.name, &self.directory)?
+            {
+                return Err(AuditError::StoreMismatch);
+            }
             Ok(())
         }
         #[cfg(not(unix))]
+        Err(AuditError::UnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn capture_state(&self) -> Result<super::StateReservation, AuditError> {
+        self.binding()?;
+        let Some(binding) = &self.state else {
+            return Ok(None);
+        };
+        let state = sweepx_cache::state_directory::StateWriteSession::capture(&binding.root)
+            .map_err(super::state_admission_error)?;
+        if !state.contains_child(binding.name, &self.directory)? {
+            return Err(AuditError::StoreMismatch);
+        }
+        Ok(Some(state))
+    }
+
+    /// Reserve the remaining component peak, not another complete copy of existing DB bytes.
+    /// Unknown ordinary files remain fully charged by the shared inventory. Every optional
+    /// sidecar name and a missing component lock are covered before any creation.
+    #[cfg(unix)]
+    pub(super) fn reserve_sql(
+        &self,
+        state: &mut super::StateReservation,
+    ) -> Result<(), AuditError> {
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let mut existing = 0_u64;
+        let mut missing = 0_usize;
+        for name in [
+            "audit.db",
+            "audit.db-wal",
+            "audit.db-journal",
+            "audit.db-shm",
+            "audit.lock",
+        ] {
+            match self.metadata(name) {
+                Ok(metadata) => {
+                    if name != "audit.lock" {
+                        existing = existing
+                            .checked_add(metadata.bytes)
+                            .ok_or(AuditError::DatabaseTooLarge)?;
+                    }
+                }
+                Err(AuditError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    missing += 1
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        super::check_native_size_budget(self, true)?;
+        state
+            .reserve(
+                super::MAX_TOTAL_DATABASE_BYTES.saturating_sub(existing),
+                missing,
+            )
+            .map_err(super::state_admission_error)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn hold_state(
+        &self,
+        state: super::StateReservation,
+    ) -> Result<super::HeldStateReservation, AuditError> {
+        let Some(binding) = &self.state else {
+            return Ok(None);
+        };
+        let state = std::sync::Arc::new(state.ok_or(AuditError::SharedStateRequired)?);
+        state
+            .validate_exclusion()
+            .map_err(super::state_admission_error)?;
+        *binding
+            .lease
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)? = std::sync::Arc::downgrade(&state);
+        Ok(Some(state))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn state_lease(&self) -> Result<super::HeldStateReservation, AuditError> {
+        let Some(binding) = &self.state else {
+            return Ok(None);
+        };
+        let state = binding
+            .lease
+            .lock()
+            .map_err(|_| AuditError::SessionLockPoisoned)?
+            .upgrade()
+            .ok_or(AuditError::SharedStateRequired)?;
+        state
+            .validate_exclusion()
+            .map_err(super::state_admission_error)?;
+        Ok(Some(state))
+    }
+
+    #[cfg(unix)]
+    pub(super) fn sql_reservation(&self) -> Result<super::HeldStateReservation, AuditError> {
+        let mut state = self.capture_state()?;
+        self.reserve_sql(&mut state)?;
+        self.hold_state(state)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn write_plan_manifest(
+        &self,
+        name: &str,
+        value: &impl serde::Serialize,
+    ) -> Result<(), AuditError> {
+        let mut state = self
+            .capture_state()?
+            .ok_or(AuditError::SharedStateRequired)?;
+        state
+            .reserve(super::PLAN_MANIFEST_BYTE_CAP as u64, 1)
+            .map_err(super::state_admission_error)?;
+        self.directory
+            .create_synced_json(name, value, super::PLAN_MANIFEST_BYTE_CAP)?;
+        self.binding()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn open_lock(&self) -> Result<File, AuditError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.binding()?;
+            // Relative admission, including the component lock, uses the same native policy
+            // as data files. No display-path create can escape the retained namespace.
+            self.directory
+                .state_file(LOCK_FILE, true)
+                .map(|(file, _)| file)
+                .map_err(AuditError::Io)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         Err(AuditError::UnsupportedPlatform)
     }
 
@@ -139,6 +311,7 @@ impl Root {
             let result = sweepx_cache::native::with_io_policy(|| {
                 use crate::retained_vfs::{FileLimits, Registered, Storage, WalMode};
                 self.binding()?;
+                let state_lease = self.state_lease()?;
                 self.require_identity(expected)?;
                 self.sidecars()?;
                 super::check_native_size_budget(self, true)?;
@@ -183,7 +356,19 @@ impl Root {
                     .map_err(|(_, error)| AuditError::Database(error));
                 #[cfg(all(test, target_os = "macos"))]
                 observe_policy(128);
+                #[cfg(test)]
+                AFTER_DATABASE_CLOSE.with(|hook| {
+                    let callback = hook.borrow_mut().take();
+                    if let Some(callback) = callback {
+                        callback();
+                    }
+                });
                 let bound = self.binding().and_then(|()| {
+                    if let Some(state) = &state_lease {
+                        state
+                            .validate_exclusion()
+                            .map_err(super::state_admission_error)?;
+                    }
                     self.require_identity(expected)?;
                     if !self
                         .directory
@@ -312,6 +497,7 @@ fn physical_name(name: crate::retained_vfs::Name) -> &'static str {
 std::thread_local! {
     pub(super) static REJECT_SQL_RESULT_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static BEFORE_DATABASE_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_DATABASE_CLOSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(all(test, target_os = "macos"))]
 std::thread_local! {
