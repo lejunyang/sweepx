@@ -1,5 +1,6 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
+use super::NativeFile;
 use super::authority::{Lease, Owner};
 use super::{AccountedFile, EntryMetadata, commit_sync, linked_object, with_cache_io, write_json};
 #[cfg(all(test, target_os = "linux"))]
@@ -22,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Releases this invocation's cache publication exclusion when dropped.
 /// Its descriptor shares native directory/control-lock owner admission until actual close.
 pub struct LockGuard {
-    file: Owner<File>,
+    file: Owner<NativeFile>,
     owner: libc::pid_t,
 }
 
@@ -69,7 +70,7 @@ pub struct StateFileMetadata {
 /// Each capture/duplicate pays the shared directory/control-lock owner allowance.
 #[derive(Debug)]
 pub struct Directory {
-    fd: Owner<OwnedFd>,
+    fd: Owner<NativeFile>,
     // Handle lifetime pins the captured mount; do not persist/recover this from display paths.
     #[cfg(target_os = "linux")]
     mount: mount::Identity,
@@ -97,7 +98,7 @@ impl Directory {
         lock.encoded_bytes()
     }
 
-    fn from_owned(fd: Owner<OwnedFd>) -> io::Result<Self> {
+    fn from_owned(fd: Owner<NativeFile>) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         let mount = mount::for_fd(fd.as_raw_fd())?;
         Ok(Self {
@@ -228,7 +229,7 @@ impl Directory {
         #[cfg(target_os = "linux")]
         self.mount
             .require_same(mount::for_fd(self.fd.as_raw_fd())?)?;
-        let metadata = File::from(self.fd.try_clone()?).metadata()?;
+        let metadata = self.fd.metadata()?;
         // SAFETY: geteuid has no pointer arguments. The retained descriptor remains authority.
         if !metadata.is_dir()
             || metadata.uid() != unsafe { libc::geteuid() }
@@ -251,6 +252,7 @@ impl Directory {
             return Err(io::Error::other("cache path must be absolute"));
         }
         let lease = Lease::acquire()?;
+        let io_lease = Lease::acquire_io()?;
         let slash = c"/";
         // SAFETY: slash is NUL terminated; returned descriptor is checked and owned below.
         let fd = unsafe {
@@ -259,7 +261,10 @@ impl Directory {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        let mut current = Self::from_owned(Owner::new(owned(fd)?, lease))?;
+        let mut current = Self::from_owned(Owner::new(
+            NativeFile::new(File::from(owned(fd)?), io_lease),
+            lease,
+        ))?;
         for part in path.components() {
             let Component::Normal(part) = part else {
                 if matches!(part, Component::RootDir | Component::CurDir) {
@@ -269,6 +274,7 @@ impl Directory {
             };
             let name = CString::new(part.as_encoded_bytes()).map_err(io::Error::other)?;
             let lease = Lease::acquire()?;
+            let io_lease = Lease::acquire_io()?;
             let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             // SAFETY: retained directory plus one native component; no path authority is reconstructed.
             let mut next = unsafe { libc::openat(current.fd.as_raw_fd(), name.as_ptr(), flags) };
@@ -300,9 +306,12 @@ impl Directory {
                 }
                 return Err(error);
             }
-            current = Self::from_owned(Owner::new(owned(next)?, lease))?;
+            current = Self::from_owned(Owner::new(
+                NativeFile::new(File::from(owned(next)?), io_lease),
+                lease,
+            ))?;
         }
-        let metadata = File::from(current.fd.try_clone()?).metadata()?;
+        let metadata = current.fd.metadata()?;
         // SAFETY: geteuid has no pointer arguments or side effects.
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
             return Err(io::Error::other(
@@ -318,10 +327,15 @@ impl Directory {
     }
 
     fn child_guarded(&self, name: &str) -> io::Result<Self> {
-        self.child_guarded_with_lease(name, Lease::acquire()?)
+        self.child_guarded_with_lease(name, Lease::acquire()?, Lease::acquire_io()?)
     }
 
-    fn child_guarded_with_lease(&self, name: &str, lease: Lease) -> io::Result<Self> {
+    fn child_guarded_with_lease(
+        &self,
+        name: &str,
+        lease: Lease,
+        io_lease: Lease,
+    ) -> io::Result<Self> {
         self.private()?;
         let name = component(name)?;
         // SAFETY: no-follow basename beneath this retained directory; returned fd is owned.
@@ -332,10 +346,13 @@ impl Directory {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
-        let child = Self::from_owned(Owner::new(owned(fd)?, lease))?;
+        let child = Self::from_owned(Owner::new(
+            NativeFile::new(File::from(owned(fd)?), io_lease),
+            lease,
+        ))?;
         #[cfg(target_os = "linux")]
         self.mount.require_same(child.mount)?;
-        let meta = File::from(child.fd.try_clone()?).metadata()?;
+        let meta = child.fd.metadata()?;
         if meta.dev() != self.private()?.dev() {
             return Err(io::Error::other("cache child crossed a volume boundary"));
         }
@@ -355,13 +372,14 @@ impl Directory {
         self.private()?;
         let native = component(name)?;
         let lease = Lease::acquire()?;
+        let io_lease = Lease::acquire_io()?;
         // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
         if unsafe { libc::mkdirat(self.fd.as_raw_fd(), native.as_ptr(), 0o700) } < 0
             && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
         {
             return Err(io::Error::last_os_error());
         }
-        self.child_guarded_with_lease(name, lease)
+        self.child_guarded_with_lease(name, lease, io_lease)
     }
 
     /// Nonblocking advisory serialization of publication and eviction across invocations.
@@ -373,6 +391,7 @@ impl Directory {
     fn lock_guarded(&self) -> io::Result<LockGuard> {
         self.private()?;
         let lease = Lease::acquire()?;
+        let io_lease = Lease::acquire_io()?;
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
             libc::openat(
@@ -386,7 +405,7 @@ impl Directory {
                 0o600,
             )
         };
-        let file = Owner::new(File::from(owned(fd)?), lease);
+        let file = Owner::new(NativeFile::new(File::from(owned(fd)?), io_lease), lease);
         #[cfg(target_os = "linux")]
         self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
         let meta = file.metadata()?;
@@ -409,15 +428,15 @@ impl Directory {
         })
     }
 
-    pub(super) fn open_file(&self, name: &str) -> io::Result<File> {
+    pub(super) fn open_file(&self, name: &str) -> io::Result<NativeFile> {
         self.open_file_mode(name, false, false)
     }
 
     /// Duplicates an admitted Unix directory for native clients that retain its lifetime.
     /// This is handle authority, not a path recipe; the client must revalidate before later I/O.
-    pub fn directory_file(&self) -> io::Result<File> {
+    pub fn directory_file(&self) -> io::Result<NativeFile> {
         self.private()?;
-        Ok(File::from(self.fd.try_clone()?))
+        self.fd.try_clone()
     }
 
     /// Compares retained Unix directory objects, including Linux mount identity. Both must
@@ -464,7 +483,7 @@ impl Directory {
 
     /// Creates a private ordinary single-link state file exclusively beneath this root.
     /// Existing names are refused without opening another data descriptor or truncating bytes.
-    pub fn create_state_file(&self, name: &str) -> io::Result<File> {
+    pub fn create_state_file(&self, name: &str) -> io::Result<NativeFile> {
         with_cache_io(|| self.open_file_mode(name, true, true))
     }
 
@@ -472,7 +491,7 @@ impl Directory {
     /// Optional creation is exclusive and private; a competing creator is admitted once.
     /// The returned descriptor pins the object; this does not validate subsequent name binding.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn state_file(&self, name: &str, create: bool) -> io::Result<(File, bool)> {
+    pub fn state_file(&self, name: &str, create: bool) -> io::Result<(NativeFile, bool)> {
         with_cache_io(|| match self.open_file_mode(name, true, false) {
             Ok(file) => Ok((file, false)),
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
@@ -488,9 +507,15 @@ impl Directory {
         })
     }
 
-    fn open_file_mode(&self, name: &str, writable: bool, create_new: bool) -> io::Result<File> {
+    fn open_file_mode(
+        &self,
+        name: &str,
+        writable: bool,
+        create_new: bool,
+    ) -> io::Result<NativeFile> {
         let parent = self.private()?;
         let name = component(name)?;
+        let io_lease = Lease::acquire_io()?;
         // Nonblocking prevents a substituted FIFO from stalling before the type check.
         // SAFETY: validated basename and a live retained parent; the opened fd is checked below.
         let fd = unsafe {
@@ -514,7 +539,7 @@ impl Directory {
         if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP) {
             return Err(linked_object());
         }
-        let file = File::from(owned(fd)?);
+        let file = NativeFile::new(File::from(owned(fd)?), io_lease);
         #[cfg(target_os = "linux")]
         self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
         let metadata = file.metadata()?;
@@ -559,7 +584,7 @@ impl Directory {
     pub(crate) fn publish(
         &self,
         name: &str,
-        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        encode: impl FnOnce(&mut NativeFile) -> io::Result<()>,
     ) -> io::Result<()> {
         self.publish_mode(name, encode, false, false)
     }
@@ -592,7 +617,7 @@ impl Directory {
     fn publish_mode(
         &self,
         name: &str,
-        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        encode: impl FnOnce(&mut NativeFile) -> io::Result<()>,
         sync: bool,
         exclusive: bool,
     ) -> io::Result<()> {
@@ -617,6 +642,7 @@ impl Directory {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
+            let io_lease = Lease::acquire_io()?;
             // SAFETY: exclusive no-follow creation cannot truncate any existing entry.
             let fd = unsafe {
                 libc::openat(
@@ -630,7 +656,7 @@ impl Directory {
                     0o600,
                 )
             };
-            let mut file = File::from(owned(fd)?);
+            let mut file = NativeFile::new(File::from(owned(fd)?), io_lease);
             created = true;
             #[cfg(target_os = "linux")]
             self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
@@ -705,7 +731,7 @@ impl Directory {
                 return Err(io::Error::last_os_error());
             }
             if sync {
-                commit_sync(|| File::from(self.fd.try_clone()?).sync_all())?;
+                commit_sync(|| self.fd.sync_all())?;
             }
             Ok(())
         });
@@ -796,6 +822,7 @@ impl Directory {
         mut visit: impl FnMut(Option<&str>) -> io::Result<()>,
     ) -> io::Result<()> {
         self.private()?;
+        let io_lease = Lease::acquire_io()?;
         // Opening '.' gives an independent directory offset; dup would share offsets between callers.
         // SAFETY: this is the already retained directory, not a display path.
         let fd = unsafe {
@@ -820,16 +847,22 @@ impl Directory {
             }
             return Err(error);
         }
-        struct Stream(*mut libc::DIR);
+        struct Stream {
+            handle: *mut libc::DIR,
+            _lease: Lease,
+        }
         impl Drop for Stream {
             fn drop(&mut self) {
                 // SAFETY: Stream owns the successfully opened directory stream.
                 unsafe {
-                    libc::closedir(self.0);
+                    libc::closedir(self.handle);
                 }
             }
         }
-        let stream = Stream(stream);
+        let stream = Stream {
+            handle: stream,
+            _lease: io_lease,
+        };
         let mut remaining = super::ENUMERATION_ENTRY_LIMIT;
         loop {
             // SAFETY: stream is live; each d_name is read before the next readdir invalidates it.
@@ -843,7 +876,7 @@ impl Directory {
                     *libc::__errno_location() = 0;
                 }
             }
-            let entry = unsafe { libc::readdir(stream.0) };
+            let entry = unsafe { libc::readdir(stream.handle) };
             if entry.is_null() {
                 let error = io::Error::last_os_error();
                 if error.raw_os_error() != Some(0) {

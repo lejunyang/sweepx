@@ -6,7 +6,7 @@ const MAX_DATABASE_BYTES: u64 = 28_311_552;
 fn register(storage: Arc<dyn Storage>, database: File) -> io::Result<Registered> {
     Registered::new(
         storage,
-        database,
+        NativeFile::admit(database)?,
         FileLimits {
             database_bytes: 28_311_552,
             wal_bytes: 4_194_304,
@@ -24,7 +24,7 @@ use std::path::PathBuf;
 fn register_shared(storage: Arc<dyn Storage>, database: File) -> Registered {
     Registered::new(
         storage,
-        database,
+        NativeFile::admit(database).unwrap(),
         FileLimits {
             database_bytes: 28_311_552,
             wal_bytes: 4_194_304,
@@ -387,7 +387,7 @@ impl Fixture {
 }
 
 impl Storage for Fixture {
-    fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<File> {
+    fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<NativeFile> {
         assert_ne!(
             name,
             Name::Database,
@@ -402,7 +402,7 @@ impl Storage for Fixture {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(self.root.join(name.text()))?;
         self.private_metadata(name)?;
-        Ok(file)
+        NativeFile::admit(file)
     }
     fn contains(&self, name: Name, file: &File) -> io::Result<bool> {
         let ordinary = self.private_metadata(name)?;
@@ -844,8 +844,37 @@ fn context_quota_counts_retired_foreign_files_until_close() {
         }
         let (_extra, storage, file) = fixture();
         assert!(register(storage.clone(), file).is_err());
+        // 64 actual database descriptions plus 192 charged duplicates exhaust native I/O,
+        // independently of the VFS namespace cap. Imported fixture files are admitted before
+        // entering the production driver; no test counter is reset or inspected.
+        let seed = NativeFile::admit(held[0].1.database().try_clone().unwrap()).unwrap();
+        let mut io_held = vec![seed];
+        for _ in 0..191 {
+            io_held.push(io_held[0].try_clone().unwrap());
+        }
+        let descriptor = held[0].1.database().as_raw_fd();
         let foreign = connect(&held[0].1);
-        drop(held.remove(0));
+        let (retired_fixture, retired) = held.remove(0);
+        drop(retired);
+        // Query the real original FD, not the Rust reservation: C's open file still owns it.
+        // SAFETY: this only queries a numeric descriptor; it transfers no ownership.
+        assert!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(storage.root.join("state.db"))
+            .unwrap();
+        let error = NativeFile::admit(file).unwrap_err();
+        assert_eq!(
+            sweepx_cache::native::handle_limit(&error),
+            Some(sweepx_cache::native::HandleLimit {
+                resource: "native_io_handles",
+                limit: 256,
+            })
+        );
+        // Keep the older independent namespace-cap regression: one free I/O slot permits
+        // file admission, but the retired C context must still prevent a 65th namespace.
+        drop(io_held.pop().unwrap());
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -853,9 +882,13 @@ fn context_quota_counts_retired_foreign_files_until_close() {
             .unwrap();
         assert!(
             register(storage.clone(), file).is_err(),
-            "retired foreign file still owns a quota slot"
+            "retired foreign context still owns its namespace slot"
         );
+        io_held.push(io_held[0].try_clone().unwrap());
         drop(foreign);
+        // SAFETY: query immediately after close, before opening another file that could reuse FD.
+        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -863,6 +896,8 @@ fn context_quota_counts_retired_foreign_files_until_close() {
             .unwrap();
         let replacement = register(storage, file).unwrap();
         drop(replacement);
+        drop(io_held);
+        drop(retired_fixture);
         drop(held);
         return;
     }
@@ -1045,7 +1080,7 @@ fn rust_panic_is_contained_before_c_abi_boundary() {
         fail: AtomicBool,
     }
     impl Storage for PanicFixture {
-        fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<File> {
+        fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<NativeFile> {
             self.storage.open(name, create, exclusive)
         }
         fn contains(&self, name: Name, file: &File) -> io::Result<bool> {

@@ -4,17 +4,29 @@
 //! shared or non-regular files. Ordinary cache publication is atomic; explicit synced writes
 //! request file flushes and Unix parent-directory synchronization, not an operation journal.
 
-use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 #[cfg(any(unix, windows))]
 mod authority;
 #[cfg(all(test, any(unix, windows)))]
 mod authority_tests;
+#[cfg(any(unix, windows))]
+mod file;
+#[cfg(all(test, any(unix, windows)))]
+mod io_tests;
+#[cfg(any(unix, windows))]
+pub use file::NativeFile;
 
-/// Identifies exhaustion of the shared 128 retained directory/control-lock owner slots.
-/// The quota excludes exported `File` duplicates, SQLite data files and other process handles.
-/// Refusal is distinct from unsafe permissions, absence or lock contention.
-pub fn authority_handle_limit(error: &io::Error) -> Option<usize> {
+/// Typed exhaustion of native storage admission, independent of permissions and contention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandleLimit {
+    /// Stable unit name: `native_io_handles` or its retained `native_authority_handles` subset.
+    pub resource: &'static str,
+    /// Maximum simultaneously owned handles in this unit, not a whole-process handle count.
+    pub limit: usize,
+}
+
+/// Identifies a storage admission refusal without classifying it as unsafe or missing data.
+pub fn handle_limit(error: &io::Error) -> Option<HandleLimit> {
     #[cfg(any(unix, windows))]
     {
         authority::limit(error)
@@ -24,6 +36,15 @@ pub fn authority_handle_limit(error: &io::Error) -> Option<usize> {
         let _ = error;
         None
     }
+}
+
+/// Identifies exhaustion of the shared 128 retained directory/control-lock owner slots.
+/// These owners also pay the 256 native I/O allowance. Data files only pay the I/O allowance.
+/// Refusal is distinct from unsafe permissions, absence or lock contention.
+pub fn authority_handle_limit(error: &io::Error) -> Option<usize> {
+    handle_limit(error)
+        .filter(|limit| limit.resource == "native_authority_handles")
+        .map(|limit| limit.limit)
 }
 
 #[derive(Debug)]
@@ -257,7 +278,7 @@ pub struct EntryMetadata {
     pub accessed: (i64, i64),
 }
 
-fn write_json(file: &mut File, value: &impl serde::Serialize, cap: usize) -> io::Result<()> {
+fn write_json(file: &mut NativeFile, value: &impl serde::Serialize, cap: usize) -> io::Result<()> {
     // Both backends share the wire cap and fixed buffer, never materializing the JSON value.
     let mut buffer = BufWriter::with_capacity(64 * 1024, file);
     let mut writer = LimitedWriter {

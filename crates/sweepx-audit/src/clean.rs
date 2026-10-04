@@ -1611,10 +1611,10 @@ pub enum AuditError {
 impl From<std::io::Error> for AuditError {
     fn from(error: std::io::Error) -> Self {
         #[cfg(unix)]
-        if let Some(limit) = sweepx_cache::native::authority_handle_limit(&error) {
+        if let Some(limit) = sweepx_cache::native::handle_limit(&error) {
             return Self::StateResourceLimit {
-                resource: "native_authority_handles",
-                limit: limit as u64,
+                resource: limit.resource,
+                limit: limit.limit as u64,
             };
         }
         Self::Io(error)
@@ -1769,7 +1769,7 @@ impl AuditStore {
             root_native.lock_filesystem(&lock_file)?;
             Ok(database_id)
         })?;
-        FileExt::unlock(&lock_file)?;
+        FileExt::unlock(&*lock_file)?;
         Ok(Self {
             root,
             root_native,
@@ -2737,6 +2737,9 @@ fn check_native_size_budget(
 struct ShortStoreLock {
     // Drop order closes the component file before the state-root lock. Claims own this same
     // guard, so all later SQL, terminal outcomes, recovery observers and close keep admission.
+    #[cfg(unix)]
+    file: sweepx_cache::native::NativeFile,
+    #[cfg(not(unix))]
     file: File,
     #[cfg(unix)]
     _state: HeldStateReservation,
@@ -2752,7 +2755,7 @@ impl Drop for ShortStoreLock {
     fn drop(&mut self) {
         // An inherited child must close only its copy, not explicitly unlock the parent.
         if self.owner_pid == std::process::id() {
-            let _ = FileExt::unlock(&self.file);
+            let _ = FileExt::unlock(&**self);
         }
     }
 }
@@ -6120,7 +6123,7 @@ mod tests {
         let token = reserve(&store, &claim, &binding);
         {
             let guard = claim.live_claim.lock_file.lock().unwrap();
-            FileExt::unlock(&guard.as_ref().unwrap().file).unwrap();
+            FileExt::unlock(&**guard.as_ref().unwrap()).unwrap();
         }
         assert!(matches!(
             token.validate_current_process(),

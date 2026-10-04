@@ -154,7 +154,7 @@ fn check_shape(bytes: &[u8]) -> Result<(), StateError> {
 
 #[cfg(any(unix, windows))]
 pub(super) fn native_error(path: &std::path::Path, error: io::Error) -> StateError {
-    if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+    if sweepx_cache::native::handle_limit(&error).is_some() {
         return error.into();
     }
     if sweepx_cache::native::is_link_refusal(&error) {

@@ -11,6 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 #[cfg(unix)]
+use sweepx_cache::native::NativeFile;
+#[cfg(unix)]
 use sweepx_cache::native::{Directory, StateFileMetadata};
 
 #[derive(Debug)]
@@ -37,7 +39,7 @@ impl Root {
     #[cfg(unix)]
     pub(super) fn open(display: &Path) -> Result<Self, AuditError> {
         let directory = Directory::open(display, false)?;
-        super::ensure_local_filesystem(&directory.directory_file()?)?;
+        super::ensure_local_filesystem(&*directory.directory_file()?)?;
         Ok(Self {
             display: display.to_path_buf(),
             directory,
@@ -52,7 +54,7 @@ impl Root {
         name: &'static str,
     ) -> Result<Self, AuditError> {
         let directory = state.child(name)?;
-        super::ensure_local_filesystem(&directory.directory_file()?)?;
+        super::ensure_local_filesystem(&*directory.directory_file()?)?;
         let root = Self {
             display: display.to_path_buf(),
             directory,
@@ -70,7 +72,7 @@ impl Root {
         #[cfg(unix)]
         {
             let current = Directory::open(&self.display, false).map_err(|error| {
-                if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+                if sweepx_cache::native::handle_limit(&error).is_some() {
                     error.into()
                 } else {
                     AuditError::StoreMismatch
@@ -208,7 +210,7 @@ impl Root {
     }
 
     #[cfg(unix)]
-    pub(super) fn open_lock(&self) -> Result<File, AuditError> {
+    pub(super) fn open_lock(&self) -> Result<NativeFile, AuditError> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.binding()?;
@@ -217,7 +219,7 @@ impl Root {
             self.directory
                 .state_file(LOCK_FILE, true)
                 .map(|(file, _)| file)
-                .map_err(AuditError::Io)
+                .map_err(AuditError::from)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         Err(AuditError::UnsupportedPlatform)
@@ -290,7 +292,7 @@ impl Root {
         {
             // Duplicate a directory descriptor only; a same-inode data FD close releases
             // POSIX SQLite locks, so filesystem validation must not reopen audit.db.
-            super::ensure_same_local_filesystem(lock, &self.directory.directory_file()?)?;
+            super::ensure_same_local_filesystem(lock, &*self.directory.directory_file()?)?;
             let metadata = self.metadata(LOCK_FILE)?;
             let expected = super::lock_identity(lock, &self.display.join(LOCK_FILE))?;
             if metadata.device != expected.device || metadata.inode != expected.inode {
@@ -438,7 +440,7 @@ impl crate::retained_vfs::Storage for Root {
         name: crate::retained_vfs::Name,
         create: bool,
         exclusive: bool,
-    ) -> io::Result<File> {
+    ) -> io::Result<NativeFile> {
         #[cfg(all(test, target_os = "macos"))]
         observe_policy(2);
         let file = if exclusive {

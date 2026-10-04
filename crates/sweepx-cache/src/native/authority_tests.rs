@@ -17,7 +17,7 @@ fn refused<T>(result: io::Result<T>) {
 }
 
 #[cfg(unix)]
-fn native_count(path: &Path) -> usize {
+pub(super) fn native_count(path: &Path) -> usize {
     use std::os::unix::fs::MetadataExt;
     let expected = std::fs::metadata(path).unwrap();
     #[cfg(target_os = "linux")]
@@ -42,7 +42,7 @@ fn native_count(path: &Path) -> usize {
 }
 
 #[cfg(windows)]
-fn process_handles() -> usize {
+pub(super) fn process_handles() -> usize {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let mut count = 0;
     // The independent Win32 query returns executive handle count, not a SweepX counter.

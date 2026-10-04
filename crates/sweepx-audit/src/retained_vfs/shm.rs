@@ -34,7 +34,7 @@ impl Drop for Mapping {
 }
 
 pub(super) struct SharedMemory {
-    file: File,
+    file: NativeFile,
     mapping: Option<Mapping>,
 }
 

@@ -24,6 +24,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use sweepx_cache::native::NativeFile;
 
 const IO_LIMIT: usize = 1024 * 1024;
 // SQLite's published lock-byte protocol, not a filesystem allocation/sector claim.
@@ -151,7 +152,8 @@ impl Name {
 /// Provider policy must cover the complete SQL interval, including mapped-page accesses.
 pub trait Storage: Send + Sync {
     /// Opens only an admitted relative file; requested exclusive creation must not reopen existing data.
-    fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<File>;
+    /// The owned file must keep its I/O admission lease through the C file's actual close.
+    fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<NativeFile>;
     /// Revalidates private/native relative binding without reopening another data descriptor.
     fn contains(&self, name: Name, file: &File) -> io::Result<bool>;
     /// Returns exact logical length or explicit absence; uncertainty remains an error.
@@ -166,10 +168,10 @@ struct Context {
     storage: Arc<dyn Storage>,
     limits: FileLimits,
     mode: WalMode,
-    database: Arc<File>,
+    database: Arc<NativeFile>,
     claimed: AtomicBool,
     // Only two allowed auxiliary files; keep closed sidecar evidence until deletion/reopen.
-    sidecars: Mutex<[Option<Arc<File>>; 2]>,
+    sidecars: Mutex<[Option<Arc<NativeFile>>; 2]>,
     live: AtomicBool,
     _reservation: Reservation,
 }
@@ -188,7 +190,7 @@ impl Context {
         }
     }
 
-    fn sidecar(&self, name: Name, create: bool, exclusive: bool) -> io::Result<Arc<File>> {
+    fn sidecar(&self, name: Name, create: bool, exclusive: bool) -> io::Result<Arc<NativeFile>> {
         let index = match name {
             Name::Wal => 0,
             Name::Rollback => 1,
@@ -349,9 +351,10 @@ impl std::fmt::Debug for Context {
 impl Registered {
     /// Consumes one admitted descriptor and reserves one of 64 active namespace contexts.
     /// Contexts held by foreign file objects continue paying the quota after owner retirement.
+    /// The database's native I/O lease follows its last file owner, independently of this context cap.
     pub fn new(
         storage: Arc<dyn Storage>,
-        database: File,
+        database: NativeFile,
         limits: FileLimits,
         mode: WalMode,
     ) -> io::Result<Self> {
@@ -463,7 +466,7 @@ struct Slot {
 
 struct State {
     context: Arc<Context>,
-    file: Arc<File>,
+    file: Arc<NativeFile>,
     name: Name,
     lock: c_int,
     shm: Option<shm::SharedMemory>,
@@ -948,13 +951,16 @@ unsafe extern "C" fn delete(
         };
         let index = if name == Name::Wal { 0 } else { 1 };
         let expected = slots[index].as_deref();
-        match ctx.storage.remove(name, expected).and_then(|_| {
-            if sync_dir != 0 {
-                ctx.storage.sync()
-            } else {
-                Ok(())
-            }
-        }) {
+        match ctx
+            .storage
+            .remove(name, expected.map(|file| &**file))
+            .and_then(|_| {
+                if sync_dir != 0 {
+                    ctx.storage.sync()
+                } else {
+                    Ok(())
+                }
+            }) {
             Ok(()) => {
                 slots[index] = None;
                 ffi::SQLITE_OK

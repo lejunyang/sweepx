@@ -17,10 +17,15 @@ fn fixture() -> (tempfile::TempDir, PathBuf, Directory) {
 fn sparse(root: &Directory, path: &Path, bytes: u64) {
     let file = match root.create_state_file("unknown-note") {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
-            .write(true)
-            .open(path.join("unknown-note"))
-            .unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            sweepx_cache::native::NativeFile::admit(
+                OpenOptions::new()
+                    .write(true)
+                    .open(path.join("unknown-note"))
+                    .unwrap(),
+            )
+            .unwrap()
+        }
         Err(error) => panic!("sparse setup: {error}"),
     };
     file.set_len(bytes).unwrap();

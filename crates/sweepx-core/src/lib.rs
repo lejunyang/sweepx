@@ -567,10 +567,10 @@ pub const fn durable_state_supported() -> bool {
 
 impl From<io::Error> for StateError {
     fn from(error: io::Error) -> Self {
-        if let Some(limit) = sweepx_cache::native::authority_handle_limit(&error) {
+        if let Some(limit) = sweepx_cache::native::handle_limit(&error) {
             Self::StateResourceLimit {
-                resource: "native_authority_handles",
-                limit: limit as u64,
+                resource: limit.resource,
+                limit: limit.limit as u64,
             }
         } else {
             Self::Io(error)

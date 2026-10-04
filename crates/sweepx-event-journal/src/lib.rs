@@ -528,7 +528,7 @@ pub struct EventJournal {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct ExclusiveLock {
-    file: File,
+    file: sweepx_cache::native::NativeFile,
 }
 
 #[cfg(target_os = "linux")]

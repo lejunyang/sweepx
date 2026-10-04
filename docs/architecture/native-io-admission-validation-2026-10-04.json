@@ -1,0 +1,187 @@
+{
+  "schema": "sweepx.native-io-admission-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "646bc16",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "Shared native file/publication/enumeration ownership and SQLite actual file lifetimes in existing crates",
+    "256 native I/O slots, with Directory/LockGuard paying the existing 128-owner subset too",
+    "NativeFile exports and bounded cloning; preserve native identity, mount, private/DACL, provider policy and old records",
+    "Remove Unix metadata and parent-sync duplicates; no end-to-end speed claim"
+  ],
+  "limits": {
+    "native_io_handles": 256,
+    "native_authority_handles": 128,
+    "sqliteContextsUnchanged": 64,
+    "childExecDeadlineSeconds": 30,
+    "workers": 8,
+    "attemptsPerWorker": 64,
+    "quotaWait": "atomic refusal; no waiting for slots"
+  },
+  "semantics": {
+    "ownership": "Native factories reserve before syscall/mkdir/create. Owner field order closes file before lease release. NativeFile owns File+lease, has no Into<File>/IntoRawFd/DerefMut. Arc shares one owner. Unix DIR stream owns its lease until closedir. Windows ReOpenFile and relative open/query/remove use charged files.",
+    "import": "NativeFile::admit only transfers an already open descriptor into admission, closing the transferred file on refusal. It establishes no filesystem, identity, provider or deletion authority. Borrowed File/raw handle aliases intentionally made outside try_clone are excluded.",
+    "sqlite": "Storage and Registered now carry NativeFile. Context DB/sidecars, C State and SHM retain leases. Retired foreign C files count through actual xClose/final Arc close. No additional database FD for identity/size; mapped index and OFD contracts unchanged.",
+    "errors": "Both marker units preserve Cache ResourceLimit / Core and Audit native entry StateResourceLimit. Journal keeps marked Io. SQLite callbacks still return database I/O errors and do not promise typed native units for all SQL failures.",
+    "exclusions": "Scanners, Windows security token query handles, external files before admit, independently duplicated borrowed handles, whole-process handles/RSS, hard deadlines and terminal-persistence reserved handles. Component-only audit disk/name APIs, future spill and noncooperating actors remain outside the global state audit.",
+    "oracle": "Fresh exec with literal limits; ordinary descriptor enumeration/fstat or Windows executive handle query, no production counter/reset. Verify no creation at cap, old bytes, Arc lifetime, one-slot active enumeration/encoder, callback refusal/panic cleanup, concurrent actual duplicates and imported failure close.",
+    "consumerOracle": "Existing Core public fixture runs isolated authority and I/O modes, checks snapshot load/save/new root, Audit integrity/manifest/new namespace refusal plus old bytes and release recovery. Windows audit unsupported as before.",
+    "foreignOracle": "Existing 64-context fixture preserved; 192 charged real duplicates exhaust I/O. Retired original descriptor queried independently with fcntl before C close, EBADF immediately after; context-only refusal still tested with one free I/O slot. Original context regression not replaced.",
+    "unchanged": "No manifest/dependency/new crate, wire enum rename, rule or scanning strategy change, new platform support, publishing, permanent deletion or emptied Trash.",
+    "postMatrixChanges": "Only public rustdoc and aligned documentation changed after final functional checks; behavior unchanged."
+  },
+  "initialFailures": [
+    {
+      "name": "native-file-callsite-migration",
+      "result": "exit101; check only, no runtime tests",
+      "log": "/private/tmp/sweepx-native-file-check.log",
+      "reason": "Borrow coercions around question-mark temporaries, fs2 UFCS, Option references, fixture return and ordinary File registration needed explicit conversions. Preserve ordinary filesystem oracle; no production gate relaxation."
+    },
+    {
+      "name": "fixture-over-admission",
+      "result": "exit101; check only, no runtime tests",
+      "log": "/private/tmp/sweepx-native-file-check-fixed.log",
+      "reason": "Broad test edit wrapped already admitted fixture files twice. Restore original controlled tests and admit plain File at helper registration boundary; production driver remains NativeFile throughout."
+    }
+  ],
+  "checks": [
+    {
+      "name": "affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-audit -p sweepx-core -p sweepx-event-journal --all-features -- --test-threads=1",
+      "log": "/private/tmp/sweepx-native-io-affected-tests.log",
+      "passed": 538,
+      "failed": 0,
+      "ignored": 2,
+      "successfulExecObservationsSeparate": 23
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed_with_existing_validation_gap",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "log": "/private/tmp/sweepx-native-io-workspace-tests.log",
+      "passed": 1224,
+      "doctestsIncluded": 9,
+      "failed": 0,
+      "ignored": 3,
+      "explicitlySkipped": 1,
+      "successfulExecObservationsSeparate": 23
+    },
+    {
+      "name": "default-parallel-cache-audit",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-audit --all-features",
+      "log": "/private/tmp/sweepx-native-io-parallel-tests.log",
+      "passed": 184,
+      "unit": 180,
+      "integration": 4,
+      "failed": 0,
+      "ignored": 0,
+      "successfulExecObservationsSeparate": 21
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-core -p sweepx-audit -p sweepx-event-journal --all-targets --all-features -- -D warnings",
+      "log": "/private/tmp/sweepx-native-io-affected-lint.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-native-io-host-lint.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-native-io-linux-lint.log"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-native-io-windows-lint.log"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list --allow-dirty -p sweepx-cache -p sweepx-audit -p sweepx-core -p sweepx-event-journal",
+      "log": "/private/tmp/sweepx-native-io-packages.log",
+      "newCacheModulesIncluded": [
+        "src/native/file.rs",
+        "src/native/io_tests.rs"
+      ],
+      "consumerFixtureIncluded": "tests/native_authority_resources.rs",
+      "registryDependencyBuild": false
+    },
+    {
+      "name": "fmt-diff",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check"
+    },
+    {
+      "name": "documentation-lint",
+      "result": "passed",
+      "command": "python3 scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-native-io-docs.log",
+      "markdownFiles": 54
+    },
+    {
+      "name": "staged-diff",
+      "result": "passed",
+      "command": "git diff --cached --check"
+    }
+  ],
+  "existingValidationGaps": [
+    {
+      "name": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "status": "explicitly_skipped",
+      "reason": "Independently diagnosed Foundation system-service hang in earlier unit. Test retained, no retry-to-pass or permanent-delete fallback. Does not qualify native Trash success in this unit."
+    },
+    {
+      "name": "three-opt-in-benchmarks",
+      "status": "ignored_existing",
+      "reason": "Not selected; no performance acceptance claimed"
+    },
+    {
+      "name": "linux-windows-msvc-native-qualification",
+      "status": "not_run",
+      "reason": "Prior host/runner/toolchain investigation left no native Linux/Windows runner or MSVC acceptance. GNU lint is compilation only; no substitute Android or production cfg widening."
+    },
+    {
+      "name": "real-provider-bind-mount-ofd-target-trash",
+      "status": "not_run",
+      "reason": "Mac controlled files and WAL tests do not qualify real cloud providers, Linux bind/OFD or target-platform Trash/isolation"
+    },
+    {
+      "name": "noncooperating-unlink-race-and-remaining-resource-audit",
+      "status": "open",
+      "reason": "Final pathname unlink race, scanner/discovery/fingerprint/legacy resource paths and actual RSS/host measurements remain roadmap work"
+    }
+  ],
+  "reusedEvidence": {
+    "topologyArtifact": "native-authority-admission-validation-2026-10-04.json",
+    "packages": 17,
+    "normalBuildTargetSpecificRows": 50,
+    "packagePairs": 47,
+    "basis": "No Cargo.toml or Cargo.lock diff; existing target-specific topology retained. Package lists are not registry dependency build.",
+    "docsCheckerTests": {
+      "passed": 23,
+      "basis": "Checker source/tests unchanged; previous unit result reused"
+    }
+  },
+  "diskKiB": {
+    "target": 3357904,
+    "debug": 2341408,
+    "debugGiBApprox": 2.23,
+    "oldTrashPayloadGiB": 43.323,
+    "trashEmptied": false,
+    "buildEnvironment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    }
+  },
+  "remainingPriority": "Continue cross-platform cache/resource audit; new Dart/SvelteKit work deferred."
+}

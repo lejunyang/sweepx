@@ -4,14 +4,14 @@ use super::{JournalError, ensure_local_filesystem};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use sweepx_cache::native::Directory;
+use sweepx_cache::native::{Directory, NativeFile};
 
 #[derive(Debug)]
 pub(super) struct Root {
     display: PathBuf,
     directory: Directory,
     // Retained alias for directory synchronization, never reopened through its display name.
-    file: File,
+    file: NativeFile,
 }
 
 impl Root {
@@ -45,7 +45,7 @@ impl Root {
         // This is a rejection gate, never a new I/O authority. Both directory captures use
         // no-follow ancestry and mount evidence; a same-inode bind alias is not the same root.
         let current = Directory::open(&self.display, false).map_err(|error| {
-            if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+            if sweepx_cache::native::handle_limit(&error).is_some() {
                 JournalError::Io(error)
             } else {
                 JournalError::StateIdentityChanged
@@ -64,7 +64,11 @@ impl Root {
         Ok(())
     }
 
-    pub(super) fn file(&self, name: &str, create: bool) -> Result<(File, bool), JournalError> {
+    pub(super) fn file(
+        &self,
+        name: &str,
+        create: bool,
+    ) -> Result<(NativeFile, bool), JournalError> {
         let (file, created) = self
             .directory
             .state_file(name, create)
@@ -100,7 +104,7 @@ impl super::retained_vfs::Storage for Root {
         name: super::retained_vfs::Name,
         create: bool,
         exclusive: bool,
-    ) -> io::Result<File> {
+    ) -> io::Result<NativeFile> {
         if exclusive {
             if !create {
                 return Err(io::Error::new(
@@ -152,7 +156,7 @@ impl super::retained_vfs::Storage for Root {
 }
 
 fn directory_error(path: &Path, error: io::Error) -> JournalError {
-    if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+    if sweepx_cache::native::handle_limit(&error).is_some() {
         return JournalError::Io(error);
     }
     if sweepx_cache::native::is_link_refusal(&error) {

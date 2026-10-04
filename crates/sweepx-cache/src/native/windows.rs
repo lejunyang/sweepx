@@ -1,6 +1,7 @@
 //! Windows cache I/O uses relative NT opens, retained handles and protected private DACLs.
 //! No operation reconstructs a pathname after admission. Unsupported namespaces are cache misses.
 
+use super::NativeFile;
 use super::authority::{Lease, Owner};
 use super::{EntryMetadata, commit_sync, linked_object, write_json};
 use crate::windows_state_security::{PrivateSecurityDescriptor, is_private_owned_handle};
@@ -53,7 +54,7 @@ const REFUSED: u32 = FILE_ATTRIBUTE_REPARSE_POINT
 /// Each capture/duplicate pays the shared directory/control-lock owner allowance.
 #[derive(Debug)]
 pub struct Directory {
-    file: Owner<File>,
+    file: Owner<NativeFile>,
     volume: u64,
 }
 
@@ -62,7 +63,7 @@ pub struct Directory {
 /// Releases this invocation's cache publication exclusion when dropped.
 /// Its handle shares native directory/control-lock owner admission until actual close.
 pub struct LockGuard {
-    _file: Owner<File>,
+    _file: Owner<NativeFile>,
 }
 
 impl LockGuard {
@@ -251,7 +252,7 @@ impl Directory {
         disposition: u32,
         share: u32,
         descriptor: Option<&PrivateSecurityDescriptor>,
-    ) -> io::Result<File> {
+    ) -> io::Result<NativeFile> {
         open_native(
             self.file.as_raw_handle().cast(),
             name,
@@ -326,7 +327,7 @@ impl Directory {
         Ok(LockGuard { _file: file })
     }
 
-    pub(super) fn open_file(&self, name: &str) -> io::Result<File> {
+    pub(super) fn open_file(&self, name: &str) -> io::Result<NativeFile> {
         self.private()?;
         let file = self.open_relative(
             &component(OsStr::new(name))?,
@@ -360,7 +361,7 @@ impl Directory {
     pub(crate) fn publish(
         &self,
         name: &str,
-        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        encode: impl FnOnce(&mut NativeFile) -> io::Result<()>,
     ) -> io::Result<()> {
         self.publish_mode(name, encode, false)
     }
@@ -379,7 +380,7 @@ impl Directory {
     fn publish_mode(
         &self,
         name: &str,
-        encode: impl FnOnce(&mut File) -> io::Result<()>,
+        encode: impl FnOnce(&mut NativeFile) -> io::Result<()>,
         sync: bool,
     ) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -476,6 +477,7 @@ impl Directory {
         // ReOpenFile creates an independent cursor on the same retained object. A duplicate
         // handle would share the cursor, and reopening a display path could reach a replacement.
         let original: FILE_ID_INFO = query(&self.file, FileIdInfo)?;
+        let io_lease = Lease::acquire_io()?;
         // SAFETY: the handle is live and the flags request an ordinary synchronous directory
         // handle. Reparse/provider attributes and native identity are checked before enumeration.
         let raw = unsafe {
@@ -489,7 +491,7 @@ impl Directory {
         if raw.is_null() || raw == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let directory = unsafe { File::from_raw_handle(raw.cast()) };
+        let directory = NativeFile::new(unsafe { File::from_raw_handle(raw.cast()) }, io_lease);
         let reopened: FILE_ID_INFO = query(&directory, FileIdInfo)?;
         if reopened.VolumeSerialNumber != original.VolumeSerialNumber
             || reopened.FileId.Identifier != original.FileId.Identifier
@@ -566,7 +568,8 @@ fn open_native(
     disposition: u32,
     share: u32,
     descriptor: Option<&PrivateSecurityDescriptor>,
-) -> io::Result<File> {
+) -> io::Result<NativeFile> {
+    let io_lease = Lease::acquire_io()?;
     let length = u16::try_from(
         name.len()
             .checked_mul(2)
@@ -621,7 +624,7 @@ fn open_native(
         return Err(io::Error::other("Windows returned no cache handle"));
     }
     // SAFETY: successful NtCreateFile returns a fresh, non-inheritable handle, transferred once.
-    let file = unsafe { File::from_raw_handle(file.cast()) };
+    let file = NativeFile::new(unsafe { File::from_raw_handle(file.cast()) }, io_lease);
     // NT_SUCCESS can include informational statuses. Own the returned handle before refusing
     // an unexpected positive completion, so conservative cache failure cannot leak it.
     nt_result(status)?;

@@ -216,7 +216,7 @@ pub enum CacheError {
 
 impl From<std::io::Error> for CacheError {
     fn from(error: std::io::Error) -> Self {
-        if native::authority_handle_limit(&error).is_some() {
+        if native::handle_limit(&error).is_some() {
             Self::ResourceLimit {
                 reason: ReasonCode::ResourceLimit,
             }
@@ -843,7 +843,7 @@ impl<'a> PreparedGeneration<'a> {
 }
 
 fn directory_error(error: std::io::Error, display: &Path) -> CacheError {
-    if native::authority_handle_limit(&error).is_some() {
+    if native::handle_limit(&error).is_some() {
         return error.into();
     }
     // Admission errors carry no authority. Keep genuine I/O failures distinct from a
