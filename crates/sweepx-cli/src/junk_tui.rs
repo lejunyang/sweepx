@@ -24,7 +24,7 @@ pub(crate) fn run(
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
-    cache_dir: Option<PathBuf>,
+    cache_state_root: Option<PathBuf>,
     quarantine_base: Option<PathBuf>,
 ) -> ExitCode {
     #[cfg(not(target_os = "linux"))]
@@ -37,7 +37,9 @@ pub(crate) fn run(
     } else {
         JunkSessionRequest::new(roots)
     };
-    request.cache_dir = cache_dir;
+    if let Some(root) = cache_state_root {
+        request.set_state_cache(root);
+    }
     let session = match JunkSession::start(request) {
         Ok(session) => session,
         Err(error) => {

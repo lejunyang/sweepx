@@ -12,6 +12,18 @@ pub(super) fn resource(resource: &'static str, limit: usize) -> StateError {
     StateError::SnapshotResourceLimit { resource, limit }
 }
 
+#[cfg(any(unix, windows))]
+pub(super) fn state_error(error: io::Error) -> StateError {
+    if let Some(quota) = sweepx_cache::state_directory::resource_limit(&error) {
+        StateError::StateResourceLimit {
+            resource: quota.resource,
+            limit: quota.limit,
+        }
+    } else {
+        StateError::Io(error)
+    }
+}
+
 pub(super) fn encode(snapshot: &OperationSnapshot) -> Result<Vec<u8>, StateError> {
     let mut output = Buffer {
         bytes: Vec::new(),
@@ -255,6 +267,102 @@ mod tests {
                 .is_none()
         );
         assert!(!path.join("not-created").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn aggregate_refusal_preserves_previous_snapshot_and_still_allows_load() {
+        let (_temp, path, store) = fixture();
+        let original = snapshot();
+        store.save(&original).unwrap();
+        let filename = path.join("operations").join(format!(
+            "{}.json",
+            crate::digest_hex(&original.operation_id)
+        ));
+        let previous = fs::read(&filename).unwrap();
+        store
+            .directory
+            .write_synced_bytes("protected-record", b"keep", 4)
+            .unwrap();
+        let protected = path.join("protected-record");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&protected)
+            .unwrap()
+            .set_len(536_870_912 - previous.len() as u64)
+            .unwrap();
+        let mut changed = original.clone();
+        changed.root_paths.push("/new-root".into());
+        assert!(matches!(
+            store.save(&changed),
+            Err(StateError::StateResourceLimit {
+                resource: "state_bytes",
+                limit: 536_870_912
+            })
+        ));
+        assert_eq!(fs::read(filename).unwrap(), previous);
+        assert_eq!(store.load(&original.operation_id).unwrap(), Some(original));
+        assert_eq!(
+            fs::metadata(protected).unwrap().len(),
+            536_870_912 - previous.len() as u64
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn full_state_refuses_snapshot_before_creating_operations() {
+        let (_temp, path, store) = fixture();
+        store
+            .directory
+            .write_synced_bytes("protected-record", b"keep", 4)
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path.join("protected-record"))
+            .unwrap()
+            .set_len(536_870_912)
+            .unwrap();
+        assert!(matches!(
+            store.save(&snapshot()),
+            Err(StateError::StateResourceLimit {
+                resource: "state_bytes",
+                limit: 536_870_912
+            })
+        ));
+        assert!(!path.join("operations").exists());
+        assert_eq!(
+            fs::metadata(path.join("protected-record")).unwrap().len(),
+            536_870_912
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn journal_peak_reservation_refuses_before_creating_journal_children() {
+        let (_temp, path, store) = fixture();
+        store
+            .directory
+            .write_synced_bytes("protected-record", b"keep", 4)
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path.join("protected-record"))
+            .unwrap()
+            .set_len(503_316_481)
+            .unwrap();
+        let id = crate::ValidatedOperationId::parse("quota-fixture").unwrap();
+        assert!(matches!(
+            store.create_journal(&id),
+            Err(StateError::StateResourceLimit {
+                resource: "state_bytes",
+                limit: 536_870_912
+            })
+        ));
+        assert!(!path.join("event-journals").exists());
+        assert_eq!(
+            fs::metadata(path.join("protected-record")).unwrap().len(),
+            503_316_481
+        );
     }
 
     #[cfg(any(unix, windows))]

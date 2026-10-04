@@ -9,6 +9,8 @@ pub mod windows_state_security;
 
 mod generation_state;
 mod json_budget;
+#[cfg(any(unix, windows))]
+pub mod state_directory;
 mod writer_admission;
 pub use generation_state::GenerationWriteSession;
 
@@ -36,6 +38,9 @@ pub const SPILL_THRESHOLD_BYTES: u64 = 96 * 1024 * 1024;
 pub const SPILL_OPERATION_BYTE_CAP: u64 = 192 * 1024 * 1024;
 pub const SPILL_GLOBAL_BYTE_CAP: u64 = 256 * 1024 * 1024;
 pub const STATE_DIRECTORY_BYTE_CAP: u64 = 512 * 1024 * 1024;
+/// Headroom protected from disposable cache publication for a scan's terminal journal/snapshot.
+/// This is a length admission reserve, not preallocated disk space or an audit RSS allowance.
+pub const STATE_RECORD_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
 pub const TOP_HEAVY_CHILDREN: usize = 64;
 pub const HEAVY_LEAF_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 pub const STORED_PREVIEW_SCHEMA: &str = "sweepx.preview.cache/v1";
@@ -348,11 +353,25 @@ impl CacheInspection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicGenerationStore {
     root: PathBuf,
+    state_root: Option<PathBuf>,
 }
 
 impl AtomicGenerationStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            state_root: None,
+        }
+    }
+
+    /// Stores ordinary previews under a shared SweepX state root. Writers participate in
+    /// the aggregate quota before their local cache lock; standalone `new` has local limits.
+    pub fn in_state_directory(root: impl Into<PathBuf>) -> Self {
+        let state_root = root.into();
+        Self {
+            root: state_root.join("preview-cache"),
+            state_root: Some(state_root),
+        }
     }
 
     pub fn root(&self) -> &Path {

@@ -718,17 +718,17 @@ fn main() -> ProcessExitCode {
                         return ProcessExitCode::from(2);
                     }
                 };
-                let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
+                let cache_state_root = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
                     .ok()
                     .flatten()
-                    .map(|state_dir| state_dir.join("junk-cache"));
+                    .filter(|root| root.join("junk-cache").as_os_str().len() <= 64 * 1024);
                 return junk_tui::run(
                     roots,
                     system,
                     context.locale(),
                     size_unit,
                     sort,
-                    cache_dir,
+                    cache_state_root,
                     quarantine_dir,
                 );
             }
@@ -756,10 +756,10 @@ fn main() -> ProcessExitCode {
             timings.phase("discovery");
             // Resolve the state directory for the per-root junk cache. A cache is best-effort: if
             // no state directory is available the scan simply runs uncached rather than failing.
-            let cache_dir = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
+            let cache_state_root = state_dir_from_explicit_or_default(cli.state_dir.as_deref())
                 .ok()
                 .flatten()
-                .map(|state_dir| state_dir.join("junk-cache"));
+                .filter(|root| root.join("junk-cache").as_os_str().len() <= 64 * 1024);
             return run_junk_scan(
                 &context,
                 format,
@@ -773,7 +773,7 @@ fn main() -> ProcessExitCode {
                     stdin_is_terminal,
                 },
                 trash,
-                cache_dir,
+                cache_state_root,
                 timings,
             );
         }
@@ -1220,11 +1220,16 @@ fn run_junk_scan(
     platform: Option<PlatformJunkSetup>,
     clean: JunkCleanOptions<'_>,
     move_to_trash: bool,
-    // Directory holding the per-root junk cache (`<state>/junk-cache`); `None` when caching is
-    // unavailable (non-macOS, or no usable state directory).
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cache_dir: Option<PathBuf>,
+    // Explicit common state root; history and indexes use its shared quota before local locks.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] cache_state_root: Option<
+        PathBuf,
+    >,
     mut timings: junk_timings::JunkTimings,
 ) -> ProcessExitCode {
+    #[cfg(target_os = "macos")]
+    let cache_dir = cache_state_root
+        .as_ref()
+        .map(|root| root.join("junk-cache"));
     if let Err(message) = validate_junk_mutation_environment(
         clean.enabled,
         move_to_trash,
@@ -1332,6 +1337,14 @@ fn run_junk_scan(
         &canonical_roots,
         junk_cache::CacheReader::new(cache_dir.as_deref().unwrap_or(Path::new("/nonexistent"))),
     );
+    #[cfg(target_os = "macos")]
+    let subtree_provider = if let Some(root) = &cache_state_root {
+        subtree_provider
+            .with_state_directory(root)
+            .expect("explicit absolute state scope")
+    } else {
+        subtree_provider
+    };
     let miss_indexes: Vec<usize> = (0..canonical_roots.len()).collect();
 
     let miss_roots: Vec<PathBuf> = miss_indexes
@@ -1449,7 +1462,7 @@ fn run_junk_scan(
     // Persist original observations for historical TUI presentation. Every root is freshly
     // traversed on the next report; these rows never qualify a whole-root scan shortcut.
     #[cfg(target_os = "macos")]
-    if let Some(cache) = &cache_dir
+    if cache_dir.is_some()
         && let Some(scan) = &scan
     {
         let cancel = CancellationToken::new();
@@ -1503,7 +1516,10 @@ fn run_junk_scan(
                         return Err(std::io::Error::other("cache root changed after traversal"));
                     }
                     record.bind_scope(&canonical_roots);
-                    junk_cache::write(cache, &record)
+                    junk_cache::write_in_state(
+                        cache_state_root.as_deref().expect("cache state scope"),
+                        &record,
+                    )
                 }) {
                 Ok(()) => {}
                 // A cache write failure never fails the report; the root simply rescans next run.
@@ -1534,8 +1550,8 @@ fn run_junk_scan(
     }
 
     #[cfg(target_os = "macos")]
-    if let Some(cache) = &cache_dir
-        && let Err(error) = junk_cache::prune(cache)
+    if let Some(root) = &cache_state_root
+        && let Err(error) = junk_cache::prune_in_state(root)
     {
         eprintln!("could not prune junk cache: {error}");
     }

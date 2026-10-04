@@ -40,12 +40,39 @@ struct RootState {
 /// Reads subtree indexes and FSEvents evidence for the roots being scanned.
 pub struct SubtreeCacheProvider {
     cache_dir: PathBuf,
+    state_root: Option<PathBuf>,
     roots: BTreeMap<PathBuf, RootState>,
     /// One bounded path/cursor map, shared by every root rather than copied per consumer.
     changes: Option<ChangeIndex>,
 }
 
 impl SubtreeCacheProvider {
+    /// Binds subsequent optional publication to the caller's explicit state scope. Preparation
+    /// stays read-only; a mismatched scope refuses writing rather than guessing a parent.
+    pub fn with_state_directory(mut self, root: &Path) -> std::io::Result<Self> {
+        if !root.is_absolute()
+            || root.as_os_str().len() > 64 * 1024
+            || self.cache_dir != root.join("junk-cache")
+        {
+            return Err(std::io::Error::other("junk cache state scope mismatch"));
+        }
+        self.state_root = Some(root.to_path_buf());
+        Ok(self)
+    }
+
+    fn publish_index(&self, index: &StoredSubtreeIndex) -> std::io::Result<()> {
+        match &self.state_root {
+            Some(root) => junk_cache::write_subtree_index_in_state(root, index),
+            None => junk_cache::write_subtree_index(&self.cache_dir, index),
+        }
+    }
+
+    fn publish_preview(&self, preview: &StoredJunkRoot) -> std::io::Result<()> {
+        match &self.state_root {
+            Some(root) => junk_cache::write_in_state(root, preview),
+            None => junk_cache::write(&self.cache_dir, preview),
+        }
+    }
     /// Compatibility entry point for file-index preparation. Candidate slots always miss.
     ///
     /// A one-shot event history cannot qualify current whole-root facts: recently completed
@@ -241,6 +268,7 @@ impl SubtreeCacheProvider {
         };
         Self {
             cache_dir: cache_dir.to_path_buf(),
+            state_root: None,
             roots: root_states,
             changes,
         }
@@ -258,7 +286,7 @@ impl SubtreeCacheProvider {
     ) -> std::io::Result<()> {
         let index =
             StoredSubtreeIndex::capture(scan_root, all_roots, since_event_id, covered, listings)?;
-        junk_cache::write_subtree_index(&self.cache_dir, &index)
+        self.publish_index(&index)
     }
 
     /// Publishes file facts only if capture still matches the traversal's observed native root.
@@ -300,7 +328,7 @@ impl SubtreeCacheProvider {
         if !index.matches_observed_root(source) {
             return Err(std::io::Error::other("cache root changed after traversal"));
         }
-        junk_cache::write_subtree_index(&self.cache_dir, &index)
+        self.publish_index(&index)
     }
 
     /// Publishes observed roots using direct single-root projection or bounded shared grouping.
@@ -550,7 +578,7 @@ impl SubtreeCacheProvider {
             merged.covered.insert(path.clone(), true);
             merged.listings.insert(path, saved);
         }
-        junk_cache::write_subtree_index(&self.cache_dir, &merged)?;
+        self.publish_index(&merged)?;
         if let Some(preview) = state.preview {
             let preview = preview.merge_preview(&paths, candidates, Some(cursor));
             if !preview.matches_observed_root(source) {
@@ -558,7 +586,7 @@ impl SubtreeCacheProvider {
                     "fragment preview root binding changed",
                 ));
             }
-            junk_cache::write(&self.cache_dir, &preview)?;
+            self.publish_preview(&preview)?;
         }
         Ok(true)
     }

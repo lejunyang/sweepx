@@ -832,6 +832,98 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
     shutdown(&last);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn state_quota_cache_warning_preserves_complete_current_scan_and_old_history() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture_root(&fixture);
+    let root = base.join("projects");
+    fs::create_dir(&root).unwrap();
+    let target = project(&root, "a", b"initial-payload");
+    let state_path = base.join("state");
+    let request = || {
+        let mut request = JunkSessionRequest::new(vec![root.clone()]);
+        request.include_platform_rules = false;
+        request.set_state_cache(state_path.clone());
+        request.limits.max_events = 1;
+        request
+    };
+    let cold = JunkSession::start(request()).unwrap();
+    let original = current(&drain(&cold, JunkSessionRevision(1)));
+    let (&key, original) = original.first_key_value().unwrap();
+    shutdown(&cold);
+    let cache = state_path.join("junk-cache");
+    let files = || {
+        fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let previous = files();
+    assert!(previous.keys().any(|name| name != ".lock"));
+    let state = sweepx_cache::native::Directory::open(&state_path, false).unwrap();
+    state
+        .write_synced_bytes("protected-record", b"keep", 4)
+        .unwrap();
+    let accounted = sweepx_cache::state_directory::StateWriteSession::capture(&state)
+        .unwrap()
+        .usage()
+        .bytes;
+    // A sparse ordinary file supplies an independent total-length oracle without allocating
+    // hundreds of MiB. Cache growth must preserve the terminal-record reserve at this boundary.
+    let protected_length = 503_316_480 - (accounted - 4);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(state_path.join("protected-record"))
+        .unwrap()
+        .set_len(protected_length)
+        .unwrap();
+    fs::write(target.join("payload"), b"a larger fresh payload").unwrap();
+    let warm = JunkSession::start(request()).unwrap();
+    let events = drain(&warm, JunkSessionRevision(1));
+    shutdown(&warm);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        JunkSessionEventKind::CacheWarning(failure) if failure.code == "cache_write_failed"
+    )));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    let refreshed = current(&events);
+    let refreshed = &refreshed[&key];
+    assert!(refreshed.complete());
+    assert_ne!(
+        original.directory_aggregate().unwrap().scan_id,
+        refreshed.directory_aggregate().unwrap().scan_id
+    );
+    let length: u128 = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
+        .sum();
+    assert_eq!(
+        refreshed.logical_bytes(),
+        &sweepx_platform::known_u128(length)
+    );
+    assert_eq!(files(), previous);
+    assert_eq!(
+        fs::metadata(state_path.join("protected-record"))
+            .unwrap()
+            .len(),
+        protected_length
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts() {

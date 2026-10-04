@@ -71,6 +71,23 @@ impl LockGuard {
 }
 
 impl Directory {
+    /// Compares retained directory identity and privacy without resolving display paths.
+    pub(crate) fn same_retained_directory(&self, other: &Self) -> io::Result<bool> {
+        self.private()?;
+        other.private()?;
+        let left: FILE_ID_INFO = query(&self.file, FileIdInfo)?;
+        let right: FILE_ID_INFO = query(&other.file, FileIdInfo)?;
+        Ok(left.VolumeSerialNumber == right.VolumeSerialNumber
+            && left.FileId.Identifier == right.FileId.Identifier)
+    }
+
+    /// Share-none prevents lock-file replacement; query our retained file without reopening it.
+    pub(crate) fn held_lock_bytes(&self, lock: &LockGuard) -> io::Result<u64> {
+        self.private()?;
+        self.valid_file(&lock._file)?;
+        lock.encoded_bytes()
+    }
+
     /// Duplicates retained authority without resolving a display pathname again.
     pub(crate) fn retain(&self) -> io::Result<Self> {
         self.private()?;

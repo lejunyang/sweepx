@@ -179,3 +179,17 @@ pub fn write_subtree_index(cache_dir: &Path, index: &StoredSubtreeIndex) -> io::
         Limits::default(),
     )
 }
+
+/// Publishes optional file facts under the explicit shared state root and aggregate quota.
+pub fn write_subtree_index_in_state(
+    state_root: &Path,
+    index: &StoredSubtreeIndex,
+) -> io::Result<()> {
+    publish_with_state(
+        &state_root.join("junk-cache"),
+        &index_file_name(Path::new(&index.root)),
+        index,
+        Limits::default(),
+        Some(state_root),
+    )
+}

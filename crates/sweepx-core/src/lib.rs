@@ -509,6 +509,14 @@ pub enum CoreError {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    /// Aggregate state admission refused new persisted bytes or metadata visits.
+    #[error("SweepX state exceeds {resource} limit ({limit})")]
+    StateResourceLimit {
+        /// Stable unit, independent of process RSS or filesystem allocation.
+        resource: &'static str,
+        /// Maximum encoded lengths or native entry visits.
+        limit: u64,
+    },
     /// Snapshot encoded input or pre-decode JSON work admission failed; no partial DTO.
     #[error("operation snapshot exceeds {resource} limit ({limit})")]
     SnapshotResourceLimit {
@@ -592,6 +600,20 @@ pub struct DurableSnapshotStore {
     base_dir: PathBuf,
     #[cfg(any(unix, windows))]
     directory: Arc<sweepx_cache::native::Directory>,
+}
+
+#[cfg(target_os = "linux")]
+struct StateJournal {
+    // Field order closes SQLite under its stream lock before releasing the global reservation.
+    journal: EventJournal,
+    _state: sweepx_cache::state_directory::StateWriteSession,
+}
+#[cfg(target_os = "linux")]
+impl std::ops::Deref for StateJournal {
+    type Target = EventJournal;
+    fn deref(&self) -> &Self::Target {
+        &self.journal
+    }
 }
 
 impl DurableSnapshotStore {
@@ -715,27 +737,38 @@ impl DurableSnapshotStore {
     fn create_journal(
         &self,
         operation_id: &ValidatedOperationId,
-    ) -> Result<EventJournal, StateError> {
+    ) -> Result<StateJournal, StateError> {
+        let mut state = sweepx_cache::state_directory::StateWriteSession::capture(&self.directory)
+            .map_err(snapshot_store::state_error)?;
+        let existing = self.journal_root(operation_id, false)?;
+        Self::reserve_journal(&mut state, existing.as_ref())?;
         let root = self
             .journal_root(operation_id, true)?
             .expect("create returns root");
-        Ok(EventJournal::open_in(
-            root,
-            &self.journal_dir(operation_id),
-        )?)
+        let journal = EventJournal::open_in(root, &self.journal_dir(operation_id))?;
+        Ok(StateJournal {
+            journal,
+            _state: state,
+        })
     }
 
     #[cfg(target_os = "linux")]
     fn open_journal(
         &self,
         operation_id: &ValidatedOperationId,
-    ) -> Result<Option<EventJournal>, StateError> {
+    ) -> Result<Option<StateJournal>, StateError> {
         let Some(root) = self.journal_root(operation_id, false)? else {
             return Ok(None);
         };
-        EventJournal::open_existing_in(root, &self.journal_dir(operation_id))
-            .map(Some)
-            .map_err(journal_open_error)
+        let mut state = sweepx_cache::state_directory::StateWriteSession::capture(&self.directory)
+            .map_err(snapshot_store::state_error)?;
+        Self::reserve_journal(&mut state, Some(&root))?;
+        let journal = EventJournal::open_existing_in(root, &self.journal_dir(operation_id))
+            .map_err(journal_open_error)?;
+        Ok(Some(StateJournal {
+            journal,
+            _state: state,
+        }))
     }
 
     #[cfg(target_os = "linux")]
@@ -746,9 +779,50 @@ impl DurableSnapshotStore {
         let Some(root) = self.journal_root(operation_id, false)? else {
             return Ok(None);
         };
+        // Replay returns owned DTOs, so this local guard covers all SQLite work and close.
+        let mut state = sweepx_cache::state_directory::StateWriteSession::capture(&self.directory)
+            .map_err(snapshot_store::state_error)?;
+        Self::reserve_journal(&mut state, Some(&root))?;
         EventJournal::open_replay_in(root, &self.journal_dir(operation_id))
             .map(Some)
             .map_err(journal_open_error)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reserve_journal(
+        state: &mut sweepx_cache::state_directory::StateWriteSession,
+        root: Option<&sweepx_cache::native::Directory>,
+    ) -> Result<(), StateError> {
+        let mut existing = 0_u64;
+        if let Some(root) = root {
+            for name in [
+                "journal.db",
+                "journal.db-wal",
+                "journal.db-journal",
+                "journal.db-shm",
+            ] {
+                match root.metadata(name) {
+                    Ok(metadata) => {
+                        existing = existing.checked_add(metadata.bytes).ok_or(
+                            StateError::StateResourceLimit {
+                                resource: "state_bytes",
+                                limit: sweepx_cache::STATE_DIRECTORY_BYTE_CAP,
+                            },
+                        )?
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(StateError::Io(error)),
+                }
+            }
+        }
+        // Existing files already pay the inventory; reserve only the remaining journal peak.
+        // Unknown files never subtract from headroom. Do not duplicate the journal's policy.
+        state
+            .reserve(
+                sweepx_event_journal::JOURNAL_FILE_LENGTH_CAP.saturating_sub(existing),
+                if root.is_some() { 5 } else { 7 },
+            )
+            .map_err(snapshot_store::state_error)
     }
 }
 
@@ -768,7 +842,14 @@ impl SnapshotStore for DurableSnapshotStore {
         let bytes = snapshot_store::encode(snapshot)?;
         #[cfg(any(unix, windows))]
         {
-            let directory = self.operations(true)?.expect("create returns a directory");
+            let mut state =
+                sweepx_cache::state_directory::StateWriteSession::capture(&self.directory)
+                    .map_err(snapshot_store::state_error)?;
+            // Old destination and full temporary coexist. Include an absent operations child.
+            state
+                .reserve(bytes.len() as u64, 2)
+                .map_err(snapshot_store::state_error)?;
+            let directory = state.root().create_child("operations")?;
             let name = format!("{}.json", digest_hex(operation_id.as_str()));
             directory.write_synced_bytes(&name, &bytes, snapshot_store::ENCODED_CAP)?;
             Ok(())
@@ -3549,8 +3630,7 @@ fn preview_generation_store(
     if !path.is_absolute() {
         return Err(StateError::NonAbsoluteStateDir(path.to_path_buf()));
     }
-    let preview_root = path.join(PREVIEW_GENERATION_POINTER_DIR);
-    Ok(Some(AtomicGenerationStore::new(preview_root)))
+    Ok(Some(AtomicGenerationStore::in_state_directory(path)))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -6682,6 +6762,8 @@ mod tests {
         let base = fs::canonicalize(temp.path()).unwrap();
         // The fixture owns this directory; production stores refuse to repair public modes.
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        // Keep scan inputs outside the state namespace whose inventory is being bounded.
+        let state = base.join("state");
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("large.bin"), vec![0u8; 4096]).unwrap();
@@ -6692,13 +6774,13 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let store = DurableSnapshotStore::new(&base).unwrap();
+        let store = DurableSnapshotStore::new(&state).unwrap();
 
         let first = scan_with_store(
             &context,
             &ScanRequest {
                 roots: vec![root.clone()],
-                state_dir: Some(base.clone()),
+                state_dir: Some(state.clone()),
             },
             Some(&store),
         )
@@ -6715,7 +6797,7 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(base),
+                state_dir: Some(state),
             },
             Some(&store),
         )
@@ -6783,6 +6865,8 @@ mod tests {
         let base = fs::canonicalize(temp.path()).unwrap();
         #[cfg(windows)]
         let base = temp.path().to_path_buf();
+        // Keep scan inputs outside the state namespace whose inventory is being bounded.
+        let state = base.join("state");
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         let file = root.join("live.bin");
@@ -6793,14 +6877,14 @@ mod tests {
         ));
         let request = ScanRequest {
             roots: vec![root],
-            state_dir: Some(base.clone()),
+            state_dir: Some(state.clone()),
         };
         let first = scan_with_store::<MemorySnapshotStore>(&context, &request, None).unwrap();
         assert_eq!(
             first.output.summary["cachePreview"]["storeStatus"],
             "written"
         );
-        let store = preview_generation_store(Some(&base)).unwrap().unwrap();
+        let store = preview_generation_store(Some(&state)).unwrap().unwrap();
         let pointer = fs::read(store.root().join("current.json")).unwrap();
         let previous = match store.load_current().unwrap() {
             LoadResult::Hit(generation) => generation,
@@ -6857,6 +6941,8 @@ mod tests {
         let base = fs::canonicalize(temp.path()).unwrap();
         #[cfg(windows)]
         let base = temp.path().to_path_buf();
+        // Keep scan inputs outside the state namespace whose inventory is being bounded.
+        let state = base.join("state");
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         let file = root.join("current.bin");
@@ -6869,7 +6955,7 @@ mod tests {
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(base.clone()),
+                state_dir: Some(state.clone()),
             },
             None,
         )
@@ -6878,7 +6964,7 @@ mod tests {
             result.output.summary["cachePreview"]["storeStatus"],
             "written"
         );
-        let preview_root = base.join(PREVIEW_GENERATION_POINTER_DIR);
+        let preview_root = state.join(PREVIEW_GENERATION_POINTER_DIR);
         let pointer_path = preview_root.join("current.json");
         let pointer = fs::read(&pointer_path).unwrap();
         let pointer_value: Value = serde_json::from_slice(&pointer).unwrap();
@@ -6889,7 +6975,7 @@ mod tests {
         let old_generation = fs::read(&generation_path).unwrap();
         let before = result.summary.clone();
         let refused = store_stale_preview_with_projection_limits(
-            Some(&base),
+            Some(&state),
             &result.summary.roots[0].scan_id,
             &result.summary,
             &preview_projection::Limits {
@@ -6926,7 +7012,7 @@ mod tests {
             current.provenance,
             FieldProvenance::LiveObservation { .. }
         ));
-        assert_eq!(load_stale_preview(Some(&base)).status, CACHE_LOAD_MODE_HIT);
+        assert_eq!(load_stale_preview(Some(&state)).status, CACHE_LOAD_MODE_HIT);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -6935,11 +7021,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        // Keep scan inputs outside the state namespace whose inventory is being bounded.
+        let state = base.join("state");
         let root = base.join("root");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("file.txt"), b"content").unwrap();
 
-        let preview_dir = base.join(PREVIEW_GENERATION_POINTER_DIR);
+        sweepx_cache::native::Directory::open(&state, true).unwrap();
+        let preview_dir = state.join(PREVIEW_GENERATION_POINTER_DIR);
         fs::create_dir_all(preview_dir.join("generations")).unwrap();
         fs::write(
             preview_dir.join("current.json"),
@@ -6963,12 +7052,12 @@ mod tests {
             Locale::EnUs,
             sweepx_i18n::LocaleSource::Explicit,
         ));
-        let store = DurableSnapshotStore::new(&base).unwrap();
+        let store = DurableSnapshotStore::new(&state).unwrap();
         let scan = scan_with_store(
             &context,
             &ScanRequest {
                 roots: vec![root],
-                state_dir: Some(base.clone()),
+                state_dir: Some(state.clone()),
             },
             Some(&store),
         )

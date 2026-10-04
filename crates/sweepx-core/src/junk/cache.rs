@@ -55,7 +55,9 @@ pub mod publication;
 #[cfg(target_os = "macos")]
 use index::index_retained_bytes;
 #[cfg(target_os = "macos")]
-pub use index::{StoredDirListing, StoredSubtreeIndex, write_subtree_index};
+pub use index::{
+    StoredDirListing, StoredSubtreeIndex, write_subtree_index, write_subtree_index_in_state,
+};
 mod storage;
 use storage::Directory;
 pub(crate) use storage::{Limits, ReadBudget};
@@ -615,16 +617,98 @@ pub fn write(cache_dir: &Path, record: &StoredJunkRoot) -> io::Result<()> {
     )
 }
 
+/// Publishes history beneath an explicit shared state root, participating in aggregate admission.
+/// Refusal is a cache miss/update failure, never a reason to discard current scan facts.
+pub fn write_in_state(state_root: &Path, record: &StoredJunkRoot) -> io::Result<()> {
+    publish_with_state(
+        &state_root.join("junk-cache"),
+        &record_file_name(Path::new(&record.root)),
+        record,
+        Limits::default(),
+        Some(state_root),
+    )
+}
+
 fn publish(
     cache_dir: &Path,
     name: &str,
     value: &impl serde::Serialize,
     limits: Limits,
 ) -> io::Result<()> {
-    let directory = Directory::open(cache_dir, true)?;
-    let _lock = directory.lock()?;
-    directory.write_json(name, value, limits.entry_bytes)?;
+    publish_with_state(cache_dir, name, value, limits, None)
+}
+
+fn publish_with_state(
+    cache_dir: &Path,
+    name: &str,
+    value: &impl serde::Serialize,
+    limits: Limits,
+    state_root: Option<&Path>,
+) -> io::Result<()> {
+    // Count without owning another encoding; cap the actual second pass to this reservation.
+    let encoded = encoded_length(value, limits.entry_bytes)?;
+    let mut state = state_root
+        .map(|path| sweepx_cache::state_directory::StateWriteSession::open(path, true))
+        .transpose()?;
+    let directory = if let Some(state) = &mut state {
+        state.reserve_disposable(encoded as u64, 3)?;
+        state.root().create_child("junk-cache")?
+    } else {
+        Directory::open(cache_dir, true)?
+    };
+    let lock = directory.lock()?;
+    if let Some(state) = &mut state {
+        state.reserve_disposable_locked(encoded as u64, 1, &directory, &lock)?;
+    }
+    directory.write_json(name, value, encoded)?;
     prune_directory(&directory, limits)
+}
+
+fn encoded_length(value: &impl serde::Serialize, cap: usize) -> io::Result<usize> {
+    struct Counter {
+        bytes: usize,
+        cap: usize,
+    }
+    impl io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|n| *n <= self.cap)
+                .ok_or_else(|| io::Error::other("junk cache encoded byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { bytes: 0, cap };
+    serde_json::to_writer(&mut counter, value).map_err(io::Error::other)?;
+    Ok(counter.bytes)
+}
+
+/// Prunes only disposable history under the shared state exclusion. Missing state/cache
+/// creates nothing; existing integrity records and unknown state files are never removed.
+pub fn prune_in_state(state_root: &Path) -> io::Result<()> {
+    let root = match Directory::open(state_root, false) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let directory = match root.child("junk-cache") {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut state = sweepx_cache::state_directory::StateWriteSession::capture(&root)?;
+    if !state.contains_child("junk-cache", &directory)? {
+        return Err(io::Error::other(
+            "junk cache binding changed before pruning",
+        ));
+    }
+    state.reserve(0, 1)?;
+    let _lock = directory.lock()?;
+    prune_directory(&directory, Limits::default())
 }
 
 /// Evicts the least recently read root groups under count, per-root and total disk limits.

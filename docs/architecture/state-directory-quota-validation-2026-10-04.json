@@ -1,0 +1,188 @@
+{
+  "schema": "sweepx.state-directory-quota-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "896b849",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "aggregate state admission within existing cache crate; no new crate/dependency",
+    "Core ordinary previews, retained legacy snapshots and Linux journals; CLI/TUI junk history and macOS file-index publication",
+    "nonblocking global-before-component lock; inventory and publication use retained native authority; guard includes SQLite close",
+    "terminal headroom and explicit error/warning behavior without deleting integrity records"
+  ],
+  "limits": {
+    "totalFileLengthBytes": 536870912,
+    "totalNonDotEntries": 4090,
+    "protectedTerminalBytes": 33554432,
+    "protectedTerminalEntries": 8,
+    "maxNamespaceDepth": 3,
+    "note": "cooperative length/metadata admission; not physical allocation, RSS, hard kernel deadlines or noncooperating-writer containment"
+  },
+  "semantics": {
+    "inventory": "fixed known layout; unknown private ordinary single-link files count; unknown directories/unrepresentable names/unsafe or uncertain observations refuse; native dot entries have separate cursor cap",
+    "locks": "own held Windows share-none lock accounted through retained file; Unix verifies relative binding. Prune checks component binding after global lock",
+    "coexistence": "snapshot/JSON encoded length reserved before namespace/publish; old target remains counted during full temporary; cache reserve protects terminal bytes/entries even during bootstrap",
+    "journal": "existing DB/WAL/rollback/legacy SHM subtract only from the journal 32MiB peak. Owned StateJournal closes SQLite and stream lock before global guard. Existing status/replay openings participate; absent query creates nothing",
+    "cache": "standalone library APIs keep component quotas; explicit state-root APIs participate. Optional cache refusal does not fail current scan. Quota-refused generation/current pointer, snapshot and junk records preserve old bytes",
+    "retention": "no automatic operation/audit/recovery/unknown-file eviction; existing disposable component policies retained",
+    "testOracles": "ordinary read_dir/symlink_metadata totals, literal boundary values, sparse controlled files, independent exec nonblocking lock contention and actual session terminal results; child observations not counted as main tests"
+  },
+  "initialFailures": [
+    {
+      "check": "initial cache tests",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-state-quota-initial-tests.log",
+      "reason": "Linux-only public helpers unavailable on macOS; add actually shared private native identity/control-lock helpers, preserve public journal cfg"
+    },
+    {
+      "check": "initial affected lint",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-state-quota-initial-affected-lint.log",
+      "reason": "host journal referenced Linux-target-only cache dependency; Linux-gate production constant, retain independent portable test literal; unnecessary unwrap rewritten without suppression"
+    },
+    {
+      "check": "initial workspace tests",
+      "result": "exit101; four Core failures; later steps untested",
+      "log": "/private/tmp/sweepx-state-quota-workspace-tests.log",
+      "reason": "four old preview fixtures mixed scan target under state root. Global inventory correctly refused unknown directory. Isolate scan and state paths, retain all accounting/live/pointer/quarantine assertions"
+    },
+    {
+      "check": "fixture correction launcher",
+      "result": "python3 shim exit127; no edit occurred",
+      "reason": "osdk shim has no Python backend; use configured bundled runtime. Premature focused tests therefore repeated two unchanged fixture failures",
+      "log": "/private/tmp/sweepx-state-quota-preview-corrections.log"
+    },
+    {
+      "check": "first oversized-path CLI filter run",
+      "result": "exit0 but zero tests; not coverage",
+      "log": "/private/tmp/sweepx-state-quota-cli-path-test.log",
+      "reason": "adjacent Linux cfg attached to new macOS test; restore original Linux cfg and macOS-only new regression before actual run"
+    },
+    {
+      "check": "topology check draft",
+      "result": "assertion refused before artifact edits",
+      "reason": "48 counts normal/build target-specific dependency rows, not 45 unique package pairs; compare same definition and actual ^0.0.1 requirements, no manifest edits"
+    }
+  ],
+  "checks": [
+    {
+      "name": "cache-core-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-core --all-features --locked -- --test-threads=1",
+      "passed": 460,
+      "failed": 0,
+      "ignored": 2,
+      "log": "/private/tmp/sweepx-state-quota-affected-tests.log",
+      "note": "after four fixture corrections and entry-headroom test; before final cache-bootstrap and prune-lock admission refinements. Final workspace covers final code"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1196,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "independentChildObservations": 10,
+      "log": "/private/tmp/sweepx-state-quota-workspace-final-tests.log",
+      "note": "service-enabled macOS; complete shared-quota code/tests. Afterwards only CLI optional-path filter and one new CLI regression changed; final CLI suite covers them, unchanged workspace results reused. Three ignored benchmarks and diagnosed Foundation Trash skip retained"
+    },
+    {
+      "name": "workspace-host-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-state-quota-workspace-host-final-lint.log",
+      "note": "final CLI admission and regression included"
+    },
+    {
+      "name": "affected-final-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-core -p sweepx-cli -p sweepx-event-journal --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-state-quota-affected-final-lint.log"
+    },
+    {
+      "name": "workspace-linux-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-state-quota-workspace-linux-final-lint.log",
+      "note": "final code/tests, including Linux journal peak and original Linux CLI cfg; pinned local Zig0.16 wrapper; compile only, not target runtime"
+    },
+    {
+      "name": "workspace-windows-gnu-lint",
+      "result": "passed",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-state-quota-workspace-windows-final-lint.log",
+      "note": "final code/tests, correctly excludes Linux journal and macOS-only CLI regression; compile only, not MSVC/native runtime"
+    },
+    {
+      "name": "fmt-diff",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "markdownFiles": 54,
+      "note": "final 54 Markdown files; unchanged checker and prior 23 selftests reused",
+      "log": "/private/tmp/sweepx-state-quota-docs-final.log"
+    },
+    {
+      "name": "package-lists-topology",
+      "result": "passed",
+      "note": "final cache/core/CLI/journal lists; new state module/tests and final CLI regression included; 48 target-specific normal/build rows,45 unique package pairs; unchanged manifests/dependencies. List does not prove registry dependency builds",
+      "packages": 17,
+      "normalBuildDependencyRows": 48,
+      "uniquePackagePairs": 45,
+      "acyclic": true,
+      "internalReq": "^0.0.1",
+      "crates": [
+        "sweepx-cache",
+        "sweepx-core",
+        "sweepx-cli",
+        "sweepx-event-journal"
+      ]
+    },
+    {
+      "name": "oversized-cli-path-final-test",
+      "result": "passed",
+      "passed": 1,
+      "failed": 0,
+      "command": "cargo test -p sweepx-cli --all-features --locked --test cli_contract junk_oversized_optional_state_path_still_returns_current_report_without_panic -- --test-threads=1",
+      "log": "/private/tmp/sweepx-state-quota-cli-path-final-test.log"
+    },
+    {
+      "name": "cli-final-tests",
+      "result": "passed",
+      "passed": 134,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 1,
+      "command": "cargo test -p sweepx-cli --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "log": "/private/tmp/sweepx-state-quota-cli-final-tests.log",
+      "note": "final CLI code/tests; 61 unit,72 contract,1 relay, includes one new regression after workspace. 1197 distinct main tests covered across unchanged workspace and final CLI suite; not a second full workspace matrix"
+    }
+  ],
+  "build": {
+    "incremental": false,
+    "devDebug": 0,
+    "testDebug": 0,
+    "targetDuKiB": 2847488,
+    "debugDuKiB": 1837548,
+    "note": "final lean build observation; no Trash emptying or permanent payload removal"
+  },
+  "notRun": [
+    "Linux native shared-state/journal peak/OFD/bind-mount runtime; Windows native sharing/DACL/quota and MSVC; real cloud provider",
+    "existing diagnosed Foundation Trash success hang; actual target Trash/isolation success",
+    "power-loss qualification; end-to-end performance/RSS measurements"
+  ],
+  "remainingGoal": [
+    "standalone AuditStore and future spill/other state writers shared admission and retention policy; no full G-STATE-DIR qualification",
+    "Linux/Windows index validity, remaining discovery/expansion/fingerprint/legacy projection audits",
+    "target-host/provider acceptance and final noncooperating pathname/unlink races",
+    "old probe/warm-PTY/FSEvents intermittent causes and end-to-end measurements; ownership/activity evidence",
+    "new Dart/SvelteKit work deferred by user"
+  ],
+  "cleanup": "43.323GiB debug payloads previously moved through SweepX to OS Trash; no Trash emptying or permanent payload deletion this unit",
+  "designCorrections": [
+    "last review found oversized optional CLI state root could panic at provider scope binding; admit derived junk-cache path before setup and skip optional caching on refusal; real macOS argument/current-report regression passes"
+  ]
+}

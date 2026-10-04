@@ -220,7 +220,10 @@ impl Worker {
                 if job.cancel.is_cancelled() {
                     return Ok(());
                 }
-                crate::junk::cache::write(directory, &record)
+                match &self.request.cache_state_root {
+                    Some(root) => crate::junk::cache::write_in_state(root, &record),
+                    None => crate::junk::cache::write(directory, &record),
+                }
             });
             if let Err(error) = result {
                 writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
@@ -402,7 +405,10 @@ impl Worker {
                     if job.cancel.is_cancelled() {
                         return Ok(());
                     }
-                    crate::junk::cache::write(directory, &record)
+                    match &self.request.cache_state_root {
+                        Some(root) => crate::junk::cache::write_in_state(root, &record),
+                        None => crate::junk::cache::write(directory, &record),
+                    }
                 });
                 if let Err(error) = result {
                     writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(

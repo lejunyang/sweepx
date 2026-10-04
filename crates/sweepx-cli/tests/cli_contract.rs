@@ -1724,6 +1724,42 @@ fn warm_junk_reports_fresh_changes_without_waiting_for_events() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn junk_oversized_optional_state_path_still_returns_current_report_without_panic() {
+    let (_fixture, base) = duplicate_fixture();
+    let root = base.join("project");
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    let payload = root.join("target/payload");
+    fs::write(&payload, b"preserved current payload").unwrap();
+    let state_parent = base.join("oversized-state");
+    // macOS accepts this argument but native pathname lookup cannot admit the component.
+    // Optional persistence must be refused before the provider scope binding can panic.
+    let state_path = state_parent.join("a".repeat(65_536));
+    let output = cli_command()
+        .timeout(std::time::Duration::from_secs(10))
+        .args(["--format", "json", "--state-dir"])
+        .arg(&state_path)
+        .arg("junk")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = report["candidates"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["ruleId"], "rust.target");
+    assert_eq!(rows[0]["path"], root.join("target").display().to_string());
+    assert_eq!(report["incompleteSizeCount"], 0);
+    assert_eq!(fs::read(payload).unwrap(), b"preserved current payload");
+    assert!(!state_parent.exists());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn junk_scan_reports_only_marker_bound_project_artifacts() {

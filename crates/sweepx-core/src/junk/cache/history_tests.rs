@@ -70,6 +70,52 @@ fn capture(root: &Path) -> StoredJunkRoot {
 }
 
 #[test]
+fn explicit_state_history_refuses_growth_and_preserves_old_record() {
+    let (_guard, root, cache) = fixture();
+    let state_path = cache.with_file_name("state");
+    let state = Directory::open(&state_path, true).unwrap();
+    let record = capture(&root);
+    write_in_state(&state_path, &record).unwrap();
+    let filename = state_path.join("junk-cache").join(record_file_name(&root));
+    let previous = fs::read(&filename).unwrap();
+    state
+        .write_synced_bytes("protected-record", b"keep", 4)
+        .unwrap();
+    let accounted = sweepx_cache::state_directory::StateWriteSession::capture(&state)
+        .unwrap()
+        .usage()
+        .bytes;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(state_path.join("protected-record"))
+        .unwrap()
+        .set_len(503_316_480 - (accounted - 4))
+        .unwrap();
+    let error = write_in_state(&state_path, &record).unwrap_err();
+    assert_eq!(
+        sweepx_cache::state_directory::resource_limit(&error)
+            .unwrap()
+            .resource,
+        "state_bytes"
+    );
+    assert_eq!(fs::read(filename).unwrap(), previous);
+    assert_eq!(
+        fs::metadata(state_path.join("protected-record"))
+            .unwrap()
+            .len(),
+        503_316_480 - (accounted - 4)
+    );
+    let mut reader = CacheReader::new(&state_path.join("junk-cache"));
+    assert!(
+        reader
+            .historical_roots(std::slice::from_ref(&root))
+            .pop()
+            .flatten()
+            .is_some()
+    );
+}
+
+#[test]
 fn history_preserves_native_facts_but_absent_cursor_and_context_never_become_zero() {
     let (_guard, root, cache) = fixture();
     let record = capture(&root);

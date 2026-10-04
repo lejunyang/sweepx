@@ -69,8 +69,16 @@ const MAX_PAGE_COUNT: i64 = 6912;
 const MAX_DATABASE_BYTES: u64 = PAGE_SIZE as u64 * MAX_PAGE_COUNT as u64;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
+const MAX_TOTAL_BYTES: u64 = JOURNAL_FILE_LENGTH_CAP;
+// Independent portable ABI fixture has the published 32 MiB quota, without adding the
+// Linux-only native cache dependency or enabling production journals on another platform.
+#[cfg(all(test, unix, not(target_os = "linux")))]
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+/// Maximum combined DB/WAL/rollback/legacy SHM file lengths admitted for one journal.
+/// A containing state writer reserves this peak; this is not physical allocation or RSS.
+#[cfg(target_os = "linux")]
+pub const JOURNAL_FILE_LENGTH_CAP: u64 = sweepx_cache::STATE_RECORD_RESERVE_BYTES;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 const MAX_ROLLBACK_BYTES: u64 = MAX_DATABASE_BYTES + 1024 * 1024;
 #[cfg(target_os = "linux")]

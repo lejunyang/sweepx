@@ -361,6 +361,9 @@ pub struct JunkSessionRequest {
     /// Optional private Linux/macOS history directory; filesystem reuse requires macOS history.
     /// Windows currently scans fresh. All cache IO stays on the worker.
     pub cache_dir: Option<PathBuf>,
+    /// Explicit shared state scope for history writes. Must pair with `<root>/junk-cache`;
+    /// None retains the standalone cache API and its local limits.
+    pub cache_state_root: Option<PathBuf>,
     /// Storage, traversal and Git bounds.
     pub limits: JunkSessionLimits,
 }
@@ -373,6 +376,7 @@ impl JunkSessionRequest {
             project_rule_bytes: PROJECT_RULES_JSON.as_bytes().to_vec(),
             include_platform_rules: false,
             cache_dir: None,
+            cache_state_root: None,
             limits: JunkSessionLimits::default(),
         }
     }
@@ -384,6 +388,12 @@ impl JunkSessionRequest {
             include_platform_rules: true,
             ..Self::new(Vec::new())
         }
+    }
+
+    /// Selects history under the shared state quota without doing filesystem I/O on the UI.
+    pub fn set_state_cache(&mut self, root: PathBuf) {
+        self.cache_dir = Some(root.join("junk-cache"));
+        self.cache_state_root = Some(root);
     }
 }
 
@@ -422,12 +432,19 @@ impl JunkSession {
             || request.limits.max_event_bytes < 4096
             || request.limits.max_candidates == 0
             || request.limits.max_candidate_bytes == 0
+            || request.cache_state_root.as_ref().is_some_and(|root| {
+                !root.is_absolute() || request.cache_dir.as_ref() != Some(&root.join("junk-cache"))
+            })
         {
             return Err(JunkSessionControlError::InvalidRequest);
         }
         if request.roots.len() > MAX_ROOTS
             || request
                 .cache_dir
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().len() > 64 * 1024)
+            || request
+                .cache_state_root
                 .as_ref()
                 .is_some_and(|path| path.as_os_str().len() > 64 * 1024)
             || request.project_rule_bytes.capacity() > 32 * 1024
@@ -826,6 +843,13 @@ impl Worker {
                 super::cache::provider::SubtreeCacheProvider::prepare_files(
                     &directory, &paths, reader,
                 )
+            };
+            let provider = if let Some(root) = &self.request.cache_state_root {
+                provider
+                    .with_state_directory(root)
+                    .expect("validated state cache scope")
+            } else {
+                provider
             };
             (directory, cursor, provider)
         });

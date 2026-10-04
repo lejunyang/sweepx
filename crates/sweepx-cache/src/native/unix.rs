@@ -62,6 +62,14 @@ pub struct Directory {
 }
 
 impl Directory {
+    /// Accounts our own held control lock and checks its retained name binding.
+    pub(crate) fn held_lock_bytes(&self, lock: &LockGuard) -> io::Result<u64> {
+        if !self.contains_file_guarded(".lock", &lock.file)? {
+            return Err(io::Error::other("state lock binding changed"));
+        }
+        lock.encoded_bytes()
+    }
+
     fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         let mount = mount::for_fd(fd.as_raw_fd())?;
@@ -380,9 +388,19 @@ impl Directory {
     /// satisfy their captured private/native contract; missing evidence returns an error.
     #[cfg(target_os = "linux")]
     pub fn same_object(&self, other: &Self) -> io::Result<bool> {
+        self.same_retained_directory(other)
+    }
+
+    // Shared quota accounting compares captured objects, not recovered display paths.
+    // Linux adds its captured mount identity; other Unix retains the existing device contract.
+    pub(crate) fn same_retained_directory(&self, other: &Self) -> io::Result<bool> {
         let left = self.private()?;
         let right = other.private()?;
-        Ok(self.mount == other.mount && left.dev() == right.dev() && left.ino() == right.ino())
+        #[cfg(target_os = "linux")]
+        if self.mount != other.mount {
+            return Ok(false);
+        }
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
     }
 
     /// Checks one Linux relative binding against an already retained private file, including
@@ -392,7 +410,6 @@ impl Directory {
         self.contains_file_guarded(name, file)
     }
 
-    #[cfg(any(target_os = "linux", test))]
     fn contains_file_guarded(&self, name: &str, file: &File) -> io::Result<bool> {
         let relative = self.accounting_metadata_guarded(name)?;
         #[cfg(target_os = "linux")]

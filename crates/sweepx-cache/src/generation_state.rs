@@ -48,6 +48,8 @@ pub struct GenerationWriteSession {
     display: PathBuf,
     inventory: Inventory,
     limits: Limits,
+    // Global exclusion outlives all component handles and the local lock.
+    state: Option<crate::state_directory::StateWriteSession>,
 }
 
 impl AtomicGenerationStore {
@@ -61,15 +63,46 @@ impl AtomicGenerationStore {
 
 impl GenerationWriteSession {
     fn open(store: &AtomicGenerationStore, limits: Limits) -> Result<Self, CacheError> {
-        let root = native::Directory::open(store.root(), true)
-            .map_err(|error| directory_error(error, store.root()))?;
-        Self::open_retained(root, store, limits)
+        let mut state = store
+            .state_root
+            .as_ref()
+            .map(|path| crate::state_directory::StateWriteSession::open(path, true))
+            .transpose()?;
+        let root = if let Some(state) = &mut state {
+            // Include private child/control names before creating an initially absent cache.
+            state.reserve_disposable(0, 3)?;
+            state.root().create_child("preview-cache")?
+        } else {
+            native::Directory::open(store.root(), true)
+                .map_err(|error| directory_error(error, store.root()))?
+        };
+        Self::open_with_state(root, store, limits, state)
     }
 
     fn open_retained(
         root: native::Directory,
         store: &AtomicGenerationStore,
         limits: Limits,
+    ) -> Result<Self, CacheError> {
+        let mut state = store
+            .state_root
+            .as_ref()
+            .map(|path| crate::state_directory::StateWriteSession::open(path, false))
+            .transpose()?;
+        if let Some(state) = &mut state {
+            if !state.contains_child("preview-cache", &root)? {
+                return Err(CacheError::InsecurePath(store.root().to_path_buf()));
+            }
+            state.reserve_disposable(0, 3)?;
+        }
+        Self::open_with_state(root, store, limits, state)
+    }
+
+    fn open_with_state(
+        root: native::Directory,
+        store: &AtomicGenerationStore,
+        limits: Limits,
+        state: Option<crate::state_directory::StateWriteSession>,
     ) -> Result<Self, CacheError> {
         let lock = root.lock()?;
         let generations = root
@@ -88,6 +121,7 @@ impl GenerationWriteSession {
             display: store.root().to_path_buf(),
             inventory: Inventory::default(),
             limits,
+            state,
         };
         session.refresh()?;
         session.prune(0, 0, 0)?;
@@ -234,7 +268,15 @@ impl GenerationWriteSession {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(CacheError::Io(error)),
         }
-        self.prune(added_bytes, 1, 2)
+        self.prune(added_bytes, 1, 2)?;
+        self.reserve_state(added_bytes, 2)
+    }
+
+    fn reserve_state(&mut self, bytes: u64, entries: usize) -> Result<(), CacheError> {
+        if let Some(state) = &mut self.state {
+            state.reserve_disposable_locked(bytes, entries, &self.root, &self.lock)?;
+        }
+        Ok(())
     }
 
     pub(super) fn quarantine(
@@ -247,6 +289,10 @@ impl GenerationWriteSession {
         session.prune(
             bytes.len() as u64,
             0,
+            if session.quarantine.is_none() { 2 } else { 1 },
+        )?;
+        session.reserve_state(
+            bytes.len() as u64,
             if session.quarantine.is_none() { 2 } else { 1 },
         )?;
         if session.quarantine.is_none() {
@@ -480,6 +526,47 @@ mod tests {
             fs::read(store.quarantine_dir().join("keep.corrupt.json")).unwrap(),
             b"quarantine evidence"
         );
+    }
+
+    #[test]
+    fn aggregate_cache_refusal_protects_sibling_records_and_current_pointer() {
+        let fixture = TestTempDir::new();
+        let store = AtomicGenerationStore::in_state_directory(fixture.path());
+        store.write_generation(&generation("current")).unwrap();
+        let pointer = fs::read(store.current_pointer_path()).unwrap();
+        let current = fs::read(store.generation_path("current")).unwrap();
+        let root = native::Directory::open(fixture.path(), false).unwrap();
+        root.write_synced_bytes("protected-record", b"keep", 4)
+            .unwrap();
+        let before = ordinary_total(fixture.path());
+        let protected = fixture.path().join("protected-record");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&protected)
+            .unwrap()
+            .set_len(503_316_480 - (before - 4))
+            .unwrap();
+        assert_eq!(ordinary_total(fixture.path()), 503_316_480);
+        assert!(matches!(store.write_generation(&generation("next")),
+            Err(CacheError::Io(error)) if crate::state_directory::resource_limit(&error).is_some()));
+        assert_eq!(fs::read(store.current_pointer_path()).unwrap(), pointer);
+        assert_eq!(fs::read(store.generation_path("current")).unwrap(), current);
+        assert!(!store.generation_path("next").exists());
+        assert_eq!(ordinary_total(fixture.path()), 503_316_480);
+        assert_eq!(
+            store.load_current().unwrap(),
+            LoadResult::Hit(generation("current"))
+        );
+    }
+
+    #[test]
+    fn shared_state_lock_refuses_cache_before_creating_its_namespace() {
+        let fixture = TestTempDir::new();
+        let store = AtomicGenerationStore::in_state_directory(fixture.path());
+        let _state =
+            crate::state_directory::StateWriteSession::open(fixture.path(), false).unwrap();
+        assert!(store.begin_write().is_err());
+        assert!(!store.root().exists());
     }
 
     #[test]

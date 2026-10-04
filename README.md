@@ -207,7 +207,9 @@ P3 executor 是 sealed、serial、deterministic 且 simulation-only：请求只�
 
 P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前运行平台的两个 Trash cell 以 `degraded` preview 报告，Linux 上 file/directory Permanent 也报告 `degraded`；link 与其他平台 Permanent 仍为 `disabled`。preview 不等于发布资格。`fixture_conformance_only`、`fake`、`stale`、`incomplete`、`placeholder` 或 `mismatched` evidence 永远不能把 mutation 标成 `qualified`；未来也只有 `real_os_qualification`、`validity.status=current` 且完整匹配精确 `QualificationKey` tuple 的 evidence 才可能使对应单元合格。
 
-`status` / `cancel` 查询缺失状态不会创建根或 `operations/`，也不会修补权限。legacy snapshot 读写复用保留原生目录句柄及 no-follow/private/provider/mount 边界；每份快照最多 8 MiB 编码、65,536 次解码前 JSON 值/键访问尝试，写入拒绝保留旧文件。它不是全进程内存或全部状态的磁盘配额。Linux journal 的目录、锁与数据库共用保留句柄和 mount 证据；查询缺失 journal 不创建文件，已有公共权限直接拒绝。私有 SQLite VFS 直接读写准入的数据库句柄，WAL/rollback 文件沿保留父目录获取并重验；实际 C 文件对象参与连接绑定，默认 VFS 不变。Linux 使用 OFD 锁，大小与身份检查不额外打开数据库。每 journal 的 32 MiB 编码长度额度包含 DB、WAL、rollback 和遗留 SHM；最多 64 个活动 VFS 上下文，不等于全部状态磁盘或进程 RSS 上限。原生 Linux/OFD 验收、最终相对 unlink 竞态、全局状态保留和目标宿主/provider 验收仍开放。发布前后请求原生刷新，提交后刷新失败不删除已发布文件，也不据此承诺断电恢复。
+`status` / `cancel` 查询缺失状态不会创建根或 `operations/`，也不会修补权限。legacy snapshot 读写复用保留原生目录句柄及 no-follow/private/provider/mount 边界；每份快照最多 8 MiB 编码、65,536 次解码前 JSON 值/键访问尝试，写入拒绝保留旧文件。它不是全进程内存或全部状态的磁盘配额。Linux journal 的目录、锁与数据库共用保留句柄和 mount 证据；查询缺失 journal 不创建文件，已有公共权限直接拒绝。私有 SQLite VFS 直接读写准入的数据库句柄，WAL/rollback 文件沿保留父目录获取并重验；实际 C 文件对象参与连接绑定，默认 VFS 不变。Linux 使用 OFD 锁，大小与身份检查不额外打开数据库。每 journal 的 32 MiB 编码长度额度包含 DB、WAL、rollback 和遗留 SHM；最多 64 个活动 VFS 上下文，不等于全部状态磁盘或进程 RSS 上限。原生 Linux/OFD 验收、最终相对 unlink 竞态、独立 audit/其他状态写入的共同额度和目标宿主/provider 验收仍开放。发布前后请求原生刷新，提交后刷新失败不删除已发布文件，也不据此承诺断电恢复。
+
+CLI/Core 的普通预览、垃圾历史及 macOS 文件索引写入现在与 operation snapshot、Linux journal 共用状态根非阻塞锁：合作写入的文件长度合计限 512 MiB，目录与文件名合计限 4,090 项，计入未知普通文件及新旧文件/临时文件共存。缓存写入保留其中 32 MiB 和 8 个条目供终态记录使用；这些是准入余量，不是预分配或物理空间保证。只遍历已知存储形状；未知目录、链接、非私有文件或不确定原生证据拒绝新写入，不改权限、不删除 operation/audit/recovery 记录。缓存拒绝仍返回当前扫描事实；终态持久化拒绝明确报错并保留旧记录。独立 library cache API 仍沿用组件额度，需显式 state-root API 才参与共同计费；独立 audit、未来 spill/其他写入及非合作式写入尚未全部接入，因此全局资源审计仍未完成。它不是 RSS 上限、硬 I/O 期限或断电恢复保证。
 
 ## Agent 权限边界
 
@@ -316,7 +318,7 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 
 普通 `scan` 的稀疏预览压缩保留原 top-K、必留边界及 Others 汇总规则，省去额度不足时反复复制和序列化全部行的开销。保存时直接写紧凑 JSON，沿用原校验摘要；实际 generation 编码最多 65 MiB，超额拒绝更新当前指针并报告缓存资源缺口，扫描事实仍保留。旧格式仍可解析，这一改造不提供删除权限。测量与边界见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
 
-普通预览与垃圾历史缓存现在共用原生目录句柄，读取、发布、损坏数据隔离和只读诊断不再逐次从显示路径打开文件。加载前限制 current 指针为 64 KiB、generation 为 65 MiB，超大输入不读取内容、不复制到隔离区，并报告缓存资源缺口；当前扫描结果仍保留。Unix 检查 owner、私有权限、普通文件与单硬链接，Windows 使用相对句柄、显式私有 DACL 和 reparse/offline/recall 拒绝。旧 JSON/checksum 兼容，原生缓存 backend 对权限不合格的对象直接拒绝；普通预览入口已去掉按路径整备权限；legacy snapshot 已接入同一原生边界；SQLite VFS 与全局状态保留仍需审计。此改造没有删除权限，也未闭合完整预览 freshness、provider 宿主行为或整体内存预算。
+普通预览与垃圾历史缓存现在共用原生目录句柄，读取、发布、损坏数据隔离和只读诊断不再逐次从显示路径打开文件。加载前限制 current 指针为 64 KiB、generation 为 65 MiB，超大输入不读取内容、不复制到隔离区，并报告缓存资源缺口；当前扫描结果仍保留。Unix 检查 owner、私有权限、普通文件与单硬链接，Windows 使用相对句柄、显式私有 DACL 和 reparse/offline/recall 拒绝。旧 JSON/checksum 兼容，原生缓存 backend 对权限不合格的对象直接拒绝；普通预览入口已去掉按路径整备权限；legacy snapshot 与 Linux SQLite 私有 VFS 已接入保留原生边界；目标宿主与其他状态路径仍需审计。此改造没有删除权限，也未闭合完整预览 freshness、provider 宿主行为或整体内存预算。
 
 普通预览写入在同一保留句柄会话内计费、发布和淘汰：最多保留四个 generation，当前代次受保护；固定检查 root、`generations/`、`quarantine/`，总计最多 4,090 个非点条目，编码文件长度与发布临时文件共用 512 MiB 额度。未知普通文件和隔离记录计入但不删除，未知目录或不确定计费拒绝更新缓存；扫描继续返回当前事实。锁竞争直接跳过缓存，现有私有权限不会被修补；generation ID 必须为新值。prepare 阶段可能淘汰非当前缓存，即使后续投影失败；当前指针仍保留。该额度不代表物理分配、全局状态目录或进程内存上限，非合作式文件系统替换及 provider 宿主行为仍需验收。
 
