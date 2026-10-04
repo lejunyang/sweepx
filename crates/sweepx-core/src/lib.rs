@@ -509,12 +509,12 @@ pub enum CoreError {
 
 #[derive(Debug, Error)]
 pub enum StateError {
-    /// Aggregate state admission refused new persisted bytes or metadata visits.
+    /// State admission refused persisted bytes, metadata visits or native authority owners.
     #[error("SweepX state exceeds {resource} limit ({limit})")]
     StateResourceLimit {
         /// Stable unit, independent of process RSS or filesystem allocation.
         resource: &'static str,
-        /// Maximum encoded lengths or native entry visits.
+        /// Maximum encoded lengths, native entry visits or retained authority handles.
         limit: u64,
     },
     /// Snapshot encoded input or pre-decode JSON work admission failed; no partial DTO.
@@ -547,7 +547,7 @@ pub enum StateError {
     #[error("invalid operation id: {0}")]
     InvalidOperationId(String),
     #[error("io error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[source] io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[cfg(target_os = "linux")]
@@ -563,6 +563,19 @@ pub enum StateError {
 /// every component of the path. Any platform without such enforcement stays fail-closed.
 pub const fn durable_state_supported() -> bool {
     cfg!(any(unix, target_os = "windows"))
+}
+
+impl From<io::Error> for StateError {
+    fn from(error: io::Error) -> Self {
+        if let Some(limit) = sweepx_cache::native::authority_handle_limit(&error) {
+            Self::StateResourceLimit {
+                resource: "native_authority_handles",
+                limit: limit as u64,
+            }
+        } else {
+            Self::Io(error)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

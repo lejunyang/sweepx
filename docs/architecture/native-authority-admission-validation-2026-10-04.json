@@ -1,0 +1,216 @@
+{
+  "schema": "sweepx.native-authority-admission-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "d3575bb",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "Shared retained native directory/control-lock owner admission across cache, snapshot, audit and Linux journal",
+    "128 slots acquired before open/duplicate/create, actual native handle closes before slot release",
+    "Preserve resource classification, existing records and native privacy/mount/provider contracts",
+    "No new crate/dependency; raw File, SQLite/scanner/temporary handles remain outside this allowance"
+  ],
+  "sources": [
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesshandlecount",
+      "checkedDate": "2026-10-04",
+      "use": "official independent executive handle count query; Windows runtime oracle compiled only, not executed"
+    }
+  ],
+  "limits": {
+    "retainedDirectoryAndControlLockOwners": 128,
+    "quotaWait": "no wait for a free slot; atomic acquisition refusal",
+    "childProcessObservationSeconds": 30,
+    "concurrentOracleWorkers": 8,
+    "attemptsPerWorker": 64
+  },
+  "semantics": {
+    "authority": "shared native Owner<File/OwnedFd> closes its handle before its Lease field. Directory root/child/retain and LockGuard acquire first; absolute ancestor captures also occupy slots. Arc references share one owner. No public cap reset or borrowed handle authority reconstructed from paths",
+    "failure": "native marker is distinct from missing, unsafe permissions and lock contention. Cache generic I/O/dir conversion maps it to existing ResourceLimit reason; Core snapshot/Audit StateResourceLimit uses native_authority_handles. Journal retains marked Io. Audit/journal path binding no longer collapses this marker into identity/privacy failure. Other error behavior unchanged; I/O sources preserved, audit retains transparent forwarding",
+    "creation": "slot refusal precedes primitive root/child/control creation. Existing shared session/cache/audit paths refuse without record eviction or permission repair. This does not assert no prior bootstrap side effects for every legacy caller",
+    "kernelOracle": "fresh exec fills literal128; ordinary /dev/fd enumeration plus fstat identifies matching directory/control inodes on macOS. Observes127 directory handles+1 live lock, then zero lock descriptors after final Arc drop. Missing/private open failures return slots. Eight real concurrent workers preserve127 copies+1 root. No production counter inspection/reset",
+    "windowsOracle": "existing SDK GetProcessHandleCount queries process executive handles at settled single-process boundaries; missing query refusal instead of assuming ordinary mkdir creates an insecure DACL. Compiled, not run",
+    "consumerOracle": "public Core integration fixture holds native cache owners, snapshot and audit together. Snapshot load/save/new state and audit integrity/manifest/new namespace refuse with literal typed limit. Ordinary old snapshot/DB bytes remain equal; clones do not release shared authority. After release read/write/integrity succeed. Windows omits unsupported audit, covers snapshot/native paths",
+    "processes": "both cap fixtures exec fresh harnesses with owned-child kill/wait and30sec observation deadline; no multithreaded fork/Rust execution, output pipes or resets",
+    "exclusions": "exported raw File duplicates (including directory_file), SQLite data/index descriptors, enumeration/query temporaries, scanner handles and total process/RSS remain outside this quota. Low remaining slots can refuse an absolute root walk. Durable terminal persistence can refuse with an explicit resource error",
+    "unchanged": "no schema/wire enum rename, publishing, permanent deletion, Trash fallback, extra crate/dependency or production platform support change",
+    "changesAfterMatrix": "only existing type rustdoc expanded after final runtime/lint checks; no behavior changed"
+  },
+  "initialFailures": [
+    {
+      "name": "unknown-fixture-directory",
+      "result": "exit101; selected main and exec child failed",
+      "log": "/private/tmp/sweepx-authority-oracle-first.log",
+      "reason": "oracle left controlled unknown empty directories before later shared state admission; production correctly refused shape. Remove only fixture directories before reuse, no production relaxation"
+    },
+    {
+      "name": "windows-unused-oracle-import",
+      "result": "exit101; later workspace steps untested",
+      "log": "/private/tmp/sweepx-authority-windows-lint.log",
+      "reason": "Path import only used by Unix fd query; gate import to Unix"
+    },
+    {
+      "name": "consumer-test-crate",
+      "result": "exit101; no tests executed",
+      "logs": [
+        "/private/tmp/sweepx-authority-consumer-tests.log",
+        "/private/tmp/sweepx-authority-workspace-tests.log",
+        "/private/tmp/sweepx-authority-host-final-lint.log"
+      ],
+      "reason": "CLI links audit only on Linux; cross-component test belonged in existing Core integration dependencies. Move fixture, use public child capture on Windows, no added dependency"
+    },
+    {
+      "name": "windows-audit-dependency-gate",
+      "result": "exit101; audit compilation failed, later workspace steps untested",
+      "log": "/private/tmp/sweepx-authority-windows-fixed-lint.log",
+      "reason": "audit new I/O conversion referenced Unix-only cache dependency without cfg; gate branch to Unix, leave audit unsupported off Unix"
+    },
+    {
+      "name": "transparent-error-source",
+      "result": "exit101; no tests executed; later workspace steps untested",
+      "logs": [
+        "/private/tmp/sweepx-authority-workspace-fixed-tests.log",
+        "/private/tmp/sweepx-authority-host-final-fixed-lint.log",
+        "/private/tmp/sweepx-authority-linux-final-fixed-lint.log",
+        "/private/tmp/sweepx-authority-windows-final-fixed-lint.log"
+      ],
+      "reason": "thiserror rejects explicit source on a transparent variant; remove only audit source attribute, preserving transparent forwarding. Cache/Core nontransparent I/O variants retain explicit source"
+    }
+  ],
+  "checks": [
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "log": "/private/tmp/sweepx-authority-workspace-final-tests.log",
+      "passed": 1223,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "successfulChildObservations": 21,
+      "expectedSigabrtChildren": 2,
+      "expectedSigkillChildren": 5,
+      "note": "final production/test source; host native services. All primary Cargo harnesses distinguished from nested exec summaries"
+    },
+    {
+      "name": "affected-tests-reused",
+      "result": "passed",
+      "command": "same passing workspace command; select audit/cache/core/journal primary harnesses",
+      "log": "/private/tmp/sweepx-authority-workspace-final-tests.log",
+      "passed": 537,
+      "failed": 0,
+      "ignored": 2,
+      "note": "65audit+4auditcrash+114cache+350core+1Core consumer integration+3host journal. Reuse exact passing full-workspace source/results rather than rerun matrix"
+    },
+    {
+      "name": "parallel-cache-audit",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-audit --lib --all-features --locked",
+      "log": "/private/tmp/sweepx-authority-parallel-tests.log",
+      "passed": 179,
+      "failed": 0,
+      "ignored": 0,
+      "successfulChildObservations": 19,
+      "note": "65audit+114cache with default parallel scheduling, including isolated native quota oracle"
+    },
+    {
+      "name": "consumer-focused",
+      "result": "passed",
+      "command": "cargo test -p sweepx-core --test native_authority_resources --all-features --locked -- --nocapture --test-threads=1",
+      "log": "/private/tmp/sweepx-authority-consumer-final-tests.log",
+      "passed": 1,
+      "successfulChildObservations": 1,
+      "note": "subsequent simplification routes native marker through the same central I/O conversion; final workspace covers final source"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-audit -p sweepx-core -p sweepx-event-journal --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-authority-affected-final-lint.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-authority-host-lint-pass.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-authority-linux-lint-pass.log",
+      "note": "Zig0.16 installed helper follows repo script; final production/tests compiled, no native runtime qualification"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-authority-windows-lint-pass.log",
+      "note": "same helper with GNU mapping; includes native Windows cap and consumer fixtures. Not MSVC/runtime"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list -p sweepx-cache -p sweepx-audit -p sweepx-core -p sweepx-event-journal --allow-dirty --locked",
+      "log": "/private/tmp/sweepx-authority-package-files.log",
+      "note": "new authority module/native fixture and Core integration fixture present. No manifest change; reuse17packages/50target-specific normal-build rows/47pairs topology. Not registry build"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "command": "PYTHONDONTWRITEBYTECODE=1 <bundled-python> scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-authority-docs.log",
+      "note": "unchanged checker self-tests reuse prior23passes",
+      "markdownFiles": 54
+    },
+    {
+      "name": "format-and-diff",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check",
+        "git diff --cached --check"
+      ],
+      "note": "format and tracked diff passed; staged diff checked again before commit"
+    }
+  ],
+  "validationGaps": [
+    {
+      "name": "known-Foundation-Trash-success",
+      "result": "explicitly skipped",
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previous independently diagnosed Foundation service hang; preserved test/no permanent deletion fallback, original evidence in prior artifacts"
+    },
+    {
+      "name": "benchmarks",
+      "result": "3 existing ignored",
+      "tests": [
+        "benchmark_batched_historical_root_reads",
+        "benchmark_multi_root_cache_preparation",
+        "native_bulk_enumeration_benchmark_smoke"
+      ],
+      "reason": "no new performance claim"
+    },
+    {
+      "name": "native-targets",
+      "result": "not executed",
+      "reason": "no native Linux/Windows/MSVC runner in prior setup inventory. GNU compile does not prove SDK runtime, private DACL oracle, OFD/bind mount, real provider or target Trash behavior"
+    },
+    {
+      "name": "resource-completeness",
+      "result": "open",
+      "reason": "raw exported File, SQLite/index, scanner/enumeration/query handles, other producers, aggregate retention and RSS/end-to-end remain work;128owner cap is not total process handles"
+    }
+  ],
+  "disk": {
+    "buildEnvironment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "targetKiB": 3272212,
+    "debugKiB": 2255748,
+    "measurement": "du -sk target target/debug after host/target checks and parallel tests; not scan performance",
+    "trash": "previously moved43.323 GiB remains in OS Trash; not emptied/permanently deleted; relocation is not physical volume free-space recovery"
+  },
+  "deferred": "new Dart/SvelteKit work remains deferred per user priority"
+}

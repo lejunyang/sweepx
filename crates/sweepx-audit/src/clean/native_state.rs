@@ -69,8 +69,13 @@ impl Root {
     pub(super) fn binding(&self) -> Result<(), AuditError> {
         #[cfg(unix)]
         {
-            let current =
-                Directory::open(&self.display, false).map_err(|_| AuditError::StoreMismatch)?;
+            let current = Directory::open(&self.display, false).map_err(|error| {
+                if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+                    error.into()
+                } else {
+                    AuditError::StoreMismatch
+                }
+            })?;
             if !self.directory.same_object(&current)? {
                 return Err(AuditError::StoreMismatch);
             }

@@ -165,6 +165,8 @@ cargo run -p sweepx-cli -- \
 
 CLI/Core 的普通预览、垃圾历史及 macOS 文件索引写入现在与 operation snapshot、Linux journal 共用状态根非阻塞锁：合作写入的文件长度合计限 512 MiB，目录与文件名合计限 4,090 项，计入未知普通文件及新旧文件/临时文件共存。缓存写入保留其中 32 MiB 和 8 个条目供终态记录使用；这些是准入余量，不是预分配或物理空间保证。只遍历已知存储形状；未知目录、链接、非私有文件或不确定原生证据拒绝新写入，不改权限、不删除 operation/audit/recovery 记录。缓存拒绝仍返回当前扫描事实；终态持久化拒绝明确报错并保留旧记录。独立 library cache API 仍沿用组件额度，需显式 state-root API 才参与共同计费；旧 component-only audit API、未来 spill/其他写入及非合作式写入尚未全部接入，因此全局资源审计仍未完成。它不是 RSS 上限、硬 I/O 期限或断电恢复保证。
 
+原生 I/O 层的保留目录及控制锁对象现在共用 128 个 owner 名额，打开、复制或创建前申请，实际句柄关闭后才返还。共享对象的引用不重复计费；额度耗尽时，普通预览按资源不足跳过缓存，快照和审计明确报告 `native_authority_handles`，保留旧记录。根与子目录、Windows 保留副本以及控制锁均参与；祖先遍历临时捕获也占用名额，因此剩余空间不足以完成打开时会拒绝。该额度不覆盖导出的裸 `File`、SQLite 数据文件、枚举/查询临时句柄或扫描器，并非全进程句柄/RSS 上限。
+
 显式 `AuditStore::open_in_state_dir` 现把固定 `audit/` 或 `permanent-delete-audit/` 接入上述共享额度，Linux `delete` 已采用该入口。创建前预留剩余 81 MiB SQL 增长及缺失名称；额度不足不创建审计子目录，但可能已创建零长度控制锁。短 SQL 和整个执行/恢复声明持有状态锁，直至数据库关闭和策略恢复；后续 SQL 复查控制锁身份及进程归属，竞争缓存写入直接拒绝。计划以借用的数据结构流式编码，最多 8 MiB，通过原生独占 rename 发布，已有或竞争创建的计划不被覆盖；提交前编码/恢复拒绝清理本次临时文件，提交后刷新失败则保留新记录。旧 `AuditStore::open` 仍只有组件额度，不能推断父状态根。全局句柄准入、其他写入/保留政策、RSS 和原生目标宿主验收继续开放。
 
 Linux/macOS AuditStore 现使用共同的保留 SQLite VFS。实际打开的数据库 FD 在 SQL 开始前核对身份，连接另检查真实 C 文件对象；DB/WAL/rollback/SHM 沿保留目录操作，写入、truncate 和索引扩展在回调中受额度限制。DB 限 64 MiB、WAL 限 16 MiB、索引限 1 MiB，四类文件总长限 81 MiB；保留 NORMAL WAL、旧 wire/schema 和并发读者视图。macOS 禁止物化策略覆盖完整同步 SQL、映射访问和关闭区间，成功恢复后才返回结果或发布 live claim；消费执行也在关闭完成后释放排他锁。拒绝不整备权限或淘汰审计记录，Windows audit 仍不支持。

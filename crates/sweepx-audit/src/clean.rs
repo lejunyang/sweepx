@@ -1490,12 +1490,12 @@ pub enum AuditError {
     UnsupportedPlatform,
     #[error("audit store filesystem is remote or has unsupported locality")]
     UnsupportedFilesystem,
-    /// Cooperating aggregate state admission exhausted a logical byte/name limit.
+    /// State admission exhausted a logical byte/name or retained native authority limit.
     #[error("SweepX state exceeds {resource} limit ({limit})")]
     StateResourceLimit {
-        /// Stable admission unit: `state_bytes` or `state_entries`.
+        /// Stable admission unit: `state_bytes`, `state_entries` or `native_authority_handles`.
         resource: &'static str,
-        /// Logical encoded lengths or entry visits, not physical space or RSS.
+        /// Encoded lengths, entry visits or authority owners, not physical space or RSS.
         limit: u64,
     },
     /// Immutable plan manifests must use a store with explicit state-root admission.
@@ -1605,7 +1605,20 @@ pub enum AuditError {
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for AuditError {
+    fn from(error: std::io::Error) -> Self {
+        #[cfg(unix)]
+        if let Some(limit) = sweepx_cache::native::authority_handle_limit(&error) {
+            return Self::StateResourceLimit {
+                resource: "native_authority_handles",
+                limit: limit as u64,
+            };
+        }
+        Self::Io(error)
+    }
 }
 
 impl AuditStore {
@@ -2754,7 +2767,7 @@ fn state_admission_error(error: std::io::Error) -> AuditError {
     } else if error.kind() == std::io::ErrorKind::WouldBlock {
         AuditError::ConcurrentWriterDenied
     } else {
-        AuditError::Io(error)
+        error.into()
     }
 }
 

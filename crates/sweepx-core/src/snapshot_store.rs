@@ -20,7 +20,7 @@ pub(super) fn state_error(error: io::Error) -> StateError {
             limit: quota.limit,
         }
     } else {
-        StateError::Io(error)
+        error.into()
     }
 }
 
@@ -154,6 +154,9 @@ fn check_shape(bytes: &[u8]) -> Result<(), StateError> {
 
 #[cfg(any(unix, windows))]
 pub(super) fn native_error(path: &std::path::Path, error: io::Error) -> StateError {
+    if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+        return error.into();
+    }
     if sweepx_cache::native::is_link_refusal(&error) {
         return StateError::SymlinkStateDir(path.to_path_buf());
     }

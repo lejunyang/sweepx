@@ -6,6 +6,25 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
+#[cfg(any(unix, windows))]
+mod authority;
+#[cfg(all(test, any(unix, windows)))]
+mod authority_tests;
+
+/// Identifies exhaustion of the shared 128 retained directory/control-lock owner slots.
+/// The quota excludes exported `File` duplicates, SQLite data files and other process handles.
+/// Refusal is distinct from unsafe permissions, absence or lock contention.
+pub fn authority_handle_limit(error: &io::Error) -> Option<usize> {
+    #[cfg(any(unix, windows))]
+    {
+        authority::limit(error)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = error;
+        None
+    }
+}
 
 #[derive(Debug)]
 struct LinkedObject;

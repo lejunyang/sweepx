@@ -209,9 +209,21 @@ pub enum CacheError {
     #[error("preview cache is quarantined after corruption at {path}")]
     Quarantined { path: PathBuf },
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<std::io::Error> for CacheError {
+    fn from(error: std::io::Error) -> Self {
+        if native::authority_handle_limit(&error).is_some() {
+            Self::ResourceLimit {
+                reason: ReasonCode::ResourceLimit,
+            }
+        } else {
+            Self::Io(error)
+        }
+    }
 }
 
 /// Legacy per-volume journal hints retained for generation wire/checksum compatibility.
@@ -831,6 +843,9 @@ impl<'a> PreparedGeneration<'a> {
 }
 
 fn directory_error(error: std::io::Error, display: &Path) -> CacheError {
+    if native::authority_handle_limit(&error).is_some() {
+        return error.into();
+    }
     // Admission errors carry no authority. Keep genuine I/O failures distinct from a
     // linked, public or unsupported directory without trying to repair its permissions.
     match error.kind() {

@@ -44,8 +44,13 @@ impl Root {
     pub(super) fn binding(&self) -> Result<(), JournalError> {
         // This is a rejection gate, never a new I/O authority. Both directory captures use
         // no-follow ancestry and mount evidence; a same-inode bind alias is not the same root.
-        let current = Directory::open(&self.display, false)
-            .map_err(|_| JournalError::StateIdentityChanged)?;
+        let current = Directory::open(&self.display, false).map_err(|error| {
+            if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+                JournalError::Io(error)
+            } else {
+                JournalError::StateIdentityChanged
+            }
+        })?;
         if !self.directory.same_object(&current)? {
             return Err(JournalError::StateIdentityChanged);
         }
@@ -147,6 +152,9 @@ impl super::retained_vfs::Storage for Root {
 }
 
 fn directory_error(path: &Path, error: io::Error) -> JournalError {
+    if sweepx_cache::native::authority_handle_limit(&error).is_some() {
+        return JournalError::Io(error);
+    }
     if sweepx_cache::native::is_link_refusal(&error) {
         return JournalError::SymlinkRejected(path.display().to_string());
     }

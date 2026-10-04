@@ -1,5 +1,6 @@
 //! Unix no-follow operations beneath retained cache directory descriptors.
 
+use super::authority::{Lease, Owner};
 use super::{AccountedFile, EntryMetadata, commit_sync, linked_object, with_cache_io, write_json};
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests;
@@ -19,8 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// but an in-progress fork/spawn can still hold a duplicate open file description. Closing only
 /// our descriptor would leave its flock alive in that child until exec/exit.
 /// Releases this invocation's cache publication exclusion when dropped.
+/// Its descriptor shares native directory/control-lock owner admission until actual close.
 pub struct LockGuard {
-    file: File,
+    file: Owner<File>,
     owner: libc::pid_t,
 }
 
@@ -64,9 +66,10 @@ pub struct StateFileMetadata {
 }
 
 /// A private cache directory retained by native handle; display paths are not reopened.
+/// Each capture/duplicate pays the shared directory/control-lock owner allowance.
 #[derive(Debug)]
 pub struct Directory {
-    fd: OwnedFd,
+    fd: Owner<OwnedFd>,
     // Handle lifetime pins the captured mount; do not persist/recover this from display paths.
     #[cfg(target_os = "linux")]
     mount: mount::Identity,
@@ -94,7 +97,7 @@ impl Directory {
         lock.encoded_bytes()
     }
 
-    fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+    fn from_owned(fd: Owner<OwnedFd>) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         let mount = mount::for_fd(fd.as_raw_fd())?;
         Ok(Self {
@@ -108,7 +111,8 @@ impl Directory {
     /// The caller owns one additional directory descriptor and must bound its lifetime/count.
     pub fn retain(&self) -> io::Result<Self> {
         self.private()?;
-        Self::from_owned(self.fd.try_clone()?)
+        let lease = Lease::acquire()?;
+        Self::from_owned(Owner::new(self.fd.try_clone()?, lease))
     }
 
     /// Verifies a retained child's current binding and private authority beneath this parent.
@@ -246,6 +250,7 @@ impl Directory {
         if !path.is_absolute() {
             return Err(io::Error::other("cache path must be absolute"));
         }
+        let lease = Lease::acquire()?;
         let slash = c"/";
         // SAFETY: slash is NUL terminated; returned descriptor is checked and owned below.
         let fd = unsafe {
@@ -254,7 +259,7 @@ impl Directory {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        let mut current = Self::from_owned(owned(fd)?)?;
+        let mut current = Self::from_owned(Owner::new(owned(fd)?, lease))?;
         for part in path.components() {
             let Component::Normal(part) = part else {
                 if matches!(part, Component::RootDir | Component::CurDir) {
@@ -263,6 +268,7 @@ impl Directory {
                 return Err(io::Error::other("invalid cache path component"));
             };
             let name = CString::new(part.as_encoded_bytes()).map_err(io::Error::other)?;
+            let lease = Lease::acquire()?;
             let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             // SAFETY: retained directory plus one native component; no path authority is reconstructed.
             let mut next = unsafe { libc::openat(current.fd.as_raw_fd(), name.as_ptr(), flags) };
@@ -294,7 +300,7 @@ impl Directory {
                 }
                 return Err(error);
             }
-            current = Self::from_owned(owned(next)?)?;
+            current = Self::from_owned(Owner::new(owned(next)?, lease))?;
         }
         let metadata = File::from(current.fd.try_clone()?).metadata()?;
         // SAFETY: geteuid has no pointer arguments or side effects.
@@ -312,6 +318,10 @@ impl Directory {
     }
 
     fn child_guarded(&self, name: &str) -> io::Result<Self> {
+        self.child_guarded_with_lease(name, Lease::acquire()?)
+    }
+
+    fn child_guarded_with_lease(&self, name: &str, lease: Lease) -> io::Result<Self> {
         self.private()?;
         let name = component(name)?;
         // SAFETY: no-follow basename beneath this retained directory; returned fd is owned.
@@ -322,7 +332,7 @@ impl Directory {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
-        let child = Self::from_owned(owned(fd)?)?;
+        let child = Self::from_owned(Owner::new(owned(fd)?, lease))?;
         #[cfg(target_os = "linux")]
         self.mount.require_same(child.mount)?;
         let meta = File::from(child.fd.try_clone()?).metadata()?;
@@ -344,13 +354,14 @@ impl Directory {
     fn create_child_guarded(&self, name: &str) -> io::Result<Self> {
         self.private()?;
         let native = component(name)?;
+        let lease = Lease::acquire()?;
         // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
         if unsafe { libc::mkdirat(self.fd.as_raw_fd(), native.as_ptr(), 0o700) } < 0
             && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
         {
             return Err(io::Error::last_os_error());
         }
-        self.child(name)
+        self.child_guarded_with_lease(name, lease)
     }
 
     /// Nonblocking advisory serialization of publication and eviction across invocations.
@@ -361,6 +372,7 @@ impl Directory {
 
     fn lock_guarded(&self) -> io::Result<LockGuard> {
         self.private()?;
+        let lease = Lease::acquire()?;
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {
             libc::openat(
@@ -374,7 +386,7 @@ impl Directory {
                 0o600,
             )
         };
-        let file = File::from(owned(fd)?);
+        let file = Owner::new(File::from(owned(fd)?), lease);
         #[cfg(target_os = "linux")]
         self.mount.require_same(mount::for_fd(file.as_raw_fd())?)?;
         let meta = file.metadata()?;
