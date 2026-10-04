@@ -95,7 +95,7 @@ impl Directory {
     /// Duplicates retained authority without resolving a display pathname again.
     pub(crate) fn retain(&self) -> io::Result<Self> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         Ok(Self {
             file: Owner::new(self.file.try_clone()?, lease),
             volume: self.volume,
@@ -185,7 +185,7 @@ impl Directory {
         let name: Vec<u16> = format!("\\??\\{}:\\", char::from(drive))
             .encode_utf16()
             .collect();
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let file = open_native(
             ptr::null_mut(),
             &name,
@@ -211,7 +211,7 @@ impl Directory {
                 return Err(io::Error::other("invalid cache path component"));
             };
             let name = component(part)?;
-            let lease = Lease::acquire()?;
+            let lease = Lease::acquire_storage_authority()?;
             let next = match current.open_relative(
                 &name,
                 DIR_ACCESS,
@@ -267,7 +267,7 @@ impl Directory {
     /// Opens a private child directory relative to this retained handle.
     pub fn child(&self, name: &str) -> io::Result<Self> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let file = self.open_relative(
             &component(OsStr::new(name))?,
             DIR_ACCESS,
@@ -288,7 +288,7 @@ impl Directory {
     /// Creates or admits a private child beneath this retained directory.
     pub fn create_child(&self, name: &str) -> io::Result<Self> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let descriptor = PrivateSecurityDescriptor::new()?;
         let file = self.open_relative(
             &component(OsStr::new(name))?,
@@ -311,7 +311,7 @@ impl Directory {
     /// Nonblocking publication exclusion; contention makes the cache unavailable.
     pub fn lock(&self) -> io::Result<LockGuard> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let descriptor = PrivateSecurityDescriptor::new()?;
         // Share-none makes contention fail synchronously; never truncate or replace a lock file.
         let file = self.open_relative(

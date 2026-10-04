@@ -39,6 +39,8 @@ use thiserror::Error;
 
 /// Bounded, handle-relative content streams for explicit content analyses.
 pub mod content;
+/// Nonblocking native I/O admission shared by scanning and private storage.
+pub mod native_handles;
 pub mod privilege;
 
 pub use content::{RegularFileStreamRequest, RegularFileStreamResult, stream_bound_regular_file};
@@ -816,6 +818,9 @@ pub enum BoundedRegularFileReadError {
     ChangedDuringRead(Box<RegularFileObservationMismatch>),
     #[error("provider unavailable or offline: {0}")]
     ProviderOrOffline(String),
+    /// Shared native I/O admission was exhausted before opening the content file.
+    #[error("native resource limit during bounded regular-file read: {0:?}")]
+    ResourceLimit(native_handles::HandleLimit),
     #[error("io error during bounded regular-file read: {detail}")]
     Io {
         detail: String,
@@ -832,6 +837,9 @@ impl BoundedRegularFileReadError {
     }
 
     pub fn io(error: std::io::Error) -> Self {
+        if let Some(limit) = native_handles::handle_limit(&error) {
+            return Self::ResourceLimit(limit);
+        }
         let detail = error.to_string();
         let io_kind = Some(error.kind());
         Self::Io { detail, io_kind }
@@ -1072,6 +1080,9 @@ pub enum PlatformError {
 
 impl PlatformError {
     pub fn io(path: impl Into<PathBuf>, error: std::io::Error) -> Self {
+        if native_handles::handle_limit(&error).is_some() {
+            return Self::ResourceLimit(error.to_string());
+        }
         let detail = error.to_string();
         let io_kind = Some(error.kind());
         Self::Io {
@@ -1403,6 +1414,9 @@ pub fn unsupported_u128(reason: ReasonCode) -> ByteValue {
 }
 
 pub fn error_kind_for_io(error: &std::io::Error) -> ErrorKind {
+    if native_handles::handle_limit(error).is_some() {
+        return ErrorKind::ResourceLimit;
+    }
     match error.kind() {
         std::io::ErrorKind::PermissionDenied => ErrorKind::AccessDenied,
         std::io::ErrorKind::NotFound => ErrorKind::NotFound,
@@ -1412,6 +1426,9 @@ pub fn error_kind_for_io(error: &std::io::Error) -> ErrorKind {
 }
 
 pub fn reason_for_io(error: &std::io::Error) -> ReasonCode {
+    if native_handles::handle_limit(error).is_some() {
+        return ReasonCode::ResourceLimit;
+    }
     match error.kind() {
         std::io::ErrorKind::PermissionDenied => ReasonCode::StrictReadOnly,
         std::io::ErrorKind::NotFound => ReasonCode::UnknownIdentity,

@@ -3278,7 +3278,8 @@ fn map_file_read_error(error: BoundedRegularFileReadError) -> ReadAttempt {
         }
         BoundedRegularFileReadError::IdentityMismatch(_) => LocatorReadFailure::IdentityMismatch,
         BoundedRegularFileReadError::MountMismatch(_) => LocatorReadFailure::MountChanged,
-        BoundedRegularFileReadError::LimitExceeded { .. } => LocatorReadFailure::ResourceLimit,
+        BoundedRegularFileReadError::LimitExceeded { .. }
+        | BoundedRegularFileReadError::ResourceLimit(_) => LocatorReadFailure::ResourceLimit,
         BoundedRegularFileReadError::ProviderOrOffline(_) => LocatorReadFailure::ProviderOrOffline,
         BoundedRegularFileReadError::ChangedDuringRead(_)
         | BoundedRegularFileReadError::Io { .. } => LocatorReadFailure::ReadFailed,

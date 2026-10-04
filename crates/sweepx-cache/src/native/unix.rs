@@ -112,7 +112,7 @@ impl Directory {
     /// The caller owns one additional directory descriptor and must bound its lifetime/count.
     pub fn retain(&self) -> io::Result<Self> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         Self::from_owned(Owner::new(self.fd.try_clone()?, lease))
     }
 
@@ -251,7 +251,7 @@ impl Directory {
         if !path.is_absolute() {
             return Err(io::Error::other("cache path must be absolute"));
         }
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let io_lease = Lease::acquire_io()?;
         let slash = c"/";
         // SAFETY: slash is NUL terminated; returned descriptor is checked and owned below.
@@ -273,7 +273,7 @@ impl Directory {
                 return Err(io::Error::other("invalid cache path component"));
             };
             let name = CString::new(part.as_encoded_bytes()).map_err(io::Error::other)?;
-            let lease = Lease::acquire()?;
+            let lease = Lease::acquire_storage_authority()?;
             let io_lease = Lease::acquire_io()?;
             let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             // SAFETY: retained directory plus one native component; no path authority is reconstructed.
@@ -327,7 +327,11 @@ impl Directory {
     }
 
     fn child_guarded(&self, name: &str) -> io::Result<Self> {
-        self.child_guarded_with_lease(name, Lease::acquire()?, Lease::acquire_io()?)
+        self.child_guarded_with_lease(
+            name,
+            Lease::acquire_storage_authority()?,
+            Lease::acquire_io()?,
+        )
     }
 
     fn child_guarded_with_lease(
@@ -371,7 +375,7 @@ impl Directory {
     fn create_child_guarded(&self, name: &str) -> io::Result<Self> {
         self.private()?;
         let native = component(name)?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let io_lease = Lease::acquire_io()?;
         // SAFETY: this is one basename beneath a live parent; mkdir never follows a link.
         if unsafe { libc::mkdirat(self.fd.as_raw_fd(), native.as_ptr(), 0o700) } < 0
@@ -390,7 +394,7 @@ impl Directory {
 
     fn lock_guarded(&self) -> io::Result<LockGuard> {
         self.private()?;
-        let lease = Lease::acquire()?;
+        let lease = Lease::acquire_storage_authority()?;
         let io_lease = Lease::acquire_io()?;
         // SAFETY: a fixed private basename opened beneath the retained parent, never a link.
         let fd = unsafe {

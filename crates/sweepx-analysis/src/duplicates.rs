@@ -555,7 +555,10 @@ fn read_reason(error: FileContentError) -> DuplicateIncompleteReason {
         FileContentError::Binding(DetailRescanError::Cancelled)
         | FileContentError::Read(BoundedRegularFileReadError::Cancelled) => R::Cancelled,
         FileContentError::Binding(DetailRescanError::ResourceLimit)
-        | FileContentError::Read(BoundedRegularFileReadError::LimitExceeded { .. }) => R::ReadLimit,
+        | FileContentError::Read(
+            BoundedRegularFileReadError::LimitExceeded { .. }
+            | BoundedRegularFileReadError::ResourceLimit(_),
+        ) => R::ReadLimit,
         FileContentError::Read(BoundedRegularFileReadError::ProviderOrOffline(_)) => {
             R::ProviderOrOffline
         }

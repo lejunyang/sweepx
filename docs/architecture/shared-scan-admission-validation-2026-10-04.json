@@ -1,0 +1,573 @@
+{
+  "schema": "sweepx.shared-scan-admission-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "6a305cd",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "buildEnvironment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0"
+  },
+  "scope": [
+    "Platform-owned common 256 native I/O reservations, storage-only 128-authority subset retained",
+    "Actual primary traversal/content owners share admission with cache/state/audit/journal",
+    "Retain public cache marker API, independent scan/rendering contract and backend features",
+    "No new crate/third-party dependency/default quota change or performance claim"
+  ],
+  "semantics": {
+    "nativeOwners": "Reserve before syscall. Actual close precedes lease release. Linux admitted root/O_PATH child/readable directory/data/dup; macOS root/child/DIR/mount-only/data; Windows root/relative metadata/directory/data. Unix fdopendir success transfers actual fd and lease separately to stream owner, closedir precedes refund. Error and callback panic unwind close.",
+    "errors": "Platform root/detail ResourceLimit and ErrorRecord resource reason; bounded content read adds ResourceLimit(HandleLimit), not NotFound. Locator uses existing resource failure; duplicates use existing read_limit gap. Stable cache marker fields/paths and wire names retained; SQLite callback refusals can remain database I/O errors.",
+    "exclusions": "Imported files before admit, arbitrary borrowed duplicates, other discovery/NTFS/Trash native helpers, FSEvents framework-owned resources and Windows security queries remain outside the participating pool. Not a whole-process FD/executive-handle/RSS/hard-deadline bound or reserved terminal persistence capacity.",
+    "postMatrixChanges": "Only strengthened final integration oracle to check exact controlled panic payload, then reran both integration cases and target cfg lint. Other unchanged functional matrix reused; docs updated afterwards."
+  },
+  "oracle": {
+    "publicIntegration": "scanner_and_storage_share_actual_io_lifetimes",
+    "isolation": "Fresh exec; bounded 30s wait and task-owned child kill/reap guard",
+    "scanRoots": 16,
+    "literalSharedIOLimit": 256,
+    "ordinaryUnixOracle": "Snapshot /dev/fd or /proc/self/fd names then ordinary file metadata, counted by independently observed fixture device/inode. No production counters or backend private fields. Ignore later oracle aliases.",
+    "windowsOracle": "GetProcessHandleCount baseline/delta; cfg compiled, not executed",
+    "macOSRetainedAtCap": 256,
+    "allReleased": "independent count returns to baseline",
+    "refusals": [
+      "New native root",
+      "Ordinary Scanner root admission",
+      "Native file mount inspection",
+      "Storage child acquisition",
+      "Bounded content typed resource error, never verified absence"
+    ],
+    "lifetimeChecks": [
+      "Cancellation remains before admission",
+      "Original payload bytes preserved",
+      "Release one real data file permits enumeration",
+      "Linux separate cursor FD charged and retained to close, compile only",
+      "Bound content read recovers after files drop",
+      "Exact controlled callback panic payload then original descriptor count restored"
+    ],
+    "previousCoverageKept": "Existing 128-owner and 256 I/O cache/state/audit consumers, actual 8-worker cloning, retired C file lifetime and strict crash signal tests retained."
+  },
+  "initialFailures": [
+    {
+      "name": "new-content-error-mapping",
+      "result": "exit101; compilation only",
+      "log": "/private/tmp/sweepx-shared-scan-admission-check.log",
+      "reason": "Locator exhaustive map needed new native ResourceLimit case; map to existing resource failure, duplicates preserve existing read_limit too."
+    },
+    {
+      "name": "fixture-api-names",
+      "result": "exit101; compilation only",
+      "log": "/private/tmp/sweepx-shared-scan-admission-tests-first.log",
+      "reason": "DirectoryReadLimits has no Default and streaming request has only new constructor. Use actual public APIs and private fixture permissions; no production broadening."
+    },
+    {
+      "name": "windows-fixture-constructor",
+      "result": "exit101; cfg compilation only",
+      "log": "/private/tmp/sweepx-shared-scan-admission-windows-lint-first.log",
+      "reason": "NativeName constructor is windows_utf16, not windows; correct test cfg branch and compile again."
+    },
+    {
+      "name": "sandbox-fsevents-matrix",
+      "result": "exit101; native environment refusal",
+      "log": "/private/tmp/sweepx-shared-scan-admission-affected-tests.log",
+      "mainPassed": 499,
+      "failed": 1,
+      "ignored": 2,
+      "successfulExecObservationsSeparate": 6,
+      "laterStepsUntested": [
+        "platform tests",
+        "scanner tests",
+        "doctests",
+        "Core integration"
+      ],
+      "test": "junk::session::tests::selected_refresh_publishes_fragments_as_history_and_restarts_with_current_facts",
+      "diagnostic": "FSEventStreamStart failed; selected fragment kept old payload length 6 instead of current 22 because history unavailable. No production/test assertion weakened."
+    }
+  ],
+  "environmentDiagnosis": {
+    "probe": "macos::fsevents::tests::zero_deadline_refuses_history_even_when_the_stream_started",
+    "sameTestBinary": "target/debug/deps/sweepx_platform-e447e4bc73b1cac4",
+    "sandbox": {
+      "result": "failed; 0 passed, 1 failed",
+      "detail": "FSEventStreamStart failed",
+      "log": "/private/tmp/sweepx-shared-scan-admission-fsevents-sandbox.log"
+    },
+    "hostPermissions": {
+      "result": "passed; 1 test actually ran",
+      "detail": "Stream starts and correctly refuses zero deadline with timeout",
+      "log": "/private/tmp/sweepx-shared-scan-admission-fsevents-host.log"
+    },
+    "resolution": "Run full affected/workspace matrix with approved host service permissions. Preserve both baselines, no retry-to-pass, cfg relaxation or test exclusion."
+  },
+  "checks": [
+    {
+      "name": "affected-tests",
+      "result": "passed",
+      "mainPassed": 695,
+      "failed": 0,
+      "ignored": 3,
+      "successfulExecObservationsSeparate": 9,
+      "log": "/private/tmp/sweepx-shared-scan-admission-affected-tests-host.log",
+      "command": "cargo test -p sweepx-platform -p sweepx-cache -p sweepx-scanner -p sweepx-analysis -p sweepx-core --all-features -- --test-threads=1"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed_with_existing_validation_gap",
+      "mainPassed": 1227,
+      "failed": 0,
+      "ignored": 3,
+      "successfulExecObservationsSeparate": 24,
+      "log": "/private/tmp/sweepx-shared-scan-admission-workspace-tests.log",
+      "doctestsIncluded": 9,
+      "explicitlySkipped": 1,
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1"
+    },
+    {
+      "name": "default-parallel-tests",
+      "result": "passed",
+      "mainPassed": 281,
+      "failed": 0,
+      "ignored": 1,
+      "successfulExecObservationsSeparate": 21,
+      "log": "/private/tmp/sweepx-shared-scan-admission-parallel-tests.log",
+      "command": "cargo test -p sweepx-platform -p sweepx-cache -p sweepx-audit --all-features"
+    },
+    {
+      "name": "final-strict-callback-oracle",
+      "result": "passed",
+      "mainPassed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "successfulExecObservationsSeparate": 3,
+      "command": "cargo test -p sweepx-core --test native_authority_resources --all-features -- --test-threads=1",
+      "log": "/private/tmp/sweepx-shared-scan-admission-tests-final.log"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-platform -p sweepx-cache -p sweepx-scanner -p sweepx-analysis -p sweepx-core --all-targets --all-features -- -D warnings",
+      "log": "/private/tmp/sweepx-shared-scan-admission-affected-lint-final.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "log": "/private/tmp/sweepx-shared-scan-admission-host-lint.log"
+    },
+    {
+      "name": "contract-only-platform-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-platform --no-default-features --all-targets -- -D warnings",
+      "log": "/private/tmp/sweepx-shared-scan-admission-contract-lint.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-shared-scan-admission-linux-lint-post-oracle.log"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-shared-scan-admission-windows-lint-post-oracle.log"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list --allow-dirty -p sweepx-platform -p sweepx-cache -p sweepx-scanner -p sweepx-analysis -p sweepx-core",
+      "log": "/private/tmp/sweepx-shared-scan-admission-packages.log",
+      "registryDependencyBuild": false,
+      "newPlatformModule": "src/native_handles.rs",
+      "consumerFixture": "tests/native_authority_resources.rs"
+    },
+    {
+      "name": "fmt-diff",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check"
+    },
+    {
+      "name": "documentation-lint",
+      "result": "passed",
+      "command": "python3 scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-shared-scan-admission-docs.log",
+      "markdownFiles": 54
+    },
+    {
+      "name": "staged-diff",
+      "result": "passed",
+      "command": "git diff --cached --check"
+    }
+  ],
+  "dependencyTopology": {
+    "packages": 17,
+    "normalBuildTargetSpecificRows": 50,
+    "packagePairs": 47,
+    "cachePlatformRows": [
+      {
+        "package": "sweepx-cache",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      }
+    ],
+    "publishOrderValid": true,
+    "rows": [
+      {
+        "package": "sweepx-protocol",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-event-journal",
+        "dependency": "sweepx-protocol",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-event-journal",
+        "dependency": "sweepx-audit",
+        "kind": "normal",
+        "target": "cfg(target_os = \"linux\")"
+      },
+      {
+        "package": "sweepx-event-journal",
+        "dependency": "sweepx-cache",
+        "kind": "normal",
+        "target": "cfg(target_os = \"linux\")"
+      },
+      {
+        "package": "sweepx-audit",
+        "dependency": "sweepx-protocol",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-audit",
+        "dependency": "sweepx-cache",
+        "kind": "normal",
+        "target": "cfg(unix)"
+      },
+      {
+        "package": "sweepx-cache",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cache",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-platform",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-fixtures",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-scanner",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-scanner",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-analysis",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-audit",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-cache",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-canonical",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-catalog",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-i18n",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-protocol",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-event-journal",
+        "kind": "normal",
+        "target": "cfg(target_os = \"linux\")"
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-scanner",
+        "kind": "normal",
+        "target": "cfg(target_os = \"linux\")"
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-scanner",
+        "kind": "normal",
+        "target": "cfg(target_os = \"macos\")"
+      },
+      {
+        "package": "sweepx-core",
+        "dependency": "sweepx-scanner",
+        "kind": "normal",
+        "target": "cfg(target_os = \"windows\")"
+      },
+      {
+        "package": "sweepx-analysis",
+        "dependency": "sweepx-canonical",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-analysis",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-analysis",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-analysis",
+        "dependency": "sweepx-scanner",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-catalog",
+        "dependency": "sweepx-canonical",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-core",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-i18n",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-protocol",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-scanner",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-tui",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-audit",
+        "kind": "normal",
+        "target": "cfg(target_os = \"linux\")"
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-canonical",
+        "kind": "normal",
+        "target": "cfg(unix)"
+      },
+      {
+        "package": "sweepx-cli",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": "cfg(windows)"
+      },
+      {
+        "package": "sweepx-tui",
+        "dependency": "sweepx-i18n",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-tui",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-tui",
+        "dependency": "sweepx-protocol",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-safety",
+        "dependency": "sweepx-analysis",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-safety",
+        "dependency": "sweepx-audit",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-safety",
+        "dependency": "sweepx-canonical",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-safety",
+        "dependency": "sweepx-model",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-executor",
+        "dependency": "sweepx-audit",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-executor",
+        "dependency": "sweepx-platform",
+        "kind": "normal",
+        "target": null
+      },
+      {
+        "package": "sweepx-executor",
+        "dependency": "sweepx-safety",
+        "kind": "normal",
+        "target": null
+      }
+    ]
+  },
+  "existingValidationGaps": [
+    {
+      "name": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "status": "explicitly_skipped",
+      "reason": "Earlier independently diagnosed Foundation service hang. Test retained; matrix does not qualify Trash execution."
+    },
+    {
+      "name": "opt-in-benchmarks",
+      "status": "ignored_existing",
+      "workspace": 3,
+      "defaultParallelSelectedCrates": 1,
+      "reason": "No performance acceptance claimed."
+    },
+    {
+      "name": "linux-windows-msvc-native-qualification",
+      "status": "not_run",
+      "reason": "Prior setup has no native runners/MSVC. GNU all-target/all-feature lint is compile-only, not native stream FD/Windows handle oracle execution."
+    },
+    {
+      "name": "provider-ofd-bind-target-trash-final-pathname",
+      "status": "open",
+      "reason": "Controlled macOS observations do not qualify real provider, Linux OFD/bind or target Trash/isolation; final noncooperating pathname race remains."
+    },
+    {
+      "name": "remaining-resource-and-cache-audit",
+      "status": "open",
+      "reason": "Other discovery/NTFS/Trash/FSEvents/security resources, broader metadata/global memory, old component disk/name APIs, Linux/Windows file-index validity and host RSS/end-to-end measurements remain."
+    }
+  ],
+  "reusedEvidence": {
+    "docsCheckerTests": 23,
+    "basis": "Checker code/tests unchanged; prior passing result reused. Dependency topology rechecked because manifest changed."
+  },
+  "diskKiB": {
+    "target": 3588712,
+    "debug": 2564560,
+    "debugGiBApprox": 2.45,
+    "oldTrashPayloadGiB": 43.323,
+    "trashEmptied": false
+  },
+  "remainingPriority": "Continue cross-platform cache/resource audit; new Dart/SvelteKit work deferred.",
+  "sourceSha256": {
+    "crates/sweepx-platform/src/native_handles.rs": "f6c27c4c52b73d3f19f9d6fac578f2579a8d1edad293bc2d8c71b049eb146263",
+    "crates/sweepx-platform/src/lib.rs": "77cc2131336c8d492ae7c460618b98e688fbbbb1f0485b25626c673265e73ebd",
+    "crates/sweepx-platform/src/linux/mod.rs": "4bdd441fe52ff65f449275c877647eec77b1c629794a0b48bc501fc86b1d90ee",
+    "crates/sweepx-platform/src/macos/mod.rs": "a321515af806d2f5c6202d05addb46fce597995f29626a1f0f4069333d6a9c6f",
+    "crates/sweepx-platform/src/windows/mod.rs": "6530a964f4b9dd0a79b17c2b8e9214479d6e44218b9e232fc230be0cd7594746",
+    "crates/sweepx-cache/Cargo.toml": "c302a8132cb2e7c71fe1d2edd792b9b649b71d56c608408247984e00e497370d",
+    "crates/sweepx-cache/src/native.rs": "c7c97074950e151e5582290fb2fe932a77768600df27859888dcce4c5cc39aa5",
+    "crates/sweepx-cache/src/native/authority.rs": "f6e1d226bfbc941a1dfa8bd33d45ebf9449bbfe0ec60ac77eac169ea04377c12",
+    "crates/sweepx-cache/src/native/unix.rs": "89c3ff8aa3334612cc346b558392695505d9c530dc497595269891ba55903080",
+    "crates/sweepx-cache/src/native/windows.rs": "b789118f63d6a2c2aee160c5710d95b558ef7a9138de4c258519572cc24e5069",
+    "crates/sweepx-scanner/src/locator_reader.rs": "0817c60e68fd3f979871b846ee53df3388686a0128074abe779e10b3f4503ce0",
+    "crates/sweepx-analysis/src/duplicates.rs": "b7613ee6e0030cf45eb90513784d5615c3894d0ee87b6339b89edf86102153d3",
+    "crates/sweepx-core/tests/native_authority_resources.rs": "0d60be8bd87437dfaf2355a42df9cb8a9d89522d5c394153f9f23dc369fb660d"
+  }
+}

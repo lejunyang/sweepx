@@ -18,9 +18,7 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
 sweepx-model = { version = "0.0.1", path = "../sweepx-model" }
-
-# Reuse the platform-owned thread I/O policy without enabling a scanner backend.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Reuse shared native admission and macOS thread I/O policy without enabling a scanner backend.
 sweepx-platform = { version = "0.0.1", path = "../sweepx-platform", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

@@ -3,6 +3,8 @@
 // targets, so the whole backend is gated on `target_os = "linux"` and non-Linux
 // hosts get the fail-closed stub at the end of this file. This keeps a
 // `--workspace` build honest on Windows and macOS instead of failing to compile.
+#[cfg(target_os = "linux")]
+use crate::native_handles::{Admitted, HandleLease};
 #[cfg(all(test, target_os = "linux"))]
 use std::cell::RefCell;
 #[cfg(target_os = "linux")]
@@ -64,7 +66,7 @@ pub struct LinuxUnavailableDirectory;
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct LinuxDirectoryHandle {
-    fd: OwnedFd,
+    fd: Admitted<OwnedFd>,
     display_path: PathBuf,
     cursor: DirectoryCursor,
 }
@@ -81,7 +83,10 @@ enum DirectoryCursor {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
-struct DirectoryStream(*mut libc::DIR);
+struct DirectoryStream {
+    raw: *mut libc::DIR,
+    _lease: HandleLease,
+}
 
 // SAFETY: a stream lives in exactly one non-Clone directory handle. The handle
 // is movable between threads, but enumeration requires exclusive `&mut` access
@@ -95,7 +100,7 @@ impl Drop for DirectoryStream {
         // SAFETY: the non-null stream was returned by `fdopendir` and ownership
         // was transferred to this guard.
         unsafe {
-            libc::closedir(self.0);
+            libc::closedir(self.raw);
         }
     }
 }
@@ -161,7 +166,7 @@ impl LinuxPlatformScanner {
         })
     }
 
-    fn open_root(path: &Path) -> Result<OwnedFd, io::Error> {
+    fn open_root(path: &Path) -> Result<Admitted<OwnedFd>, io::Error> {
         let path = Self::path_c_string(path)?;
         // SAFETY: `open_how` is a plain kernel ABI value initialized to zero,
         // then populated with documented flags.
@@ -171,6 +176,7 @@ impl LinuxPlatformScanner {
                 .expect("open flags fit u64");
         how.resolve = libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
         // SAFETY: the path and open_how pointers remain valid for the syscall.
+        let lease = HandleLease::acquire_io()?;
         let raw = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
@@ -180,10 +186,10 @@ impl LinuxPlatformScanner {
                 mem::size_of::<libc::open_how>(),
             ) as libc::c_int
         };
-        Self::owned_fd(raw)
+        Self::owned_fd(raw, lease)
     }
 
-    fn pin_child(parent: &OwnedFd, name: &CStr) -> Result<OwnedFd, io::Error> {
+    fn pin_child(parent: &OwnedFd, name: &CStr) -> Result<Admitted<OwnedFd>, io::Error> {
         // O_PATH | O_NOFOLLOW pins the directory entry itself, including a
         // final symlink, without granting read access or following its target.
         // The token is one validated basename, and RESOLVE_BENEATH keeps the
@@ -196,6 +202,7 @@ impl LinuxPlatformScanner {
         how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS;
         // SAFETY: the basename and open_how pointers remain valid for the
         // syscall, and `parent` is a live directory descriptor.
+        let lease = HandleLease::acquire_io()?;
         let raw = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
@@ -205,10 +212,10 @@ impl LinuxPlatformScanner {
                 mem::size_of::<libc::open_how>(),
             ) as libc::c_int
         };
-        Self::owned_fd(raw)
+        Self::owned_fd(raw, lease)
     }
 
-    fn open_child_directory(parent: &OwnedFd, name: &CStr) -> Result<OwnedFd, io::Error> {
+    fn open_child_directory(parent: &OwnedFd, name: &CStr) -> Result<Admitted<OwnedFd>, io::Error> {
         // SAFETY: `open_how` is a plain kernel ABI value initialized to zero,
         // then populated with documented flags.
         let mut how: libc::open_how = unsafe { mem::zeroed() };
@@ -221,6 +228,7 @@ impl LinuxPlatformScanner {
             | libc::RESOLVE_NO_XDEV;
         // SAFETY: the basename and open_how pointers remain valid for the
         // syscall, and `parent` is a live directory descriptor.
+        let lease = HandleLease::acquire_io()?;
         let raw = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
@@ -230,10 +238,13 @@ impl LinuxPlatformScanner {
                 mem::size_of::<libc::open_how>(),
             ) as libc::c_int
         };
-        Self::owned_fd(raw)
+        Self::owned_fd(raw, lease)
     }
 
-    fn open_child_regular_file(parent: &OwnedFd, name: &CStr) -> Result<OwnedFd, io::Error> {
+    fn open_child_regular_file(
+        parent: &OwnedFd,
+        name: &CStr,
+    ) -> Result<Admitted<OwnedFd>, io::Error> {
         // SAFETY: `open_how` is a plain kernel ABI value initialized to zero,
         // then populated with documented flags.
         let mut how: libc::open_how = unsafe { mem::zeroed() };
@@ -246,6 +257,7 @@ impl LinuxPlatformScanner {
             | libc::RESOLVE_NO_XDEV;
         // SAFETY: the basename and open_how pointers remain valid for the
         // syscall, and `parent` is a live directory descriptor.
+        let lease = HandleLease::acquire_io()?;
         let raw = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
@@ -255,7 +267,7 @@ impl LinuxPlatformScanner {
                 mem::size_of::<libc::open_how>(),
             ) as libc::c_int
         };
-        Self::owned_fd(raw)
+        Self::owned_fd(raw, lease)
     }
 
     fn open_matching_child_directory(
@@ -263,7 +275,7 @@ impl LinuxPlatformScanner {
         name: &CStr,
         pinned_stat: &libc::stat,
         pinned_mount_id: u64,
-    ) -> Result<OwnedFd, io::Error> {
+    ) -> Result<Admitted<OwnedFd>, io::Error> {
         let directory = Self::open_child_directory(parent, name)?;
         let directory_stat = Self::fstat(&directory)?;
         let directory_mount_id = Self::mount_id_for_fd(&directory)?;
@@ -276,18 +288,19 @@ impl LinuxPlatformScanner {
         Ok(directory)
     }
 
-    fn owned_fd(raw: libc::c_int) -> Result<OwnedFd, io::Error> {
+    fn owned_fd(raw: libc::c_int, lease: HandleLease) -> Result<Admitted<OwnedFd>, io::Error> {
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: a successful open-style syscall returns a fresh descriptor.
-        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+        Ok(Admitted::new(unsafe { OwnedFd::from_raw_fd(raw) }, lease))
     }
 
-    fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, io::Error> {
+    fn duplicate_fd(fd: &OwnedFd) -> Result<Admitted<OwnedFd>, io::Error> {
         // SAFETY: fd is live and F_DUPFD_CLOEXEC returns a fresh descriptor.
+        let lease = HandleLease::acquire_io()?;
         let raw = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        Self::owned_fd(raw)
+        Self::owned_fd(raw, lease)
     }
 
     fn fstat(fd: &OwnedFd) -> Result<libc::stat, io::Error> {
@@ -436,7 +449,7 @@ impl LinuxPlatformScanner {
         request: &BoundedRegularFileReadRequest,
         cancel: &CancellationToken,
         require_local_content: bool,
-    ) -> Result<(OwnedFd, RegularFileObservation), BoundedRegularFileReadError> {
+    ) -> Result<(Admitted<OwnedFd>, RegularFileObservation), BoundedRegularFileReadError> {
         Self::ensure_regular_file_read_not_cancelled(cancel)?;
         let name = Self::child_name_c_string(request.child_name()).map_err(|error| {
             if error.kind() == io::ErrorKind::InvalidInput {
@@ -747,9 +760,13 @@ impl PlatformScanner for LinuxPlatformScanner {
                     io::Error::last_os_error(),
                 ));
             }
+            let (duplicate, lease) = duplicate.into_parts();
             mem::forget(duplicate);
             directory.cursor = DirectoryCursor::Active {
-                stream: DirectoryStream(stream),
+                stream: DirectoryStream {
+                    raw: stream,
+                    _lease: lease,
+                },
                 pending: None,
             };
         }
@@ -771,7 +788,7 @@ impl PlatformScanner for LinuxPlatformScanner {
                         *libc::__errno_location() = 0;
                     }
                     // SAFETY: stream is live and exclusively used by this loop.
-                    let raw_entry = unsafe { libc::readdir(stream.0) };
+                    let raw_entry = unsafe { libc::readdir(stream.raw) };
                     if raw_entry.is_null() {
                         let error = io::Error::last_os_error();
                         if error.raw_os_error() == Some(0) {

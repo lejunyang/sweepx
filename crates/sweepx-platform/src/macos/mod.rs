@@ -23,6 +23,7 @@ impl MacosPlatformScanner {
 
 #[cfg(target_os = "macos")]
 mod backend {
+    use crate::native_handles::{Admitted, HandleLease};
     use std::ffi::{CStr, CString};
     #[cfg(test)]
     use std::fs;
@@ -119,6 +120,8 @@ mod backend {
     #[derive(Debug)]
     pub struct OpenDirectory {
         stream: *mut libc::DIR,
+        // Drop closes the actual DIR* before this reservation is refunded.
+        _lease: HandleLease,
         path: PathBuf,
         identity: ObjectIdentity,
         mount_identity: MountIdentity,
@@ -383,7 +386,10 @@ mod backend {
             }
         }
 
-        fn open_directory_from_fd(fd: OwnedFd, path: PathBuf) -> Result<OpenDirectory, io::Error> {
+        fn open_directory_from_fd(
+            fd: Admitted<OwnedFd>,
+            path: PathBuf,
+        ) -> Result<OpenDirectory, io::Error> {
             let observed = Self::fstat(&fd)?;
             let identity = observed.identity();
             let mount_identity = Self::fstatfs_raw(fd.as_raw_fd())?;
@@ -401,9 +407,11 @@ mod backend {
             if stream.is_null() {
                 return Err(io::Error::last_os_error());
             }
+            let (fd, lease) = fd.into_parts();
             std::mem::forget(fd);
             Ok(OpenDirectory {
                 stream,
+                _lease: lease,
                 path,
                 identity,
                 mount_identity,
@@ -417,6 +425,7 @@ mod backend {
             let path_c = Self::path_c_string(path)?;
             // O_NOFOLLOW_ANY rejects symlinks in any path component. Root admission is the only
             // operation allowed to resolve from a path string; descendants are handled via dirfd.
+            let lease = HandleLease::acquire_io()?;
             let raw_fd = unsafe {
                 libc::open(
                     path_c.as_ptr(),
@@ -427,7 +436,7 @@ mod backend {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: `open` returned a fresh owned descriptor.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let fd = Admitted::new(unsafe { OwnedFd::from_raw_fd(raw_fd) }, lease);
             Self::open_directory_from_fd(fd, path.to_path_buf())
         }
 
@@ -441,6 +450,7 @@ mod backend {
 
             // SAFETY: `parent_fd` is live, `child_name` is NUL-terminated, and flags refuse
             // following a symlink in the final component while requiring a directory.
+            let lease = HandleLease::acquire_io()?;
             let raw_fd = unsafe {
                 libc::openat(
                     parent_fd,
@@ -456,7 +466,7 @@ mod backend {
             }
 
             // SAFETY: `openat` returned a fresh owned descriptor.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let fd = Admitted::new(unsafe { OwnedFd::from_raw_fd(raw_fd) }, lease);
             let observed_after = Self::fstat(&fd)?;
             if observed_before.identity() != observed_after.identity() {
                 return Err(io::Error::new(
@@ -545,7 +555,8 @@ mod backend {
             parent: &OpenDirectory,
             request: &BoundedRegularFileReadRequest,
             cancel: &CancellationToken,
-        ) -> Result<(OwnedFd, RegularFileObservation), BoundedRegularFileReadError> {
+        ) -> Result<(Admitted<OwnedFd>, RegularFileObservation), BoundedRegularFileReadError>
+        {
             Self::ensure_not_cancelled_read(cancel)?;
             Self::assert_directory_identity_current(parent).map_err(|error| {
                 BoundedRegularFileReadError::Io {
@@ -571,6 +582,7 @@ mod backend {
 
             // SAFETY: `parent_fd` is live, `child_name` is NUL-terminated, and the flags force a
             // no-follow open of the final basename while keeping the descriptor nonblocking.
+            let lease = HandleLease::acquire_io().map_err(BoundedRegularFileReadError::io)?;
             let raw_fd = unsafe {
                 libc::openat(
                     parent_fd,
@@ -587,7 +599,7 @@ mod backend {
                 );
             }
             // SAFETY: `openat` returned a fresh owned descriptor.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let fd = Admitted::new(unsafe { OwnedFd::from_raw_fd(raw_fd) }, lease);
             let observed_before = Self::read_regular_file_observation(&fd)
                 .map_err(BoundedRegularFileReadError::io)?;
             let native_before = Self::fstat(&fd).map_err(BoundedRegularFileReadError::io)?;
@@ -721,6 +733,8 @@ mod backend {
             // with ELOOP on this host. fstat rejects substituted kinds before accepting evidence.
             // O_EVTONLY requests metadata/event access; no payload read is issued. O_NONBLOCK
             // prevents a substituted FIFO from blocking here. Host access checks still apply.
+            let lease =
+                HandleLease::acquire_io().map_err(|error| PlatformError::io(&child.path, error))?;
             let raw_fd = unsafe {
                 libc::openat(
                     parent_fd,
@@ -732,7 +746,7 @@ mod backend {
                 return Err(PlatformError::io(&child.path, io::Error::last_os_error()));
             }
             // SAFETY: openat returned a fresh fd, released on every success/error/cancel path.
-            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let fd = Admitted::new(unsafe { OwnedFd::from_raw_fd(raw_fd) }, lease);
             Self::ensure_not_cancelled(cancel)?;
             let observe = || -> io::Result<EntryMetadata> {
                 let before = Self::fstat(&fd)?;

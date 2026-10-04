@@ -16,27 +16,8 @@ mod io_tests;
 #[cfg(any(unix, windows))]
 pub use file::NativeFile;
 
-/// Typed exhaustion of native storage admission, independent of permissions and contention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HandleLimit {
-    /// Stable unit name: `native_io_handles` or its retained `native_authority_handles` subset.
-    pub resource: &'static str,
-    /// Maximum simultaneously owned handles in this unit, not a whole-process handle count.
-    pub limit: usize,
-}
-
-/// Identifies a storage admission refusal without classifying it as unsafe or missing data.
-pub fn handle_limit(error: &io::Error) -> Option<HandleLimit> {
-    #[cfg(any(unix, windows))]
-    {
-        authority::limit(error)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = error;
-        None
-    }
-}
+// Keep the public storage paths and stable marker fields while sharing scanner admission.
+pub use sweepx_platform::native_handles::{HandleLimit, handle_limit};
 
 /// Identifies exhaustion of the shared 128 retained directory/control-lock owner slots.
 /// These owners also pay the 256 native I/O allowance. Data files only pay the I/O allowance.

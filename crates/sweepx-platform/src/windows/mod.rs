@@ -107,6 +107,7 @@ impl WindowsPlatformScanner {
 
 #[cfg(windows)]
 mod backend {
+    use crate::native_handles::{Admitted, HandleLease};
     use std::io;
     use std::mem::{self, MaybeUninit};
     use std::os::windows::ffi::OsStrExt;
@@ -161,7 +162,7 @@ mod backend {
     /// synchronous, so cancellation is cooperative between calls rather than preempting one.
     #[derive(Debug)]
     pub struct WindowsDirectoryHandle {
-        handle: OwnedHandle,
+        handle: Admitted<OwnedHandle>,
         display_path: PathBuf,
         identity: ObjectIdentity,
         cursor: DirectoryCursor,
@@ -632,7 +633,7 @@ mod backend {
         fn open_drive_volume_root(
             drive: u8,
             volume_role: DirectoryOpenRole,
-        ) -> Result<OwnedHandle, RootOpenError> {
+        ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
             let (dos_root, nt_root) = Self::drive_root_names(drive);
             // Reject network and indeterminate drive mappings before any root traversal.
             if !matches!(
@@ -702,7 +703,7 @@ mod backend {
             component: &[u16],
             role: DirectoryOpenRole,
             case_insensitive: bool,
-        ) -> Result<OwnedHandle, RootOpenError> {
+        ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
             Self::nt_open_directory(
                 parent.as_raw_handle() as HANDLE,
                 component,
@@ -716,7 +717,7 @@ mod backend {
             name: &[u16],
             role: DirectoryOpenRole,
             case_insensitive: bool,
-        ) -> Result<OwnedHandle, RootOpenError> {
+        ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
             Self::nt_open_relative(
                 parent,
                 name,
@@ -729,7 +730,7 @@ mod backend {
         fn open_child_entry(
             parent: &OwnedHandle,
             component: &[u16],
-        ) -> Result<OwnedHandle, io::Error> {
+        ) -> Result<Admitted<OwnedHandle>, io::Error> {
             Self::nt_open_relative(
                 parent.as_raw_handle() as HANDLE,
                 component,
@@ -754,7 +755,7 @@ mod backend {
         fn open_enumerated_child_directory(
             parent: &OwnedHandle,
             component: &[u16],
-        ) -> Result<OwnedHandle, io::Error> {
+        ) -> Result<Admitted<OwnedHandle>, io::Error> {
             Self::nt_open_relative(
                 parent.as_raw_handle() as HANDLE,
                 component,
@@ -779,7 +780,7 @@ mod backend {
         fn open_regular_file_relative(
             parent: &OwnedHandle,
             name: &[u16],
-        ) -> Result<OwnedHandle, BoundedRegularFileReadError> {
+        ) -> Result<Admitted<OwnedHandle>, BoundedRegularFileReadError> {
             let byte_length = name
                 .len()
                 .checked_mul(mem::size_of::<u16>())
@@ -800,6 +801,7 @@ mod backend {
                 SecurityDescriptor: ptr::null(),
                 SecurityQualityOfService: ptr::null(),
             };
+            let lease = HandleLease::acquire_io().map_err(BoundedRegularFileReadError::io)?;
             let mut handle: HANDLE = INVALID_HANDLE_VALUE;
             let mut io_status = IO_STATUS_BLOCK::default();
             let status = unsafe {
@@ -837,7 +839,10 @@ mod backend {
                     "NtCreateFile succeeded without returning a valid file handle",
                 )));
             }
-            Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
+            Ok(Admitted::new(
+                unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
+                lease,
+            ))
         }
 
         fn nt_open_relative(
@@ -846,7 +851,7 @@ mod backend {
             desired_access: u32,
             type_options: u32,
             case_insensitive: bool,
-        ) -> Result<OwnedHandle, RootOpenError> {
+        ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
             let byte_length = name
                 .len()
                 .checked_mul(mem::size_of::<u16>())
@@ -870,6 +875,7 @@ mod backend {
                 SecurityDescriptor: ptr::null(),
                 SecurityQualityOfService: ptr::null(),
             };
+            let lease = HandleLease::acquire_io().map_err(RootOpenError::Io)?;
             let mut handle: HANDLE = INVALID_HANDLE_VALUE;
             let mut io_status = IO_STATUS_BLOCK::default();
             // SAFETY: `name`, `object_name`, and all other input structures remain live for the
@@ -912,7 +918,10 @@ mod backend {
             }
             // SAFETY: successful NtCreateFile returned a fresh handle and ownership is transferred
             // exactly once.
-            Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
+            Ok(Admitted::new(
+                unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
+                lease,
+            ))
         }
 
         fn reject_reparse_or_nondirectory(
@@ -931,7 +940,7 @@ mod backend {
         fn resolve_root(
             path: &Path,
             cancel: &CancellationToken,
-        ) -> Result<(OwnedHandle, ObservedMetadata), RootOpenError> {
+        ) -> Result<(Admitted<OwnedHandle>, ObservedMetadata), RootOpenError> {
             let parsed = Self::parse_drive_path(path)?;
             let volume_role = if parsed.components.is_empty() {
                 DirectoryOpenRole::AdmittedRoot
@@ -1110,7 +1119,8 @@ mod backend {
             parent: &WindowsDirectoryHandle,
             request: &BoundedRegularFileReadRequest,
             cancel: &CancellationToken,
-        ) -> Result<(OwnedHandle, RegularFileObservation), BoundedRegularFileReadError> {
+        ) -> Result<(Admitted<OwnedHandle>, RegularFileObservation), BoundedRegularFileReadError>
+        {
             if cancel.is_cancelled() {
                 return Err(BoundedRegularFileReadError::Cancelled);
             }
