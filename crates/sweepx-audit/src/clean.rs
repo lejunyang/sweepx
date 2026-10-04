@@ -1,9 +1,15 @@
 // SQLite implementation.
 
+#[cfg(all(test, unix))]
+mod native_lock_tests;
+mod native_state;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -373,6 +379,7 @@ struct LiveClaimAuthority {
     active: AtomicBool,
     coordinator: Arc<SessionCoordinator>,
     lock_file: Mutex<Option<File>>,
+    root_native: Arc<native_state::Root>,
     database_path: PathBuf,
     database_id: String,
     database_identity: FileIdentity,
@@ -497,18 +504,18 @@ impl DurableIntentToken {
             .map_err(|_| AuditError::SessionLockPoisoned)?;
         let lock_file = lock_file.as_ref().ok_or(AuditError::ClaimNotActive)?;
         validate_held_lock(lock_file, &live_claim.lock_path, &live_claim.lock_identity)?;
-        if database_file_identity(&live_claim.database_path)? != live_claim.database_identity {
+        if live_claim.root_native.identity()? != live_claim.database_identity {
             return Err(AuditError::StoreMismatch);
         }
-        let root = live_claim.database_path.parent().ok_or_else(|| {
-            AuditError::UnsafeStateDir(live_claim.database_path.display().to_string())
-        })?;
-        ensure_sqlite_sidecars_private(root)?;
+        live_claim.root_native.binding()?;
+        live_claim.root_native.sidecars()?;
+        check_native_size_budget(&live_claim.root_native, true)?;
         let connection = open_connection(&live_claim.database_path)?;
-        if database_file_identity(&live_claim.database_path)? != live_claim.database_identity {
+        if live_claim.root_native.identity()? != live_claim.database_identity {
             return Err(AuditError::StoreMismatch);
         }
-        ensure_sqlite_sidecars_private(root)?;
+        live_claim.root_native.binding()?;
+        live_claim.root_native.sidecars()?;
         let database_id: String = connection.query_row(
             "SELECT database_id FROM store_meta WHERE singleton=1",
             [],
@@ -1230,6 +1237,7 @@ pub enum ProjectionError {
 #[derive(Debug)]
 pub struct AuditStore {
     root: PathBuf,
+    root_native: Arc<native_state::Root>,
     database_path: PathBuf,
     lock_path: PathBuf,
     database_id: String,
@@ -1243,6 +1251,7 @@ impl Clone for AuditStore {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
+            root_native: Arc::clone(&self.root_native),
             database_path: self.database_path.clone(),
             lock_path: self.lock_path.clone(),
             database_id: self.database_id.clone(),
@@ -1270,24 +1279,6 @@ struct FileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-}
-
-fn database_file_identity(path: &Path) -> Result<FileIdentity, AuditError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        ensure_private_file_handle(&file, path)?;
-        file_identity(&file)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(AuditError::UnsupportedPlatform)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1593,43 +1584,56 @@ impl AuditStore {
         {
             let root = root.as_ref().to_path_buf();
             ensure_private_state_dir(&root)?;
+            let root_native = Arc::new(native_state::Root::open(&root)?);
             let lock_path = root.join(LOCK_FILE);
             let lock_file = open_lock_file(&lock_path)?;
             ensure_local_filesystem(&lock_file)?;
             let lock_identity = lock_identity(&lock_file, &lock_path)?;
             let database_path = root.join(DATABASE_FILE);
-            let database_preexisting = database_path.exists();
+            let database_preexisting = match root_native.identity() {
+                Ok(_) => true,
+                Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            };
             if !database_preexisting {
                 lock_file
                     .try_lock_exclusive()
                     .map_err(|_| AuditError::ConcurrentWriterDenied)?;
-                create_private_database_file(&database_path)?;
+                root_native.create_database()?;
             } else {
                 lock_file
                     .try_lock_shared()
                     .map_err(|_| AuditError::ConcurrentWriterDenied)?;
             }
-            ensure_sqlite_sidecars_private(&root)?;
-            ensure_private_regular_file(&database_path)?;
+            root_native.binding()?;
+            root_native.sidecars()?;
+            let database_identity = root_native.identity()?;
+            check_native_size_budget(&root_native, true)?;
             let mut connection = open_connection(&database_path)?;
             if database_preexisting {
                 verify_initialized_database(&connection)?;
             } else {
-                initialize_database(&mut connection)?;
+                initialize_database(&mut connection, &root_native)?;
             }
-            ensure_sqlite_sidecars_private(&root)?;
+            root_native.binding()?;
+            root_native.sidecars()?;
             let database_id: String = connection.query_row(
                 "SELECT database_id FROM store_meta WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )?;
             validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
-            let database_file = OpenOptions::new().read(true).open(&database_path)?;
-            ensure_same_local_filesystem(&lock_file, &database_file)?;
-            let database_identity = file_identity(&database_file)?;
+            root_native.lock_filesystem(&lock_file)?;
+            if root_native.identity()? != database_identity {
+                return Err(AuditError::StoreMismatch);
+            }
+            // Close SQLite before releasing store exclusion. Never close a second DB FD:
+            // POSIX locks are process-wide and an unrelated same-inode close releases them.
+            drop(connection);
             FileExt::unlock(&lock_file)?;
             Ok(Self {
                 root,
+                root_native,
                 database_path,
                 lock_path,
                 database_id,
@@ -1849,6 +1853,7 @@ impl AuditStore {
             active: AtomicBool::new(true),
             coordinator: Arc::clone(&self.coordinator),
             lock_file: Mutex::new(Some(lock_file)),
+            root_native: Arc::clone(&self.root_native),
             database_path: self.database_path.clone(),
             database_id: self.database_id.clone(),
             database_identity: self.database_identity.clone(),
@@ -2429,22 +2434,20 @@ impl AuditStore {
     }
 
     fn connection_locked(&self) -> Result<Connection, AuditError> {
-        ensure_private_state_dir(&self.root)?;
-        ensure_private_regular_file(&self.database_path)?;
-        let database_file = OpenOptions::new().read(true).open(&self.database_path)?;
-        if file_identity(&database_file)? != self.database_identity {
+        self.root_native.binding()?;
+        if self.root_native.identity()? != self.database_identity {
             return Err(AuditError::StoreMismatch);
         }
-        ensure_local_filesystem(&database_file)?;
-        ensure_sqlite_sidecars_private(&self.root)?;
+        self.root_native.sidecars()?;
+        check_native_size_budget(&self.root_native, true)?;
         let connection = open_connection(&self.database_path)?;
-        ensure_private_regular_file(&self.database_path)?;
-        let reopened_database = OpenOptions::new().read(true).open(&self.database_path)?;
-        if file_identity(&reopened_database)? != self.database_identity {
+        // Metadata never opens/closes a second audit.db FD while SQLite holds POSIX locks.
+        // Pre/post name checks remain conservative gates, not actual default-VFS authority.
+        self.root_native.binding()?;
+        if self.root_native.identity()? != self.database_identity {
             return Err(AuditError::StoreMismatch);
         }
-        ensure_same_local_filesystem(&database_file, &reopened_database)?;
-        ensure_sqlite_sidecars_private(&self.root)?;
+        self.root_native.sidecars()?;
         let database_id: String = connection.query_row(
             "SELECT database_id FROM store_meta WHERE singleton=1",
             [],
@@ -2458,6 +2461,7 @@ impl AuditStore {
 
     fn short_lock(&self) -> Result<ShortStoreLock, AuditError> {
         self.ensure_process()?;
+        self.root_native.binding()?;
         let file = open_lock_file(&self.lock_path)?;
         if lock_identity(&file, &self.lock_path)? != self.lock_identity {
             return Err(AuditError::LockReplaced);
@@ -2465,16 +2469,14 @@ impl AuditStore {
         file.try_lock_exclusive()
             .map_err(|_| AuditError::ConcurrentWriterDenied)?;
         self.validate_lock_path_identity(&file)?;
-        ensure_same_local_filesystem(
-            &file,
-            &OpenOptions::new().read(true).open(&self.database_path)?,
-        )?;
-        ensure_sqlite_sidecars_private(&self.root)?;
+        self.root_native.lock_filesystem(&file)?;
+        self.root_native.sidecars()?;
         Ok(ShortStoreLock { file })
     }
 
     fn acquire_lifetime_lock(&self) -> Result<File, AuditError> {
         self.ensure_process()?;
+        self.root_native.binding()?;
         let file = open_lock_file(&self.lock_path)?;
         if lock_identity(&file, &self.lock_path)? != self.lock_identity {
             return Err(AuditError::LockReplaced);
@@ -2482,11 +2484,8 @@ impl AuditStore {
         file.try_lock_exclusive()
             .map_err(|_| AuditError::ConcurrentWriterDenied)?;
         self.validate_lock_path_identity(&file)?;
-        ensure_same_local_filesystem(
-            &file,
-            &OpenOptions::new().read(true).open(&self.database_path)?,
-        )?;
-        ensure_sqlite_sidecars_private(&self.root)?;
+        self.root_native.lock_filesystem(&file)?;
+        self.root_native.sidecars()?;
         Ok(file)
     }
 
@@ -2508,11 +2507,8 @@ impl AuditStore {
             .map_err(|_| AuditError::SessionLockPoisoned)?;
         let lock_file = lock_file.as_ref().ok_or(AuditError::ClaimNotActive)?;
         validate_held_lock(lock_file, &self.lock_path, &self.lock_identity)?;
-        ensure_same_local_filesystem(
-            lock_file,
-            &OpenOptions::new().read(true).open(&self.database_path)?,
-        )?;
-        ensure_sqlite_sidecars_private(&self.root)?;
+        self.root_native.lock_filesystem(lock_file)?;
+        self.root_native.sidecars()?;
         Ok(())
     }
 
@@ -2553,23 +2549,41 @@ impl AuditStore {
     }
 
     fn check_size_budget(&self, allow_emergency: bool) -> Result<(), AuditError> {
-        let db = file_len_if_exists(&self.database_path)?;
-        let wal = file_len_if_exists(&self.root.join(format!("{DATABASE_FILE}-wal")))?;
-        let shm = file_len_if_exists(&self.root.join(format!("{DATABASE_FILE}-shm")))?;
-        if db > MAX_DATABASE_BYTES
-            || wal > MAX_WAL_BYTES
-            || db.saturating_add(wal).saturating_add(shm) > MAX_TOTAL_DATABASE_BYTES
-        {
-            return Err(AuditError::DatabaseTooLarge);
-        }
-        if !allow_emergency
-            && db.saturating_add(wal).saturating_add(shm)
-                > MAX_TOTAL_DATABASE_BYTES - 8 * 1024 * 1024
-        {
-            return Err(AuditError::DatabaseTooLarge);
-        }
-        Ok(())
+        check_native_size_budget(&self.root_native, allow_emergency)
     }
+}
+
+// This pre-open metadata gate bounds existing files. Actual SQLite growth still needs an
+// I/O-level quota; PRAGMA limits and a post-write check cannot prove that contract.
+fn check_native_size_budget(
+    root: &native_state::Root,
+    allow_emergency: bool,
+) -> Result<(), AuditError> {
+    root.binding()?;
+    let db = root.length(DATABASE_FILE)?;
+    let wal = root.length("audit.db-wal")?;
+    let shm = root.length("audit.db-shm")?;
+    let rollback = root.length("audit.db-journal")?;
+    if db > MAX_DATABASE_BYTES
+        || wal > MAX_WAL_BYTES
+        || db
+            .saturating_add(wal)
+            .saturating_add(shm)
+            .saturating_add(rollback)
+            > MAX_TOTAL_DATABASE_BYTES
+    {
+        return Err(AuditError::DatabaseTooLarge);
+    }
+    if !allow_emergency
+        && db
+            .saturating_add(wal)
+            .saturating_add(shm)
+            .saturating_add(rollback)
+            > MAX_TOTAL_DATABASE_BYTES - 8 * 1024 * 1024
+    {
+        return Err(AuditError::DatabaseTooLarge);
+    }
+    Ok(())
 }
 
 struct ShortStoreLock {
@@ -2666,6 +2680,7 @@ CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events BEGIN SELECT
 CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit events are append-only'); END;
 "#;
 
+#[cfg(unix)]
 fn ensure_private_state_dir(root: &Path) -> Result<(), AuditError> {
     if !root.is_absolute() {
         return Err(AuditError::StateDirNotAbsolute);
@@ -2710,6 +2725,7 @@ fn ensure_private_state_dir(root: &Path) -> Result<(), AuditError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn ensure_existing_ancestors_not_symlinks(path: &Path) -> Result<(), AuditError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -2726,6 +2742,7 @@ fn ensure_existing_ancestors_not_symlinks(path: &Path) -> Result<(), AuditError>
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_private_directory_metadata(
     path: &Path,
     metadata: &fs::Metadata,
@@ -2799,11 +2816,7 @@ fn ensure_local_filesystem(_file: &File) -> Result<(), AuditError> {
     Err(AuditError::UnsupportedPlatform)
 }
 
-#[cfg(not(unix))]
-fn ensure_local_filesystem(_file: &File) -> Result<(), AuditError> {
-    Err(AuditError::UnsupportedPlatform)
-}
-
+#[cfg(unix)]
 fn ensure_same_local_filesystem(first: &File, second: &File) -> Result<(), AuditError> {
     ensure_local_filesystem(first)?;
     ensure_local_filesystem(second)?;
@@ -2831,7 +2844,7 @@ fn open_lock_file(path: &Path) -> Result<File, AuditError> {
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(path)?
     };
     #[cfg(not(unix))]
@@ -2856,7 +2869,7 @@ fn open_existing_lock_file(path: &Path) -> Result<File, AuditError> {
         OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(path)?
     };
     #[cfg(not(unix))]
@@ -2882,35 +2895,6 @@ fn validate_held_lock(
         Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-#[cfg(unix)]
-fn create_private_database_file(path: &Path) -> Result<(), AuditError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?
-            .sync_all()?;
-    }
-    sync_directory(
-        path.parent()
-            .ok_or_else(|| AuditError::UnsafeStateDir(path.display().to_string()))?,
-    )
-}
-
-fn ensure_private_regular_file(path: &Path) -> Result<(), AuditError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(AuditError::SymlinkRejected(path.display().to_string()));
-    }
-    let file = OpenOptions::new().read(true).open(path)?;
-    ensure_private_file_handle(&file, path)
 }
 
 fn ensure_private_file_handle(file: &File, path: &Path) -> Result<(), AuditError> {
@@ -2952,43 +2936,6 @@ fn lock_identity(
             canonical_path: fs::canonicalize(path)?,
         })
     }
-}
-
-fn file_identity(file: &File) -> Result<FileIdentity, AuditError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata()?;
-        Ok(FileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
-        Err(AuditError::UnsupportedPlatform)
-    }
-}
-
-fn ensure_sqlite_sidecars_private(root: &Path) -> Result<(), AuditError> {
-    for name in [
-        format!("{DATABASE_FILE}-wal"),
-        format!("{DATABASE_FILE}-shm"),
-    ] {
-        let path = root.join(name);
-        if path.exists() {
-            ensure_private_regular_file(&path)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), AuditError> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    Ok(())
 }
 
 fn open_connection(path: &Path) -> Result<Connection, AuditError> {
@@ -3042,7 +2989,10 @@ fn verify_connection_pragmas(connection: &Connection) -> Result<(), AuditError> 
 }
 
 #[cfg(unix)]
-fn initialize_database(connection: &mut Connection) -> Result<(), AuditError> {
+fn initialize_database(
+    connection: &mut Connection,
+    root: &native_state::Root,
+) -> Result<(), AuditError> {
     connection.pragma_update(None, "page_size", PAGE_SIZE as i64)?;
     connection.pragma_update(None, "max_page_count", MAX_PAGE_COUNT as i64)?;
     connection.pragma_update(None, "application_id", APPLICATION_ID)?;
@@ -3057,14 +3007,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AuditError> {
     transaction.execute("INSERT INTO audit_head VALUES(1,0,NULL)", [])?;
     transaction.commit()?;
     verify_initialized_database(connection)?;
-    sync_directory(
-        connection
-            .path()
-            .and_then(|path| Path::new(path).parent())
-            .ok_or_else(|| {
-                AuditError::DatabaseConfiguration("database path unavailable".to_string())
-            })?,
-    )
+    root.sync()
 }
 
 fn verify_initialized_database(connection: &Connection) -> Result<(), AuditError> {
@@ -4766,18 +4709,6 @@ fn validate_optional_field(value: &Option<String>, maximum: usize) -> Result<(),
         validate_nonempty_field(value, "optional outcome field", maximum)?;
     }
     Ok(())
-}
-fn file_len_if_exists(path: &Path) -> Result<u64, AuditError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(AuditError::SymlinkRejected(path.display().to_string()));
-            }
-            Ok(metadata.len())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
-    }
 }
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);

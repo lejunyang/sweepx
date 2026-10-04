@@ -22,5 +22,9 @@ sha2 = "0.10.9"
 sweepx-protocol = { version = "0.0.1", path = "../sweepx-protocol" }
 thiserror = "2.0.16"
 
+# Audit preflight shares retained native metadata; Windows audit remains unsupported.
+[target.'cfg(unix)'.dependencies]
+sweepx-cache = { version = "0.0.1", path = "../sweepx-cache" }
+
 [dev-dependencies]
 tempfile = "3.21.0"

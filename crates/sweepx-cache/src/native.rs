@@ -31,7 +31,7 @@ pub fn is_link_refusal(error: &io::Error) -> bool {
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{Directory, LockGuard};
+pub use unix::{Directory, LockGuard, StateFileMetadata};
 #[cfg(unix)]
 use unix::{same_observation, touch_accessed};
 #[cfg(windows)]

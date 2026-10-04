@@ -211,6 +211,8 @@ P4a.2 又把 mutation 资格拆成五个独立 cell：`trash.local.file`、`tras
 
 CLI/Core 的普通预览、垃圾历史及 macOS 文件索引写入现在与 operation snapshot、Linux journal 共用状态根非阻塞锁：合作写入的文件长度合计限 512 MiB，目录与文件名合计限 4,090 项，计入未知普通文件及新旧文件/临时文件共存。缓存写入保留其中 32 MiB 和 8 个条目供终态记录使用；这些是准入余量，不是预分配或物理空间保证。只遍历已知存储形状；未知目录、链接、非私有文件或不确定原生证据拒绝新写入，不改权限、不删除 operation/audit/recovery 记录。缓存拒绝仍返回当前扫描事实；终态持久化拒绝明确报错并保留旧记录。独立 library cache API 仍沿用组件额度，需显式 state-root API 才参与共同计费；独立 audit、未来 spill/其他写入及非合作式写入尚未全部接入，因此全局资源审计仍未完成。它不是 RSS 上限、硬 I/O 期限或断电恢复保证。
 
+Unix audit/recovery 的预检现在保留原生目录，并仅用相对元数据重查数据库身份、私有权限及 DB/WAL/SHM/rollback 长度，避免打开再关闭另一数据库 FD 释放 SQLite 的 POSIX 锁。已替换的目录、链接旁文件及超过既有组件额度的文件在 SQLite 打开前拒绝；拒绝保留旧字节，不整备权限或淘汰审计记录。首次数据库创建为相对独占创建，同步使用保留父目录。audit 仍使用默认 SQLite pathname VFS，前后校验不能证明实际 C 文件绑定或阻止所有竞态/增长，也尚未加入上述共同额度；macOS 禁止物化保护目前仅覆盖这些原生预检，Windows audit 仍不支持。验证与剩余边界见[审计预检记录](docs/architecture/audit-native-preflight-validation-2026-10-04.json)。
+
 ## Agent 权限边界
 
 当前 Agent 可安全协助的范围仅限：

@@ -52,6 +52,17 @@ pub(super) fn same_observation(left: &Metadata, right: &Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
+/// Metadata-only observation of an admitted Unix state file under its retained parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateFileMetadata {
+    /// Logical file length, independent of allocation or reclaimable space.
+    pub bytes: u64,
+    /// Current native device number; Linux mount admission is separately enforced by the root.
+    pub device: u64,
+    /// Current native inode; this observation cannot bind a future pathname open.
+    pub inode: u64,
+}
+
 /// A private cache directory retained by native handle; display paths are not reopened.
 #[derive(Debug)]
 pub struct Directory {
@@ -62,6 +73,19 @@ pub struct Directory {
 }
 
 impl Directory {
+    /// Observes a private ordinary single-link state file without opening a data descriptor.
+    /// Linux additionally requires the retained mount identity. This is a time-local name
+    /// observation, not proof of SQLite's actual C file object or execution authority.
+    pub fn state_metadata(&self, name: &str) -> io::Result<StateFileMetadata> {
+        with_cache_io(|| {
+            let observed = self.accounting_metadata_guarded(name)?;
+            Ok(StateFileMetadata {
+                bytes: observed.bytes,
+                device: observed.identity[0],
+                inode: observed.identity[1],
+            })
+        })
+    }
     /// Accounts our own held control lock and checks its retained name binding.
     pub(crate) fn held_lock_bytes(&self, lock: &LockGuard) -> io::Result<u64> {
         if !self.contains_file_guarded(".lock", &lock.file)? {
@@ -376,17 +400,15 @@ impl Directory {
         self.open_file_mode(name, false, false)
     }
 
-    /// Duplicates an admitted Linux directory for native clients that retain its lifetime.
+    /// Duplicates an admitted Unix directory for native clients that retain its lifetime.
     /// This is handle authority, not a path recipe; the client must revalidate before later I/O.
-    #[cfg(target_os = "linux")]
     pub fn directory_file(&self) -> io::Result<File> {
         self.private()?;
         Ok(File::from(self.fd.try_clone()?))
     }
 
-    /// Compares two retained Linux directories, including mount identity. Both must still
-    /// satisfy their captured private/native contract; missing evidence returns an error.
-    #[cfg(target_os = "linux")]
+    /// Compares retained Unix directory objects, including Linux mount identity. Both must
+    /// still satisfy their private/native contract; missing evidence returns an error.
     pub fn same_object(&self, other: &Self) -> io::Result<bool> {
         self.same_retained_directory(other)
     }
@@ -425,6 +447,12 @@ impl Directory {
             return Err(io::Error::other("retained state file is no longer private"));
         }
         Ok(relative.identity == [observed.dev(), observed.ino(), observed.nlink()])
+    }
+
+    /// Creates a private ordinary single-link state file exclusively beneath this root.
+    /// Existing names are refused without opening another data descriptor or truncating bytes.
+    pub fn create_state_file(&self, name: &str) -> io::Result<File> {
+        with_cache_io(|| self.open_file_mode(name, true, true))
     }
 
     /// Opens a private single-link Linux state file for read/write without truncation.
@@ -1121,10 +1149,22 @@ mod tests {
         observe_posix_lock(&display, true);
         for _ in 0..3 {
             assert_eq!(directory.metadata("journal.db").unwrap().bytes, 0);
+            let state = directory.state_metadata("journal.db").unwrap();
+            let held = file.metadata().unwrap();
+            assert_eq!(state.bytes, held.len());
+            assert_eq!((state.device, state.inode), (held.dev(), held.ino()));
             assert!(
                 with_cache_io(|| directory.contains_file_guarded("journal.db", &file)).unwrap()
             );
         }
+        // A competing initializer must not open an existing inode even on its error path.
+        assert_eq!(
+            directory
+                .create_state_file("journal.db")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
         observe_posix_lock(&display, true);
         // Independent negative control: closing any other same-process FD for this inode
         // releases POSIX locks. This pins the old defect rather than assuming it exists.

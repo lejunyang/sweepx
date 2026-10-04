@@ -1,0 +1,223 @@
+{
+  "schema": "sweepx.audit-native-preflight-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "89cab7c",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "Unix AuditStore and durable-intent database preflight use the existing cache native directory layer; no new crate",
+    "metadata-only database identity, locality and component accounting preserve default SQLite POSIX locks",
+    "relative exclusive initial database creation and retained-parent synchronization; root replacement and sidecar refusal",
+    "DB/WAL/SHM/rollback existing-length admission before SQLite opens; retain old bytes and records on refusal"
+  ],
+  "sources": [
+    {
+      "url": "https://man7.org/linux/man-pages/man2/fcntl_locking.2.html",
+      "checkedDate": "2026-10-04",
+      "use": "POSIX record locks are released by closing any same-process descriptor for that file; kernel fixture independently reproduces this"
+    },
+    {
+      "url": "https://www.sqlite.org/lockingv3.html",
+      "checkedDate": "2026-10-04",
+      "use": "SQLite locking context; actual shipped bundled SQLite is exercised in the regression"
+    }
+  ],
+  "limits": {
+    "databaseBytes": 67108864,
+    "walBytes": 16777216,
+    "totalDatabaseSidecarBytes": 84934656,
+    "nonEmergencyMarginBytes": 8388608,
+    "sidecarNames": [
+      "audit.db-wal",
+      "audit.db-shm",
+      "audit.db-journal"
+    ],
+    "note": "existing component length policy; rollback now participates. Not callback-enforced growth, shared state quota, physical allocation, RSS or a hard kernel deadline"
+  },
+  "semantics": {
+    "authority": "one retained native directory per opened AuditStore, shared by clones and live claims; no aggregate AuditStore handle admission yet",
+    "identity": "relative no-follow metadata for private ordinary single-link files; Linux enforces captured statx mount, Unix requires same native device. Never open/drop another database descriptor for identity or size checks",
+    "absence": "only typed NotFound is absent optional sidecar storage; linked, unsafe, denied, provider and uncertain states remain errors",
+    "creation": "exclusive relative creation refuses an existing name without opening or truncating it; sync uses admitted retained directory",
+    "defaultVfs": "SQLite still opens pathname with its default VFS. Before/after display-root/database metadata gates do not bind the actual C file object, eliminate ABA/final pathname races, or enforce all growth",
+    "macPolicy": "shared no-materialization and checked-restoration policy covers native preflight only; default SQLite I/O is not covered by that claim",
+    "windows": "audit remains UnsupportedPlatform; Unix-only cache dependency and metadata consumer are properly gated",
+    "records": "no permission repair, integrity record eviction, Trash or permanent deletion in this unit",
+    "oracle": "fresh exec child uses F_GETLK, bounded 10 seconds, no output pipes and owned-child cleanup. Verify actual SQLite lock survives checks, disappears after close, and independently calibrate old extra-FD-close defect. Child observations excluded from main test counts"
+  },
+  "initialFailures": [
+    {
+      "name": "old-connection-kernel-oracle",
+      "result": "expected regression failure; exit101",
+      "log": "/private/tmp/sweepx-audit-native-lock-baseline.log",
+      "reason": "child observed held=false when expected true immediately after old connection_locked returned; child and parent failures are one contract regression",
+      "testFilter": "audit_connection_returns_with_sqlite_database_lock_still_held"
+    },
+    {
+      "name": "new-exclusive-creation-assertion-format",
+      "result": "fmt check exit1; whitespace only",
+      "reason": "format method chain in the added independent oracle, then final format check passes"
+    },
+    {
+      "name": "artifact-updater-check-count",
+      "result": "diagnostic assertion failure after successful final field update",
+      "reason": "updater mistakenly expected 13 rows; the named list contains exactly 12 checks. Verify exact expected name set and count before final write; no production or validation-result change"
+    }
+  ],
+  "checks": [
+    {
+      "name": "initial-affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit -p sweepx-cache --all-features --locked -- --test-threads=1",
+      "passed": 151,
+      "failed": 0,
+      "ignored": 0,
+      "independentChildObservations": 9,
+      "log": "/private/tmp/sweepx-audit-native-preflight-final-tests.log",
+      "note": "after pre-open rollback budget and exclusive creator changes; before extending existing cache lock oracle and later cfg/thin-wrapper cleanup"
+    },
+    {
+      "name": "exclusive-creator-kernel-contract",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache --all-features --locked metadata_and_retained_binding_preserve_posix_locks -- --test-threads=1",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 109,
+      "independentChildObservations": 3,
+      "log": "/private/tmp/sweepx-audit-native-preflight-creator-contract.log",
+      "note": "main focused result has the same filtered count as child results; identify the exact test name, not filtered count alone"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1202,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "independentChildObservations": 15,
+      "log": "/private/tmp/sweepx-audit-native-preflight-workspace-tests.log",
+      "note": "host service access; subsequently only Unix helper cfg and unnecessary thin wrappers change, final affected tests cover final code; unchanged remaining workspace behavior reused"
+    },
+    {
+      "name": "final-affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-cache -p sweepx-audit --all-features --locked -- --test-threads=1",
+      "log": "/private/tmp/sweepx-audit-native-preflight-delivery-tests.log",
+      "passed": 151,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "independentChildObservations": 9
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-cache -p sweepx-audit --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-native-preflight-final-affected-lint.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-native-preflight-final-host-lint.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-audit-native-preflight-final-linux-lint.log",
+      "note": "Zig 0.16.0 helper follows repository script with explicit installed compiler; compilation only"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-audit-native-preflight-windows-lint.log",
+      "note": "same helper with Windows GNU mapping; compilation only"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "crates": [
+        "sweepx-cache",
+        "sweepx-audit",
+        "sweepx-core",
+        "sweepx-executor"
+      ],
+      "command": "cargo package --list -p <crate> --allow-dirty --locked",
+      "note": "new native audit modules and cache Unix implementation are present; not a registry dependency build"
+    },
+    {
+      "name": "workspace-publish-topology",
+      "result": "passed",
+      "packages": 17,
+      "normalBuildTargetSpecificRows": 49,
+      "uniquePackagePairs": 46,
+      "newDependency": [
+        "sweepx-audit",
+        "sweepx-cache",
+        "cfg(unix)"
+      ],
+      "note": "actual locked metadata has ^0.0.1 requirements; publisher lists cache before audit and all dependencies before their workspace consumers"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "command": "PYTHONDONTWRITEBYTECODE=1 <bundled-python> scripts/lint_docs.py",
+      "note": "unchanged checker self-tests reuse prior 23 passing tests",
+      "markdownFiles": 54,
+      "log": "/private/tmp/sweepx-audit-native-preflight-docs.log"
+    },
+    {
+      "name": "format-and-diff",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check"
+      ]
+    }
+  ],
+  "validationGaps": [
+    {
+      "name": "known Foundation Trash success regression",
+      "result": "explicitly skipped",
+      "commandFilter": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "earlier diagnosed host/service hang; test preserved, not excluded because of this audit change"
+    },
+    {
+      "name": "existing opt-in benchmarks",
+      "result": "ignored",
+      "count": 3,
+      "note": "not run or counted as passes"
+    },
+    {
+      "name": "native Linux, Windows, MSVC, bind-mount/OFD, real cloud provider and target Trash behavior",
+      "result": "not run",
+      "reason": "this host provides macOS runtime and GNU cross-compilation; compiled cfg branches do not prove target behavior"
+    },
+    {
+      "name": "AuditStore actual retained C VFS, callback growth limits and aggregate state quota",
+      "result": "not implemented by this slice",
+      "note": "explicit next prerequisite; audit is not part of the shared 512MiB/4090-name admission yet"
+    },
+    {
+      "name": "state retention, aggregate handles/RSS and end-to-end scan/cache performance",
+      "result": "not complete; no new speed or RSS claim",
+      "note": "metadata bounds and measured disk occupancy do not close the whole cross-platform resource audit"
+    }
+  ],
+  "buildStorage": {
+    "environment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "measuredDate": "2026-10-04",
+    "measurement": "du -sk target target/debug",
+    "targetKiB": 3132592,
+    "debugKiB": 2118904,
+    "note": "filesystem du after final checks; previous 43.323GiB payloads remain in OS Trash, never emptied"
+  },
+  "ordering": "new Dart/SvelteKit work deferred per user; continue cross-platform cache/resource audit"
+}

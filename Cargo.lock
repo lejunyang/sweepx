@@ -1179,6 +1179,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "sweepx-cache",
  "sweepx-protocol",
  "tempfile",
  "thiserror",
