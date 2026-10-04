@@ -18,8 +18,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 #[cfg(target_os = "linux")]
 mod native_state;
-#[cfg(any(target_os = "linux", all(test, unix)))]
-mod retained_vfs;
 #[cfg(all(test, target_os = "linux"))]
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -31,6 +29,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use sweepx_audit::retained_vfs;
 
 #[cfg(target_os = "linux")]
 use fs2::FileExt;
@@ -61,25 +61,21 @@ const SCHEMA_VERSION: &str = "sweepx.event_journal.sqlite.v1";
 const APPLICATION_ID: i64 = 0x5357_584a;
 #[cfg(target_os = "linux")]
 const USER_VERSION: i64 = 1;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
 const PAGE_SIZE: i64 = 4096;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
 const MAX_PAGE_COUNT: i64 = 6912;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
 const MAX_DATABASE_BYTES: u64 = PAGE_SIZE as u64 * MAX_PAGE_COUNT as u64;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
 const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_TOTAL_BYTES: u64 = JOURNAL_FILE_LENGTH_CAP;
-// Independent portable ABI fixture has the published 32 MiB quota, without adding the
-// Linux-only native cache dependency or enabling production journals on another platform.
-#[cfg(all(test, unix, not(target_os = "linux")))]
-const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum combined DB/WAL/rollback/legacy SHM file lengths admitted for one journal.
 /// A containing state writer reserves this peak; this is not physical allocation or RSS.
 #[cfg(target_os = "linux")]
 pub const JOURNAL_FILE_LENGTH_CAP: u64 = sweepx_cache::STATE_RECORD_RESERVE_BYTES;
-#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg(target_os = "linux")]
 const MAX_ROLLBACK_BYTES: u64 = MAX_DATABASE_BYTES + 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_APPEND_RESERVE_BYTES: u64 = 1024 * 1024;
@@ -755,6 +751,14 @@ impl EventJournal {
         let vfs = retained_vfs::Registered::new(
             Arc::clone(&root) as Arc<dyn retained_vfs::Storage>,
             database_file,
+            retained_vfs::FileLimits {
+                database_bytes: MAX_DATABASE_BYTES,
+                wal_bytes: MAX_WAL_BYTES,
+                rollback_bytes: MAX_ROLLBACK_BYTES,
+                shm_bytes: MAX_TOTAL_BYTES,
+                total_bytes: MAX_TOTAL_BYTES,
+            },
+            retained_vfs::WalMode::Exclusive,
         )?;
         let mut connection = open_connection(&vfs)?;
         if !vfs.owns_connection(&connection)? {

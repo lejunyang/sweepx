@@ -167,6 +167,8 @@ CLI/Core 的普通预览、垃圾历史及 macOS 文件索引写入现在与 ope
 
 Unix audit/recovery 的预检现在保留原生目录，并仅用相对元数据重查数据库身份、私有权限及 DB/WAL/SHM/rollback 长度，避免打开再关闭另一数据库 FD 释放 SQLite 的 POSIX 锁。已替换的目录、链接旁文件及超过既有组件额度的文件在 SQLite 打开前拒绝；拒绝保留旧字节，不整备权限或淘汰审计记录。首次数据库创建为相对独占创建，同步使用保留父目录。audit 仍使用默认 SQLite pathname VFS，前后校验不能证明实际 C 文件绑定或阻止所有竞态/增长，也尚未加入上述共同额度；macOS 禁止物化保护目前仅覆盖这些原生预检，Windows audit 仍不支持。
 
+保留 SQLite VFS 现统一在现有 audit crate 内，Linux journal 复用其 EXCLUSIVE 模式，原有数据库布局及 32 MiB 额度不变。共享层另支持 Linux/macOS NORMAL WAL，以有界共享索引和 OFD 锁保留并发读者的旧事务视图；每个上下文的索引映射最多 1 MiB，64 个活动上下文为组件共同准入。macOS 已验证并发读写、独立进程默认 SQLite 兼容及两种模式的崩溃恢复，Linux 原生运行仍待验。默认 SQLite 的同进程混用不在兼容声明内。AuditStore 本身尚未接入该 VFS；完整 SQL/映射/关闭区间的禁止物化保护、共同状态额度及全局资源验收仍待完成。
+
 ## Preview cache 只读诊断
 
 ```bash

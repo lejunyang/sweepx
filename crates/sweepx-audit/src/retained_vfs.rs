@@ -1,12 +1,15 @@
 //! Process-lifetime SQLite VFS with bounded namespace leases and retained data descriptors.
 //!
-//! Version-one I/O deliberately has no shared-memory or mmap methods. The journal must set
-//! EXCLUSIVE before WAL and temp_store=MEMORY; unsupported names/temp files fail closed.
-//! Production storage is the Linux native root. Tests use controlled Unix fixture storage
-//! to exercise the actual bundled SQLite ABI without widening production platform gates.
+//! Exclusive mode has no shared-memory methods. Shared mode provides a bounded Unix WAL
+//! index with OFD locks on Linux/macOS. Owners supply native authority and the complete
+//! synchronous provider-policy interval, including mapped-page access and close.
+//! Controlled fixtures exercise bundled SQLite separately from native mount admission.
+//! Default POSIX VFS interoperability is qualified across independent processes only:
+//! closing custom descriptors can release a builtin client's same-process POSIX locks.
 //! Inherited SQLite connections must not be used after fork. Retirement rejects subsequent
 //! file I/O; it cannot revoke data already loaded into a foreign connection's SQLite cache.
 
+mod shm;
 #[cfg(test)]
 mod tests;
 
@@ -22,7 +25,6 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use super::{MAX_DATABASE_BYTES, MAX_ROLLBACK_BYTES, MAX_TOTAL_BYTES, MAX_WAL_BYTES};
 const IO_LIMIT: usize = 1024 * 1024;
 // SQLite's published lock-byte protocol, not a filesystem allocation/sector claim.
 const PENDING_BYTE: libc::off_t = 0x4000_0000;
@@ -30,32 +32,81 @@ const RESERVED_BYTE: libc::off_t = PENDING_BYTE + 1;
 const SHARED_FIRST: libc::off_t = PENDING_BYTE + 2;
 const SHARED_SIZE: libc::off_t = 510;
 
+/// Caller-owned encoded-length policy checked at actual I/O boundaries.
+#[derive(Debug, Clone, Copy)]
+pub struct FileLimits {
+    /// Maximum main database length.
+    pub database_bytes: u64,
+    /// Maximum WAL length.
+    pub wal_bytes: u64,
+    /// Maximum rollback-journal length.
+    pub rollback_bytes: u64,
+    /// Maximum SHM length; shared mode additionally caps mapping capacity at one MiB.
+    pub shm_bytes: u64,
+    /// Maximum sum of all four file lengths, including legacy sidecars.
+    pub total_bytes: u64,
+}
+impl FileLimits {
+    fn validate(self) -> io::Result<()> {
+        if [
+            self.database_bytes,
+            self.wal_bytes,
+            self.rollback_bytes,
+            self.shm_bytes,
+            self.total_bytes,
+        ]
+        .into_iter()
+        .any(|n| n == 0 || n > i64::MAX as u64)
+        {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid retained SQLite length limits",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// WAL-index strategy; exclusive mode retains its original version-one I/O contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// The complete physical namespace admitted by the journal; SHM is accounting-only.
-pub(super) enum Name {
+pub enum WalMode {
+    /// Caller configures EXCLUSIVE before WAL access; SHM remains accounting-only.
+    Exclusive,
+    /// Normal WAL readers/writers use a bounded, descriptor-bound shared-memory index.
+    Shared,
+}
+
+/// Fixed VFS token names, mapped by Storage to retained native names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Name {
+    /// Main database.
     Database,
+    /// Write-ahead log.
     Wal,
+    /// Rollback journal.
     Rollback,
-    // Account legacy SHM, but never open/delete it: version-one exclusive WAL uses heap state.
+    /// WAL-index file; exclusive mode only accounts its legacy length.
     Shm,
 }
 
 impl Name {
-    pub(super) fn text(self) -> &'static str {
+    /// Basename in the ephemeral VFS namespace, never a host pathname.
+    pub fn text(self) -> &'static str {
         match self {
-            Self::Database => "journal.db",
-            Self::Wal => "journal.db-wal",
-            Self::Rollback => "journal.db-journal",
-            Self::Shm => "journal.db-shm",
+            Self::Database => "state.db",
+            Self::Wal => "state.db-wal",
+            Self::Rollback => "state.db-journal",
+            Self::Shm => "state.db-shm",
         }
     }
 
-    fn limit(self) -> u64 {
+    fn limit(self, limits: FileLimits) -> u64 {
         match self {
-            Self::Database => MAX_DATABASE_BYTES,
-            Self::Wal => MAX_WAL_BYTES,
-            Self::Rollback => MAX_ROLLBACK_BYTES,
-            Self::Shm => MAX_TOTAL_BYTES,
+            Self::Database => limits.database_bytes,
+            Self::Wal => limits.wal_bytes,
+            Self::Rollback => limits.rollback_bytes,
+            Self::Shm => limits.shm_bytes,
         }
     }
 
@@ -82,10 +133,10 @@ impl Name {
                     n.checked_mul(10)?.checked_add(u64::from(*byte - b'0'))
                 })?;
                 let name = match &input[split + 1..] {
-                    b"journal.db" => Self::Database,
-                    b"journal.db-wal" => Self::Wal,
-                    b"journal.db-journal" => Self::Rollback,
-                    b"journal.db-shm" => Self::Shm,
+                    b"state.db" => Self::Database,
+                    b"state.db-wal" => Self::Wal,
+                    b"state.db-journal" => Self::Rollback,
+                    b"state.db-shm" => Self::Shm,
                     _ => return None,
                 };
                 return Some((key, name));
@@ -96,17 +147,25 @@ impl Name {
     }
 }
 
-/// Native authority supplied by the journal; no callback accepts an execution pathname.
-pub(super) trait Storage: Send + Sync {
+/// Native authority supplied by the owner; no callback accepts an execution pathname.
+/// Provider policy must cover the complete SQL interval, including mapped-page accesses.
+pub trait Storage: Send + Sync {
+    /// Opens only an admitted relative file; requested exclusive creation must not reopen existing data.
     fn open(&self, name: Name, create: bool, exclusive: bool) -> io::Result<File>;
+    /// Revalidates private/native relative binding without reopening another data descriptor.
     fn contains(&self, name: Name, file: &File) -> io::Result<bool>;
+    /// Returns exact logical length or explicit absence; uncertainty remains an error.
     fn length(&self, name: Name) -> io::Result<Option<u64>>;
+    /// Removes a checked sidecar via retained authority; final unlink races remain explicit.
     fn remove(&self, name: Name, expected: Option<&File>) -> io::Result<()>;
+    /// Requests retained-parent synchronization, without a power-loss claim.
     fn sync(&self) -> io::Result<()>;
 }
 
 struct Context {
     storage: Arc<dyn Storage>,
+    limits: FileLimits,
+    mode: WalMode,
     database: Arc<File>,
     claimed: AtomicBool,
     // Only two allowed auxiliary files; keep closed sidecar evidence until deletion/reopen.
@@ -162,7 +221,7 @@ impl Context {
     }
 
     fn growth(&self, name: Name, end: u64) -> Result<(), c_int> {
-        if end > name.limit() {
+        if end > name.limit(self.limits) {
             return Err(ffi::SQLITE_FULL);
         }
         let mut total = 0_u64;
@@ -173,9 +232,12 @@ impl Context {
                 .map_err(|_| ffi::SQLITE_IOERR_FSTAT)?
                 .unwrap_or(0);
             let bytes = if item == name { bytes.max(end) } else { bytes };
+            if bytes > item.limit(self.limits) {
+                return Err(ffi::SQLITE_FULL);
+            }
             total = total.checked_add(bytes).ok_or(ffi::SQLITE_FULL)?;
         }
-        if total > MAX_TOTAL_BYTES {
+        if total > self.limits.total_bytes {
             Err(ffi::SQLITE_FULL)
         } else {
             Ok(())
@@ -183,7 +245,7 @@ impl Context {
     }
 }
 
-const VFS_NAME: &CStr = c"sweepx-retained-journal-v1";
+const VFS_NAME: &CStr = c"sweepx-retained-state-v1";
 const MAX_CONTEXTS: usize = 64;
 
 struct Registry {
@@ -270,7 +332,7 @@ fn registry() -> io::Result<&'static Registry> {
 /// One bounded namespace lease. The C VFS itself has process lifetime; retiring a lease
 /// invalidates future I/O but never frees memory that another SQLite connection could see.
 #[derive(Debug)]
-pub(super) struct Registered {
+pub struct Registered {
     key: u64,
     filename: CString,
     context: Arc<Context>,
@@ -287,7 +349,23 @@ impl std::fmt::Debug for Context {
 impl Registered {
     /// Consumes one admitted descriptor and reserves one of 64 active namespace contexts.
     /// Contexts held by foreign file objects continue paying the quota after owner retirement.
-    pub(super) fn new(storage: Arc<dyn Storage>, database: File) -> io::Result<Self> {
+    pub fn new(
+        storage: Arc<dyn Storage>,
+        database: File,
+        limits: FileLimits,
+        mode: WalMode,
+    ) -> io::Result<Self> {
+        limits.validate()?;
+        if mode == WalMode::Shared
+            && (limits.shm_bytes < 32768
+                || limits.shm_bytes > 1024 * 1024
+                || !limits.shm_bytes.is_multiple_of(32768))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shared WAL index must admit 32 KiB to 1 MiB",
+            ));
+        }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let registry = registry()?;
         registry
@@ -300,9 +378,11 @@ impl Registered {
         let key = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| io::Error::other("journal VFS keys exhausted"))?;
-        let filename = CString::new(format!("/{key}/journal.db")).expect("numeric namespace token");
+        let filename = CString::new(format!("/{key}/state.db")).expect("numeric namespace token");
         let context = Arc::new(Context {
             storage,
+            limits,
+            mode,
             database: Arc::new(database),
             claimed: AtomicBool::new(false),
             sidecars: Mutex::new([None, None]),
@@ -323,21 +403,21 @@ impl Registered {
     }
 
     /// Returns the non-default process-lifetime driver name for SQLite open.
-    pub(super) fn name(&self) -> &CStr {
+    pub fn name(&self) -> &CStr {
         VFS_NAME
     }
     /// Returns an ephemeral registry token, never a host execution pathname.
-    pub(super) fn filename(&self) -> &CStr {
+    pub fn filename(&self) -> &CStr {
         &self.filename
     }
     /// Borrows the actual main I/O descriptor without creating another file description.
-    pub(super) fn database(&self) -> &File {
+    pub fn database(&self) -> &File {
         &self.context.database
     }
 
     /// Checks SQLite's actual file object, our method/context markers and retained identity.
     /// This never interprets a builtin private struct or treats a reported name as authority.
-    pub(super) fn owns_connection(&self, connection: &Connection) -> io::Result<bool> {
+    pub fn owns_connection(&self, connection: &Connection) -> io::Result<bool> {
         let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
         // SAFETY: live exclusive Connection borrow, writable pointer output. We only cast
         // sqlite3_file after checking our own methods marker, never a private Unix C struct.
@@ -349,7 +429,8 @@ impl Registered {
                 (&mut file as *mut *mut ffi::sqlite3_file).cast(),
             )
         };
-        if code != ffi::SQLITE_OK || file.is_null() || unsafe { (*file).pMethods } != &METHODS {
+        if code != ffi::SQLITE_OK || file.is_null() || !matches_methods(unsafe { (*file).pMethods })
+        {
             return Ok(false);
         }
         let state = unsafe { (*file.cast::<Slot>()).state.as_ref() };
@@ -385,6 +466,7 @@ struct State {
     file: Arc<File>,
     name: Name,
     lock: c_int,
+    shm: Option<shm::SharedMemory>,
 }
 
 impl State {
@@ -395,6 +477,10 @@ impl State {
         }
         Ok(())
     }
+}
+
+fn matches_methods(methods: *const ffi::sqlite3_io_methods) -> bool {
+    methods == &METHODS || methods == &SHARED_METHODS
 }
 
 // Every callback catches Rust panics before crossing SQLite's C ABI. Buffer/pointer validity
@@ -462,10 +548,16 @@ unsafe extern "C" fn open(
             file: data,
             name,
             lock: ffi::SQLITE_LOCK_NONE,
+            shm: None,
         });
+        let methods = if data.context.mode == WalMode::Shared {
+            &SHARED_METHODS
+        } else {
+            &METHODS
+        };
         unsafe {
             (*file.cast::<Slot>()).state = Box::into_raw(data);
-            (*file).pMethods = &METHODS;
+            (*file).pMethods = methods;
             if !output.is_null() {
                 *output = flags;
             }
@@ -485,8 +577,13 @@ unsafe extern "C" fn close(file: *mut ffi::sqlite3_file) -> c_int {
         slot.state = ptr::null_mut();
         slot.base.pMethods = ptr::null();
         if data.name == Name::Database {
-            record_lock(&data.file, libc::F_UNLCK, 0, 0)
-                .map_or(ffi::SQLITE_IOERR_UNLOCK, |_| ffi::SQLITE_OK)
+            let shm = data
+                .shm
+                .map_or(Ok(()), |shm| shm.finish(&data.context, false));
+            let unlocked =
+                record_lock(&data.file, libc::F_UNLCK, 0, 0).map_err(|_| ffi::SQLITE_IOERR_UNLOCK);
+            shm.and(unlocked)
+                .map_or_else(|code| code, |()| ffi::SQLITE_OK)
         } else {
             ffi::SQLITE_OK
         }
@@ -643,12 +740,12 @@ fn record_lock(
     lock.l_whence = libc::SEEK_SET as libc::c_short;
     lock.l_start = start;
     lock.l_len = len;
-    // Linux OFD locks also conflict with ordinary SQLite's POSIX locks in this process,
-    // without relying on the builtin VFS's private inode registry. Other Unix branches are
-    // test-only protocol fixtures and deliberately do not claim this Linux guarantee.
-    #[cfg(target_os = "linux")]
+    // Linux/macOS OFD locks survive closes of unrelated descriptors and conflict with POSIX
+    // locks. Builtin-client descriptor-close caveats remain explicit. Other Unix branches
+    // are test-only fixtures without production admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let command = libc::F_OFD_SETLK;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let command = libc::F_SETLK;
     if unsafe { libc::fcntl(file.as_raw_fd(), command, &lock) } < 0 {
         Err(io::Error::last_os_error())
@@ -752,9 +849,9 @@ unsafe extern "C" fn reserved(file: *mut ffi::sqlite3_file, out: *mut c_int) -> 
         query.l_whence = libc::SEEK_SET as libc::c_short;
         query.l_start = RESERVED_BYTE;
         query.l_len = 1;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let command = libc::F_OFD_GETLK;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let command = libc::F_GETLK;
         if unsafe { libc::fcntl(state.file.as_raw_fd(), command, &mut query) } < 0 {
             return ffi::SQLITE_IOERR_CHECKRESERVEDLOCK;
@@ -808,6 +905,15 @@ static METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
     xShmUnmap: None,
     xFetch: None,
     xUnfetch: None,
+};
+
+static SHARED_METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
+    iVersion: 2,
+    xShmMap: Some(shm::map),
+    xShmLock: Some(shm::lock),
+    xShmBarrier: Some(shm::barrier),
+    xShmUnmap: Some(shm::unmap),
+    ..METHODS
 };
 
 unsafe extern "C" fn delete(

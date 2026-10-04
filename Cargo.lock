@@ -1295,6 +1295,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "sweepx-audit",
  "sweepx-cache",
  "sweepx-model",
  "sweepx-protocol",

@@ -1,0 +1,274 @@
+{
+  "schema": "sweepx.shared-retained-vfs-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "ab12212",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "Move the retained SQLite driver and independent ABI fixtures from event-journal into a public module of the existing audit crate; no new crate",
+    "Linux journal reuses EXCLUSIVE mode and maps opaque state.db tokens to its existing journal.db physical layout",
+    "Add NORMAL WAL index support on Linux/macOS without changing AuditStore concurrency to EXCLUSIVE",
+    "Enforce caller-owned component length limits at SQLite writes/truncation/index growth and preserve bounded native file objects"
+  ],
+  "sources": [
+    {
+      "url": "https://www.sqlite.org/c3ref/io_methods.html",
+      "checkedDate": "2026-10-04",
+      "use": "SQLite version-two shared-memory method and C argument contracts"
+    },
+    {
+      "url": "https://www.sqlite.org/walformat.html",
+      "checkedDate": "2026-10-04",
+      "use": "Unix WAL index and eight lock bytes; actual shipped source and kernel tests provide independent oracles"
+    },
+    {
+      "url": "https://www.sqlite.org/wal.html",
+      "checkedDate": "2026-10-04",
+      "use": "NORMAL WAL concurrent snapshot semantics; preserve readers rather than force EXCLUSIVE"
+    },
+    {
+      "localPackage": "libsqlite3-sys 0.38.2, bundled sqlite3/sqlite3.c",
+      "observations": [
+        "Unix SHM lock base 120 and dead-man switch byte 128",
+        "first live index initialization truncates to a three-byte debug marker under exclusive dead-man lock, then downgrades to shared",
+        "native-page-rounded index backing touches newly added pages before mmap",
+        "walIndexPage passes writeLock as bExtend; observed value 2 is true, not invalid"
+      ],
+      "note": "fixed shipped source, not a current upstream release assertion"
+    },
+    {
+      "localPackage": "libc 0.2.189 apple definitions",
+      "observations": [
+        "F_OFD_SETLK=90, F_OFD_GETLK=92; native macOS kernel query and close-survival tests pass"
+      ],
+      "note": "constants alone do not qualify native target behavior"
+    }
+  ],
+  "limits": {
+    "activeContexts": 64,
+    "maxSingleReadWriteBytes": 1048576,
+    "maxVirtualFilenameBytes": 64,
+    "maxSharedIndexMappingBytesPerContext": 1048576,
+    "indexRegionBytes": 32768,
+    "retainedDataFilesPerContext": {
+      "main": 1,
+      "walAndRollback": 2,
+      "sharedIndex": 1
+    },
+    "journalComponentBytes": {
+      "database": 28311552,
+      "wal": 4194304,
+      "rollback": 29360128,
+      "legacyShm": 33554432,
+      "total": 33554432
+    },
+    "note": "per-component file length admission and bounded virtual mappings; not physical allocation, all owner handles, global state/RSS or hard kernel deadlines. Shared mode accounts actual native-page-rounded backing. Cooperating owner coordination is still required for aggregate quotas.",
+    "hostNativePageBytes": 16384,
+    "indexBacking": "one-byte write per newly backed native page; actual rounded growth is charged and bounded by admitted SHM length, never a physical allocation guarantee"
+  },
+  "semantics": {
+    "registration": "one non-default process-lifetime VFS with bounded leases, no global syscall replacement; retired contexts held by foreign C files retain their admission reservation",
+    "authority": "Storage owns native root/file authority and maps opaque names; real SQLITE_FCNTL_FILE_POINTER method/context/descriptor checks remain available. Test fixtures use independent ordinary metadata and do not prove native mount/provider admission",
+    "locking": "production Linux/macOS database and index locks use open-file-description locks with nonblocking conflict behavior; no production process-lock fallback",
+    "index": "stable bounded MAP_SHARED mapping; checked initialization, native-page backing, callback locks and checked unmap. Extension treats all nonzero C boolean values as true",
+    "concurrency": "custom same-process reader retains its old transaction while a second writer commits/closes; default SQLite interoperability is qualified across independent exec processes only",
+    "defaultSameProcess": "not qualified: custom descriptor close can still release a foreign default POSIX client lock in the same process",
+    "provider": "native owner must cover the complete synchronous SQL/mapped-page/close interval with provider policy and checked restoration; protecting only callbacks or mmap does not suffice",
+    "retirement": "rejects subsequent file I/O but cannot revoke already cached SQLite pages or mapped index bytes",
+    "journalAdapter": "preserve journal.db/WAL/rollback/SHM names and EXCLUSIVE schema/wire/replay contracts; relative exclusive creator refuses existing names without reopening/truncating",
+    "auditStore": "unchanged default pathname VFS; this slice only delivers the common driver prerequisite. AuditStore actual binding, full policy interval, callback budget and shared 512MiB/4090-name admission remain next work",
+    "windows": "AuditStore remains UnsupportedPlatform and event-journal remains Linux-only",
+    "mutation": "no target Trash/permanent deletion, permission repair or audit/recovery eviction; final noncooperating relative unlink race remains explicit"
+  },
+  "initialFailures": [
+    {
+      "name": "patch-context-mismatches",
+      "result": "no edits applied by those requests",
+      "reason": "old lib uses private clean plus pub use, old I/O methods are static, and formatter retained a one-line condition; reread exact contexts before corrected edits"
+    },
+    {
+      "name": "native-type-compile-errors",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-shared-vfs-first-tests.log",
+      "reason": "macOS flock constants are i16 while callback selector is i32; correct casts and adapt io-error mapping signature"
+    },
+    {
+      "name": "unsafe-implicit-autoref",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-shared-vfs-portable-tests.log",
+      "reason": "choose method pointer from safe Box state before converting to raw C ownership; remove unused fixture-only limit"
+    },
+    {
+      "name": "normal-wal-first-index-map",
+      "result": "exit101; three new tests failed, old exclusive tests passed",
+      "log": "/private/tmp/sweepx-shared-vfs-normal-tests.log",
+      "reason": "SQLITE_IOERR_SHMMAP 5386. Actual C xShmMap bExtend=2 was rejected as invalid; kernel OFD query/locks and retained index validity were independently confirmed. Interpret nonzero as true and add actual installed-C-callback extension/bytes regression; temporary diagnostic prints removed"
+    },
+    {
+      "name": "normal-wal-diagnostics",
+      "result": "diagnostic failures retained",
+      "logs": [
+        "/private/tmp/sweepx-shared-vfs-lock-diagnostic.log",
+        "/private/tmp/sweepx-shared-vfs-lock-validity-diagnostic.log",
+        "/private/tmp/sweepx-shared-vfs-lock-map-diagnostic.log"
+      ],
+      "note": "the early interpretation as SHMLOCK was corrected against shipped SQLite macro values; passing only after a concrete implementation fix, not retry luck"
+    }
+  ],
+  "checks": [
+    {
+      "name": "ofd-kernel-query",
+      "result": "passed",
+      "passed": 1,
+      "log": "/private/tmp/sweepx-shared-vfs-ofd-query.log",
+      "note": "real macOS F_OFD_GETLK sees another description dead-man read lock, then unlocked state"
+    },
+    {
+      "name": "normal-and-exclusive-driver-contracts",
+      "result": "passed",
+      "passed": 17,
+      "log": "/private/tmp/sweepx-shared-vfs-normal-fixed-tests.log",
+      "note": "before final crash/page-backing hardening; old ABI/quota/retirement/panic tests plus NORMAL snapshot and independent-process compatibility"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1207,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "successfulChildObservations": 19,
+      "log": "/private/tmp/sweepx-shared-vfs-workspace-tests.log",
+      "note": "host service access; before extending abrupt-crash oracle to both modes, native-page fixture portability and final Linux-only exclusive adapter. Unchanged workspace behavior reused with affected tests and final Linux all-targets lint"
+    },
+    {
+      "name": "final-affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "passed": 61,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "successfulChildObservations": 15,
+      "expectedAbortChildren": 2,
+      "log": "/private/tmp/sweepx-shared-vfs-final-affected-tests.log",
+      "note": "54 audit unit +4 audit crash integration +3 host journal unit. Both EXCLUSIVE/NORMAL committed-WAL crashes require SIGABRT and recover through retained VFS then ordinary SQLite integrity/data checks. Final native adapter and its new fixture are Linux-only; same-process snapshot cfg restricts its OFD contract to supported Linux/macOS, without changing host execution"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-audit -p sweepx-event-journal --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-shared-vfs-final-affected-lint.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-shared-vfs-host-lint.log",
+      "note": "final Linux-only adapter is absent from host compilation; final affected lint covers latest public/test code"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-shared-vfs-final-linux-lint.log",
+      "note": "Zig 0.16.0 helper follows repository script with explicit installed compiler. Final native adapter and exclusive-name byte-preservation test compiled, not executed. Subsequent snapshot-test cfg remains true on Linux; no target branch change"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-shared-vfs-windows-lint.log",
+      "note": "same helper with GNU mapping; final Linux/Unix-only changes absent from Windows branch; not MSVC/runtime evidence"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "crates": [
+        "sweepx-audit",
+        "sweepx-event-journal",
+        "sweepx-core",
+        "sweepx-executor"
+      ],
+      "command": "cargo package --list -p <crate> --allow-dirty --locked",
+      "note": "new driver/shm/tests are included in audit; old journal driver files absent. File list is not a registry dependency build"
+    },
+    {
+      "name": "workspace-publish-topology",
+      "result": "passed",
+      "packages": 17,
+      "normalBuildTargetSpecificRows": 50,
+      "uniquePackagePairs": 47,
+      "newDependency": [
+        "sweepx-event-journal",
+        "sweepx-audit",
+        "cfg(target_os = \"linux\")"
+      ],
+      "note": "all actual locked workspace normal/build requirements match ^0.0.1 and publisher order is acyclic/topological; cache precedes audit precedes journal"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "command": "PYTHONDONTWRITEBYTECODE=1 <bundled-python> scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-shared-vfs-docs.log",
+      "note": "unchanged checker self-tests reuse prior 23 passes",
+      "markdownFiles": 54
+    },
+    {
+      "name": "format-and-diff",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check",
+        "git diff --cached --check"
+      ]
+    }
+  ],
+  "validationGaps": [
+    {
+      "name": "known Foundation Trash success regression",
+      "result": "explicitly skipped",
+      "commandFilter": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "earlier diagnosed host/service hang; preserved test, not excluded for this driver change"
+    },
+    {
+      "name": "existing opt-in benchmarks",
+      "result": "ignored",
+      "count": 3,
+      "note": "not run or counted as passes"
+    },
+    {
+      "name": "native Linux OFD/bind-mount/journal/shared-WAL and Windows/MSVC/provider/target Trash",
+      "result": "not run",
+      "reason": "macOS runtime plus GNU cross-compilation cannot prove native target behavior"
+    },
+    {
+      "name": "AuditStore VFS integration and full SQL provider interval",
+      "result": "not implemented by this slice",
+      "note": "AuditStore still uses default pathname driver; full lexical no-materialization interval must include mapped access/close and checked restoration"
+    },
+    {
+      "name": "AuditStore shared state quota, global state retention/owner handles, RSS and scan/cache performance",
+      "result": "not complete; no new performance/RSS claim",
+      "note": "common driver admission is not complete G-STATE-DIR or release qualification"
+    },
+    {
+      "name": "same-process default SQLite mixing and noncooperating pathname/unlink/index modifications",
+      "result": "outside qualified claim",
+      "note": "OFD protects custom clients, not foreign process-wide POSIX locks. Live data already cached/mapped is not revocable"
+    }
+  ],
+  "buildStorage": {
+    "environment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "measuredDate": "2026-10-04",
+    "measurement": "du -sk target target/debug",
+    "targetKiB": 3133216,
+    "debugKiB": 2116880,
+    "note": "after code checks; 43.323GiB previously moved to OS Trash remain there, Trash never emptied"
+  },
+  "ordering": "new Dart/SvelteKit work deferred; next vertical slice is actual AuditStore retained-C-binding, full policy interval and state quota integration"
+}

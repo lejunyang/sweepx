@@ -96,22 +96,32 @@ impl super::retained_vfs::Storage for Root {
         create: bool,
         exclusive: bool,
     ) -> io::Result<File> {
-        let (file, created) = self.file(name.text(), create).map_err(io::Error::other)?;
-        if exclusive && !created {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "journal sidecar already exists",
-            ));
+        if exclusive {
+            if !create {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "exclusive sidecar open requires creation",
+                ));
+            }
+            // A failed exclusive creator must never reopen an existing data description.
+            // The shared driver owns opaque names; relative exclusive creation owns authority.
+            let file = self.directory.create_state_file(physical_name(name))?;
+            ensure_local_filesystem(&file).map_err(io::Error::other)?;
+            file.sync_all()?;
+            self.file.sync_all()?;
+            return Ok(file);
         }
-        Ok(file)
+        self.file(physical_name(name), create)
+            .map(|(file, _)| file)
+            .map_err(io::Error::other)
     }
 
     fn contains(&self, name: super::retained_vfs::Name, file: &File) -> io::Result<bool> {
-        self.directory.contains_file(name.text(), file)
+        self.directory.contains_file(physical_name(name), file)
     }
 
     fn length(&self, name: super::retained_vfs::Name) -> io::Result<Option<u64>> {
-        match self.directory.metadata(name.text()) {
+        match self.directory.metadata(physical_name(name)) {
             Ok(metadata) => Ok(Some(metadata.bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -120,15 +130,15 @@ impl super::retained_vfs::Storage for Root {
 
     fn remove(&self, name: super::retained_vfs::Name, expected: Option<&File>) -> io::Result<()> {
         // Metadata first preserves explicit absence and native private/mount/type refusal.
-        self.directory.metadata(name.text())?;
+        self.directory.metadata(physical_name(name))?;
         if let Some(file) = expected
-            && !self.directory.contains_file(name.text(), file)?
+            && !self.directory.contains_file(physical_name(name), file)?
         {
             return Err(io::Error::other("journal sidecar changed before removal"));
         }
         // Linux unlink has no identity-conditional form: the last check-to-unlink window
         // remains explicit. Authority is the retained parent, never a SQLite pathname.
-        self.directory.remove(name.text())
+        self.directory.remove(physical_name(name))
     }
 
     fn sync(&self) -> io::Result<()> {
@@ -162,5 +172,42 @@ fn file_error(path: &Path, error: io::Error) -> JournalError {
             JournalError::UnsafeStateFile(path.display().to_string())
         }
         _ => JournalError::Io(error),
+    }
+}
+
+// The VFS name is an opaque token, not a storage pathname. Journal owns these physical names.
+fn physical_name(name: super::retained_vfs::Name) -> &'static str {
+    use super::retained_vfs::Name;
+    match name {
+        Name::Database => "journal.db",
+        Name::Wal => "journal.db-wal",
+        Name::Rollback => "journal.db-journal",
+        Name::Shm => "journal.db-shm",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{FileExt, PermissionsExt};
+    use sweepx_audit::retained_vfs::{Name, Storage};
+
+    #[test]
+    fn exclusive_sidecar_creation_preserves_existing_native_bytes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = Root::open(&path, false).unwrap();
+        let file = Storage::open(&root, Name::Wal, true, true).unwrap();
+        assert_eq!(file.write_at(b"keep", 0).unwrap(), 4);
+        assert_eq!(
+            Storage::open(&root, Name::Wal, true, true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(path.join("journal.db-wal")).unwrap(), b"keep");
+        assert!(!path.join("state.db-wal").exists());
+        assert!(Storage::contains(&root, Name::Wal, &file).unwrap());
     }
 }
