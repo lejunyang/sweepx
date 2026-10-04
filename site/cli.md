@@ -165,9 +165,9 @@ cargo run -p sweepx-cli -- \
 
 CLI/Core 的普通预览、垃圾历史及 macOS 文件索引写入现在与 operation snapshot、Linux journal 共用状态根非阻塞锁：合作写入的文件长度合计限 512 MiB，目录与文件名合计限 4,090 项，计入未知普通文件及新旧文件/临时文件共存。缓存写入保留其中 32 MiB 和 8 个条目供终态记录使用；这些是准入余量，不是预分配或物理空间保证。只遍历已知存储形状；未知目录、链接、非私有文件或不确定原生证据拒绝新写入，不改权限、不删除 operation/audit/recovery 记录。缓存拒绝仍返回当前扫描事实；终态持久化拒绝明确报错并保留旧记录。独立 library cache API 仍沿用组件额度，需显式 state-root API 才参与共同计费；独立 audit、未来 spill/其他写入及非合作式写入尚未全部接入，因此全局资源审计仍未完成。它不是 RSS 上限、硬 I/O 期限或断电恢复保证。
 
-Unix audit/recovery 的预检现在保留原生目录，并仅用相对元数据重查数据库身份、私有权限及 DB/WAL/SHM/rollback 长度，避免打开再关闭另一数据库 FD 释放 SQLite 的 POSIX 锁。已替换的目录、链接旁文件及超过既有组件额度的文件在 SQLite 打开前拒绝；拒绝保留旧字节，不整备权限或淘汰审计记录。首次数据库创建为相对独占创建，同步使用保留父目录。audit 仍使用默认 SQLite pathname VFS，前后校验不能证明实际 C 文件绑定或阻止所有竞态/增长，也尚未加入上述共同额度；macOS 禁止物化保护目前仅覆盖这些原生预检，Windows audit 仍不支持。
+Linux/macOS AuditStore 现使用共同的保留 SQLite VFS。实际打开的数据库 FD 在 SQL 开始前核对身份，连接另检查真实 C 文件对象；DB/WAL/rollback/SHM 沿保留目录操作，写入、truncate 和索引扩展在回调中受额度限制。DB 限 64 MiB、WAL 限 16 MiB、索引限 1 MiB，四类文件总长限 81 MiB；保留 NORMAL WAL、旧 wire/schema 和并发读者视图。macOS 禁止物化策略覆盖完整同步 SQL、映射访问和关闭区间，成功恢复后才返回结果或发布 live claim；消费执行也在关闭完成后释放排他锁。拒绝不整备权限或淘汰审计记录，Windows audit 仍不支持。
 
-保留 SQLite VFS 现统一在现有 audit crate 内，Linux journal 复用其 EXCLUSIVE 模式，原有数据库布局及 32 MiB 额度不变。共享层另支持 Linux/macOS NORMAL WAL，以有界共享索引和 OFD 锁保留并发读者的旧事务视图；每个上下文的索引映射最多 1 MiB，64 个活动上下文为组件共同准入。macOS 已验证并发读写、独立进程默认 SQLite 兼容及两种模式的崩溃恢复，Linux 原生运行仍待验。默认 SQLite 的同进程混用不在兼容声明内。AuditStore 本身尚未接入该 VFS；完整 SQL/映射/关闭区间的禁止物化保护、共同状态额度及全局资源验收仍待完成。
+保留 SQLite VFS 统一在现有 audit crate 内，Linux journal 复用其 EXCLUSIVE 模式，原有数据库布局及 32 MiB 额度不变。AuditStore 使用 NORMAL WAL；64 个活动上下文由组件共同准入，每个共享索引映射最多 1 MiB，数据库页面不映射。macOS 已验证实际审计写入拒绝、目录/数据库替换拒绝、完整禁止物化区间、锁保持及崩溃恢复；并发读写和默认 SQLite 兼容由共同驱动测试覆盖，后者仅限独立进程。同进程默认 POSIX 客户端混用、Linux 原生运行、真实 provider、最终非合作式 unlink 替换、独立 audit 的共同状态额度及全局 owner 句柄/资源验收仍开放。
 
 ## Preview cache 只读诊断
 

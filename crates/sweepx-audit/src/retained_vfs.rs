@@ -870,6 +870,14 @@ unsafe extern "C" fn control(file: *mut ffi::sqlite3_file, op: c_int, out: *mut 
                 *out.cast::<c_int>() = c_int::from(state(file).valid().is_err());
             }
             ffi::SQLITE_OK
+        } else if op == ffi::SQLITE_FCNTL_MMAP_SIZE && !out.is_null() {
+            if unsafe { state(file) }.valid().is_err() {
+                return ffi::SQLITE_IOERR;
+            }
+            // No database xFetch exists: both querying and requesting mmap must report zero.
+            // NORMAL WAL's separately bounded shared index does not enable DB page mapping.
+            unsafe { *out.cast::<i64>() = 0 };
+            ffi::SQLITE_OK
         } else {
             ffi::SQLITE_NOTFOUND
         }

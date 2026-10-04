@@ -43,11 +43,15 @@ use windows::{same_observation, touch_accessed};
 #[cfg(any(windows, test))]
 mod windows_names;
 
-/// Protects the complete synchronous I/O interval on macOS, including opens and reads.
+/// Protects the complete synchronous I/O interval on macOS, including opens, mapped access
+/// and closing handles. The closure must finish all protected I/O before returning.
 /// Success requires restoration; an original operation failure is preserved. Publication
 /// must invoke this only for its preparation stage, then commit after restoration succeeds.
 #[cfg(target_os = "macos")]
-fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+pub fn with_io_policy<T, E>(operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
     let policy = sweepx_platform::macos_io_policy::NoMaterialization::enter()?;
     let result = operation();
     {
@@ -65,15 +69,24 @@ fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> 
         #[cfg(not(test))]
         let restored = policy.restore();
         if result.is_ok() {
-            restored?;
+            restored.map_err(E::from)?;
         }
     }
     result
 }
 
 #[cfg(not(target_os = "macos"))]
-fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+/// Runs synchronous I/O without a macOS provider policy on this platform.
+/// The matching macOS API protects the complete closure and checks policy restoration.
+pub fn with_io_policy<T, E>(operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
     operation()
+}
+
+fn with_cache_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    with_io_policy(operation)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -375,5 +388,40 @@ mod synced_tests {
         );
         assert_eq!(std::fs::read(path.join("snapshot")).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generic_policy_preserves_operation_error_and_drops_refused_success() {
+        #[derive(Debug)]
+        enum DomainError {
+            Operation,
+            Io(io::Error),
+        }
+        impl From<io::Error> for DomainError {
+            fn from(error: io::Error) -> Self {
+                Self::Io(error)
+            }
+        }
+        let dropped = std::cell::Cell::new(false);
+        struct Owned<'a>(&'a std::cell::Cell<bool>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let result: Result<Owned<'_>, DomainError> = with_io_policy(|| {
+            FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+            Ok(Owned(&dropped))
+        });
+        assert!(
+            matches!(result, Err(DomainError::Io(ref e)) if e.to_string()=="injected cache policy restoration failure")
+        );
+        assert!(dropped.get());
+        let result: Result<(), DomainError> = with_io_policy(|| {
+            FAIL_RESTORE_ONCE.with(|flag| flag.set(true));
+            Err(DomainError::Operation)
+        });
+        assert!(matches!(result, Err(DomainError::Operation)));
     }
 }

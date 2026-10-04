@@ -21,6 +21,7 @@ use tempfile::TempDir;
 const CHILD_ENV: &str = "SWEEPX_AUDIT_CRASH_CHILD";
 const ROOT_ENV: &str = "SWEEPX_AUDIT_CRASH_ROOT";
 const READY_FILE: &str = "child-ready";
+const READER_READY_ENV: &str = "SWEEPX_AUDIT_READER_READY";
 const DATABASE_FILE: &str = "audit.db";
 const WAL_FILE: &str = "audit.db-wal";
 
@@ -77,19 +78,48 @@ fn private_root(temp: &TempDir) -> PathBuf {
     root
 }
 
-fn spawn_child(root: &Path, scenario: &str) -> std::process::Child {
-    Command::new(env::current_exe().unwrap())
-        .arg("--exact")
-        .arg("crash_child")
-        .arg("--nocapture")
-        .env(CHILD_ENV, scenario)
-        .env(ROOT_ENV, root)
-        .spawn()
-        .unwrap()
+struct OwnedChild(std::process::Child);
+impl std::ops::Deref for OwnedChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_child(root: &Path, scenario: &str) -> OwnedChild {
+    OwnedChild(
+        Command::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("crash_child")
+            .arg("--nocapture")
+            .env(CHILD_ENV, scenario)
+            .env(ROOT_ENV, root)
+            .spawn()
+            .unwrap(),
+    )
 }
 
 fn wait_until_ready(root: &Path, child: &mut std::process::Child) {
-    let ready = root.join(READY_FILE);
+    wait_for_barrier(&barrier(root, READY_FILE), child);
+}
+
+fn barrier(root: &Path, name: &str) -> PathBuf {
+    // Synchronization is outside the state inventory and never contributes audit authority.
+    root.parent().unwrap().join(name)
+}
+
+fn wait_for_barrier(ready: &Path, child: &mut std::process::Child) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if ready.exists() {
@@ -140,24 +170,6 @@ fn raw_connection(root: &Path) -> Connection {
 fn committed_intent_child(root: &Path) -> ! {
     let store = AuditStore::open(root).unwrap();
     let binding = binding();
-    register(&store, &binding);
-
-    let checkpoint = raw_connection(root);
-    let (busy, _, _): (i64, i64, i64) = checkpoint
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .unwrap();
-    assert_eq!(busy, 0);
-    drop(checkpoint);
-
-    // Pin the pre-commit database end-mark so the committed intent remains in a
-    // live WAL rather than being checkpointed into the main database.
-    let reader = raw_connection(root);
-    reader.execute_batch("BEGIN").unwrap();
-    let _: i64 = reader
-        .query_row("SELECT count(*) FROM audit_events", [], |row| row.get(0))
-        .unwrap();
 
     let claim = store
         .claim_execution(&binding.authorization_id, &binding.plan_digest)
@@ -165,10 +177,49 @@ fn committed_intent_child(root: &Path) -> ! {
     let token = store.reserve_intent(&claim, intent_request()).unwrap();
     assert_eq!(token.action_id().as_str(), "action-crash-integration");
     assert!(root.join(WAL_FILE).metadata().unwrap().len() > 0);
-    fs::write(root.join(READY_FILE), b"intent-committed\n").unwrap();
+    fs::write(barrier(root, READY_FILE), b"intent-committed\n").unwrap();
     loop {
         thread::park();
     }
+}
+
+fn pinned_reader_child(root: &Path) -> ! {
+    let reader = raw_connection(root);
+    reader.execute_batch("BEGIN").unwrap();
+    let sequence: i64 = reader
+        .query_row(
+            "SELECT sequence FROM audit_head WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sequence, 1);
+    let ready = PathBuf::from(env::var_os(READER_READY_ENV).unwrap());
+    fs::write(ready, b"reader-pinned\n").unwrap();
+    loop {
+        thread::park();
+    }
+}
+
+fn spawn_committed_fixture(root: &Path) -> (OwnedChild, OwnedChild) {
+    // Native registration closes/checkpoints before another process pins sequence 1.
+    let store = AuditStore::open(root).unwrap();
+    register(&store, &binding());
+    drop(store);
+    let ready = barrier(root, "reader-ready");
+    let mut reader = OwnedChild(
+        Command::new(env::current_exe().unwrap())
+            .args(["--exact", "crash_child", "--nocapture"])
+            .env(CHILD_ENV, "pinned-reader")
+            .env(ROOT_ENV, root)
+            .env(READER_READY_ENV, &ready)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_barrier(&ready, &mut reader);
+    // OFD custom clients preserve cross-process POSIX readers. Same-process default
+    // descriptor closes release its POSIX locks and cannot provide this independent oracle.
+    (spawn_child(root, "committed-intent"), reader)
 }
 
 fn uncommitted_transaction_child(root: &Path) -> ! {
@@ -233,7 +284,7 @@ fn uncommitted_transaction_child(root: &Path) -> ! {
     let wal_len_after = wal_path.metadata().unwrap().len();
     assert!(wal_len_after > wal_len_before);
     File::open(&wal_path).unwrap().sync_all().unwrap();
-    fs::write(root.join(READY_FILE), b"transaction-uncommitted\n").unwrap();
+    fs::write(barrier(root, READY_FILE), b"transaction-uncommitted\n").unwrap();
     loop {
         thread::park();
     }
@@ -247,6 +298,7 @@ fn crash_child() {
     let root = PathBuf::from(env::var_os(ROOT_ENV).expect("missing child audit root"));
     match scenario.as_str() {
         "committed-intent" => committed_intent_child(&root),
+        "pinned-reader" => pinned_reader_child(&root),
         "uncommitted-transaction" => uncommitted_transaction_child(&root),
         other => panic!("unknown crash scenario {other}"),
     }
@@ -256,11 +308,12 @@ fn crash_child() {
 fn committed_intent_survives_sigkill_and_forces_recovery_without_resubmit() {
     let temp = TempDir::new().unwrap();
     let root = private_root(&temp);
-    let mut child = spawn_child(&root, "committed-intent");
+    let (mut child, mut reader) = spawn_committed_fixture(&root);
     wait_until_ready(&root, &mut child);
     assert!(root.join(WAL_FILE).metadata().unwrap().len() > 0);
     let status = kill_and_wait(&mut child);
     assert!(!status.success());
+    kill_and_wait(&mut reader);
     assert!(root.join(WAL_FILE).metadata().unwrap().len() > 0);
 
     // The main database was checkpointed immediately before claim/reserve. Its
@@ -390,10 +443,11 @@ fn sigkill_during_uncommitted_transaction_leaves_no_projection_or_event_fragment
 fn reopened_store_projection_marks_committed_intent_as_pending_reconciliation() {
     let temp = TempDir::new().unwrap();
     let root = private_root(&temp);
-    let mut child = spawn_child(&root, "committed-intent");
+    let (mut child, mut reader) = spawn_committed_fixture(&root);
     wait_until_ready(&root, &mut child);
     let status = kill_and_wait(&mut child);
     assert!(!status.success());
+    kill_and_wait(&mut reader);
 
     let store = AuditStore::open(&root).unwrap();
     let snapshot = store.projection_snapshot().unwrap();

@@ -425,11 +425,11 @@ impl Directory {
         Ok(left.dev() == right.dev() && left.ino() == right.ino())
     }
 
-    /// Checks one Linux relative binding against an already retained private file, including
-    /// mount evidence. No data descriptor is opened/closed, preserving POSIX database locks.
-    #[cfg(target_os = "linux")]
+    /// Checks a Linux/macOS relative binding against an already retained private file.
+    /// Linux includes mount evidence. No data descriptor is opened or closed for metadata.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn contains_file(&self, name: &str, file: &File) -> io::Result<bool> {
-        self.contains_file_guarded(name, file)
+        with_cache_io(|| self.contains_file_guarded(name, file))
     }
 
     fn contains_file_guarded(&self, name: &str, file: &File) -> io::Result<bool> {
@@ -455,12 +455,12 @@ impl Directory {
         with_cache_io(|| self.open_file_mode(name, true, true))
     }
 
-    /// Opens a private single-link Linux state file for read/write without truncation.
+    /// Opens a private single-link Linux/macOS state file for read/write without truncation.
     /// Optional creation is exclusive and private; a competing creator is admitted once.
     /// The returned descriptor pins the object; this does not validate subsequent name binding.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn state_file(&self, name: &str, create: bool) -> io::Result<(File, bool)> {
-        match self.open_file_mode(name, true, false) {
+        with_cache_io(|| match self.open_file_mode(name, true, false) {
             Ok(file) => Ok((file, false)),
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
                 match self.open_file_mode(name, true, true) {
@@ -472,7 +472,7 @@ impl Directory {
                 }
             }
             Err(error) => Err(error),
-        }
+        })
     }
 
     fn open_file_mode(&self, name: &str, writable: bool, create_new: bool) -> io::Result<File> {

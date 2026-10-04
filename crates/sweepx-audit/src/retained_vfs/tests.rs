@@ -479,6 +479,16 @@ fn sqlite_wal_uses_retained_descriptor_and_preserves_default_vfs() {
         .pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
         .unwrap();
     assert_eq!(mode.to_lowercase(), "wal");
+    // Advisory requests cannot enable database-page mmap; verify SQLite's real pragma path.
+    connection
+        .execute_batch("PRAGMA mmap_size=1073741824;")
+        .unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value::<i64, _>(None, "mmap_size", |r| r.get(0))
+            .unwrap(),
+        0
+    );
     connection.execute_batch("CREATE TABLE records(value INTEGER NOT NULL); BEGIN IMMEDIATE; INSERT INTO records VALUES(3),(8); COMMIT;").unwrap();
     assert_eq!(
         connection

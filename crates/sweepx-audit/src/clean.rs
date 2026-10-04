@@ -12,13 +12,15 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use rusqlite::OpenFlags;
 use rusqlite::config::DbConfig;
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sweepx_protocol::{
@@ -380,7 +382,6 @@ struct LiveClaimAuthority {
     coordinator: Arc<SessionCoordinator>,
     lock_file: Mutex<Option<File>>,
     root_native: Arc<native_state::Root>,
-    database_path: PathBuf,
     database_id: String,
     database_identity: FileIdentity,
     lock_path: PathBuf,
@@ -510,24 +511,21 @@ impl DurableIntentToken {
         live_claim.root_native.binding()?;
         live_claim.root_native.sidecars()?;
         check_native_size_budget(&live_claim.root_native, true)?;
-        let connection = open_connection(&live_claim.database_path)?;
-        if live_claim.root_native.identity()? != live_claim.database_identity {
-            return Err(AuditError::StoreMismatch);
-        }
-        live_claim.root_native.binding()?;
-        live_claim.root_native.sidecars()?;
-        let database_id: String = connection.query_row(
-            "SELECT database_id FROM store_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        if database_id != live_claim.database_id {
-            return Err(AuditError::StoreMismatch);
-        }
-        verify_database(&connection)?;
-        let row: Option<(String, String)> = connection
-            .query_row(
-                "SELECT a.binding_json,i.authority_json FROM authorizations a \
+        live_claim
+            .root_native
+            .with_connection(&live_claim.database_identity, |connection| {
+                let database_id: String = connection.query_row(
+                    "SELECT database_id FROM store_meta WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if database_id != live_claim.database_id {
+                    return Err(AuditError::StoreMismatch);
+                }
+                verify_database(connection)?;
+                let row: Option<(String, String)> = connection
+                    .query_row(
+                        "SELECT a.binding_json,i.authority_json FROM authorizations a \
                  JOIN executions e ON e.execution_id=a.current_execution_id \
                  JOIN intents i ON i.execution_id=e.execution_id \
                  WHERE a.authorization_id=?1 AND a.state='claimed' \
@@ -535,25 +533,26 @@ impl DurableIntentToken {
                  AND e.state='active' AND e.authorization_id=?1 AND e.fence_epoch=?3 \
                  AND i.attempt_id=?4 AND i.authorization_id=?1 AND i.fence_epoch=?3 \
                  AND i.terminal_state='reserved'",
-                params![
-                    live_claim.authorization_id.as_str(),
-                    live_claim.execution_id,
-                    live_claim.fence_epoch as i64,
-                    self.attempt_id.as_str(),
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((binding_json, authority_json)) = row else {
-            return Err(AuditError::FenceEpochMismatch);
-        };
-        let binding: AuthorizationBinding =
-            serde_json::from_str(&binding_json).map_err(AuditError::JournalDecode)?;
-        let authority: IntentAuthority =
-            serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
-        validate_binding(&binding)?;
-        validate_authority_binding(&authority, &binding)?;
-        validate_token_authority(self, &authority)
+                        params![
+                            live_claim.authorization_id.as_str(),
+                            live_claim.execution_id,
+                            live_claim.fence_epoch as i64,
+                            self.attempt_id.as_str(),
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((binding_json, authority_json)) = row else {
+                    return Err(AuditError::FenceEpochMismatch);
+                };
+                let binding: AuthorizationBinding =
+                    serde_json::from_str(&binding_json).map_err(AuditError::JournalDecode)?;
+                let authority: IntentAuthority =
+                    serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+                validate_binding(&binding)?;
+                validate_authority_binding(&authority, &binding)?;
+                validate_token_authority(self, &authority)
+            })
     }
 }
 
@@ -1609,27 +1608,21 @@ impl AuditStore {
             root_native.sidecars()?;
             let database_identity = root_native.identity()?;
             check_native_size_budget(&root_native, true)?;
-            let mut connection = open_connection(&database_path)?;
-            if database_preexisting {
-                verify_initialized_database(&connection)?;
-            } else {
-                initialize_database(&mut connection, &root_native)?;
-            }
-            root_native.binding()?;
-            root_native.sidecars()?;
-            let database_id: String = connection.query_row(
-                "SELECT database_id FROM store_meta WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )?;
-            validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
-            root_native.lock_filesystem(&lock_file)?;
-            if root_native.identity()? != database_identity {
-                return Err(AuditError::StoreMismatch);
-            }
-            // Close SQLite before releasing store exclusion. Never close a second DB FD:
-            // POSIX locks are process-wide and an unrelated same-inode close releases them.
-            drop(connection);
+            let database_id = root_native.with_connection(&database_identity, |connection| {
+                if database_preexisting {
+                    verify_initialized_database(connection)?;
+                } else {
+                    initialize_database(connection, &root_native)?;
+                }
+                let database_id: String = connection.query_row(
+                    "SELECT database_id FROM store_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                validate_bounded_field(&database_id, "database_id", MAX_ID_BYTES)?;
+                root_native.lock_filesystem(&lock_file)?;
+                Ok(database_id)
+            })?;
             FileExt::unlock(&lock_file)?;
             Ok(Self {
                 root,
@@ -1694,33 +1687,36 @@ impl AuditStore {
         }
         let _guard = self.short_lock()?;
         self.check_size_budget(false)?;
-        let mut connection = self.connection_locked()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: i64 =
-            transaction.query_row("SELECT count(*) FROM authorizations", [], |row| row.get(0))?;
-        if count >= MAX_AUTHORIZATIONS {
-            return Err(AuditError::StateTooLarge);
-        }
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM authorizations WHERE authorization_id=?1)",
-            [request.binding.authorization_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if exists {
-            return Err(AuditError::AuthorizationAlreadyExists(
-                request.binding.authorization_id.as_str().to_string(),
-            ));
-        }
-        insert_authorization(&transaction, &request.binding, &binding_json)?;
-        append_event(
-            &transaction,
-            &EventPayload::AuthorizationRegistered {
-                binding: request.binding,
-            },
-        )?;
-        transaction.commit()?;
-        Ok(())
+        self.with_connection_locked(|connection| {
+            verify_database(connection)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let count: i64 =
+                transaction
+                    .query_row("SELECT count(*) FROM authorizations", [], |row| row.get(0))?;
+            if count >= MAX_AUTHORIZATIONS {
+                return Err(AuditError::StateTooLarge);
+            }
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM authorizations WHERE authorization_id=?1)",
+                [request.binding.authorization_id.as_str()],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Err(AuditError::AuthorizationAlreadyExists(
+                    request.binding.authorization_id.as_str().to_string(),
+                ));
+            }
+            insert_authorization(&transaction, &request.binding, &binding_json)?;
+            append_event(
+                &transaction,
+                &EventPayload::AuthorizationRegistered {
+                    binding: request.binding,
+                },
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn claim_execution(
@@ -1769,92 +1765,93 @@ impl AuditStore {
         recovery: bool,
     ) -> Result<ClaimedExecution, AuditError> {
         self.check_size_budget(false)?;
-        let mut connection = self.connection_locked()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (binding, state, current_fence, current_execution) =
-            load_authorization(&transaction, authorization_id)?;
-        if &binding.plan_digest != expected_plan_digest {
-            return Err(AuditError::PlanDigestMismatch);
-        }
-        let latest_fence: i64 = transaction.query_row(
-            "SELECT next_fence_epoch FROM store_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let next_fence = latest_fence
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let execution_id = random_id(&transaction, "execution")?;
-        let now = unix_ms_i64(SystemTime::now())?;
-        let payload = if recovery {
-            if state == "unused" {
-                return Err(AuditError::AuthorizationNotClaimed(
-                    authorization_id.as_str().to_string(),
-                ));
+        let (binding, next_fence, execution_id) = self.with_connection_locked(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (binding, state, current_fence, current_execution) =
+                load_authorization(&transaction, authorization_id)?;
+            if &binding.plan_digest != expected_plan_digest {
+                return Err(AuditError::PlanDigestMismatch);
             }
-            if state == "consumed" {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            let previous_execution = current_execution.ok_or(AuditError::HeadMismatch)?;
-            let previous_fence = current_fence.ok_or(AuditError::HeadMismatch)?;
+            let latest_fence: i64 = transaction.query_row(
+                "SELECT next_fence_epoch FROM store_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let next_fence = latest_fence
+                .checked_add(1)
+                .ok_or(AuditError::FenceEpochOverflow)?;
+            let execution_id = random_id(&transaction, "execution")?;
+            let now = unix_ms_i64(SystemTime::now())?;
+            let payload = if recovery {
+                if state == "unused" {
+                    return Err(AuditError::AuthorizationNotClaimed(
+                        authorization_id.as_str().to_string(),
+                    ));
+                }
+                if state == "consumed" {
+                    return Err(AuditError::AuthorizationAlreadyConsumed(
+                        authorization_id.as_str().to_string(),
+                    ));
+                }
+                let previous_execution = current_execution.ok_or(AuditError::HeadMismatch)?;
+                let previous_fence = current_fence.ok_or(AuditError::HeadMismatch)?;
+                let changed = transaction.execute(
+                    "UPDATE executions SET state='superseded', ended_at_ms=?1 WHERE execution_id=?2 AND fence_epoch=?3 AND state='active'",
+                    params![now, previous_execution, previous_fence],
+                )?;
+                if changed != 1 {
+                    return Err(AuditError::FenceEpochMismatch);
+                }
+                EventPayload::RecoveryClaimed {
+                    authorization_id: authorization_id.clone(),
+                    previous_execution_id: previous_execution,
+                    execution_id: execution_id.clone(),
+                    fence_epoch: next_fence as u64,
+                    started_at_unix_ms: now.to_string(),
+                }
+            } else {
+                if state == "claimed" {
+                    return Err(AuditError::AuthorizationAlreadyClaimed(
+                        authorization_id.as_str().to_string(),
+                    ));
+                }
+                if state == "consumed" {
+                    return Err(AuditError::AuthorizationAlreadyConsumed(
+                        authorization_id.as_str().to_string(),
+                    ));
+                }
+                EventPayload::ExecutionClaimed {
+                    authorization_id: authorization_id.clone(),
+                    execution_id: execution_id.clone(),
+                    fence_epoch: next_fence as u64,
+                    started_at_unix_ms: now.to_string(),
+                }
+            };
+            transaction.execute(
+                "INSERT INTO executions(execution_id,authorization_id,fence_epoch,kind,state,started_at_ms) VALUES(?1,?2,?3,?4,'active',?5)",
+                params![execution_id, authorization_id.as_str(), next_fence, if recovery { "recovery" } else { "execution" }, now],
+            )?;
             let changed = transaction.execute(
-                "UPDATE executions SET state='superseded', ended_at_ms=?1 WHERE execution_id=?2 AND fence_epoch=?3 AND state='active'",
-                params![now, previous_execution, previous_fence],
+                "UPDATE authorizations SET state='claimed',current_fence_epoch=?1,current_execution_id=?2 WHERE authorization_id=?3 AND state=?4",
+                params![next_fence, execution_id, authorization_id.as_str(), if recovery { "claimed" } else { "unused" }],
             )?;
             if changed != 1 {
                 return Err(AuditError::FenceEpochMismatch);
             }
-            EventPayload::RecoveryClaimed {
-                authorization_id: authorization_id.clone(),
-                previous_execution_id: previous_execution,
-                execution_id: execution_id.clone(),
-                fence_epoch: next_fence as u64,
-                started_at_unix_ms: now.to_string(),
-            }
-        } else {
-            if state == "claimed" {
-                return Err(AuditError::AuthorizationAlreadyClaimed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            if state == "consumed" {
-                return Err(AuditError::AuthorizationAlreadyConsumed(
-                    authorization_id.as_str().to_string(),
-                ));
-            }
-            EventPayload::ExecutionClaimed {
-                authorization_id: authorization_id.clone(),
-                execution_id: execution_id.clone(),
-                fence_epoch: next_fence as u64,
-                started_at_unix_ms: now.to_string(),
-            }
-        };
-        transaction.execute(
-            "INSERT INTO executions(execution_id,authorization_id,fence_epoch,kind,state,started_at_ms) VALUES(?1,?2,?3,?4,'active',?5)",
-            params![execution_id, authorization_id.as_str(), next_fence, if recovery { "recovery" } else { "execution" }, now],
-        )?;
-        let changed = transaction.execute(
-            "UPDATE authorizations SET state='claimed',current_fence_epoch=?1,current_execution_id=?2 WHERE authorization_id=?3 AND state=?4",
-            params![next_fence, execution_id, authorization_id.as_str(), if recovery { "claimed" } else { "unused" }],
-        )?;
-        if changed != 1 {
-            return Err(AuditError::FenceEpochMismatch);
-        }
-        transaction.execute(
-            "UPDATE store_meta SET next_fence_epoch=?1 WHERE singleton=1 AND next_fence_epoch=?2",
-            params![next_fence, latest_fence],
-        )?;
-        append_event(&transaction, &payload)?;
-        transaction.commit()?;
+            transaction.execute(
+                "UPDATE store_meta SET next_fence_epoch=?1 WHERE singleton=1 AND next_fence_epoch=?2",
+                params![next_fence, latest_fence],
+            )?;
+            append_event(&transaction, &payload)?;
+            transaction.commit()?;
+            Ok((binding, next_fence, execution_id))
+        })?;
         let live_claim = Arc::new(LiveClaimAuthority {
             active: AtomicBool::new(true),
             coordinator: Arc::clone(&self.coordinator),
             lock_file: Mutex::new(Some(lock_file)),
             root_native: Arc::clone(&self.root_native),
-            database_path: self.database_path.clone(),
             database_id: self.database_id.clone(),
             database_identity: self.database_identity.clone(),
             lock_path: self.lock_path.clone(),
@@ -1929,133 +1926,134 @@ impl AuditStore {
         self.validate_claim_guard(claimed)?;
         validate_intent_binding(&claimed.binding, &request)?;
         self.check_size_budget(false)?;
-        let mut connection = self.connection()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_live_claim(&transaction, claimed)?;
-        let binding_json: String = transaction.query_row(
-            "SELECT binding_json FROM authorizations WHERE authorization_id=?1",
-            [claimed.authorization_id().as_str()],
-            |row| row.get(0),
-        )?;
-        if binding_json != canonical_json(&claimed.binding)? {
-            return Err(AuditError::AuthorizationBindingMismatch);
-        }
-        {
-            let mut statement = transaction.prepare(
-                "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id<>?1 AND terminal_state IN ('reserved','classified_indeterminate') ORDER BY ordinal",
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_live_claim(&transaction, claimed)?;
+            let binding_json: String = transaction.query_row(
+                "SELECT binding_json FROM authorizations WHERE authorization_id=?1",
+                [claimed.authorization_id().as_str()],
+                |row| row.get(0),
             )?;
-            let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (attempt_id, item_id, action_id, authority_json) = row?;
-                let authority: IntentAuthority =
-                    serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
-                if authority.source_path_hash == request.source_path_hash {
-                    return Ok(IntentReservation::Conflicting(IntentReservationInfo {
-                        attempt_id: AttemptId::new(attempt_id)?,
-                        item_id: ItemId::new(item_id)?,
-                        action_id: ActionId::new(action_id)?,
-                        source_path_hash: authority.source_path_hash.clone(),
-                        before_revalidation_digest: authority.before_revalidation_digest.clone(),
-                    }));
+            if binding_json != canonical_json(&claimed.binding)? {
+                return Err(AuditError::AuthorizationBindingMismatch);
+            }
+            {
+                let mut statement = transaction.prepare(
+                    "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id<>?1 AND terminal_state IN ('reserved','classified_indeterminate') ORDER BY ordinal",
+                )?;
+                let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (attempt_id, item_id, action_id, authority_json) = row?;
+                    let authority: IntentAuthority =
+                        serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+                    if authority.source_path_hash == request.source_path_hash {
+                        return Ok(IntentReservation::Conflicting(IntentReservationInfo {
+                            attempt_id: AttemptId::new(attempt_id)?,
+                            item_id: ItemId::new(item_id)?,
+                            action_id: ActionId::new(action_id)?,
+                            source_path_hash: authority.source_path_hash.clone(),
+                            before_revalidation_digest: authority.before_revalidation_digest.clone(),
+                        }));
+                    }
                 }
             }
-        }
-        let existing: Option<(String, String, String, String)> = transaction.query_row(
-            "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id=?1 AND action_id=?2",
-            params![
-                claimed.authorization_id().as_str(),
-                request.action_id.as_str()
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).optional()?;
-        if let Some((attempt_id, item_id, action_id, authority_json)) = existing {
-            let authority: IntentAuthority =
-                serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
-            let info = IntentReservationInfo {
-                attempt_id: AttemptId::new(attempt_id)?,
-                item_id: ItemId::new(item_id)?,
-                action_id: ActionId::new(action_id)?,
-                source_path_hash: authority.source_path_hash.clone(),
-                before_revalidation_digest: authority.before_revalidation_digest.clone(),
-            };
-            return if info.matches_request(&request) {
-                Ok(IntentReservation::Existing(info))
-            } else {
-                Ok(IntentReservation::Conflicting(info))
-            };
-        }
-        let ordinal: i64 = transaction.query_row(
-            "SELECT next_attempt_ordinal FROM store_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let next_ordinal = ordinal
-            .checked_add(1)
-            .ok_or(AuditError::FenceEpochOverflow)?;
-        let attempt_id = AttemptId::new(random_id(&transaction, "attempt")?)?;
-        let nonce = NonceId::new(random_id(&transaction, "nonce")?)?;
-        let risk_tier = claimed
-            .binding
-            .risk_by_action
-            .get(&request.action_id)
-            .copied()
-            .ok_or(AuditError::ActionNotAuthorized)?;
-        let authority = IntentAuthority {
-            attempt_id: attempt_id.clone(),
-            nonce: nonce.clone(),
-            database_id: self.database_id.clone(),
-            execution_id: claimed.execution_id.clone(),
-            authorization_id: claimed.binding.authorization_id.clone(),
-            authorization_source: claimed.binding.authorization_source,
-            batch_id: claimed.binding.batch_id.clone(),
-            plan_id: claimed.binding.plan_id.clone(),
-            plan_digest: claimed.binding.plan_digest.clone(),
-            item_id: request.item_id,
-            action_id: request.action_id,
-            requested_mode: claimed.binding.requested_mode,
-            risk_tier,
-            source_path_hash: request.source_path_hash,
-            before_revalidation_digest: request.before_revalidation_digest,
-            fence_epoch: claimed.fence_epoch,
-            policy_version: claimed.binding.policy_version.clone(),
-            policy_digest: claimed.binding.policy_digest.clone(),
-            protected_anchor_snapshot_digest: claimed
+            let existing: Option<(String, String, String, String)> = transaction.query_row(
+                "SELECT attempt_id,item_id,action_id,authority_json FROM intents WHERE authorization_id=?1 AND action_id=?2",
+                params![
+                    claimed.authorization_id().as_str(),
+                    request.action_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()?;
+            if let Some((attempt_id, item_id, action_id, authority_json)) = existing {
+                let authority: IntentAuthority =
+                    serde_json::from_str(&authority_json).map_err(AuditError::JournalDecode)?;
+                let info = IntentReservationInfo {
+                    attempt_id: AttemptId::new(attempt_id)?,
+                    item_id: ItemId::new(item_id)?,
+                    action_id: ActionId::new(action_id)?,
+                    source_path_hash: authority.source_path_hash.clone(),
+                    before_revalidation_digest: authority.before_revalidation_digest.clone(),
+                };
+                return if info.matches_request(&request) {
+                    Ok(IntentReservation::Existing(info))
+                } else {
+                    Ok(IntentReservation::Conflicting(info))
+                };
+            }
+            let ordinal: i64 = transaction.query_row(
+                "SELECT next_attempt_ordinal FROM store_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let next_ordinal = ordinal
+                .checked_add(1)
+                .ok_or(AuditError::FenceEpochOverflow)?;
+            let attempt_id = AttemptId::new(random_id(&transaction, "attempt")?)?;
+            let nonce = NonceId::new(random_id(&transaction, "nonce")?)?;
+            let risk_tier = claimed
                 .binding
-                .protected_anchor_snapshot_digest
-                .clone(),
-            adapter_capabilities_digest: claimed.binding.adapter_capabilities_digest.clone(),
-            cleaner_set_digest: claimed.binding.cleaner_set_digest.clone(),
-            host_instance_id: claimed.binding.host_instance_id.clone(),
-            user_identity: claimed.binding.user_identity.clone(),
-            workflow_session: claimed.binding.workflow_session.clone(),
-        };
-        let authority_json = canonical_json(&authority)?;
-        if authority_json.len() > MAX_RECORD_BYTES {
-            return Err(AuditError::RecordTooLarge);
-        }
-        transaction.execute(
-            "INSERT INTO intents(attempt_id,ordinal,nonce,authorization_id,execution_id,fence_epoch,item_id,action_id,source_path_hash,before_revalidation_digest,authority_json,terminal_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'reserved')",
-            params![attempt_id.as_str(), next_ordinal, nonce.as_str(), authority.authorization_id.as_str(), authority.execution_id, authority.fence_epoch as i64, authority.item_id.as_str(), authority.action_id.as_str(), authority.source_path_hash.as_str(), authority.before_revalidation_digest.as_str(), authority_json],
-        )?;
-        transaction.execute("UPDATE store_meta SET next_attempt_ordinal=?1 WHERE singleton=1 AND next_attempt_ordinal=?2", params![next_ordinal, ordinal])?;
-        append_event(
-            &transaction,
-            &EventPayload::ActionIntent {
-                authority: authority.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        Ok(IntentReservation::Created(
-            authority.to_token(Arc::downgrade(&claimed.live_claim)),
-        ))
+                .risk_by_action
+                .get(&request.action_id)
+                .copied()
+                .ok_or(AuditError::ActionNotAuthorized)?;
+            let authority = IntentAuthority {
+                attempt_id: attempt_id.clone(),
+                nonce: nonce.clone(),
+                database_id: self.database_id.clone(),
+                execution_id: claimed.execution_id.clone(),
+                authorization_id: claimed.binding.authorization_id.clone(),
+                authorization_source: claimed.binding.authorization_source,
+                batch_id: claimed.binding.batch_id.clone(),
+                plan_id: claimed.binding.plan_id.clone(),
+                plan_digest: claimed.binding.plan_digest.clone(),
+                item_id: request.item_id,
+                action_id: request.action_id,
+                requested_mode: claimed.binding.requested_mode,
+                risk_tier,
+                source_path_hash: request.source_path_hash,
+                before_revalidation_digest: request.before_revalidation_digest,
+                fence_epoch: claimed.fence_epoch,
+                policy_version: claimed.binding.policy_version.clone(),
+                policy_digest: claimed.binding.policy_digest.clone(),
+                protected_anchor_snapshot_digest: claimed
+                    .binding
+                    .protected_anchor_snapshot_digest
+                    .clone(),
+                adapter_capabilities_digest: claimed.binding.adapter_capabilities_digest.clone(),
+                cleaner_set_digest: claimed.binding.cleaner_set_digest.clone(),
+                host_instance_id: claimed.binding.host_instance_id.clone(),
+                user_identity: claimed.binding.user_identity.clone(),
+                workflow_session: claimed.binding.workflow_session.clone(),
+            };
+            let authority_json = canonical_json(&authority)?;
+            if authority_json.len() > MAX_RECORD_BYTES {
+                return Err(AuditError::RecordTooLarge);
+            }
+            transaction.execute(
+                "INSERT INTO intents(attempt_id,ordinal,nonce,authorization_id,execution_id,fence_epoch,item_id,action_id,source_path_hash,before_revalidation_digest,authority_json,terminal_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'reserved')",
+                params![attempt_id.as_str(), next_ordinal, nonce.as_str(), authority.authorization_id.as_str(), authority.execution_id, authority.fence_epoch as i64, authority.item_id.as_str(), authority.action_id.as_str(), authority.source_path_hash.as_str(), authority.before_revalidation_digest.as_str(), authority_json],
+            )?;
+            transaction.execute("UPDATE store_meta SET next_attempt_ordinal=?1 WHERE singleton=1 AND next_attempt_ordinal=?2", params![next_ordinal, ordinal])?;
+            append_event(
+                &transaction,
+                &EventPayload::ActionIntent {
+                    authority: authority.clone(),
+                },
+            )?;
+            transaction.commit()?;
+            Ok(IntentReservation::Created(
+                authority.to_token(Arc::downgrade(&claimed.live_claim)),
+            ))
+        })
     }
 
     pub fn record_outcome(
@@ -2071,38 +2069,39 @@ impl AuditStore {
         self.validate_claim_guard(claimed)?;
         let validated = validate_outcome(token, outcome)?;
         self.check_size_budget(true)?;
-        let mut connection = self.connection()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_live_claim(&transaction, claimed)?;
-        let (authority, terminal_state) = load_intent(&transaction, token.attempt_id())?;
-        validate_token_authority(token, &authority)?;
-        if terminal_state != "reserved" {
-            return Err(AuditError::OutcomeAlreadyExists(
-                token.attempt_id().as_str().to_string(),
-            ));
-        }
-        let event = outcome_event(authority.clone(), validated);
-        let outcome_json = canonical_json(&event)?;
-        if outcome_json.len() > MAX_RECORD_BYTES {
-            return Err(AuditError::RecordTooLarge);
-        }
-        transaction.execute(
-            "INSERT INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
-            params![token.attempt_id().as_str(), outcome_json],
-        )?;
-        let changed = transaction.execute("UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state='reserved'", [token.attempt_id().as_str()])?;
-        if changed != 1 {
-            return Err(AuditError::OutcomeAlreadyExists(
-                token.attempt_id().as_str().to_string(),
-            ));
-        }
-        append_event(
-            &transaction,
-            &EventPayload::ActionOutcome { outcome: event },
-        )?;
-        transaction.commit()?;
-        Ok(())
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_live_claim(&transaction, claimed)?;
+            let (authority, terminal_state) = load_intent(&transaction, token.attempt_id())?;
+            validate_token_authority(token, &authority)?;
+            if terminal_state != "reserved" {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    token.attempt_id().as_str().to_string(),
+                ));
+            }
+            let event = outcome_event(authority.clone(), validated);
+            let outcome_json = canonical_json(&event)?;
+            if outcome_json.len() > MAX_RECORD_BYTES {
+                return Err(AuditError::RecordTooLarge);
+            }
+            transaction.execute(
+                "INSERT INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
+                params![token.attempt_id().as_str(), outcome_json],
+            )?;
+            let changed = transaction.execute("UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state='reserved'", [token.attempt_id().as_str()])?;
+            if changed != 1 {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    token.attempt_id().as_str().to_string(),
+                ));
+            }
+            append_event(
+                &transaction,
+                &EventPayload::ActionOutcome { outcome: event },
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn record_recovery_outcome(
@@ -2115,55 +2114,56 @@ impl AuditStore {
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
-        let mut connection = self.connection()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_live_claim(&transaction, claimed)?;
-        let (authority, terminal_state) = load_intent(&transaction, attempt_id)?;
-        if authority.authorization_id != claimed.binding.authorization_id
-            || authority.batch_id != claimed.binding.batch_id
-            || claimed.binding.item_by_action.get(&authority.action_id) != Some(&authority.item_id)
-            || claimed.fence_epoch <= authority.fence_epoch
-        {
-            return Err(AuditError::RecoveryClaimRequired);
-        }
-        if terminal_state == "outcome_recorded" {
-            return Err(AuditError::OutcomeAlreadyExists(
-                attempt_id.as_str().to_string(),
-            ));
-        }
-        let validated = validate_outcome_for_mode(authority.requested_mode, outcome)?;
-        let event = outcome_event(authority, validated);
-        let outcome_json = canonical_json(&event)?;
-        if outcome_json.len() > MAX_RECORD_BYTES {
-            return Err(AuditError::RecordTooLarge);
-        }
-        transaction.execute(
-            "INSERT OR REPLACE INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
-            params![attempt_id.as_str(), outcome_json],
-        )?;
-        transaction.execute(
-            "DELETE FROM recoveries WHERE attempt_id=?1",
-            [attempt_id.as_str()],
-        )?;
-        let changed = transaction.execute(
-            "UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state<>'outcome_recorded'",
-            [attempt_id.as_str()],
-        )?;
-        if changed != 1 {
-            return Err(AuditError::OutcomeAlreadyExists(
-                attempt_id.as_str().to_string(),
-            ));
-        }
-        append_event(
-            &transaction,
-            &EventPayload::RecoveryOutcome {
-                outcome: event,
-                recovery_fence_epoch: claimed.fence_epoch,
-            },
-        )?;
-        transaction.commit()?;
-        Ok(())
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_live_claim(&transaction, claimed)?;
+            let (authority, terminal_state) = load_intent(&transaction, attempt_id)?;
+            if authority.authorization_id != claimed.binding.authorization_id
+                || authority.batch_id != claimed.binding.batch_id
+                || claimed.binding.item_by_action.get(&authority.action_id) != Some(&authority.item_id)
+                || claimed.fence_epoch <= authority.fence_epoch
+            {
+                return Err(AuditError::RecoveryClaimRequired);
+            }
+            if terminal_state == "outcome_recorded" {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    attempt_id.as_str().to_string(),
+                ));
+            }
+            let validated = validate_outcome_for_mode(authority.requested_mode, outcome)?;
+            let event = outcome_event(authority, validated);
+            let outcome_json = canonical_json(&event)?;
+            if outcome_json.len() > MAX_RECORD_BYTES {
+                return Err(AuditError::RecordTooLarge);
+            }
+            transaction.execute(
+                "INSERT OR REPLACE INTO outcomes(attempt_id,outcome_json) VALUES(?1,?2)",
+                params![attempt_id.as_str(), outcome_json],
+            )?;
+            transaction.execute(
+                "DELETE FROM recoveries WHERE attempt_id=?1",
+                [attempt_id.as_str()],
+            )?;
+            let changed = transaction.execute(
+                "UPDATE intents SET terminal_state='outcome_recorded' WHERE attempt_id=?1 AND terminal_state<>'outcome_recorded'",
+                [attempt_id.as_str()],
+            )?;
+            if changed != 1 {
+                return Err(AuditError::OutcomeAlreadyExists(
+                    attempt_id.as_str().to_string(),
+                ));
+            }
+            append_event(
+                &transaction,
+                &EventPayload::RecoveryOutcome {
+                    outcome: event,
+                    recovery_fence_epoch: claimed.fence_epoch,
+                },
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn unresolved_recovery_intents(
@@ -2173,32 +2173,33 @@ impl AuditStore {
         self.ensure_not_in_observer_phase()?;
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
-        let connection = self.connection()?;
-        verify_database(&connection)?;
-        validate_live_claim_connection(&connection, claimed)?;
-        let mut statement = connection.prepare(
-            "SELECT attempt_id,item_id,action_id,source_path_hash,before_revalidation_digest FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded' ORDER BY ordinal",
-        )?;
-        let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (attempt, item, action, source_path_hash, before_revalidation_digest) = row?;
-            Ok(IntentReservationInfo {
-                attempt_id: AttemptId::new(attempt)?,
-                item_id: ItemId::new(item)?,
-                action_id: ActionId::new(action)?,
-                source_path_hash: PathHash::new(source_path_hash)?,
-                before_revalidation_digest: DigestString::new(before_revalidation_digest)?,
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            validate_live_claim_connection(connection, claimed)?;
+            let mut statement = connection.prepare(
+                "SELECT attempt_id,item_id,action_id,source_path_hash,before_revalidation_digest FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded' ORDER BY ordinal",
+            )?;
+            let rows = statement.query_map([claimed.authorization_id().as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            rows.map(|row| {
+                let (attempt, item, action, source_path_hash, before_revalidation_digest) = row?;
+                Ok(IntentReservationInfo {
+                    attempt_id: AttemptId::new(attempt)?,
+                    item_id: ItemId::new(item)?,
+                    action_id: ActionId::new(action)?,
+                    source_path_hash: PathHash::new(source_path_hash)?,
+                    before_revalidation_digest: DigestString::new(before_revalidation_digest)?,
+                })
             })
+            .collect()
         })
-        .collect()
     }
 
     pub fn classify_recovery(
@@ -2210,10 +2211,11 @@ impl AuditStore {
         let (reserved, mut existing) = {
             let _mutation_guard = claimed.lock_mutation()?;
             self.validate_claim_guard(claimed)?;
-            let connection = self.connection()?;
-            verify_database(&connection)?;
-            validate_live_claim_connection(&connection, claimed)?;
-            load_recovery_candidates(&connection, claimed.authorization_id())?
+            self.with_connection(|connection| {
+                verify_database(connection)?;
+                validate_live_claim_connection(connection, claimed)?;
+                load_recovery_candidates(connection, claimed.authorization_id())
+            })?
         };
         let mut pending = Vec::new();
         {
@@ -2241,52 +2243,53 @@ impl AuditStore {
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
-        let mut connection = self.connection()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_live_claim(&transaction, claimed)?;
-        for (authority, _observation, disposition, reason) in pending {
-            let (_, state) = load_intent(&transaction, &authority.attempt_id)?;
-            if state != "reserved" {
-                return Err(AuditError::OutcomeAlreadyExists(
-                    authority.attempt_id.as_str().to_string(),
-                ));
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_live_claim(&transaction, claimed)?;
+            for (authority, _observation, disposition, reason) in pending {
+                let (_, state) = load_intent(&transaction, &authority.attempt_id)?;
+                if state != "reserved" {
+                    return Err(AuditError::OutcomeAlreadyExists(
+                        authority.attempt_id.as_str().to_string(),
+                    ));
+                }
+                let record = RecoveryRecord {
+                    batch_id: authority.batch_id.clone(),
+                    authorization_id: authority.authorization_id.clone(),
+                    action_id: authority.action_id.clone(),
+                    attempt_id: authority.attempt_id.clone(),
+                    disposition,
+                    reason,
+                };
+                let record_json = canonical_json(&record)?;
+                transaction.execute(
+                    "INSERT INTO recoveries(attempt_id,disposition,record_json) VALUES(?1,?2,?3)",
+                    params![
+                        authority.attempt_id.as_str(),
+                        disposition_db(disposition),
+                        record_json
+                    ],
+                )?;
+                let changed = transaction.execute("UPDATE intents SET terminal_state=?1 WHERE attempt_id=?2 AND terminal_state='reserved'", params![terminal_for_disposition(disposition), authority.attempt_id.as_str()])?;
+                if changed != 1 {
+                    return Err(AuditError::OutcomeAlreadyExists(
+                        authority.attempt_id.as_str().to_string(),
+                    ));
+                }
+                append_event(
+                    &transaction,
+                    &EventPayload::RecoveryClassification {
+                        authority,
+                        record: record.clone(),
+                    },
+                )?;
+                existing.push(record);
             }
-            let record = RecoveryRecord {
-                batch_id: authority.batch_id.clone(),
-                authorization_id: authority.authorization_id.clone(),
-                action_id: authority.action_id.clone(),
-                attempt_id: authority.attempt_id.clone(),
-                disposition,
-                reason,
-            };
-            let record_json = canonical_json(&record)?;
-            transaction.execute(
-                "INSERT INTO recoveries(attempt_id,disposition,record_json) VALUES(?1,?2,?3)",
-                params![
-                    authority.attempt_id.as_str(),
-                    disposition_db(disposition),
-                    record_json
-                ],
-            )?;
-            let changed = transaction.execute("UPDATE intents SET terminal_state=?1 WHERE attempt_id=?2 AND terminal_state='reserved'", params![terminal_for_disposition(disposition), authority.attempt_id.as_str()])?;
-            if changed != 1 {
-                return Err(AuditError::OutcomeAlreadyExists(
-                    authority.attempt_id.as_str().to_string(),
-                ));
-            }
-            append_event(
-                &transaction,
-                &EventPayload::RecoveryClassification {
-                    authority,
-                    record: record.clone(),
-                },
-            )?;
-            existing.push(record);
-        }
-        transaction.commit()?;
-        existing.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
-        Ok(existing)
+            transaction.commit()?;
+            existing.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
+            Ok(existing)
+        })
     }
 
     pub fn consume_execution(&self, claimed: &ClaimedExecution) -> Result<(), AuditError> {
@@ -2294,55 +2297,56 @@ impl AuditStore {
         let _mutation_guard = claimed.lock_mutation()?;
         self.validate_claim_guard(claimed)?;
         self.check_size_budget(true)?;
-        let mut connection = self.connection()?;
-        verify_database(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state: Option<(String, Option<i64>, Option<String>)> = transaction.query_row(
-            "SELECT state,current_fence_epoch,current_execution_id FROM authorizations WHERE authorization_id=?1",
-            [claimed.authorization_id().as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?;
-        let Some((state, fence, execution)) = state else {
-            return Err(AuditError::AuthorizationUnknown(
-                claimed.authorization_id().as_str().to_string(),
-            ));
-        };
-        if state == "consumed" && fence == Some(claimed.fence_epoch as i64) {
-            release_live_claim(&claimed.live_claim);
-            return Ok(());
-        }
-        if state != "claimed"
-            || fence != Some(claimed.fence_epoch as i64)
-            || execution.as_deref() != Some(&claimed.execution_id)
-        {
-            return Err(AuditError::FenceEpochMismatch);
-        }
-        let unresolved: i64 = transaction.query_row(
-            "SELECT count(*) FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded'",
-            [claimed.authorization_id().as_str()], |row| row.get(0),
-        )?;
-        if unresolved != 0 {
-            return Err(AuditError::UnresolvedIntentsRemain);
-        }
-        let changed = transaction.execute(
-            "UPDATE authorizations SET state='consumed',current_execution_id=NULL WHERE authorization_id=?1 AND state='claimed' AND current_execution_id=?2 AND current_fence_epoch=?3",
-            params![claimed.authorization_id().as_str(), claimed.execution_id, claimed.fence_epoch as i64],
-        )?;
-        if changed != 1 {
-            return Err(AuditError::FenceEpochMismatch);
-        }
-        let now = unix_ms_i64(SystemTime::now())?;
-        transaction.execute("UPDATE executions SET state='consumed',ended_at_ms=?1 WHERE execution_id=?2 AND state='active'", params![now, claimed.execution_id])?;
-        append_event(
-            &transaction,
-            &EventPayload::ExecutionConsumed {
-                authorization_id: claimed.authorization_id().clone(),
-                execution_id: claimed.execution_id.clone(),
-                fence_epoch: claimed.fence_epoch,
-                ended_at_unix_ms: now.to_string(),
-            },
-        )?;
-        transaction.commit()?;
+        self.with_connection(|connection| {
+            verify_database(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state: Option<(String, Option<i64>, Option<String>)> = transaction.query_row(
+                "SELECT state,current_fence_epoch,current_execution_id FROM authorizations WHERE authorization_id=?1",
+                [claimed.authorization_id().as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?;
+            let Some((state, fence, execution)) = state else {
+                return Err(AuditError::AuthorizationUnknown(
+                    claimed.authorization_id().as_str().to_string(),
+                ));
+            };
+            if state == "consumed" && fence == Some(claimed.fence_epoch as i64) {
+                return Ok(());
+            }
+            if state != "claimed"
+                || fence != Some(claimed.fence_epoch as i64)
+                || execution.as_deref() != Some(&claimed.execution_id)
+            {
+                return Err(AuditError::FenceEpochMismatch);
+            }
+            let unresolved: i64 = transaction.query_row(
+                "SELECT count(*) FROM intents WHERE authorization_id=?1 AND terminal_state<>'outcome_recorded'",
+                [claimed.authorization_id().as_str()], |row| row.get(0),
+            )?;
+            if unresolved != 0 {
+                return Err(AuditError::UnresolvedIntentsRemain);
+            }
+            let changed = transaction.execute(
+                "UPDATE authorizations SET state='consumed',current_execution_id=NULL WHERE authorization_id=?1 AND state='claimed' AND current_execution_id=?2 AND current_fence_epoch=?3",
+                params![claimed.authorization_id().as_str(), claimed.execution_id, claimed.fence_epoch as i64],
+            )?;
+            if changed != 1 {
+                return Err(AuditError::FenceEpochMismatch);
+            }
+            let now = unix_ms_i64(SystemTime::now())?;
+            transaction.execute("UPDATE executions SET state='consumed',ended_at_ms=?1 WHERE execution_id=?2 AND state='active'", params![now, claimed.execution_id])?;
+            append_event(
+                &transaction,
+                &EventPayload::ExecutionConsumed {
+                    authorization_id: claimed.authorization_id().clone(),
+                    execution_id: claimed.execution_id.clone(),
+                    fence_epoch: claimed.fence_epoch,
+                    ended_at_unix_ms: now.to_string(),
+                },
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })?;
         release_live_claim(&claimed.live_claim);
         Ok(())
     }
@@ -2413,50 +2417,47 @@ impl AuditStore {
     }
 
     fn projection_snapshot_locked(&self) -> Result<AuditProjectionSnapshot, AuditError> {
-        let connection = self.connection_locked()?;
-        let replayed = replay_projection(&connection)?;
-        verify_replayed_projection(&connection, &replayed)?;
-        self.check_size_budget(true)?;
-        projection_snapshot_from_replay(&replayed)
+        self.with_connection_locked(|connection| {
+            let replayed = replay_projection(connection)?;
+            verify_replayed_projection(connection, &replayed)?;
+            self.check_size_budget(true)?;
+            projection_snapshot_from_replay(&replayed)
+        })
     }
 
     fn integrity_summary_locked(&self) -> Result<IntegritySummary, AuditError> {
-        let connection = self.connection_locked()?;
-        let summary = verify_database(&connection)?;
-        self.check_size_budget(true)?;
-        Ok(summary)
+        self.with_connection_locked(|connection| {
+            let summary = verify_database(connection)?;
+            self.check_size_budget(true)?;
+            Ok(summary)
+        })
     }
 
-    fn connection(&self) -> Result<Connection, AuditError> {
+    fn with_connection<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AuditError>,
+    ) -> Result<T, AuditError> {
         self.ensure_process()?;
         // Claimed operations already retain the exclusive lifetime lock.
-        self.connection_locked()
+        self.with_connection_locked(operation)
     }
 
-    fn connection_locked(&self) -> Result<Connection, AuditError> {
-        self.root_native.binding()?;
-        if self.root_native.identity()? != self.database_identity {
-            return Err(AuditError::StoreMismatch);
-        }
-        self.root_native.sidecars()?;
-        check_native_size_budget(&self.root_native, true)?;
-        let connection = open_connection(&self.database_path)?;
-        // Metadata never opens/closes a second audit.db FD while SQLite holds POSIX locks.
-        // Pre/post name checks remain conservative gates, not actual default-VFS authority.
-        self.root_native.binding()?;
-        if self.root_native.identity()? != self.database_identity {
-            return Err(AuditError::StoreMismatch);
-        }
-        self.root_native.sidecars()?;
-        let database_id: String = connection.query_row(
-            "SELECT database_id FROM store_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        if database_id != self.database_id {
-            return Err(AuditError::StoreMismatch);
-        }
-        Ok(connection)
+    fn with_connection_locked<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AuditError>,
+    ) -> Result<T, AuditError> {
+        self.root_native
+            .with_connection(&self.database_identity, |connection| {
+                let database_id: String = connection.query_row(
+                    "SELECT database_id FROM store_meta WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if database_id != self.database_id {
+                    return Err(AuditError::StoreMismatch);
+                }
+                operation(connection)
+            })
     }
 
     fn short_lock(&self) -> Result<ShortStoreLock, AuditError> {
@@ -2553,8 +2554,8 @@ impl AuditStore {
     }
 }
 
-// This pre-open metadata gate bounds existing files. Actual SQLite growth still needs an
-// I/O-level quota; PRAGMA limits and a post-write check cannot prove that contract.
+// This metadata gate bounds existing files before SQL. The retained VFS separately refuses
+// growth in actual I/O callbacks; PRAGMA limits and post-write checks alone cannot prove that.
 fn check_native_size_budget(
     root: &native_state::Root,
     allow_emergency: bool,
@@ -2938,12 +2939,17 @@ fn lock_identity(
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection, AuditError> {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_connection(vfs: &crate::retained_vfs::Registered) -> Result<Connection, AuditError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let connection = Connection::open_with_flags(path, flags)?;
+    let connection = Connection::open_with_flags_and_vfs(
+        vfs.filename().to_str().expect("numeric SQLite token"),
+        flags,
+        vfs.name(),
+    )?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
@@ -4914,34 +4920,67 @@ mod tests {
         store.consume_execution(&claim).unwrap();
         let summary = store.verify_integrity().unwrap();
         assert_eq!(summary.latest_sequence, 5);
-        let connection = store.connection().unwrap();
-        assert_eq!(
-            connection
-                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
-                .unwrap()
-                .to_ascii_lowercase(),
-            "wal"
-        );
-        assert_eq!(
-            connection
-                .pragma_query_value::<i64, _>(None, "synchronous", |row| row.get(0))
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            connection
-                .pragma_query_value::<i64, _>(None, "mmap_size", |row| row.get(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            fs::read_dir(&store.root)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("audit"))
-                .count(),
-            4
-        );
+        store
+            .with_connection(|connection| {
+                assert_eq!(
+                    connection
+                        .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                        .unwrap()
+                        .to_ascii_lowercase(),
+                    "wal"
+                );
+                assert_eq!(
+                    connection
+                        .pragma_query_value::<i64, _>(None, "synchronous", |row| row.get(0))
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(
+                    connection
+                        .pragma_query_value::<i64, _>(None, "mmap_size", |row| row.get(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    fs::read_dir(&store.root)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_name().to_string_lossy().starts_with("audit"))
+                        .count(),
+                    4
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn refused_closed_interval_never_publishes_claim_and_recovery_can_fence() {
+        let (_temp, store) = store();
+        let binding = binding(61, RequestedMode::Permanent);
+        register(&store, &binding);
+        let worker_store = store.clone();
+        let worker_binding = binding.clone();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            native_state::REJECT_SQL_RESULT_ONCE.with(|flag| flag.set(true));
+            let result = worker_store.claim_execution(
+                &worker_binding.authorization_id,
+                &worker_binding.plan_digest,
+            );
+            sent.send(matches!(result, Err(AuditError::Io(ref e)) if e.to_string()=="injected audit interval result refusal")).unwrap();
+        });
+        // A mistakenly published claim's Drop would reenter the held mutation mutex.
+        assert!(received.recv_timeout(Duration::from_secs(10)).unwrap());
+        worker.join().unwrap();
+        assert!(!store.coordinator.active.load(Ordering::Acquire));
+        let recovery = store
+            .claim_recovery(&binding.authorization_id, &binding.plan_digest)
+            .unwrap();
+        assert_eq!(recovery.fence_epoch(), 2);
+        let token = reserve(&store, &recovery, &binding);
+        token.validate_current_process().unwrap();
     }
 
     #[cfg(unix)]
@@ -5318,13 +5357,15 @@ mod tests {
         let binding = binding(19, RequestedMode::Permanent);
         register(&store, &binding);
         {
-            let connection = store.connection().unwrap();
+            store.with_connection(|connection| {
             connection
                 .execute(
                     "UPDATE authorizations SET plan_digest='forged-digest' WHERE authorization_id=?1",
                     [binding.authorization_id.as_str()],
                 )
                 .unwrap();
+                Ok(())
+            }).unwrap();
         }
         let error = store.projection_snapshot().unwrap_err();
         assert!(matches!(error, ProjectionError::Corruption(_)));
@@ -5336,9 +5377,12 @@ mod tests {
     #[test]
     fn projection_snapshot_classifies_invalid_database_header_as_corruption() {
         let (_temp, store) = store();
-        let connection = store.connection().unwrap();
-        connection.pragma_update(None, "application_id", 0).unwrap();
-        drop(connection);
+        store
+            .with_connection(|connection| {
+                connection.pragma_update(None, "application_id", 0)?;
+                Ok(())
+            })
+            .unwrap();
 
         let error = store.projection_snapshot().unwrap_err();
         assert!(matches!(error, ProjectionError::Corruption(_)));
@@ -5466,8 +5510,10 @@ mod tests {
         let binding = binding(10, RequestedMode::Permanent);
         register(&store, &binding);
         {
-            let connection = store.connection().unwrap();
+            store.with_connection(|connection| {
             connection.execute("UPDATE authorizations SET plan_digest='forged-digest' WHERE authorization_id=?1", [binding.authorization_id.as_str()]).unwrap();
+                Ok(())
+            }).unwrap();
         }
         assert!(matches!(
             store.verify_integrity(),
@@ -5940,8 +5986,10 @@ mod tests {
         let binding = binding(8, RequestedMode::Permanent);
         register(&store, &binding);
         {
-            let connection = store.connection().unwrap();
+            store.with_connection(|connection| {
             connection.execute_batch("DROP TRIGGER audit_events_no_update; UPDATE audit_events SET digest='sha256:tampered' WHERE sequence=1;").unwrap();
+                Ok(())
+            }).unwrap();
         }
         assert!(matches!(
             store.verify_integrity(),

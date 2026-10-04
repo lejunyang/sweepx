@@ -1,0 +1,219 @@
+{
+  "schema": "sweepx.audit-retained-io-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "91dab0b",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "scope": [
+    "AuditStore uses the common retained VFS without a new crate/dependency; preserve NORMAL WAL, schema/wire, durable intent/fence/recovery and observer separation",
+    "Actual database descriptor identity checked before SQL configuration and actual C connection binding checked afterward",
+    "Complete synchronous SQL/mapped-index/close interval under macOS no-materialization policy with checked restoration",
+    "Component callback growth limits; shared state-root quota remains a subsequent unit"
+  ],
+  "sources": [
+    {
+      "url": "https://www.sqlite.org/c3ref/c_fcntl_begin_atomic_write.html",
+      "checkedDate": "2026-10-04",
+      "use": "MMAP_SIZE input/output sqlite3_int64 advisory contract; driver permanently returns old/current zero"
+    },
+    {
+      "localPackage": "libsqlite3-sys 0.38.2 bundled sqlite3/sqlite3.c",
+      "use": "actual unix MMAP_SIZE branch and PRAGMA implementation; unchanged mandatory configuration verification"
+    }
+  ],
+  "limits": {
+    "databaseBytes": 67108864,
+    "walBytes": 16777216,
+    "shmBytes": 1048576,
+    "rollbackBytes": 84934656,
+    "totalBytes": 84934656,
+    "nonEmergencyHeadroomBytes": 8388608,
+    "sharedActiveContexts": 64,
+    "sharedStateQuota": "not integrated for standalone AuditStore"
+  },
+  "semantics": {
+    "authority": "Root retains a native directory. Physical audit.db/WAL/rollback/SHM names stay unchanged. The actual opened FD is matched to expected identity before any SQLite configure/read; retained VFS method/context/descriptor binding checked through SQLITE_FCNTL_FILE_POINTER",
+    "policy": "all SQL, mapped accesses, checkpoint/index cleanup, C-file closes and VFS drop finish inside protected closure; no escaped Connection from production helper; no real cloud-provider qualification",
+    "publication": "construct LiveClaimAuthority only from durable plain facts after successful close and restoration. A refused successful interval cannot drop a claim while mutation mutex is held. Consume releases exclusion after helper success",
+    "failureInjection": "generic guard phase refusal uses real native restoration in Drop; audit seam refuses after real checked restoration. Neither simulates a failing kernel setter",
+    "growth": "actual C write/truncate/index growth limits complement pre/post metadata gates; no audit/recovery eviction or permission repair; database xFetch absent, MMAP_SIZE returns zero, bounded SHM mapping remains separate",
+    "locks": "Linux/macOS OFD database/index locks survive a foreign same-process ordinary descriptor close. Default POSIX negative oracle still reproduces its old lock-release behavior",
+    "crashOracle": "parent independently owns exec POSIX reader and native audit writer. Reader pins sequence 1 before native claim/reserve commits WAL; both killed with asserted SIGKILL before reopen. Main-only/recovered sequences, events, fence, projection and no-resubmit assertions preserved. Barrier files outside state namespace; owned-child RAII",
+    "defaultSameProcess": "not qualified; custom descriptor close can still release a foreign same-process default POSIX client lock",
+    "windows": "AuditStore remains UnsupportedPlatform; GNU lint does not qualify MSVC/runtime",
+    "remaining": "shared 512 MiB/4090-name admission, owner-handle admission/retention, native Linux/Windows/MSVC/provider/mount runtime and final noncooperating unlink race remain open"
+  },
+  "initialFailures": [
+    {
+      "name": "first-compile",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-audit-retained-first-tests.log",
+      "reason": "Linux-only native helper unavailable on macOS and old tests called removed Connection-returning factory; concrete macOS consumer and scoped tests added without weakening assertions"
+    },
+    {
+      "name": "mandatory-mmap-query",
+      "result": "exit101; 22 audit unit passed, 32 failed; later cache step untested",
+      "log": "/private/tmp/sweepx-audit-retained-first-fixed-tests.log",
+      "reason": "retained driver lacked MMAP_SIZE callback query, mandatory PRAGMA returned no row; implement actual contract rather than remove verification"
+    },
+    {
+      "name": "old-same-process-crash-fixture",
+      "result": "exit101; targeted committed-WAL test failed, 3 filtered",
+      "log": "/private/tmp/sweepx-audit-retained-old-crash-fixture.log",
+      "reason": "foreign default POSIX reader lost locks when native writer closed its FD, checkpoint removed WAL before barrier; rebuild independent-process oracle preserving assertions and explicit unsupported same-process boundary"
+    },
+    {
+      "name": "closure-borrow-lint",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-audit-retained-first-lint.log",
+      "reason": "14 needless borrows after factory-to-closure conversion; pass already borrowed connections directly"
+    },
+    {
+      "name": "substitution-test-type",
+      "result": "exit101; no tests executed",
+      "log": "/private/tmp/sweepx-audit-retained-final-affected.log",
+      "reason": "panic-only closure needed explicit Result generic type; add unit result type"
+    },
+    {
+      "name": "cfg-tail-return-lint",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-audit-retained-final-affected-lint.log",
+      "reason": "supported cfg branch used unnecessary return; remove it"
+    },
+    {
+      "name": "windows-unused-imports",
+      "result": "exit101",
+      "log": "/private/tmp/sweepx-audit-retained-windows-lint.log",
+      "reason": "OpenFlags and production Duration belong to Linux/macOS connection factory; gate imports correctly, give Unix oracle its own Duration import"
+    }
+  ],
+  "checks": [
+    {
+      "name": "affected-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit -p sweepx-cache -p sweepx-event-journal --all-features --locked -- --test-threads=1",
+      "passed": 176,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "successfulChildObservations": 19,
+      "expectedSigabrtChildren": 2,
+      "expectedSigkillChildren": 5,
+      "log": "/private/tmp/sweepx-audit-retained-final-affected-fixed.log",
+      "note": "58 audit unit +4 crash integration +111 cache unit +3 host journal unit. Subsequent edits only closure whitespace, equivalent cfg tail expression and correct import/test cfg gates; no host behavior changed"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1212,
+      "failed": 0,
+      "ignored": 3,
+      "filtered": 1,
+      "successfulChildObservations": 19,
+      "expectedSigabrtChildren": 2,
+      "expectedSigkillChildren": 5,
+      "log": "/private/tmp/sweepx-audit-retained-workspace-tests.log",
+      "note": "host service access; known Foundation Trash success hang explicitly skipped. Final import gates/whitespace/equivalent tail expression preserve the host behavior; later affected/host lint covers final source"
+    },
+    {
+      "name": "parallel-audit-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-audit --lib --all-features --locked",
+      "passed": 58,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/private/tmp/sweepx-audit-retained-parallel-tests.log",
+      "note": "default parallel harness, shared VFS quota isolated in its existing exec fixture; final import-only cfg correction leaves host behavior unchanged"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-audit -p sweepx-cache -p sweepx-event-journal --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-retained-final-affected-lint-pass.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "log": "/private/tmp/sweepx-audit-retained-final-host-lint.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-linux bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-audit-retained-linux-lint.log",
+      "note": "Zig0.16.0 installed helper follows repo script; subsequent imports gated true on Linux and oracle Duration import moved locally, no Linux behavior change. Compile only, not native runtime"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed",
+      "command": "ZIG_GLOBAL_CACHE_DIR=/private/tmp/sweepx-zig-global ZIG_LOCAL_CACHE_DIR=/private/tmp/sweepx-zig-windows bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-audit-retained-windows-lint-fixed.log",
+      "note": "same helper with GNU mapping; final platform imports compiled. Not MSVC/runtime"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list -p sweepx-audit -p sweepx-cache -p sweepx-event-journal -p sweepx-core -p sweepx-executor --allow-dirty --locked",
+      "log": "/private/tmp/sweepx-audit-retained-package-files.log",
+      "note": "manifest dependency graph unchanged: 17 packages,50 target-specific normal/build rows,47 package pairs from prior validated topology; package list not a registry dependency build"
+    },
+    {
+      "name": "docs",
+      "result": "passed",
+      "command": "PYTHONDONTWRITEBYTECODE=1 <bundled-python> scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-audit-retained-docs.log",
+      "note": "unchanged checker self-tests reuse prior23 passes",
+      "markdownFiles": 54
+    },
+    {
+      "name": "format-and-diff",
+      "result": "passed",
+      "commands": [
+        "cargo fmt --all --check",
+        "git diff --check"
+      ],
+      "note": "rerun after final documentation only; Rust format already passed"
+    }
+  ],
+  "validationGaps": [
+    {
+      "name": "known-Foundation-Trash-success",
+      "result": "explicitly skipped",
+      "test": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "reason": "previously independently diagnosed Foundation service hang; preserved test, no permanent deletion fallback; original evidence in earlier quota/preflight validation artifacts"
+    },
+    {
+      "name": "opt-in-benchmarks",
+      "result": "3 existing ignored",
+      "tests": [
+        "benchmark_batched_historical_root_reads",
+        "benchmark_multi_root_cache_preparation",
+        "native_bulk_enumeration_benchmark_smoke"
+      ],
+      "reason": "no new timing/performance claim"
+    },
+    {
+      "name": "native-targets",
+      "result": "unqualified",
+      "reason": "no native Linux/Windows/MSVC runner; prior setup inventory has no desktop VM/container/runtime. GNU lint compiles cfg/test branches only; native OFD/bind-mount/provider and target Trash behavior not executed"
+    },
+    {
+      "name": "resource-completeness",
+      "result": "open",
+      "reason": "standalone AuditStore not yet in shared state-root quota; owner handles, retention/RSS/end-to-end and other state producers remain work"
+    }
+  ],
+  "disk": {
+    "buildEnvironment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "targetKiB": 3137904,
+    "debugKiB": 2121552,
+    "measurement": "du -sk target target/debug after host and both GNU lints plus parallel tests; not scan performance",
+    "trash": "previously moved43.323 GiB remains in OS Trash; not emptied/permanently deleted; relocation is not physical volume free-space recovery"
+  },
+  "deferred": "new Dart/SvelteKit work remains deferred per user priority"
+}

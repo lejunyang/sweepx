@@ -3,7 +3,7 @@
 use super::*;
 use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const PATH_ENV: &str = "SWEEPX_AUDIT_LOCK_ORACLE_PATH";
 const HELD_ENV: &str = "SWEEPX_AUDIT_LOCK_ORACLE_HELD";
@@ -69,27 +69,34 @@ fn observe(path: &Path, held: bool) {
 }
 
 #[test]
-fn audit_connection_returns_with_sqlite_database_lock_still_held() {
+fn audit_sql_interval_keeps_ofd_locks_through_checks_and_foreign_fd_close() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().canonicalize().unwrap().join("audit");
     let store = AuditStore::open(root).unwrap();
-    let connection = store.connection_locked().unwrap();
-    observe(&store.database_path, true);
-    for _ in 0..3 {
-        let _guard = store.short_lock().unwrap();
-        store.check_size_budget(true).unwrap();
-        assert_eq!(
-            store.root_native.identity().unwrap(),
-            store.database_identity
-        );
-    }
-    observe(&store.database_path, true);
-    drop(connection);
+    store
+        .with_connection_locked(|_| {
+            observe(&store.database_path, true);
+            for _ in 0..3 {
+                let _guard = store.short_lock().unwrap();
+                store.check_size_budget(true).unwrap();
+                assert_eq!(
+                    store.root_native.identity().unwrap(),
+                    store.database_identity
+                );
+            }
+            drop(File::open(&store.database_path).unwrap());
+            observe(&store.database_path, true);
+            Ok(())
+        })
+        .unwrap();
     observe(&store.database_path, false);
 
     // Calibrate the old defect independently: default SQLite holds a lock until a foreign
     // same-process data descriptor is closed, even though the Connection remains alive.
-    let ordinary = open_connection(&store.database_path).unwrap();
+    let ordinary = Connection::open(&store.database_path).unwrap();
+    ordinary
+        .execute_batch("PRAGMA journal_mode=WAL; BEGIN; SELECT database_id FROM store_meta;")
+        .unwrap();
     observe(&store.database_path, true);
     drop(File::open(&store.database_path).unwrap());
     observe(&store.database_path, false);
@@ -114,7 +121,7 @@ fn replaced_root_refuses_before_creating_or_touching_replacement_namespace() {
         Err(AuditError::StoreMismatch)
     ));
     assert!(matches!(
-        store.connection_locked(),
+        store.with_connection_locked(|_| Ok(())),
         Err(AuditError::StoreMismatch)
     ));
     assert!(matches!(
@@ -125,6 +132,39 @@ fn replaced_root_refuses_before_creating_or_touching_replacement_namespace() {
     assert!(!root.join(DATABASE_FILE).exists());
     assert_eq!(fs::read(root.join("keep")).unwrap(), b"replacement");
     assert_eq!(fs::read(retained.join(DATABASE_FILE)).unwrap(), original);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn database_replaced_after_admission_refuses_before_sql_or_sidecar_creation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap().join("audit");
+    let store = AuditStore::open(&root).unwrap();
+    let original = fs::read(root.join(DATABASE_FILE)).unwrap();
+    let swapped_root = root.clone();
+    native_state::BEFORE_DATABASE_OPEN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::rename(
+                swapped_root.join(DATABASE_FILE),
+                swapped_root.join("original.db"),
+            )
+            .unwrap();
+            sweepx_cache::native::Directory::open(&swapped_root, false)
+                .unwrap()
+                .write_synced_bytes(DATABASE_FILE, b"keep", 4)
+                .unwrap();
+        }));
+    });
+    assert!(matches!(
+        store.with_connection_locked::<()>(|_| panic!("replacement must be refused before SQL")),
+        Err(AuditError::StoreMismatch)
+    ));
+    assert!(native_state::BEFORE_DATABASE_OPEN.with(|hook| hook.borrow().is_none()));
+    assert_eq!(fs::read(root.join(DATABASE_FILE)).unwrap(), b"keep");
+    assert_eq!(fs::read(root.join("original.db")).unwrap(), original);
+    for name in ["audit.db-wal", "audit.db-shm", "audit.db-journal"] {
+        assert!(!root.join(name).exists(), "unexpected sidecar: {name}");
+    }
 }
 
 #[test]
@@ -140,7 +180,7 @@ fn dangling_rollback_link_refuses_without_opening_sqlite_or_changing_old_bytes()
         Err(AuditError::SymlinkRejected(_))
     ));
     assert!(matches!(
-        store.connection_locked(),
+        store.with_connection_locked(|_| Ok(())),
         Err(AuditError::SymlinkRejected(_))
     ));
     assert_eq!(
@@ -173,7 +213,7 @@ fn rollback_bytes_participate_in_preclaim_budget_without_eviction() {
         Err(AuditError::DatabaseTooLarge)
     ));
     assert!(matches!(
-        store.connection_locked(),
+        store.with_connection_locked(|_| Ok(())),
         Err(AuditError::DatabaseTooLarge)
     ));
     assert!(matches!(
@@ -185,4 +225,66 @@ fn rollback_bytes_participate_in_preclaim_budget_without_eviction() {
     ));
     assert_eq!(fs::symlink_metadata(rollback).unwrap().len(), 84_934_656);
     assert_eq!(fs::read(root.join(DATABASE_FILE)).unwrap(), original);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_policy_covers_real_sql_callbacks_and_close_then_restores() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap().join("audit");
+    let store = AuditStore::open(&root).unwrap();
+    let previous = native_state::current_policy();
+    native_state::POLICY_PROBE.with(|p| p.set(Some((0, false))));
+    store.with_connection_locked(|connection| {
+        assert_eq!(native_state::current_policy(), 1);
+        connection.execute_batch("BEGIN IMMEDIATE; UPDATE store_meta SET next_fence_epoch=next_fence_epoch+1; UPDATE store_meta SET next_fence_epoch=next_fence_epoch-1; COMMIT;")?;
+        Ok(())
+    }).unwrap();
+    let (seen, failed) = native_state::POLICY_PROBE.with(|p| p.replace(None).unwrap());
+    assert!(!failed, "unprotected native phase bitmap: {seen}");
+    assert_eq!(
+        seen, 255,
+        "open/binding/accounting/sync/remove/SQL/close all observed"
+    );
+    assert_eq!(native_state::current_policy(), previous);
+    store.verify_integrity().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn actual_audit_write_callback_refuses_growth_and_preserves_database_bytes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap().join("audit");
+    let store = AuditStore::open(&root).unwrap();
+    let original = fs::read(root.join(DATABASE_FILE)).unwrap();
+    store
+        .with_connection_locked(|connection| {
+            use rusqlite::ffi;
+            let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+            // Public C file-control returns the actual installed object, not a display filename.
+            assert_eq!(
+                unsafe {
+                    ffi::sqlite3_file_control(
+                        connection.handle(),
+                        c"main".as_ptr(),
+                        ffi::SQLITE_FCNTL_FILE_POINTER,
+                        (&mut file as *mut *mut ffi::sqlite3_file).cast(),
+                    )
+                },
+                ffi::SQLITE_OK
+            );
+            assert!(!file.is_null());
+            let methods = unsafe { &*(*file).pMethods };
+            assert_eq!(methods.iVersion, 2);
+            assert!(methods.xFetch.is_none());
+            assert_eq!(
+                unsafe { methods.xWrite.unwrap()(file, b"keep".as_ptr().cast(), 4, 67_108_864) },
+                ffi::SQLITE_FULL
+            );
+            assert_eq!(fs::read(root.join(DATABASE_FILE)).unwrap(), original);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(fs::read(root.join(DATABASE_FILE)).unwrap(), original);
+    store.verify_integrity().unwrap();
 }
