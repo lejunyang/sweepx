@@ -991,7 +991,10 @@ pub struct ScanResourceLimits {
     pub max_directory_batch_bytes: usize,
     /// Maximum concurrently retained directory handles plus reserved child-handle permits.
     ///
-    /// This bounds *live operating-system handles*, not retained results. Because the
+    /// This bounds retained directory capabilities, not retained results or all OS handles.
+    /// Linux's active enumeration also owns a separate stream FD; transient metadata/data opens
+    /// are separate resources. Neither this per-invocation pool nor the storage I/O allowance
+    /// proves a whole-process handle cap. Because the
     /// traversal is depth-first, the pool is spent descending one path at a time rather
     /// than being divided across a whole level, so a directory with a very wide fan-out
     /// no longer exhausts it. Raising this value increases peak handle usage; it does not
@@ -1030,8 +1033,7 @@ impl Default for ScanResourceLimits {
             // 256-way fan-out -- which forced `partial` results and lower-bound totals.
             // Depth-first traversal is the actual fix, because it makes peak usage scale
             // with tree *depth*; this larger pool additionally leaves room for the wide
-            // sibling sets encountered on the way down. It stays well inside a normal
-            // process handle budget.
+            // sibling sets encountered on the way down. It is not a measured host handle budget.
             max_frontier_entries: 32_768,
             max_visited_entries: 131_072,
             max_retained_aggregates: 131_072,
@@ -1171,6 +1173,30 @@ pub trait PlatformScanner: Send + Sync {
         self.inspect_child(parent, child, cancel)
     }
 
+    /// Combines native mount observations with the retained-directory admission decision.
+    /// Denial must precede construction of a retained child directory capability. Backends whose
+    /// ordinary inspection lacks file mount evidence must override this method to observe that evidence
+    /// without opening a denied directory; unknown evidence must never be copied from the parent.
+    fn inspect_child_with_mount_identity_and_directory_admission(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+        cancel: &CancellationToken,
+        directory_admission: DirectoryHandleAdmission,
+    ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+        match directory_admission {
+            DirectoryHandleAdmission::Allow => {
+                self.inspect_child_with_mount_identity(parent, child, cancel)
+            }
+            DirectoryHandleAdmission::Deny => self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                directory_admission,
+            ),
+        }
+    }
+
     /// Performs the same bound inspection while optionally denying creation of
     /// a retained child-directory handle. Implementations must classify a
     /// denied directory without first constructing its retained handle; this
@@ -1280,8 +1306,46 @@ pub fn inspect_bound_child_with_mount_identity<P: PlatformScanner + ?Sized>(
     child: &DirectoryEntryRecord,
     cancel: &CancellationToken,
 ) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
+    inspect_bound_child_with_mount_identity_and_directory_admission(
+        platform,
+        parent,
+        parent_path,
+        child,
+        cancel,
+        DirectoryHandleAdmission::Allow,
+    )
+}
+
+/// Inspects a bound detail child while reserving or refusing its retained directory capability.
+/// Mount evidence and token validation have the same contract as the unrestricted detail helper.
+/// A backend returning a directory despite denial is refused; this cannot undo a faulty backend's
+/// already performed open, so native implementations must deny construction of the retained
+/// capability themselves. A transient metadata inspection may still need its own native descriptor.
+pub fn inspect_bound_child_with_mount_identity_and_directory_admission<
+    P: PlatformScanner + ?Sized,
+>(
+    platform: &P,
+    parent: &P::DirectoryHandle,
+    parent_path: &Path,
+    child: &DirectoryEntryRecord,
+    cancel: &CancellationToken,
+    directory_admission: DirectoryHandleAdmission,
+) -> Result<WalkEntry<P::DirectoryHandle>, PlatformError> {
     inspect_checked_child(parent_path, child, cancel, || {
-        platform.inspect_child_with_mount_identity(parent, child, cancel)
+        let entry = platform.inspect_child_with_mount_identity_and_directory_admission(
+            parent,
+            child,
+            cancel,
+            directory_admission,
+        )?;
+        if directory_admission == DirectoryHandleAdmission::Deny
+            && matches!(entry, WalkEntry::Directory(_))
+        {
+            return Err(PlatformError::ResourceLimit(
+                "backend opened a denied detail directory".into(),
+            ));
+        }
+        Ok(entry)
     })
 }
 

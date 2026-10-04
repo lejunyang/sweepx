@@ -1057,7 +1057,27 @@ mod backend {
             child: &DirectoryEntryRecord,
             cancel: &CancellationToken,
         ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
-            match self.inspect_child(parent, child, cancel)? {
+            self.inspect_child_with_mount_identity_and_directory_admission(
+                parent,
+                child,
+                cancel,
+                DirectoryHandleAdmission::Allow,
+            )
+        }
+
+        fn inspect_child_with_mount_identity_and_directory_admission(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+            cancel: &CancellationToken,
+            directory_admission: DirectoryHandleAdmission,
+        ) -> Result<WalkEntry<Self::DirectoryHandle>, PlatformError> {
+            match self.inspect_child_with_directory_admission(
+                parent,
+                child,
+                cancel,
+                directory_admission,
+            )? {
                 WalkEntry::File(metadata) => Ok(WalkEntry::File(
                     Self::observe_child_mount_metadata(parent, child, &metadata, cancel)?,
                 )),

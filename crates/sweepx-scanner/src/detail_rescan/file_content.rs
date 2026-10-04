@@ -1,6 +1,7 @@
 //! Content access shares detail rescans' native root and directory lineage validation.
 
 use super::*;
+use sweepx_platform::inspect_bound_child_with_mount_identity;
 use sweepx_platform::{
     BoundedRegularFileReadError, RegularFileObservation, RegularFileReadExpectation,
     RegularFileStreamRequest, RegularFileStreamResult, stream_bound_regular_file,

@@ -1,0 +1,197 @@
+{
+  "schema": "sweepx.detail-traversal-validation/v1",
+  "date": "2026-10-04",
+  "baselineCommit": "75edff2",
+  "host": "macOS 26.5.2 (25F84), Darwin arm64; Rust 1.98.0 (88d9e12ae 2026-08-18)",
+  "build": {
+    "profile": "dev/test; all features",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0"
+  },
+  "scope": [
+    "Recursive detail DFS and retained directory admission within existing platform/scanner crates",
+    "Borrow progress projection instead of copying hard-link ledgers; one shared progress clock and final cancellation gate",
+    "No new crate/dependency, public limit field, default-limit change or end-to-end speed claim"
+  ],
+  "contracts": {
+    "directories": "Outer target and suspended ancestor capabilities count. Inspect child with admission before retained directory construction. Root allowance zero refuses before root admission; direct aggregates include target state.",
+    "traversal": "Iterative DFS retains at most one bounded token batch per ancestor. No opened sibling queue or path reopen. Metadata retained across depth still needs global memory accounting.",
+    "mount": "Combined mount/admission inspection preserves Linux/Windows native denial and macOS ordinary file/link mount observation. Files can still be observed at full directory capacity; transient native inspection descriptors are separate.",
+    "progress": "Borrow accumulators; hard-link ledgers are not Clone. Periodic callbacks share 120ms policy across direct subtrees, only final provisional may flush sooner. Terminal result retains all rows; last callback cancellation refuses complete publication.",
+    "excluded": "Per-call retained directory capabilities are not whole-process FD/Windows executive handle/RSS bounds. Linux active cursors retain separate stream FDs. Scanner data/transient opens, other discovery/fingerprint/legacy paths, and full global metadata retention remain open.",
+    "evidence": "No-follow, native identity, mount, logical/unique accounting, unknown allocation, provisional lower bounds and incomplete refusal preserved. No deletion authority from progress.",
+    "postMatrixChanges": "Only public rustdoc wording and aligned documents changed after final functional matrix."
+  },
+  "fixture": {
+    "wideDirectDirectories": 160,
+    "directoryCapabilities": 3,
+    "directoryBatchTokens": 2,
+    "oracle": "Ordinary independent recursive read_dir/symlink_metadata totals and device/inode hard-link dedup, per-direct-row subtree walk. Snapshot descriptor names then ordinary fstat aliases, count only fixture directory objects; no production/private counters.",
+    "macOSObservedPeakRetainedFixtureDirectoryFDs": 3,
+    "releasedFixtureDirectoryFDs": 0,
+    "linuxDescriptorBoundCompiledOnly": 6,
+    "allocation": "macOS accepted allocation stays UnknownIdentity despite nonzero ordinary stat. Linux independently checks blocks times literal 512 after native execution, still not run here.",
+    "progress": "Independent callback-entry clock pins literal 120ms periodic contract, permits only last provisional earlier; functional test duration is not a performance sample.",
+    "failuresCovered": [
+      "depth refusal at two capabilities",
+      "zero allowance before root open",
+      "target-inclusive aggregate refusal",
+      "last callback cancellation",
+      "empty nonterminal native batch"
+    ],
+    "nativeTestNames": [
+      "wide_native_detail_is_complete_with_three_capabilities_and_independent_totals",
+      "native_detail_refusal_cancellation_and_invalid_batch_release_all_capabilities"
+    ]
+  },
+  "initialFailures": [
+    {
+      "name": "file-content-import",
+      "result": "exit101; compilation only",
+      "log": "/private/tmp/sweepx-detail-dfs-check.log",
+      "reason": "Changing parent detail import removed a helper implicitly supplied through super; add explicit existing mount helper import to file_content, no behavior change."
+    },
+    {
+      "name": "native-regressions-first",
+      "result": "exit101; two new tests failed",
+      "log": "/private/tmp/sweepx-detail-dfs-tests-first.log",
+      "reason": "Last progress callback cancellation returned complete: fix production publication gate. Allocation oracle incorrectly expected known macOS allocation: preserve production unknown contract. Denied-call counter also includes files at full directory capacity; verify successful native bytes rather than assuming zero calls."
+    },
+    {
+      "name": "native-regressions-after-cancel-fix",
+      "result": "exit101; cancellation passed, allocation expectation still failed",
+      "log": "/private/tmp/sweepx-detail-dfs-tests-fixed.log",
+      "reason": "Inspect actual backend and existing contract before correcting macOS test expectation. Do not widen evidence to pass test."
+    }
+  ],
+  "checks": [
+    {
+      "name": "native-regressions-final",
+      "result": "passed",
+      "passed": 2,
+      "failed": 0,
+      "log": "/private/tmp/sweepx-detail-dfs-progress-tests.log"
+    },
+    {
+      "name": "affected-dependent-tests",
+      "result": "passed",
+      "command": "cargo test -p sweepx-platform -p sweepx-scanner -p sweepx-core -p sweepx-tui --all-features -- --test-threads=1",
+      "passed": 639,
+      "failed": 0,
+      "ignored": 3,
+      "successfulExecObservationsSeparate": 2,
+      "log": "/private/tmp/sweepx-detail-dfs-affected-tests.log"
+    },
+    {
+      "name": "workspace-tests",
+      "result": "passed_with_existing_validation_gap",
+      "command": "cargo test --workspace --all-features --locked -- --skip trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --test-threads=1",
+      "passed": 1226,
+      "doctestsIncluded": 9,
+      "failed": 0,
+      "ignored": 3,
+      "explicitlySkipped": 1,
+      "successfulExecObservationsSeparate": 23,
+      "log": "/private/tmp/sweepx-detail-dfs-workspace-tests.log"
+    },
+    {
+      "name": "affected-lint",
+      "result": "passed",
+      "command": "cargo clippy -p sweepx-platform -p sweepx-scanner --all-targets --all-features -- -D warnings",
+      "log": "/private/tmp/sweepx-detail-dfs-affected-lint.log"
+    },
+    {
+      "name": "host-workspace-lint",
+      "result": "passed",
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "log": "/private/tmp/sweepx-detail-dfs-host-lint.log"
+    },
+    {
+      "name": "linux-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-unknown-linux-gnu all",
+      "log": "/private/tmp/sweepx-detail-dfs-linux-lint.log"
+    },
+    {
+      "name": "windows-gnu-workspace-lint",
+      "result": "passed_compile_only",
+      "command": "bash /private/tmp/sweepx-cross-lint.sh x86_64-pc-windows-gnu all",
+      "log": "/private/tmp/sweepx-detail-dfs-windows-lint.log"
+    },
+    {
+      "name": "package-file-lists",
+      "result": "passed",
+      "command": "cargo package --list --allow-dirty -p sweepx-platform -p sweepx-scanner",
+      "log": "/private/tmp/sweepx-detail-dfs-packages.log",
+      "registryDependencyBuild": false,
+      "newScannerTestModule": "src/detail_rescan/traversal_tests.rs"
+    },
+    {
+      "name": "fmt-diff",
+      "result": "passed",
+      "command": "cargo fmt --all --check; git diff --check"
+    },
+    {
+      "name": "documentation-lint",
+      "result": "passed",
+      "command": "python3 scripts/lint_docs.py",
+      "log": "/private/tmp/sweepx-detail-dfs-docs.log",
+      "markdownFiles": 54
+    },
+    {
+      "name": "staged-diff",
+      "result": "passed",
+      "command": "git diff --cached --check"
+    }
+  ],
+  "existingValidationGaps": [
+    {
+      "name": "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations",
+      "status": "explicitly_skipped",
+      "reason": "Earlier independent Foundation service hang diagnosis; test kept. This matrix is not a Trash runtime qualification."
+    },
+    {
+      "name": "three-opt-in-benchmarks",
+      "status": "ignored_existing",
+      "reason": "No speed or percentile acceptance claimed."
+    },
+    {
+      "name": "linux-windows-msvc-native-qualification",
+      "status": "not_run",
+      "reason": "Previously investigated host/runner setup has no native target runner/MSVC; GNU lint only compiles all cfg/test branches. No Android substitution or production cfg widening."
+    },
+    {
+      "name": "provider-ofd-bind-target-trash-and-pathname-race",
+      "status": "open",
+      "reason": "Controlled macOS fixtures do not qualify real provider, Linux OFD/bind mount or target Trash/isolation; final noncooperating pathname window remains."
+    },
+    {
+      "name": "remaining-cache-resource-audit",
+      "status": "open",
+      "reason": "Linux/Windows file-index validity, other discovery/fingerprint/legacy paths, global scanner handles/metadata and actual RSS/end-to-end host measurements remain."
+    }
+  ],
+  "reusedEvidence": {
+    "topology": "native-authority-admission-validation-2026-10-04.json",
+    "packages": 17,
+    "normalBuildTargetSpecificRows": 50,
+    "packagePairs": 47,
+    "basis": "No manifest/lock/dependency changes; existing topology and 23 unchanged docs-checker tests reused."
+  },
+  "diskKiB": {
+    "target": 3371852,
+    "debug": 2355352,
+    "debugGiBApprox": 2.25,
+    "oldTrashPayloadGiB": 43.323,
+    "trashEmptied": false
+  },
+  "remainingPriority": "Cross-platform cache/resource audit first; new Dart/SvelteKit work deferred.",
+  "sourceSha256": {
+    "crates/sweepx-platform/src/lib.rs": "3dc4f8aa67012158a73979df15c48b93ad6800d5785909807218921f8682b316",
+    "crates/sweepx-platform/src/macos/mod.rs": "78ada4bbecb8c788a0c9b98bb78232d0450b3e392298e12ce94adb30755f87d1",
+    "crates/sweepx-scanner/src/detail_rescan.rs": "9ef14bd9ac88841a380071f2e39eabd4bfb712eb9757fb3960b078ee2d61f46d",
+    "crates/sweepx-scanner/src/detail_rescan/file_content.rs": "811c3b2d1818ece20a39956d2ca3ebfa6a0a7d81052e28a8fc2efb3477047100",
+    "crates/sweepx-scanner/src/detail_rescan/traversal_tests.rs": "e07589ce9f1afead57d96d99e8b399ea4519950748e5b76c85eb50eac3fc949b"
+  }
+}
