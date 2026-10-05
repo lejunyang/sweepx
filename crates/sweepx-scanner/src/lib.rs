@@ -502,6 +502,9 @@ struct CollectingScanSink<'a> {
     /// evidence (junk rules match directories), so they are admitted against their own count
     /// rather than sharing a pool that file rows could exhaust.
     retained_directories: usize,
+    /// Ordinary detail rows share a byte allowance because native ancestor recipes make a
+    /// deep entry much larger than a shallow one. Counts alone do not bound that storage.
+    retained_entry_bytes: usize,
     /// When present, the sink runs in junk mode: non-directory rows feed only the marker index,
     /// and directory rows are classified when their aggregate is pushed.
     classifier: Option<&'a dyn JunkClassifier>,
@@ -560,6 +563,7 @@ impl<'a> CollectingScanSink<'a> {
             detail_overflowed_roots: BTreeSet::new(),
             detail_overflow_count: 0,
             retained_directories: 0,
+            retained_entry_bytes: 0,
             classifier: None,
             observer: None,
             pending_directories: BTreeMap::new(),
@@ -948,6 +952,23 @@ impl ScanSink for CollectingScanSink<'_> {
             );
             return Ok(());
         }
+        // File analyses already received the live observation and recursive totals already
+        // counted it. Reserve twice the owned estimate for Vec growth and allocator overhead;
+        // refusing detail must not manufacture incomplete filesystem accounting.
+        let bytes = Self::row_cost(&entry).saturating_mul(2);
+        let Some(next_bytes) = self
+            .retained_entry_bytes
+            .checked_add(bytes)
+            .filter(|next| *next <= self.limits.max_retained_entry_bytes)
+        else {
+            self.mark_detail_overflow(
+                root,
+                Path::new(&entry.display_path),
+                "retained entry byte budget exceeded",
+            );
+            return Ok(());
+        };
+        self.retained_entry_bytes = next_bytes;
         if is_directory {
             self.retained_directories += 1;
         }
@@ -1231,7 +1252,14 @@ fn take_frontier_directory<D>(
     });
     match selected {
         Some(index) => frontier.remove(index),
-        None => frontier.pop_back(),
+        // A resumed ancestor is pushed after its children. Merely popping the back would
+        // expand that ancestor again, filling the pool with siblings before descent.
+        None => frontier
+            .iter()
+            .enumerate()
+            .max_by_key(|(index, current)| (current.path.components().count(), *index))
+            .map(|(index, _)| index)
+            .and_then(|index| frontier.remove(index)),
     }
     .expect("frontier round length was captured")
 }
@@ -3620,6 +3648,12 @@ mod tests {
             capped,
             ScannerOptions {
                 max_workers: usize::MAX,
+                // The barrier checks all 32 workers with a deliberately larger synthetic
+                // frontier. The native default must leave room in the shared I/O pool.
+                resource_limits: ScanResourceLimits {
+                    max_frontier_entries: 256,
+                    ..ScanResourceLimits::default()
+                },
                 ..ScannerOptions::default()
             },
         )
@@ -5144,8 +5178,8 @@ mod tests {
             "live directory handle high-water exceeded the frontier permit cap"
         );
         assert_eq!(live_handles.load(Ordering::SeqCst), 0);
-        // Every token is still inspected so non-directory entries cannot be
-        // lost; only two inspections may retain directory handles.
+        // Deferred siblings are still inspected, while completed children release their
+        // handles before the next sibling. A shallow wide tree needs no coverage loss.
         assert_eq!(child_inspections.load(Ordering::SeqCst), 16);
         assert_eq!(
             result
@@ -5153,7 +5187,14 @@ mod tests {
                 .iter()
                 .filter(|boundary| boundary.detail == "frontier limit exceeded")
                 .count(),
-            14
+            0
+        );
+        assert_eq!(result.entries.len(), 16);
+        assert!(
+            result
+                .aggregates
+                .iter()
+                .all(|aggregate| aggregate.coverage.complete)
         );
     }
 

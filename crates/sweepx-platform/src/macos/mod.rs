@@ -1174,6 +1174,48 @@ mod backend {
 
             match kind_from_mode(observed.stat.st_mode) {
                 EntryKind::Directory => {
+                    // Bulk attributes can describe the covered vnode beneath a mount. A
+                    // no-follow stat of the name sees the mounted object without activating
+                    // it via openat. Keep files on the bulk path; directories need this check.
+                    let observed =
+                        if from_bulk && observed.stat.st_dev as u64 == parent.identity.device {
+                            let parent_fd = Self::dirfd(parent)
+                                .map_err(|error| PlatformError::io(parent.path.clone(), error))?;
+                            let name = Self::name_c_string(&child.file_name)?;
+                            match Self::fstatat_raw(parent_fd, &name) {
+                                Ok(current) => current,
+                                Err(error) => {
+                                    return Ok(WalkEntry::Error(ErrorRecord {
+                                        path: child.path.clone(),
+                                        kind: crate::error_kind_for_io(&error),
+                                        reason: crate::reason_for_io(&error),
+                                        detail: error.to_string(),
+                                    }));
+                                }
+                            }
+                        } else {
+                            observed
+                        };
+                    // Reject an already observed foreign device before opening its directory:
+                    // openat can trigger an automount and block even though traversal would
+                    // subsequently refuse that mount. Equality is only a preliminary check;
+                    // the opened handle still supplies the authoritative mount identity.
+                    if observed.stat.st_dev as u64 != parent.identity.device {
+                        return Ok(WalkEntry::Boundary(BoundaryRecord {
+                            path: child.path.clone(),
+                            kind: BoundaryKind::Mount,
+                            reason: ReasonCode::UnsupportedFilesystem,
+                            detail: "entry crosses the observed device boundary".to_string(),
+                        }));
+                    }
+                    if kind_from_mode(observed.stat.st_mode) != EntryKind::Directory {
+                        return Ok(WalkEntry::Error(ErrorRecord {
+                            path: child.path.clone(),
+                            kind: crate::ErrorKind::Io,
+                            reason: ReasonCode::UnknownIdentity,
+                            detail: "directory type changed after bulk observation".to_string(),
+                        }));
+                    }
                     if directory_admission == DirectoryHandleAdmission::Deny {
                         return Ok(WalkEntry::Boundary(BoundaryRecord {
                             path: child.path.clone(),
@@ -1383,6 +1425,95 @@ mod backend {
                 }
                 Err(error) => Err(error),
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod device_boundary_tests {
+        use super::*;
+        use std::os::unix::fs::MetadataExt;
+
+        #[test]
+        fn foreign_directory_is_rejected_before_attempting_to_open_it() {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().canonicalize().unwrap();
+            let scanner = MacosPlatformScanner::new();
+            let cancel = CancellationToken::new();
+            let mut admission = scanner
+                .admit_root(&ScanRoot::new(&path).unwrap(), &cancel)
+                .unwrap();
+            let mounted = fs::symlink_metadata("/dev").unwrap();
+            assert_ne!(mounted.dev(), fs::symlink_metadata(&path).unwrap().dev());
+            let name = b"foreign-not-present".to_vec();
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                &path,
+                NativeName::UnixBytes(name.clone()),
+            )
+            .unwrap();
+            // A controlled bulk observation names a foreign directory that does not exist
+            // here. An attempted open would return NotFound, never a mount boundary.
+            let mut observed = MacosPlatformScanner::fstat_raw(
+                MacosPlatformScanner::dirfd(&admission.directory).unwrap(),
+            )
+            .unwrap();
+            observed.stat.st_dev = mounted.dev() as libc::dev_t;
+            admission
+                .directory
+                .bulk_attributes
+                .insert(name, observed.stat);
+            assert!(!child.path.exists());
+            for directory_admission in [
+                DirectoryHandleAdmission::Allow,
+                DirectoryHandleAdmission::Deny,
+            ] {
+                assert!(matches!(
+                    scanner
+                        .inspect_child_with_directory_admission(
+                            &admission.directory,
+                            &child,
+                            &cancel,
+                            directory_admission,
+                        )
+                        .unwrap(),
+                    WalkEntry::Boundary(BoundaryRecord {
+                        kind: BoundaryKind::Mount,
+                        ..
+                    })
+                ));
+            }
+        }
+
+        #[test]
+        fn covered_bulk_vnode_does_not_hide_a_current_device_boundary() {
+            let scanner = MacosPlatformScanner::new();
+            let cancel = CancellationToken::new();
+            let mut admission = scanner
+                .admit_root(&ScanRoot::new("/").unwrap(), &cancel)
+                .unwrap();
+            let current = fs::symlink_metadata("/dev").unwrap();
+            assert_ne!(current.dev(), fs::symlink_metadata("/").unwrap().dev());
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                Path::new("/"),
+                NativeName::UnixBytes(b"dev".to_vec()),
+            )
+            .unwrap();
+            let underlying = MacosPlatformScanner::fstat_raw(
+                MacosPlatformScanner::dirfd(&admission.directory).unwrap(),
+            )
+            .unwrap();
+            admission
+                .directory
+                .bulk_attributes
+                .insert(b"dev".to_vec(), underlying.stat);
+            assert!(matches!(
+                scanner
+                    .inspect_child(&admission.directory, &child, &cancel)
+                    .unwrap(),
+                WalkEntry::Boundary(BoundaryRecord {
+                    kind: BoundaryKind::Mount,
+                    ..
+                })
+            ));
         }
     }
 }

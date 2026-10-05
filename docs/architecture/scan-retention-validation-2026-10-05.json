@@ -1,0 +1,114 @@
+{
+  "schema": "sweepx.scan-retention-validation/v1",
+  "date": "2026-10-05",
+  "startingCommit": "a345b86",
+  "host": {
+    "os": "macOS 26.5.2 (25F84)",
+    "arch": "arm64",
+    "rust": "1.98.0",
+    "fullDiskAccess": "effective during final verification"
+  },
+  "scope": "Native wide traversal and ordinary detail retention; actual host Data-volume observations remain partial.",
+  "sourceFingerprints": {
+    "crates/sweepx-platform/src/lib.rs": "dc66fa93c24fa85a599c910459637098163cc9ab06c612817f67f1b4c2df888c",
+    "crates/sweepx-platform/src/macos/mod.rs": "32e6683fd88501d26ab2d9dccacb548636a4da0ab6c472630222e8302643ba0c",
+    "crates/sweepx-scanner/src/lib.rs": "b528e80c047c42b56769ac992dad2391bbff6d520817f17a4c2862028091f4ac",
+    "crates/sweepx-scanner/tests/native_wide_cache.rs": "c38db9768341c2ea75c72c151f415b182303ac3396ffd71dd91dcd7c730cce82"
+  },
+  "changes": [
+    "Refresh same-device bulk directory hints with no-follow metadata before open; reject observed foreign devices without activating them. Opened native handle retains authoritative mount checks.",
+    "Default retained directory frontier 32768 -> 128; prefer deepest admitted subtree over a resumed ancestor to defer wide siblings.",
+    "Ordinary detail rows share a 128 MiB owned-storage estimate with Vec/allocator allowances. Truncation is explicit and does not change already accumulated totals or independent live observations."
+  ],
+  "regressions": [
+    {
+      "test": "foreign_directory_is_rejected_before_attempting_to_open_it",
+      "oracle": "Foreign /dev device and nonexistent child; an attempted open would fail NotFound rather than produce Mount."
+    },
+    {
+      "test": "covered_bulk_vnode_does_not_hide_a_current_device_boundary",
+      "oracle": "Independent /dev native metadata differs from covered parent bulk hint."
+    },
+    {
+      "test": "default_native_scan_completes_wide_cache_with_independent_totals",
+      "workload": {
+        "shards": 256,
+        "branchesPerShard": 4,
+        "nestedSingleChildLevels": 8,
+        "payloadBytes": 37
+      },
+      "oracle": "Ordinary no-follow directory walk; no resource errors/boundaries and exact root logical total."
+    },
+    {
+      "test": "detail_byte_limit_keeps_independently_measured_recursive_totals",
+      "workload": {
+        "branches": 8,
+        "nestedSingleChildLevels": 8,
+        "payloadBytes": 37,
+        "detailByteAllowance": 4096
+      },
+      "oracle": "Ordinary metadata total equals native complete root aggregate despite explicit retained-detail truncation."
+    }
+  ],
+  "hostObservations": {
+    "beforeWideFix": {
+      "scope": "npm content cache before moving it to Trash",
+      "nativeHandleResourceErrors": 13146,
+      "reportedLogicalBytes": "lower bound about 36 MB",
+      "independentAllocatedBytes": "31850811392",
+      "comparison": "Accounting defect evidence; not an equivalent-workload speed benchmark."
+    },
+    "beforeDetailBudget": {
+      "elapsedSeconds": 27.787,
+      "exitCode": -15,
+      "termination": "observed_rss_limit",
+      "peakSampledRssBytes": 1614856192,
+      "outputBytes": 0
+    },
+    "afterDetailBudget": {
+      "elapsedSeconds": 90.891,
+      "exitCode": 4,
+      "termination": null,
+      "peakSampledRssBytes": 758022144,
+      "outputBytes": 7740,
+      "status": "partial",
+      "ordinaryFilesObserved": 920650,
+      "filesAtLeast100MiB": 58,
+      "largeFilesRetained": 30,
+      "entryDetailsRetained": 10169,
+      "aggregatesRetained": 131072,
+      "boundariesRetained": 16384,
+      "errorRecords": 250
+    },
+    "method": "release/all-features for final Data-volume run; ps samples main-process RSS every 0.5 s. First diagnostic killed only its own process group at 1.5 GiB observed RSS. Final run returned partial without wrapper termination. OS cache and other host activity uncontrolled; final Data scan overlapped verification. Not a paired speed comparison or RSS upper-bound proof."
+  },
+  "validation": {
+    "environment": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0",
+    "fmt": "passed",
+    "diffCheck": "passed",
+    "scannerAllFeatures": "96 unit tests and 2 native integration tests passed; no skipped tests",
+    "workspaceTests": {
+      "command": "cargo test --workspace --all-features -- --test-threads=4",
+      "exitCode": 0,
+      "wallSeconds": 117.889,
+      "skipped": 0,
+      "ignored": 3,
+      "ignoredReason": "Existing opt-in historical-cache, cache-preparation and native enumeration benchmarks",
+      "foundationTrash": "previously hung host integration passed with Full Disk Access"
+    },
+    "workspaceClippy": "passed: --workspace --all-targets --all-features -- -D warnings",
+    "crossClippy": {
+      "x86_64-unknown-linux-gnu": "passed",
+      "x86_64-pc-windows-gnu": "passed",
+      "method": "scripts/cross-lint.sh semantics with a temporary Windows-GNU case and pinned Zig 0.16.0 path; writable ZIG_GLOBAL_CACHE_DIR. No production cfg changes."
+    },
+    "unverified": [
+      "Linux/Windows native runtime",
+      "Windows MSVC",
+      "Real cloud providers",
+      "Complete Data-volume coverage",
+      "Universal absence of native-open/Trash hangs",
+      "Whole-process memory bound including retained aggregation/hard-link facts"
+    ]
+  }
+}

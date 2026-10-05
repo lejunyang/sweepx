@@ -1018,6 +1018,10 @@ pub struct ScanResourceLimits {
     /// reported as incomplete *coverage* -- the directory was fully walked and its aggregate
     /// is exact; only the per-file listing was truncated.
     pub max_retained_entries: usize,
+    /// Shared estimated bytes for ordinary scan entry details, including native lineage and
+    /// container spare capacity. Dropping detail preserves already accumulated totals and live
+    /// observations. Classified scans use their separate metadata allowance. This is not RSS.
+    pub max_retained_entry_bytes: usize,
     pub max_retained_boundaries: usize,
     /// Maximum retained progress-log records. Omissions do not reduce filesystem coverage;
     /// error counts and traversal terminal facts remain available independently of this log.
@@ -1036,13 +1040,11 @@ impl Default for ScanResourceLimits {
             max_directory_bytes: 16 * 1024 * 1024,
             max_directory_batch_entries: 4096,
             max_directory_batch_bytes: 1024 * 1024,
-            // Raised from 4096 alongside the move to depth-first traversal. The old value
-            // was reached by real caches -- npm's `_cacache` holds 24453 directories with a
-            // 256-way fan-out -- which forced `partial` results and lower-bound totals.
-            // Depth-first traversal is the actual fix, because it makes peak usage scale
-            // with tree *depth*; this larger pool additionally leaves room for the wide
-            // sibling sets encountered on the way down. It is not a measured host handle budget.
-            max_frontier_entries: 32_768,
+            // Keep the traversal's retained frontier below the shared 256-slot native I/O
+            // pool, leaving room for worker temporaries, ancestor admission and storage.
+            // Wide trees defer siblings; a larger frontier is unnecessary for complete scans.
+            // This is a per-scan allowance, not a guarantee against unrelated concurrent users.
+            max_frontier_entries: 128,
             max_visited_entries: 131_072,
             max_retained_aggregates: 131_072,
             // Raised from 16,384 on 2026-09-29: a real-machine scan measured 81,459
@@ -1050,6 +1052,7 @@ impl Default for ScanResourceLimits {
             // pool because they carry junk-classification evidence, so the cap must cover the
             // directory count; surplus file rows stay detail overflow with totals still exact.
             max_retained_entries: 131_072,
+            max_retained_entry_bytes: 128 * 1024 * 1024,
             max_retained_boundaries: 16_384,
             max_progress_events: 16_384,
             max_classified_metadata_bytes: 256 * 1024 * 1024,
