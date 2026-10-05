@@ -49,6 +49,7 @@ fn run_oracle() {
     ));
     refused(root.create_child("must-not-create"));
     refused(root.lock());
+    refused(root.create_state_file("must-not-create.db"));
     refused(root.entries(|_| panic!("refused enumeration must not visit")));
     refused(root.write_json("seed.json", &99, 32));
     refused(root.write_json("must-not-create.json", &0, 32));
@@ -56,7 +57,6 @@ fn run_oracle() {
     #[cfg(unix)]
     {
         refused(root.directory_file());
-        refused(root.create_state_file("must-not-create.db"));
     }
     let cache = crate::AtomicGenerationStore::new(&path);
     assert!(matches!(

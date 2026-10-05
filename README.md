@@ -36,7 +36,7 @@ npx 工具可用 `sweepx npx-cache` 查看实际版本与包含依赖的安装�
 
 Chrome 基础模型可用 `sweepx browser-model` 查看版本；`--trash` 在 Chrome 完全退出后回收已识别载荷，`--disable-download-config /absolute/new.mobileconfig` 导出专用禁用策略。该入口只生成配置文件，不自动写入或安装系统策略；安装后需在 `chrome://policy` 核验值为 1。
 
-浏览器网站数据可用 `sweepx site-storage` 按域名查看；`--browser edge --domain example.com` 展示具体 profile、完整存储键与 bucket。支持 macOS/Linux/Windows 默认位置、旧 CacheStorage/IndexedDB 和现代 WebStorage。共享数据库及 HTTP 缓存只统计整体大小，报告为逻辑长度和非原子观察。仅使用 SweepX 可以扫描和导出计划，尚不能独立按域删除；按域删除需另行安装本地浏览器扩展，将 `--export-delete-plan` 的具体 origin 计划导入后调用浏览器自身 API；清除没有回收站，实际扩展安装/删除尚待本机验收。旧 `--trash-origin` / `--browse` 继续拒绝直接文件清理。详见 [CLI 说明](site/cli.md#site-storage)。
+浏览器网站数据可用 `sweepx site-storage` 按域名查看；支持默认位置的 CacheStorage、IndexedDB 和现代 WebStorage。共享数据库及 HTTP 缓存只统计整体大小，逻辑大小不代表可释放空间。程序现已[内置 Chrome/Edge 扩展及本地通信组件](integrations/chromium-cleanup/README.md)：`sweepx browser-extension bundle --output /absolute/new-bundle` 导出，`register --browser chrome --bundle /absolute/new-bundle` 注册；首次需在浏览器加载扩展。扩展可以请求扫描、查看域名和 bucket 明细、确认清除并回传 SweepX 请求结果。清除没有回收站，不能按单个 bucket 删除；实际浏览器安装/删除仍待验收。本地更新需导出新版、替换通信注册并重新加载扩展，未提供商店自动更新。旧 `--trash-origin` / `--browse` 继续拒绝直接文件清理。详见 [CLI 说明](site/cli.md#browser-extension)。
 
 ## 安装
 

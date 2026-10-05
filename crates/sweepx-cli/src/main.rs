@@ -24,6 +24,7 @@ use sweepx_core::junk::JunkService;
 use sweepx_core::junk::ProjectJunkRule as JunkRule;
 #[cfg(test)]
 use sweepx_core::junk::load_project_rules as load_project_junk_rules;
+mod browser_extension;
 mod browser_model_command;
 mod file_tui;
 mod junk_timings;
@@ -300,6 +301,12 @@ enum Commands {
         #[arg(long, value_name = "NEW_MOBILECONFIG", conflicts_with = "version")]
         disable_download_config: Option<PathBuf>,
     },
+    /// Export the bundled Chrome/Edge extension, register its local bridge, or request cleanup.
+    /// First installation and extension reload require confirmation inside the browser.
+    BrowserExtension {
+        #[command(subcommand)]
+        command: browser_extension::Commands,
+    },
     /// List npx tool versions and whole-installation sizes; preview or Trash selected slots.
     NpxCache {
         /// Explicit npm cache/_npx root. Defaults to ~/.npm/_npx; redirected caches require this.
@@ -387,6 +394,11 @@ enum CacheCommands {
 }
 
 fn main() -> ProcessExitCode {
+    // Browsers launch the exported copy directly, without CLI arguments. Dispatch before
+    // parsing, elevation, locale notices or TCC UI: stdout belongs exclusively to framing.
+    if browser_extension::is_host_invocation() {
+        return browser_extension::host_main();
+    }
     let cli = Cli::parse();
 
     // An elevated child redirects its own stdout before producing anything, so every existing
@@ -835,6 +847,9 @@ fn main() -> ProcessExitCode {
                 size_unit,
                 context.locale(),
             );
+        }
+        Commands::BrowserExtension { command } => {
+            return browser_extension::run(command);
         }
         Commands::NpxCache {
             root,

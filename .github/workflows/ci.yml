@@ -62,6 +62,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test full workspace
         run: cargo test --workspace --all-features --locked
+      - name: Test bundled browser adapter contracts
+        run: |
+          node --version
+          node --test crates/sweepx-cli/assets/chromium-cleanup/logic.test.mjs crates/sweepx-cli/assets/chromium-cleanup/bridge.test.mjs
       # Rule packages ship unsigned and are meant to be editable. What still has to hold is that an
       # edit is never silent: `content_digest` binds a clean authorization to the rule bytes that
       # produced the scan. `editing_a_rule_changes_the_content_digest_but_still_loads` covers this

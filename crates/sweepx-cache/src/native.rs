@@ -340,6 +340,21 @@ impl Directory {
 mod synced_tests {
     use super::*;
 
+    #[test]
+    fn exclusive_state_file_preserves_existing_bytes_and_directory() {
+        use std::io::Write;
+        let (_temp, path, directory) = fixture();
+        let mut file = directory.create_state_file("payload").unwrap();
+        file.write_all(b"preserved").unwrap();
+        file.sync_all().unwrap();
+        assert!(directory.create_state_file("payload").is_err());
+        drop(file);
+        assert_eq!(std::fs::read(path.join("payload")).unwrap(), b"preserved");
+        let _child = directory.create_child("child").unwrap();
+        assert!(directory.create_state_file("child").is_err());
+        assert!(path.join("child").is_dir());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn exclusive_json_commit_preserves_a_racing_destination_and_discards_refused_temp() {

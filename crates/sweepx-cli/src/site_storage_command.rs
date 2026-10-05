@@ -191,7 +191,10 @@ fn size_label(value: Option<&str>, complete: bool, unit: HumanSizeUnit) -> Strin
     }
 }
 
-fn render_json(analysis: &BrowserStorageAnalysis, domain: Option<&str>) -> serde_json::Value {
+pub(crate) fn render_json(
+    analysis: &BrowserStorageAnalysis,
+    domain: Option<&str>,
+) -> serde_json::Value {
     let mut domains = BTreeMap::<String, (Option<u128>, usize, bool)>::new();
     for report in &analysis.profiles {
         for row in report

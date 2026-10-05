@@ -341,6 +341,24 @@ impl Directory {
         Ok(file)
     }
 
+    /// Exclusively creates a private ordinary single-link state file beneath this retained
+    /// directory. Existing entries are never opened or truncated. A protected DACL and a
+    /// share-none native handle preserve the same ownership/provider boundaries as publication.
+    pub fn create_state_file(&self, name: &str) -> io::Result<NativeFile> {
+        self.private()?;
+        let descriptor = PrivateSecurityDescriptor::new()?;
+        let file = self.open_relative(
+            &component(OsStr::new(name))?,
+            FILE_READ_DATA | GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_NON_DIRECTORY_FILE,
+            FILE_CREATE,
+            0,
+            Some(&descriptor),
+        )?;
+        self.valid_file(&file)?;
+        Ok(file)
+    }
+
     fn valid_file(&self, file: &File) -> io::Result<()> {
         ordinary(file, false, Some(self.volume))?;
         revalidate_file(file)

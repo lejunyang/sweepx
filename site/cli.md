@@ -455,6 +455,23 @@ sweepx browser-model --disable-download-config /absolute/chrome-no-model.mobilec
 
 这个入口只导出配置文件，不自动写入或安装系统策略。macOS 配置导出只包含 `GenAILocalFoundationalModelSettings=1`，不关闭其他组件更新。请手动安装并在 `chrome://policy` 确认该值与正常状态。此策略禁止基础模型下载，Chrome 自身可能删除已有模型，依赖该模型的能力将不可用；策略自动清除不经过 SweepX 回收站，建议先退出 Chrome 并回收载荷。移除该配置描述文件恢复默认策略。导出不等于安装或验证。
 
+## `browser-extension`
+
+```sh
+sweepx browser-extension bundle --output /absolute/new-bundle
+sweepx browser-extension register --browser chrome --bundle /absolute/new-bundle
+sweepx browser-extension request --browser chrome --profile Default --domain example.com
+sweepx browser-extension status
+```
+
+程序内置扩展源文件，`bundle` 创建新的私有目录，包含扩展、独立通信组件及 `INSTALL.txt`，拒绝覆盖已有目录。`register` 在 macOS/Linux 为当前用户的稳定版 Chrome/Edge 注册通信组件；Edge 使用 `--browser edge`。Windows 注册需依导出的说明手动设置 HKCU；Beta/Dev 注册未自动化。最后一级注册目录权限不安全或祖先含链接时拒绝，且不修复现有权限。
+
+首次需在对应浏览器的扩展页启用开发者模式并加载导出的 `extension` 目录。点击扩展后连接 SweepX、选择当前浏览器和 profile 目录，扫描并按域确认清除。浏览器启动本地组件，不需要一直运行 SweepX 或网络服务。扩展只能展示 SweepX 已识别的存储；共享及未归属数据单独显示，不声称覆盖所有网站数据。
+
+`request` 仅排队一个精确域名的待确认计划，15 分钟有效；打开匹配的扩展确认页处理或拒绝，`status` 查看待处理和最后回传结果。完成报告表示浏览器 API 已完成，不证明空间释放。网站存储可能有未同步内容，清除无回收站；Cookie、历史、密码和扩展数据不清除，个人资料身份需用户确认。
+
+更新时用新版 SweepX 导出**新目录**，`register --replace` 替换原 SweepX 通信注册，再在浏览器加载/重新加载新扩展目录。旧目录保留。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。实际浏览器安装/删除仍待本机验收。详见[扩展指南](../integrations/chromium-cleanup/README.md)。
+
 ## `site-storage`
 
 按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。默认报告只读；网站应用状态与 `junk` 分开。
@@ -546,4 +563,4 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
 ```
 
-仅安装 SweepX 时，按域分析和计划导出可用，按域清除不可用；必须另行安装浏览器扩展。将本地计划导入 [可选 Chromium 清理扩展](../integrations/chromium-cleanup/README.md)，在匹配的浏览器个人资料里审阅范围后执行。扩展调用浏览器 `browsingData` API，支持网站缓存或缓存及 IndexedDB、Local Storage、Service Worker、网站文件；不直接移走共享数据库。只使用 `browsingData` 权限，无网络请求。Cookie、历史、密码、权限、扩展数据和受保护网页应用不清除；同 origin 的分区由浏览器处理，不能选单个 bucket。清除不可由 SweepX 撤销。扩展无法独立绑定原生 profile 身份，需要用户确认。完成 API 请求后重新扫描，不能把 callback 当作字节释放证明。扩展实际安装/删除仍待本机验收；企业策略拒绝安装时不绕过。旧文件级回收参数保持拒绝。
+SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extension`](#browser-extension)。仅安装 SweepX 时可扫描和导出计划；完成按域清除仍需在匹配的浏览器个人资料加载扩展。可以连接 SweepX 直接查看域名、存储键/bucket 和共享分类占用，也可导入 `--export-delete-plan` 的计划。扩展只申请 `browsingData`、`nativeMessaging` 权限，无网络请求，不直接移走共享数据库。清理范围、确认要求和验收边界见[扩展指南](../integrations/chromium-cleanup/README.md)。旧文件级回收参数保持拒绝。

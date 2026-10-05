@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SweepX 网站清理 / Site cleanup</title>
+<link rel="stylesheet" href="review.css">
+<main>
+<h1>网站清理 <small>Site cleanup</small></h1>
+<p>连接本机 SweepX 查看网站占用并清理。首次使用需在 SweepX 注册本地通信组件；浏览器和个人资料由你核对。<br>Connect to local SweepX for inventory and cleanup. Register the native host first and confirm the active profile.</p>
+<div class="toolbar">
+<label>当前浏览器 / Browser <select id="browser"><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="chrome-beta">Chrome Beta</option><option value="chrome-dev">Chrome Dev</option><option value="edge-beta">Edge Beta</option><option value="edge-dev">Edge Dev</option></select></label>
+<label>个人资料目录 / Profile directory <input id="native-profile" value="Default" maxlength="80" placeholder="Default / Profile 1"></label>
+</div>
+<button id="connect">连接 SweepX / Connect</button>
+<button id="scan" disabled>扫描或刷新 / Scan or refresh</button>
+<button id="disconnect" disabled>取消扫描或断开 / Cancel or disconnect</button>
+<button id="poll" disabled>检查待确认请求 / Check requests</button>
+<p id="connection" role="status">尚未连接 / Not connected</p>
+<p>扩展无法读取原生个人资料身份。目录名可在浏览器的版本信息页中核对。连接只使用本机管道，无网络服务。<br>The extension cannot prove the native profile identity. Check the directory in the browser version page. The bridge uses local pipes.</p>
+<p id="inventory-status" role="status"></p>
+<label>搜索域名 / Find a domain <input id="domain-filter" type="search" placeholder="example.com" maxlength="253"></label>
+<div class="table-wrap"><table><caption>按域名归属的存储 / Attributed site storage</caption><thead><tr><th>域名 / Domain</th><th>大小 / Size</th><th>条目 / Items</th><th>操作 / Action</th></tr></thead><tbody id="domains"></tbody></table></div>
+<button id="page-prev" disabled>上一页 / Previous</button><span id="page-label">0 / 0</span><button id="page-next" disabled>下一页 / Next</button>
+<p>这些是已识别 IndexedDB、Cache Storage 和 WebStorage 的逻辑占用；不包含该域名所有数据，也不是可释放空间。共享 HTTP 缓存等不能可靠按域名分摊。<br>Attributed storage covers recognized layouts, not every site's data or reclaimable space. Shared HTTP cache cannot be reliably assigned to domains.</p>
+<details><summary>分类总计与未归属占用 / Categories and unattributed bytes</summary><div class="table-wrap"><table><thead><tr><th>分类 / Category</th><th>总计 / Total</th><th>未归属 / Unattributed</th><th>问题 / Issues</th></tr></thead><tbody id="categories"></tbody></table></div></details>
+<details open><summary>选中域名明细 / Selected domain details</summary><pre id="details">尚未选择域名 / No domain selected</pre></details>
+<details><summary>导入已有计划 / Import an existing plan</summary>
+<label>本地计划 / Local plan <input id="file" type="file" accept=".json,application/json"></label>
+</details>
+<pre id="preview">尚未选择计划 / No plan selected</pre>
+<label>清理范围 / What to remove
+<select id="mode"><option value="">请选择 / Select</option><option value="cache">仅网站缓存 / Website caches</option><option value="storage">缓存和网站存储 / Caches and website storage</option></select></label>
+<p>缓存可重新下载，但离线内容可能丢失；网站存储还包括 IndexedDB、Local Storage、Service Worker 和网站文件，可能包含未同步的草稿。浏览器清除没有回收站，无法由 SweepX 撤销。Cookie、历史、密码和扩展数据不在此操作范围。<br>Browser removal has no Trash or SweepX undo. Storage can contain unsynced work. Cookies, history, passwords and extension data are excluded.</p>
+<p>同一 origin 的存储分区按浏览器规则一起处理；不能按单个 bucket 精确删除。受保护的已安装网页应用保持不变。<br>This selects origins across partitions, not individual buckets. Protected hosted apps are excluded.</p>
+<label><input id="profile" type="checkbox">我确认当前浏览器和个人资料与计划一致 / I confirm the matching browser and profile</label>
+<label>输入计划中的域名确认 / Type the exact domain <input id="confirm" autocomplete="off"></label>
+<button id="remove" disabled>确认清除 / Confirm removal</button>
+<button id="reject" hidden>拒绝 SweepX 请求 / Reject request</button>
+<p id="status" role="status" aria-live="polite"></p>
+<p>完成后重新运行 SweepX 扫描验证当前占用；打开的网站可能重新创建数据。<br>Rescan in SweepX after completion. Open websites may recreate data.</p>
+</main>
+<script type="module" src="review.mjs"></script>
+</html>

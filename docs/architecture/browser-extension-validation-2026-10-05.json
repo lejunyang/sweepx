@@ -1,0 +1,155 @@
+{
+  "schema": "sweepx.browser_extension.validation/v1",
+  "date": "2026-10-05",
+  "host": "macOS aarch64",
+  "toolchain": "rustc 1.98.0",
+  "delivery": {
+    "crateCountChange": 0,
+    "assetsEmbeddedInBinary": true,
+    "cargoPackageIncludesAssets": true,
+    "extensionVersion": "0.2.0",
+    "developmentExtensionId": "bcidfcdfefinmefhopannchcnicdopad",
+    "storePublished": false,
+    "silentInstall": false,
+    "automaticStoreUpdate": false,
+    "localUpdate": "new_bundle_register_replace_browser_reload"
+  },
+  "contracts": {
+    "transport": "browser_launched_native_messaging_stdio",
+    "permissions": [
+      "browsingData",
+      "nativeMessaging"
+    ],
+    "networkListener": false,
+    "arbitraryPathOrCommandEndpoint": false,
+    "filesystemDeletionEndpoint": false,
+    "inputFrameCapBytes": 65536,
+    "outputFrameCapBytes": 786432,
+    "inputQueueFrames": 8,
+    "pendingRequests": 1,
+    "requestTtlSeconds": 900,
+    "inventoryPageRows": 20,
+    "displayedDomainPageRows": 100,
+    "mailboxFiles": [
+      "pending.json",
+      "result.json",
+      ".lock"
+    ],
+    "completionEvidence": "browser_extension_report",
+    "reclaimedBytes": null,
+    "independentlyVerifiesRemoval": false,
+    "profileBinding": "explicit_user_confirmation_in_browser"
+  },
+  "checks": {
+    "rustBridgeUnit": {
+      "status": "passed",
+      "tests": 7
+    },
+    "exportedHostIsolatedProcess": {
+      "status": "passed",
+      "tests": 3,
+      "covers": [
+        "native_wire_handshake",
+        "fixture_scan_size_independent_of_host_report",
+        "exact_origin_nondefault_port",
+        "different_profile_refusal",
+        "unregistered_origin_refusal",
+        "CLI_pending_request_rejection_ack",
+        "source_data_preserved",
+        "owned_registration_update_preserves_old_bundle",
+        "foreign_registration_and_changed_host_refused"
+      ]
+    },
+    "nodeAdapter": {
+      "status": "passed",
+      "tests": 7
+    },
+    "cliAllFeatures": {
+      "status": "passed",
+      "tests": 143,
+      "ignored": 0,
+      "environment": "authorized_host",
+      "reusedUnchangedPassingTargets": true
+    },
+    "sandboxCliAttempt": {
+      "status": "failed",
+      "passedIntegrationTests": 76,
+      "failure": "existing_ordinary_Trash_fixture_denied_by_execution_sandbox",
+      "laterTargets": "elevation_relay_not_run_in_failed_attempt",
+      "resolution": "authorized_host_run_passed_without_product_change"
+    },
+    "hostWorkspaceClippy": {
+      "status": "passed"
+    },
+    "linuxGnuWorkspaceClippy": {
+      "status": "passed",
+      "runtimeVerified": false
+    },
+    "windowsGnuWorkspaceClippy": {
+      "status": "passed",
+      "runtimeVerified": false
+    },
+    "format": {
+      "status": "passed"
+    },
+    "browserInstallationAndDeletion": {
+      "status": "not_run",
+      "reason": "actual_unpacked_install_and_new_browser_permissions_require_user_confirmation"
+    },
+    "nativeLinuxWindowsAndMsvc": {
+      "status": "not_run"
+    },
+    "warmScanAcceleration": {
+      "status": "not_measured",
+      "claim": false
+    },
+    "windowsGnuInitialAttempt": {
+      "status": "failed",
+      "reason": "Unix-only create_state_file API used by bundle export",
+      "resolution": "Added Windows retained-parent exclusive creation with private DACL and no overwrite; cross-lint passed"
+    },
+    "cacheAllFeatures": {
+      "status": "passed",
+      "tests": 116,
+      "ignored": 0
+    },
+    "docsLinterAndTests": {
+      "status": "passed",
+      "tests": 41
+    },
+    "bundledReviewModuleSyntax": {
+      "status": "passed"
+    },
+    "liveChromeDefaultNativeResponse": {
+      "date": "2026-10-05",
+      "host": "macOS aarch64",
+      "build": "release 0.0.1 rustc 1.98.0",
+      "workload": "chrome Default live native inventory via exported stdio host",
+      "browserState": "active",
+      "repetitions": 1,
+      "phase": "full native response including serialization",
+      "seconds": 1.094,
+      "status": "passed",
+      "counts": {
+        "domains": 1,
+        "origins": 1,
+        "categories": 9
+      },
+      "issues": [],
+      "cacheState": "no SweepX subtree cache used; OS cache uncontrolled",
+      "browserExtensionInstalled": false,
+      "browserRemovalTested": false,
+      "inventoryStatus": "ok"
+    }
+  },
+  "limitations": [
+    "Recognized default-location/default-partition storage only; shared caches and databases are not fully attributable",
+    "Logical non-atomic observations do not prove reclaimable bytes",
+    "No per-bucket or per-partition removal",
+    "No cookies history passwords permissions extension data or protected hosted-app removal",
+    "No native profile identity proof in extension",
+    "No Windows registry automation or Beta/Dev native registration automation",
+    "Cooperative cancellation may be delayed by blocking OS calls",
+    "Browser API clearing has no Trash recovery"
+  ]
+}

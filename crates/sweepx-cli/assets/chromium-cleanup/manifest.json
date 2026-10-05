@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "SweepX \u7f51\u7ad9\u6e05\u7406 / Site cleanup",
+  "version": "0.2.0",
+  "minimum_chrome_version": "96",
+  "description": "Review a local SweepX plan and let the browser clear selected website caches or storage.",
+  "permissions": [
+    "browsingData",
+    "nativeMessaging"
+  ],
+  "action": {
+    "default_title": "SweepX \u7f51\u7ad9\u6e05\u7406"
+  },
+  "background": {
+    "service_worker": "open.js"
+  },
+  "options_ui": {
+    "page": "review.html",
+    "open_in_tab": true
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy0bYHtVutyxiN8VHFItisJjPklVIwNuTJPhc3Yd/pqh2UipFzxETR0of7SHclJ5R5j//ap0rIpjDKh+yCI4dv9ChnZHADjbRuQ8L1Ye4ttmSyBZPjJhjNNVJp7oSqPS2MjSUq7nbN9dBFmVYf3qqLIIXBRKKlekPHsi2Qv2LRrcd9mgw0fSuYQo0n8FnH6bCM+qnBjlo+iupQktLdRD0Rw+uYQ3fzNi3WDlvE3gsRMXL+X2o9XUGwJV6sXB4Z3V3IOg6X6CArvsp1PYHiK8JOAX6Nfr71JVdQibghAiOdnDZXW4uoS5qv2B2NUWo8D4dqfyPGQzZabnQlRk8zrq8SwIDAQAB"
+}
