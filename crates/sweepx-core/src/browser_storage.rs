@@ -4,7 +4,7 @@
 //! paths in this report are display information, not authority to remove a directory. Chromium's
 //! on-disk formats are internal: unknown directories and unsupported metadata stay visible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -770,6 +770,101 @@ fn varint(bytes: &mut &[u8]) -> Option<u64> {
         }
     }
     None
+}
+
+/// Browser-owned origin removal request. It does not contain filesystem execution authority.
+/// The optional extension must separately confirm the active browser/profile, scope and domain.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCleanupPlan {
+    /// Stable plan schema, accepted only by the reviewed browser adapter.
+    pub schema: &'static str,
+    /// Browser API operation; never direct directory removal.
+    pub operation: &'static str,
+    /// Expected browser/channel for explicit user confirmation inside that browser.
+    pub browser: String,
+    /// Expected profile basename; extensions cannot independently read native profile identity.
+    pub profile: String,
+    /// Exact selected hostname, excluding subdomains.
+    pub domain: String,
+    /// HTTP(S) origins derived from observed keys, preserving non-default ports.
+    /// The browser origin API handles partitions together and cannot select one bucket.
+    pub origins: Vec<String>,
+    /// Browser API clearing has no Trash recovery; no action has occurred during export.
+    pub recoverable: bool,
+    /// How the optional adapter binds execution to its active profile.
+    pub profile_binding: &'static str,
+}
+
+/// Builds a bounded explicit domain selection from current native reports. Unknown attribution
+/// fails instead of expanding to a wildcard. Sizes and directory paths do not authorize execution.
+pub fn cleanup_plan(
+    analysis: &BrowserStorageAnalysis,
+    browser: &str,
+    profile: &str,
+    domain: &str,
+) -> Result<BrowserCleanupPlan, String> {
+    if !matches!(
+        browser,
+        "chrome" | "edge" | "chrome-beta" | "chrome-dev" | "edge-beta" | "edge-dev"
+    ) || !(profile == "Default"
+        || profile
+            .strip_prefix("Profile ")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+    {
+        return Err("unsupported_browser_profile".into());
+    }
+    let domain = domain.to_ascii_lowercase();
+    let mut origins = BTreeSet::new();
+    for report in analysis
+        .profiles
+        .iter()
+        .filter(|r| r.browser == browser && r.profile_name == profile)
+    {
+        for usage in report
+            .origins
+            .iter()
+            .filter(|r| r.domain.eq_ignore_ascii_case(&domain))
+        {
+            if !usage.complete {
+                return Err("selected_observation_incomplete".into());
+            }
+            let (scheme, rest) = usage
+                .storage_key
+                .split_once("://")
+                .ok_or("unsupported_origin")?;
+            if !matches!(scheme, "http" | "https") {
+                return Err("unsupported_origin".into());
+            }
+            let authority = rest.split('/').next().ok_or("unsupported_origin")?;
+            let authority = if scheme == "https" {
+                authority.strip_suffix(":443").unwrap_or(authority)
+            } else {
+                authority.strip_suffix(":80").unwrap_or(authority)
+            };
+            let origin = format!("{scheme}://{authority}");
+            if storage_key_domain(&origin).as_deref() != Some(domain.as_str()) {
+                return Err("origin_domain_mismatch".into());
+            }
+            origins.insert(origin);
+            if origins.len() > 128 {
+                return Err("origin_limit".into());
+            }
+        }
+    }
+    if origins.is_empty() {
+        return Err("domain_not_observed".into());
+    }
+    Ok(BrowserCleanupPlan {
+        schema: "sweepx.browser_cleanup.plan/v1",
+        operation: "browser_managed_origin_removal",
+        browser: browser.into(),
+        profile: profile.into(),
+        domain,
+        origins: origins.into_iter().collect(),
+        recoverable: false,
+        profile_binding: "explicit_user_confirmation_in_browser",
+    })
 }
 
 #[cfg(test)]

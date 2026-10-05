@@ -456,7 +456,7 @@ The default is `~/.npm/_npx`; use `--root` for redirected caches. Without `--tra
 
 ## `site-storage`
 
-Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. This is read-only and separate from `junk`; application state is not automatically disposable.
+Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. The default report is read-only and separate from `junk`; application state is not automatically disposable.
 
 ```bash
 sweepx site-storage
@@ -544,3 +544,11 @@ Linux/macOS/Windows junk TUI history shares bounded private storage with no link
 Windows state-directory owner/DACL checks read one descriptor from the same opened directory handle and reject final reparse/offline/recall objects. Privacy accepts only fully interpreted ordinary allow/deny ACEs; unfamiliar grant layouts, malformed boundaries or unreadable information are refused. Existing controlled ownership remains: the token's user/owner SID, or Administrators when that group is actually present in the user's token. Token information is admitted up to 256 KiB per read, native SIDs use bounded aligned storage, and SDK text admits at most 32,767 native UTF-16 units without embedded NULs. These are individual admission limits, not RSS bounds or hard deadlines for blocking OS calls. This check does not bind subsequent pathname operations. Junk history and legacy operation snapshots now use retained handles; other state paths and full execution-path race audits remain open.
 
 Windows junk TUI can now restore historical first paint. Cache reads, publication and eviction use retained directory/file handles and the shared protected DACL policy. Reparse/offline/recall objects, remote devices, volume crossings and multiply linked files are refused. Ordinary absolute drive paths (including verbatim drive paths) are supported; UNC/device namespaces and unknown filesystems fall back to fresh scanning. Linux/Windows have no current file-index hits. Cache-directory enumeration observes at most 4,096 entries, including unknown names; Windows pages stay at 64 KiB. Zero progress, truncation or exhausted allowances make the cache unavailable while the scan continues. Existing disk eviction limits apply after successful publication; failed eviction may leave the published generation. This cache promises neither crash durability nor an RSS bound. Native Windows/MSVC/provider acceptance remains pending.
+
+Browser-managed domain removal:
+
+```sh
+sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
+```
+
+Import the local plan into the [optional Chromium cleanup extension](../../integrations/chromium-cleanup/README.md), then review and apply it in the matching browser profile. The extension invokes the browser browsingData API for website caches or caches plus IndexedDB, Local Storage, Service Workers and website files; it never moves shared database directories. Only browsingData permission is used, with no network requests. Cookies, history, passwords, permissions, extension data and protected hosted apps are excluded. The browser handles origin partitions; individual buckets cannot be selected. SweepX cannot undo clearing. Extensions cannot independently bind native profile identity, so users confirm the profile. Rescan after API completion rather than treating its callback as reclaimed-byte evidence. Actual installation/deletion awaits native acceptance; organizational policy is never bypassed. Legacy filesystem removal flags remain refused.

@@ -322,3 +322,31 @@ fn installation_model_is_visible_without_becoming_a_domain_or_junk_candidate() {
     assert_eq!(report.unattributed_bytes.as_deref(), Some("41"));
     assert!(report.origins.is_empty());
 }
+
+#[test]
+fn browser_managed_plan_has_exact_origins_without_paths_or_cookie_authority() {
+    let (_temp, mut install, profile) = fixture();
+    install.browser = "edge".into();
+    let storage = profile.join("IndexedDB");
+    fs::create_dir_all(storage.join("https_chosen.example_443.indexeddb.leveldb")).unwrap();
+    fs::create_dir_all(storage.join("https_chosen.example_8443.indexeddb.blob")).unwrap();
+    fs::create_dir_all(storage.join("https_other.example_0.indexeddb.leveldb")).unwrap();
+    let analysis = analyze_site_storage(&[install], Some("Default"), &CancellationToken::new());
+    let plan = cleanup_plan(&analysis, "edge", "Default", "CHOSEN.EXAMPLE").unwrap();
+    assert_eq!(
+        plan.origins,
+        vec!["https://chosen.example", "https://chosen.example:8443"]
+    );
+    assert!(!plan.recoverable);
+    assert_eq!(
+        plan.profile_binding,
+        "explicit_user_confirmation_in_browser"
+    );
+    assert!(
+        !serde_json::to_string(&plan)
+            .unwrap()
+            .contains("subsystemPath")
+    );
+    assert!(cleanup_plan(&analysis, "edge", "Default", "absent.example").is_err());
+    assert!(cleanup_plan(&analysis, "edge", "../Default", "chosen.example").is_err());
+}

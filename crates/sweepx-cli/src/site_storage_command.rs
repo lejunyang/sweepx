@@ -19,6 +19,7 @@ pub(crate) fn run(
     profile: Option<&str>,
     domain: Option<&str>,
     legacy_mutation: bool,
+    export_delete_plan: Option<&std::path::Path>,
 ) -> ExitCode {
     if legacy_mutation {
         // An exclusive Windows LOCK open never proved all browser clients were stopped, and
@@ -44,6 +45,43 @@ pub(crate) fn run(
         }
     }
     let analysis = analyze_site_storage(&installations, profile, &CancellationToken::new());
+    if let Some(path) = export_delete_plan {
+        let result = (|| {
+            let plan = sweepx_core::browser_storage::cleanup_plan(
+                &analysis,
+                browser.ok_or("browser_required")?,
+                profile.ok_or("profile_required")?,
+                domain.ok_or("domain_required")?,
+            )?;
+            if !path.is_absolute() {
+                return Err("plan_path_must_be_absolute".to_string());
+            }
+            let bytes = serde_json::to_vec_pretty(&plan).map_err(|e| e.to_string())?;
+            // Only a fresh user-selected file is created; no overwrite or followed final symlink.
+            // Export is never deletion authority: the browser adapter revalidates the selection.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            use std::io::Write;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            Ok::<_, String>(plan)
+        })();
+        match result {
+            Ok(plan) => {
+                println!(
+                    "{}",
+                    json!({"schema":"sweepx.browser_cleanup.export/v1","readOnly":true,"plan":plan,"path":path,"applied":false})
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(3);
+            }
+        }
+    }
     let output = render_json(&analysis, domain);
     if format != OutputFormat::Human {
         println!("{output}");

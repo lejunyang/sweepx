@@ -2,6 +2,8 @@
 
 > 调研快照：2026-08-26（PRC）。本文只描述只读发现、归因、快照与受控清理设计；本次调研未启动浏览器数据清理，也未修改任何 Profile、浏览器设置或企业策略。
 
+> 产品范围更新（2026-10-05）：下文 v1 report-only 是当时的设计限制。现在已有显式 npx 回收及 [可选浏览器原生清理适配器](../../integrations/chromium-cleanup/README.md)。网站状态不执行文件级删除。实际浏览器扩展安装/删除仍待本机验收。
+
 ## 1. 结论与安全边界
 
 1. **先发现真实 Profile，再谈目录。** Chromium/Edge 优先读取 `chrome://version` / `edge://version` 的 `Profile Path`；Firefox 优先用 `about:profiles`；Safari 17+ 的 Profile 是由 Safari 管理的逻辑数据存储，不应只靠猜目录名。默认路径只是候选，channel、命令行、环境变量、企业策略和沙箱发行版都可能改写它。

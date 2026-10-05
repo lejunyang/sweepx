@@ -541,6 +541,42 @@ fn site_storage_filters_domains_preserves_totals_and_refuses_legacy_removal() {
             report["profiles"][0]["origins"][0]["storageKey"],
             "https://chosen.example:8443"
         );
+        let plan_path = base.join(format!("delete-plan-{locale}.json"));
+        let output = cli_command()
+            .env("HOME", &base)
+            .env("LOCALAPPDATA", &base)
+            .env("XDG_CONFIG_HOME", &base)
+            .env("XDG_CACHE_HOME", base.join("cache"))
+            .args([
+                "--locale",
+                locale,
+                "--format",
+                "json",
+                "site-storage",
+                "--browser",
+                "chrome",
+                "--profile",
+                "Default",
+                "--domain",
+                "chosen.example",
+                "--export-delete-plan",
+            ])
+            .arg(&plan_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let exported: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+        assert_eq!(exported["origins"], json!(["https://chosen.example:8443"]));
+        assert_eq!(exported["recoverable"], false);
+        assert!(
+            storage
+                .join("https_chosen.example_8443.indexeddb.leveldb/payload")
+                .exists()
+        );
         for flag in ["--browse", "--trash-origin"] {
             let mut command = cli_command();
             command.env("HOME", &base).env("LOCALAPPDATA", &base).args([

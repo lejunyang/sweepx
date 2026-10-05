@@ -319,6 +319,10 @@ enum Commands {
         /// This is a read-only filter, not deletion authority.
         #[arg(long)]
         domain: Option<String>,
+        /// Export a browser-managed deletion plan. Requires an exact browser, profile and domain.
+        /// Apply it with the optional Chromium extension after reviewing its irreversible scope.
+        #[arg(long, value_name = "NEW_JSON_FILE", requires_all = ["browser", "profile", "domain"], conflicts_with_all = ["trash_origin", "browse"])]
+        export_delete_plan: Option<PathBuf>,
         /// Legacy removal request. Refused until browser activity and metadata mappings can be
         /// revalidated; use --domain to review concrete storage items first.
         #[arg(long, value_name = "STORAGE_KEY")]
@@ -833,6 +837,7 @@ fn main() -> ProcessExitCode {
             browser,
             profile,
             domain,
+            export_delete_plan,
             trash_origin,
             browse,
         } => {
@@ -844,6 +849,7 @@ fn main() -> ProcessExitCode {
                 profile.as_deref(),
                 domain.as_deref(),
                 trash_origin.is_some() || browse,
+                export_delete_plan.as_deref(),
             );
         }
         Commands::Cache { command } => match command {

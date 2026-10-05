@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-05",
+  "host": "macOS arm64",
+  "build": "release all-features Rust 1.98.0",
+  "browserManagedRemoval": {
+    "adapter": "optional local MV3 extension; official browsingData API",
+    "permission": "browsingData only; no host or network permissions",
+    "selection": "HTTP(S) origin set from explicit native browser/profile/domain selection; non-default ports preserved",
+    "profileBinding": "explicit user confirmation in the active browser profile; no native profile identity claim",
+    "scope": "caches or caches plus IndexedDB/localStorage/serviceWorkers/fileSystems; cookies/history/passwords/permissions/extension data/protected hosted apps excluded",
+    "bucketSelection": false,
+    "recoverable": false,
+    "localContractTests": {
+      "passed": 3,
+      "failed": 0
+    },
+    "nativePlanExport": {
+      "browser": "edge",
+      "profile": "Default",
+      "originCount": 1,
+      "applied": false,
+      "seconds": 1.5598673329805024,
+      "repetitions": 1,
+      "osCacheAndActivity": "uncontrolled"
+    },
+    "actualExtensionInstallAndRemoval": "not_run_requires_user_browser_installation",
+    "browserUiToolBlocked": "chrome://policy rejected by browser URL security policy; no workaround attempted"
+  },
+  "sources": [
+    "https://developer.chrome.com/docs/extensions/reference/api/browsingData"
+  ],
+  "validation": {
+    "affectedCoreCliTests": {
+      "passed": 512,
+      "ignored": 2,
+      "failed": 0,
+      "context": "authorized host",
+      "coverage": "core/CLI all-features; existing filtered helper tests preserved"
+    },
+    "fmt": "passed",
+    "hostWorkspaceClippy": "passed",
+    "linuxGnuWorkspaceClippy": "passed",
+    "windowsGnuWorkspaceClippy": "passed",
+    "nativeLinuxWindowsMsvc": "not_run",
+    "browserNativeExecution": "not_verified",
+    "ui": "static review and local adapter tests; no native installation acceptance"
+  }
+}

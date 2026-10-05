@@ -445,7 +445,7 @@ sweepx --format json npx-cache --root /absolute/npm-cache/_npx
 
 ## `site-storage`
 
-按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。该命令只读，不预选删除项；网站应用状态与 `junk` 分开。
+按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。默认报告只读；网站应用状态与 `junk` 分开。
 
 ```bash
 sweepx site-storage
@@ -527,3 +527,11 @@ Linux/macOS/Windows 的垃圾 TUI 历史记录共享私有、无链接跟随的�
 Windows 状态目录的 owner/DACL 检查来自同一个已打开目录句柄，最终 reparse/offline/recall 对象拒绝。私有权限只接受能完整解释的普通 allow/deny 条目；陌生授权类型、损坏边界或读取失败不算私有。受控 owner 仍为 token user/owner，或本用户令牌确有 Administrators 组时的该组；SYSTEM/Administrators 的允许访问政策不变。每次令牌信息最多 256 KiB，SID 有界并按原生要求对齐，SDK 文本最多 32,767 个原生 UTF-16 单元，内嵌 NUL 拒绝。这些不是进程 RSS 或阻塞系统调用的硬期限；目录检查也不绑定后续路径操作。垃圾历史缓存与 legacy operation snapshot 已使用保留句柄接入；其他状态路径及完整执行路径竞态审计仍开放。
 
 Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿保留目录/文件句柄进行，复用受保护 DACL 与权限解释器，拒绝 reparse、offline/recall、远程设备、跨卷及多硬链接文件。仅支持普通绝对 drive 路径（含 verbatim drive），UNC/device 与未知文件系统回退现场扫描；这些记录仍是历史展示，没有 Linux/Windows 当前文件索引命中。各平台每缓存目录最多观察 4,096 条枚举项（含未知名称）；Windows 单页固定 64 KiB，零进度、截断和超额报缓存不可用，当前扫描继续。成功发布后沿用原磁盘淘汰额度；淘汰失败可能留下已发布代次，不保证崩溃耐久或进程 RSS。Windows 原生运行/MSVC/provider 验收仍待完成。
+
+按域名清除：
+
+```sh
+sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
+```
+
+将本地计划导入 [可选 Chromium 清理扩展](../integrations/chromium-cleanup/README.md)，在匹配的浏览器个人资料里审阅范围后执行。扩展调用浏览器 `browsingData` API，支持网站缓存或缓存及 IndexedDB、Local Storage、Service Worker、网站文件；不直接移走共享数据库。只使用 `browsingData` 权限，无网络请求。Cookie、历史、密码、权限、扩展数据和受保护网页应用不清除；同 origin 的分区由浏览器处理，不能选单个 bucket。清除不可由 SweepX 撤销。扩展无法独立绑定原生 profile 身份，需要用户确认。完成 API 请求后重新扫描，不能把 callback 当作字节释放证明。扩展实际安装/删除仍待本机验收；企业策略拒绝安装时不绕过。旧文件级回收参数保持拒绝。
