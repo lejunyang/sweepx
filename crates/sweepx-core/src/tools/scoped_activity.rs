@@ -163,6 +163,31 @@ pub fn check_chrome_inactive(cancel: &CancellationToken) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn profile_metadata_does_not_establish_selected_model_activity() {
+        let scope =
+            "/Library/Application Support/Google/Chrome/OptGuideOnDeviceModel/2025.8.8.1141";
+        assert!(
+            check_open_files(
+                "p2\nn/Library/Application Support/Google/Chrome/.DS_Store",
+                &[scope],
+                1,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            check_open_files(&format!("p2\nn{scope}/weights.bin"), &[scope], 1),
+            Err("open_installation".into())
+        );
+        assert_eq!(
+            check_commands(
+                &format!("2 helper --model=\"{scope}/weights.bin\""),
+                &[scope],
+                1
+            ),
+            Err("running_installation".into())
+        );
+    }
+    #[test]
     fn known_arguments_handles_and_boundary_matches_are_distinct() {
         let scopes = ["/cache/_npx/123"];
         assert!(

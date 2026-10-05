@@ -72,10 +72,10 @@ pub(crate) fn run(
                     sweepx_core::tools::scoped_activity::check_chrome_inactive(&cancel)?;
                     let scope = crate::trash_command::path_from_live_locator(row.source_entry())
                         .map_err(|e| e.to_string())?;
-                    sweepx_core::tools::scoped_activity::check_scopes(
-                        &[install.user_data.as_path(), scope.as_path()],
-                        &cancel,
-                    )?;
+                    // The browser-wide check above still refuses active Chrome. Other processes
+                    // may read unrelated profile metadata (e.g. Spotlight and .DS_Store); that
+                    // does not establish use of this model version. Check its native scope only.
+                    sweepx_core::tools::scoped_activity::check_scopes(&[scope.as_path()], &cancel)?;
                     row.revalidate(&cancel)?;
                     let candidate = TrashCandidate::from_scanned_entry(row.source_entry())
                         .map_err(|e| e.to_string())?;

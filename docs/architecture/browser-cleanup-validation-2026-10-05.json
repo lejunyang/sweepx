@@ -24,16 +24,18 @@
       "osCacheAndActivity": "uncontrolled"
     },
     "actualExtensionInstallAndRemoval": "not_run_requires_user_browser_installation",
-    "browserUiToolBlocked": "chrome://policy rejected by browser URL security policy; no workaround attempted"
+    "browserUiToolBlocked": "chrome://policy rejected by browser URL security policy; no workaround attempted",
+    "standaloneSweepxDeletion": false,
+    "requiresSeparatelyInstalledBrowserExtension": true
   },
   "chromeModel": {
     "component": "OptGuideOnDeviceModel",
     "version": "2025.8.8.1141",
     "logicalBytes": "4269934835",
     "metadataAndSizeComplete": true,
-    "trashAttemptExit": 8,
-    "trashAttempt": "blocked_running_browser",
-    "moved": 0,
+    "trashAttemptExit": 0,
+    "trashAttempt": "moved_to_os_trash_after_normal_browser_exit",
+    "moved": 1,
     "policyExport": "GenAILocalFoundationalModelSettings integer 1; standalone removable macOS profile",
     "policyInstalled": true,
     "policyEffective": "user_confirmed_value_1_status_ok_after_reload",
@@ -48,10 +50,31 @@
       "present": true,
       "policyEffective": "user_confirmed_value_1_status_ok_after_reload",
       "automaticPayloadRemoval": "not_observed",
-      "timeRelationship": "inventory repeated after manual policy acceptance"
+      "timeRelationship": "earlier observation immediately after policy acceptance, before explicit native Trash"
     },
     "policyVerificationEvidence": "human user manually reloaded chrome://policy and confirmed value 1, status OK",
-    "futureDownloadsObserved": "not_measured"
+    "futureDownloadsObserved": "not_measured",
+    "trashExecutionBuild": "dev all-features Rust 1.98.0; incremental and symbols disabled",
+    "initialRefusals": [
+      "running_browser",
+      "open_installation: Spotlight held only User Data/.DS_Store; model activity scope corrected"
+    ],
+    "nativeVerification": {
+      "sourceAbsent": true,
+      "trashIdentityMatch": true,
+      "manifestSha256Match": true,
+      "logicalBytes": 4269934835,
+      "regularFiles": 6,
+      "trashEmptiedBySweepX": false
+    },
+    "browserNormallyReopened": true,
+    "policyInstallationIntegrated": false,
+    "postTrashAndBrowserRestart": {
+      "sourceStillAbsent": true,
+      "versionDirectoryRecreated": false,
+      "otherModelVersionDirectories": [],
+      "observation": "bounded startup observation; no long-term download claim"
+    }
   },
   "sources": [
     "https://developer.chrome.com/docs/extensions/reference/api/browsingData",
@@ -62,7 +85,7 @@
   ],
   "validation": {
     "affectedCoreCliTests": {
-      "passed": 512,
+      "passed": 513,
       "ignored": 2,
       "failed": 0,
       "context": "authorized host",
@@ -74,6 +97,13 @@
     "windowsGnuWorkspaceClippy": "passed",
     "nativeLinuxWindowsMsvc": "not_run",
     "browserNativeExecution": "not_verified",
-    "ui": "static review and local adapter tests; no native installation acceptance"
+    "ui": "static review and local adapter tests; no native installation acceptance",
+    "modelNativeExecution": "passed with independent source/Trash identity and manifest verification",
+    "ignoredTests": [
+      "existing native historical-read timing experiment",
+      "existing opt-in release cache-preparation microbenchmark"
+    ],
+    "releaseBuild": "passed after scope fix",
+    "diagnosticFailure": "one ad hoc lsof probe without -nP timed out at 8 seconds; terminated; production already disables name resolution and completed normally"
   }
 }
