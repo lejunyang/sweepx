@@ -18,7 +18,17 @@
     "unknownLocalLinkedInstallationRetained": true,
     "inventoryStatus": "partial",
     "trashCleared": false,
-    "spaceFreedClaimed": false
+    "spaceFreedClaimed": false,
+    "finalRecheck": {
+      "sourcesAbsent": 62,
+      "matchingTrashItems": 0,
+      "trashEntryCount": 0,
+      "permissionDenied": false,
+      "clearedBySweepX": false,
+      "cause": "awaiting_user_confirmation",
+      "initialSuccessfulIdentityVerificationPreserved": true,
+      "currentTrashRecovery": "not_available_at_observed_paths"
+    }
   },
   "limits": {
     "activity": "current-user process arguments and open files; time-local, not an exclusive lock",
