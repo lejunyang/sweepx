@@ -1,3 +1,5 @@
+/// Read-only Chromium site attribution over bounded native observations.
+pub mod browser_storage;
 mod cargo_cleaner_detect;
 #[allow(dead_code)]
 mod cargo_cleaner_evidence;

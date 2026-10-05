@@ -14,7 +14,7 @@ mod context;
 pub mod format;
 /// Current Git interpretation shared by fresh scans and validated candidate-cache hits.
 pub mod git;
-mod layout;
+pub(crate) mod layout;
 /// Native Linux temporary-object discovery shared with cleanup preparation.
 #[cfg(target_os = "linux")]
 pub mod linux_temp;

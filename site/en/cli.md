@@ -442,89 +442,29 @@ P3 has library models and fake-execution tests for related concepts, but there i
 
 ## `site-storage`
 
-Reports browser site storage per origin, so a user can decide site by site. Read-only: it never
-deletes and never pre-selects.
+Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. This is read-only and separate from `junk`; application state is not automatically disposable.
 
-Separate from `junk` on purpose. Junk means rebuildable; this is R3 browser application state, which
-the risk taxonomy places at *default skip/report, policy may allow an individually selected item*.
-The per-origin breakdown is what makes such a selection possible — without it the only available
-choice is to clear everything and lose every login.
-
-Two subsystems are attributed, because each keeps one directory per origin:
-
-- `service_worker_cache_storage` — the origin lives in each bucket's `index.txt`, since the directory
-  name is a one-way hash. It is stored as plain UTF-8 and is preceded by its own length, which is how
-  it is told apart from a URL embedded in a neighbouring field: a Workbox site stores the cache name
-  `workbox-precache-v2-https://gamemap.app/`, whose leading length counts the whole name rather than
-  the URL inside it.
-- `indexed_db` — the origin is in the directory name. `.leveldb` and `.blob` belong to one origin and
-  are summed, not counted twice.
-
-The reported unit is the **full storage key**, not a hostname. Chromium partitions third-party
-storage by top-level site, so one host can hold several mutually invisible sets of data; merging on
-hostname would present unrelated parties as one row.
-
-`fullyAttributed` says whether every byte below the subsystem was attributed to some named origin.
-It is an exact comparison. A 367-byte shortfall was once explained away as a live browser writing
-between two walks and covered with a tolerance — it was in fact an entire origin the parser was
-dropping, so the check stays strict.
-
-**Local Storage is deliberately absent.** Measured 2026-09-05, its 303 origins share twelve LevelDB
-files many-to-many: one 2.3 MB file held 61 origins, `cn.bing.com` spanned four files, and 47 origins
-crossed file boundaries. No file boundary lines up with an origin boundary, and summing an origin's
-record bytes would not fix it, because LevelDB keeps superseded revisions and tombstones until
-compaction. Any per-origin figure there would be invented, so none is reported.
-
-Measured 2026-09-05 on this host: Edge `Default` holds 458.6 MB of CacheStorage across 12 origins
-(`onedrive.live.com` alone 200.4 MB) and 276.6 MB of IndexedDB across 43 (`www.bilibili.com` 236.1 MB,
-85% of the subsystem).
-### Removing one origin's storage
-
-`site-storage --trash-origin <STORAGE_KEY>` moves that origin's storage to the Trash. One origin per
-invocation: R3 permits an individually selected item, not a batch.
-
-The key is matched exactly and a hostname is not accepted as shorthand, because a host can own
-several partitioned, mutually isolated sets of storage. Accepting `example.com` for
-`https://example.com/^0https://other.test` would clear data the user never named.
-
-Three refusals happen before anything is touched, and each leaves the filesystem unchanged:
-
-- **Unknown key** — exit 2, listing how keys are matched.
-- **Held database** — exit 3. LevelDB guards a database with an exclusive lock on `LOCK`; if that
-  lock cannot be taken, the browser has the database open. This is not a theoretical guard: measured
-  2026-09-05 with 35 Edge processes running, an IndexedDB directory renamed *successfully*, so the
-  filesystem will not stop the move. The browser would go on writing against a handle whose directory
-  is gone. The probe must open with no write sharing — Rust's default share mode reported 0 of 43
-  Edge directories held where an exclusive open reported 2.
-- **No interactive terminal** in human format — exit 2.
-
-The probe is per directory rather than per browser, because Chromium opens a database only when a
-site needs it. A directory whose lock cannot be evaluated is treated as held: refusing a removable
-directory costs nothing, while moving a live database is unrecoverable.
-
-An origin can own several directories — IndexedDB keeps `.leveldb` and `.blob` apart — and the Trash
-offers no transaction, so all directories are checked before any is moved and a later failure is
-reported as `status: partial` with the paths that did move. Partial is never rounded to success.
-
-Windows identity revalidation was strengthened for this. `same_file` previously compared type, length
-and modification time; a directory's length is zero and its timestamps are writable, so a directory
-deleted and recreated at the same path satisfied all three while being a different object. Identity
-now comes from `FILE_ID_INFO`, the same source the scanner records, and is re-read immediately before
-each move.
-
-### Browsing origins in the TUI
-
-`--browse` hands the discovered storage subsystem directories to the existing interactive browser, so origins can be inspected one at a time and moved to the Trash with `d` / `Delete`.
-
-```
-sweepx site-storage --browse
+```bash
+sweepx site-storage
+sweepx site-storage --browser edge --profile Default --domain example.com
+sweepx --format json site-storage --browser chrome
 ```
 
-The rows come from an ordinary scan rather than from the report: the interactive Trash draws its authority from the scanner's native identity and locator, and the model explicitly forbids deriving either from a display path.
+macOS, Linux and Windows probe default installation locations for `Default` / `Profile *`. `--browser` uses stable labels such as `edge`, `chrome` and `edge-dev`; `--profile` matches the exact directory name; `--domain` matches one hostname, excluding subdomains. Custom profiles, sandbox distributions and non-default StoragePartitions are not inferred.
 
-The first screen lists each browser's subsystem roots (`IndexedDB`, `Service Worker\CacheStorage`); the per-origin directories under them are listed on demand once a root is entered. Root rows keep only as many trailing path components as it takes to stay distinct — the four subsystems do not sit at the same depth, so a fixed cut renders Edge and Edge Dev `CacheStorage` as the very same text.
+Three layouts support attribution:
 
-`--browse` requires terminal stdin and stdout, and cannot be combined with `--format json` / `--format ndjson` or `--trash-origin`.
+- `service_worker_cache_storage`: bounded `index.txt` reads parse actual protobuf origin/storage_key fields, excluding URLs embedded in cache names.
+- `indexed_db`: legacy `.indexeddb.leveldb` / `.indexeddb.blob` pairs, preserving non-default ports.
+- `web_storage`: a native-bound `QuotaManager` main-file observation maps IDs to full storage keys and bucket names for `WebStorage/<id>`. This is non-atomic and does not replay WAL/journal state; it cannot authorize removal.
+
+Local Storage, Session Storage, Service Worker registration/scripts, extensions and HTTP/code cache are reported as shared categories, without invented domain sizes. Separate macOS/Linux profile cache roots are included. Installation-wide AI/optimization models and component downloads use an explicit `@installation` scope, without domain attribution; an explicit `--profile` excludes this scope. New standalone IndexedDB SQLite layouts and unknown buckets remain unattributed while their overall size stays visible.
+
+The machine format preserves `sweepx.site_storage.result/v1`, `profiles`, `subsystemBytes`, `fullyAttributed` and `origins[].storageKey/bytes/directoryCount`. Additions include `domains`, `sizeComplete`, `unattributedBytes`, `snapshotConsistency`, paths and bucket details. Sizes are logical lengths, not physical allocation or reclaimable space. Unavailable sizes are null; coverage distinguishes lower bounds from complete values. `fullyAttributed=false` may represent shared/unknown bytes rather than incomplete filesystem coverage.
+
+Domain filtering affects origin rows; subsystem totals remain unchanged, as recorded in `totalsScope`. One native traversal supplies parent and child totals. Limits include 32 profiles, 64 MiB of metadata observations and a 16 MiB retained-origin estimate. A two-minute cooperative deadline is checked between native observations; blocked OS calls may delay cancellation. Discovery/scan/metadata failures return partial with exit 4; complete reports exit 0.
+
+Legacy `--trash-origin` and `--browse` now refuse with exit 3 before scanning. The former LOCK probe did not establish that all browser writers had stopped, and the generic directory TUI cannot enforce site-data selection. Future removal needs an explicit browser/profile/partition/bucket preview, current mapping and inactivity checks, and native identity revalidation. Display paths and domain summaries are not execution authority. No site data is removed.
 
 ### Name-column overflow, full paths, and scrolling
 

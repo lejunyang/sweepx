@@ -431,74 +431,29 @@ P3 中有对应概念的 library model 与 fake execution tests，但仍没有�
 
 ## `site-storage`
 
-按来源报告浏览器站点存储，让用户可以逐站点决定。只读：不删除任何内容，也不预选任何条目。
+按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。该命令只读，不预选删除项；网站应用状态与 `junk` 分开。
 
-**刻意与 `junk` 分开**。junk 表示"可重建"；而这里是 R3 浏览器应用状态，风险分级将其归入*默认跳过/仅报告，
-策略可允许逐项选中*。正是这份按来源的拆分让"逐项选中"成为可能 —— 没有它，用户唯一的选择就是全部清空、
-丢掉所有登录态。
-
-归因两个子系统，因为它们都是一个来源一个目录：
-
-- `service_worker_cache_storage` —— 目录名是单向哈希，因此来源取自每个桶的 `index.txt`。它以纯 UTF-8
-  存储，且前面紧跟自身长度；这正是把它与相邻字段中内嵌的 URL 区分开的依据：某个使用 Workbox 的站点会存入
-  缓存名 `workbox-precache-v2-https://gamemap.app/`，其前置长度计的是整个名字，而不是其中那段 URL。
-- `indexed_db` —— 来源就在目录名里。`.leveldb` 与 `.blob` 属于同一个来源，需要相加而不是分别计为两个。
-
-报告的单位是**完整存储键**，不是主机名。Chromium 会按顶层站点对第三方存储分区，因此同一个主机可以持有多份
-互不可见的数据；按主机名合并会把互不相关的各方呈现为同一行。
-
-`fullyAttributed` 表示子系统之下的每一个字节是否都归属到了某个具名来源，采用精确比较。曾有 367 字节的差额
-被解释为"浏览器运行中在两次遍历之间写入"并用容差掩盖过去 —— 而它实际上是解析器漏掉了一整个来源，因此这项
-检查保持严格。
-
-**Local Storage 被刻意排除在外。** 2026-09-05 实测，它的 303 个来源以多对多的方式共享 12 个 LevelDB 文件：
-单个 2.3 MB 文件里有 61 个来源，`cn.bing.com` 跨 4 个文件，47 个来源跨越文件边界。没有任何文件边界与来源
-边界对齐；把某个来源的记录字节相加也无法解决，因为 LevelDB 在 compaction 之前会保留被覆盖的旧版本与
-tombstone。在那里给出任何按来源的体积都是编造，因此一律不报。
-
-2026-09-05 在本机实测：Edge `Default` 的 CacheStorage 为 458.6 MB、12 个来源（仅 `onedrive.live.com`
-就占 200.4 MB）；IndexedDB 为 276.6 MB、43 个来源（`www.bilibili.com` 236.1 MB，占该子系统 85%）。
-### 删除单个来源的存储
-
-`site-storage --trash-origin <STORAGE_KEY>` 会把该来源的存储移入回收站。每次调用只处理一个来源：R3
-允许的是逐项选中，而不是批量。
-
-存储键精确匹配，且不接受用主机名作简写，因为同一个主机可以拥有多份被分区、互相隔离的存储。若允许用
-`example.com` 匹配 `https://example.com/^0https://other.test`，就会清掉用户并未指名的数据。
-
-有三种拒绝发生在触碰任何东西之前，且都不改动文件系统：
-
-- **未知存储键** —— exit 2，并说明匹配规则。
-- **数据库正被占用** —— exit 3。LevelDB 用 `LOCK` 文件上的独占锁保护数据库；拿不到该锁就说明浏览器正打开
-  着它。这不是理论上的顾虑：2026-09-05 实测，在 35 个 Edge 进程运行时，IndexedDB 目录**可以被成功重命名**，
-  也就是说文件系统不会阻止这次移动，而浏览器会继续向一个目录已消失的句柄写入。探测必须以"不共享写"方式打开
-  —— Rust 的默认共享模式在 43 个 Edge 目录中报出 0 个被占用，而独占打开报出 2 个。
-- **人类可读格式下没有交互式终端** —— exit 2。
-
-探测是逐目录而非逐浏览器的，因为 Chromium 只在站点需要时才打开数据库。无法判定锁状态的目录按"被占用"处理：
-错误地拒绝一个本可删除的目录没有代价，而移走一个正在使用的数据库无法挽回。
-
-一个来源可能拥有多个目录（IndexedDB 的 `.leveldb` 与 `.blob` 是分开的），而回收站不提供事务，因此会在移动
-任何目录之前先检查全部；若中途失败，则以 `status: partial` 报告，并列出确实已移动的路径。partial 绝不会被
-四舍五入成成功。
-
-为此加强了 Windows 上的身份复校。原先 `same_file` 比较的是类型、长度和修改时间；而目录长度为 0、时间戳可写，
-因此在同一路径上删除并重建的目录能同时满足这三项，却是另一个对象。现在身份取自 `FILE_ID_INFO`（与扫描器记录
-身份的来源相同），并在每次移动前立即重新读取。
-
-### 在 TUI 中按域浏览
-
-`--browse` 把发现到的存储子系统目录交给已有的交互式浏览器，用户可以逐个域查看体积、并用 `d` / `Delete` 键把单个域移入回收站。
-
-```
-sweepx site-storage --browse
+```bash
+sweepx site-storage
+sweepx site-storage --browser edge --profile Default --domain example.com
+sweepx --format json site-storage --browser chrome
 ```
 
-行走的是普通扫描，而不是把报告里的条目重新拼成表格：交互式回收站的执行凭据来自扫描器提供的 native identity 与 locator，而数据模型明确禁止从展示路径反推这两个字段。
+macOS、Linux 和 Windows 均探测默认安装位置的 `Default` / `Profile *`。`--browser` 使用稳定标签，如 `edge`、`chrome`、`edge-dev`；`--profile` 精确匹配目录名；`--domain` 只匹配一个 hostname，不包含子域名。自定义 profile 路径、沙箱发行版和非默认 StoragePartition 不自动推断。
 
-首屏列出的是各浏览器的子系统根目录（如 `IndexedDB`、`Service Worker\CacheStorage`），进入后才按需列出其下的各域目录。根目录行只保留足以互相区分的尾部路径段——四个子系统的深度并不相同，固定截取会让 Edge 与 Edge Dev 的 `CacheStorage` 渲染成同一行文本。
+支持三种归因布局：
 
-`--browse` 需要终端 stdin 与 stdout，且不能与 `--format json` / `--format ndjson` 或 `--trash-origin` 同时使用。
+- `service_worker_cache_storage`：读取有界的 `index.txt`，按 protobuf 的 origin/storage_key 字段解析，避免把缓存名称中的 URL 误认成来源。
+- `indexed_db`：识别旧 `.indexeddb.leveldb` / `.indexeddb.blob` 配对，保留非默认端口。
+- `web_storage`：从原生绑定的 `QuotaManager` 文件观察 bucket ID、完整 storage key 和 bucket 名称，关联 `WebStorage/<id>`。这是主数据库文件的非原子观察，不重放 WAL/journal，不能作为删除依据。
+
+Local Storage、Session Storage、Service Worker 注册/脚本、扩展和 HTTP/code cache 以共享类别报告整体大小，不编造按域名的占用。macOS/Linux 分离的 profile cache 根也会统计。 安装级 AI 模型、优化模型和组件下载以 `@installation` 独立列出，不归属域名；显式 `--profile` 排除此范围。新 IndexedDB SQLite 独立布局及未知 bucket 保持未归因；不因解析不支持而丢掉整体大小。
+
+机器格式保留 `sweepx.site_storage.result/v1`、`profiles`、`subsystemBytes`、`fullyAttributed`、`origins[].storageKey/bytes/directoryCount`。新增 `domains` 汇总，以及 `sizeComplete`、`unattributedBytes`、`snapshotConsistency`、目录和 bucket 明细。大小是逻辑长度，不代表物理分配或可释放空间；无法取得的大小为 null，已知下界与完整值通过覆盖状态区分。`fullyAttributed=false` 可以表示有共享/未知字节，不能据此把总量显示为精确归因。
+
+域名筛选只过滤来源行，子系统整体总量保持不变；`totalsScope` 明确这一点。来源目录的大小和父总量由同一次原生遍历得到，不反复遍历同一数据。最多 32 个 profile、64 MiB 元数据观察和 16 MiB 来源报告保留估算；两分钟合作式期限在原生观察间检查，不能保证中断阻塞的 OS 调用。发现/扫描/元数据失败输出 partial、退出码 4；完整报告退出 0。
+
+旧 `--trash-origin` 和 `--browse` 目前在扫描前以退出码 3 拒绝：原 LOCK 探测不能证明所有浏览器写入已停止，通用目录 TUI 也不具备站点选择约束。后续删除需要先预览具体浏览器/profile/分区/bucket，并验证关闭状态、当前映射和原生身份；显示路径与域名汇总都不是执行授权。未删除网站数据。
 
 ### 名称列溢出、完整路径与滚动
 

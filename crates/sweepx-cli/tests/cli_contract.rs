@@ -485,6 +485,86 @@ fn cli_command() -> Command {
 }
 
 #[test]
+fn site_storage_filters_domains_preserves_totals_and_refuses_legacy_removal() {
+    let (_fixture, base) = duplicate_fixture();
+    #[cfg(target_os = "macos")]
+    let browser = base.join("Library/Application Support/Google/Chrome");
+    #[cfg(target_os = "linux")]
+    let browser = base.join("google-chrome");
+    #[cfg(windows)]
+    let browser = base.join("Google/Chrome/User Data");
+    let storage = browser.join("Default/IndexedDB");
+    for (domain, length) in [("chosen.example", 17), ("other.example", 29)] {
+        let dir = storage.join(format!("https_{domain}_8443.indexeddb.leveldb"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("payload"), vec![0; length]).unwrap();
+    }
+    for locale in ["zh-CN", "en-US"] {
+        let output = cli_command()
+            .env("HOME", &base)
+            .env("LOCALAPPDATA", &base)
+            .env("XDG_CONFIG_HOME", &base)
+            .env("XDG_CACHE_HOME", base.join("cache"))
+            .args([
+                "--locale",
+                locale,
+                "--format",
+                "json",
+                "site-storage",
+                "--browser",
+                "chrome",
+                "--profile",
+                "Default",
+                "--domain",
+                "CHOSEN.EXAMPLE",
+            ])
+            .timeout(std::time::Duration::from_secs(10))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["schema"], "sweepx.site_storage.result/v1");
+        assert_eq!(report["readOnly"], true);
+        assert_eq!(report["removalSupported"], false);
+        assert_eq!(report["domains"].as_array().unwrap().len(), 1);
+        assert_eq!(report["domains"][0]["bytes"], "17");
+        assert_eq!(report["profiles"][0]["subsystemBytes"], "46");
+        assert_eq!(
+            report["profiles"][0]["origins"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            report["profiles"][0]["origins"][0]["storageKey"],
+            "https://chosen.example:8443"
+        );
+        for flag in ["--browse", "--trash-origin"] {
+            let mut command = cli_command();
+            command.env("HOME", &base).env("LOCALAPPDATA", &base).args([
+                "--locale",
+                locale,
+                "--format",
+                "json",
+                "site-storage",
+                flag,
+            ]);
+            if flag == "--trash-origin" {
+                command.arg("https://chosen.example:8443");
+            }
+            command.assert().code(3);
+            assert!(
+                storage
+                    .join("https_chosen.example_8443.indexeddb.leveldb/payload")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
 fn cargo_include_output_model_is_locale_stable_and_does_not_grant_project_trash() {
     let (_fixture, base) = duplicate_fixture();
     let root = base.join("project");

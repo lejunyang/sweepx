@@ -68,7 +68,7 @@ impl LayoutDiscoveryFailure {
 /// Handles are closed after discovery. A later scan must observe the same object and fingerprint;
 /// mutations can decline a match, and cleanup still obtains its own current native authorization.
 #[derive(Debug)]
-pub(super) struct LayoutRoot {
+pub(crate) struct LayoutRoot {
     pub path: PathBuf,
     native_path: NativeAbsolutePath,
     identity: EntryIdentity,
@@ -126,7 +126,7 @@ struct ChildListing {
     complete: bool,
 }
 
-pub(super) struct LayoutDiscovery {
+pub(crate) struct LayoutDiscovery {
     backend: HostPlatformScanner,
     cancel: CancellationToken,
     limits: LayoutDiscoveryLimits,

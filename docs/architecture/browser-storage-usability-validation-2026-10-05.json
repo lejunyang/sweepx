@@ -1,0 +1,175 @@
+{
+  "schema": "sweepx.browser-storage-usability-validation/v1",
+  "date": "2026-10-05",
+  "startingCommit": "c2f114e",
+  "host": {
+    "os": "macOS 26.5.2 (25F84)",
+    "arch": "arm64",
+    "rust": "1.98.0",
+    "fullDiskAccess": "effective"
+  },
+  "privacy": "Raw browser keys, domain/tool inventories, user paths and Trash responses remain in a private local report outside version control.",
+  "sourceFingerprints": {
+    "crates/sweepx-core/src/browser_storage.rs": "c7fb1b1add63adb16eddca23a682f503d693a58ffe66d7d194264b78e2749211",
+    "crates/sweepx-core/src/browser_storage_tests.rs": "aa35344ea3ba3a2a437f524ecd1d1d2f144a7bb9f425d43f1db2c3cfdda024f8",
+    "crates/sweepx-cli/src/site_storage_command.rs": "38743a5ac664af1e022b4afe4622ed53dd646847c5e2cf57d87d87f709d2a2d9",
+    "crates/sweepx-cli/src/main.rs": "904acdcf4410a4b23abb07c795d52ca6bc74684c97a3cb616abab08df8daed8e",
+    "crates/sweepx-cli/tests/cli_contract.rs": "71218ec914bd2b40d5811705224fc653ea8b6e5642bd714b4b1e6d8b87e6e020",
+    "crates/sweepx-core/Cargo.toml": "79be4d615803a33c47609471dc6c41c6bfe9fb3ba20a4881fe834fbd08a470e3",
+    "crates/sweepx-core/src/junk/layout.rs": "ef9828bfe7afeccb3414d520b48008fe1e1a8875b97222da1ef451760f5600b5"
+  },
+  "behavior": [
+    "Move attribution from CLI into core; reuse bounded native layout discovery and classified traversal, with one parent/child accounting pass per subsystem.",
+    "Default macOS/Linux/Windows profiles, mirrored cache roots and selected installation model/component directories; exact browser/profile/domain filters.",
+    "Protobuf wire fields 2/3, not URL heuristics; preserve full keys, ports and partition suffixes. Legacy IndexedDB pairs and modern WebStorage IDs.",
+    "Read QuotaManager through a capped native-bound regular-file observation; deserialize into read-only in-memory SQLite, never open the live browser SQLite path through SQLite. No WAL/journal replay or atomic cross-file mapping claim.",
+    "Domain totals are display grouping, with concrete browser/profile/subsystem/key/bucket/path details. Shared databases/caches/models remain unattributed, not junk or execution authority.",
+    "Preserve result/v1 field names, decimal byte strings, independent sizeComplete/fullyAttributed, unknown nulls, explicit partial errors and unfiltered parent totals.",
+    "Legacy --trash-origin and --browse refuse before discovery/mutation until activity, mapping and explicit selection can be verified. Native Trash identity alone does not prove browser inactivity."
+  ],
+  "bounds": {
+    "profiles": 32,
+    "metadataObservationBytes": 67108864,
+    "singleQuotaBytes": 16777216,
+    "metadataRequests": 4096,
+    "retainedOriginEstimateBytes": 16777216,
+    "originDirectories": 4096,
+    "deadlineSeconds": 120,
+    "deadlineKind": "cooperative between native observations; blocked OS calls can delay cancellation",
+    "scope": "per invocation; these are not whole-process RSS or handle caps"
+  },
+  "regressions": [
+    "Real protobuf fields ignore cache-name URLs, preserve long partition keys, reject conflicting fields/truncated input.",
+    "Legacy blob/leveldb pairs, non-default ports, IPv6 and distinct partition keys.",
+    "Independent ordinary fixture walk strictly equals native logical parent/child totals; unknown bucket bytes stay visible.",
+    "Corrupt/oversized SQLite metadata and linked external index preserve sizes while declining attribution.",
+    "Cancellation, exact profile selection, cache alias deduplication and installation-model reporting.",
+    "CLI exact domain filter preserves parent totals, stable schema/keys across locales; legacy mutation flags exit 3 without altering fixture payloads."
+  ],
+  "hostReport": {
+    "build": "release/all-features",
+    "binarySha256": "97d43f72b4b6019cd9658ba03e36e05a745a1dae20430d819b813196510eae90",
+    "subsystemReports": 37,
+    "originRows": 220,
+    "status": "ok",
+    "readOnly": true,
+    "wallSeconds": 2.577,
+    "repetitions": 1,
+    "peakSampledMainProcessRssBytes": 46415872,
+    "outputBytes": 103174,
+    "sweepxCache": "no cache reuse in this browser analysis",
+    "osCacheControlled": false,
+    "otherHostActivity": "uncontrolled; no concurrent SweepX scan during final measured invocation",
+    "interpretation": "Operational end-to-end time for these browser scopes, not a paired speed benchmark, tail-latency result or whole-system-junk improvement.",
+    "measurementLabel": "browser-delivery-release"
+  },
+  "independentCrosscheck": {
+    "roots": 37,
+    "completeWalks": 37,
+    "exactMatches": 30,
+    "nonEquivalentLiveDifferences": [
+      {
+        "category": "indexed_db",
+        "logicalDelta": 221019,
+        "latestContentModificationAfterNativeOutputSeconds": 51.535
+      },
+      {
+        "category": "local_storage_shared",
+        "logicalDelta": 162,
+        "latestContentModificationAfterNativeOutputSeconds": 22.431
+      },
+      {
+        "category": "session_storage_shared",
+        "logicalDelta": 591,
+        "latestContentModificationAfterNativeOutputSeconds": 3.107
+      },
+      {
+        "category": "web_storage",
+        "logicalDelta": -4104,
+        "latestContentModificationAfterNativeOutputSeconds": 64.624
+      },
+      {
+        "category": "profile_cache_shared",
+        "logicalDelta": 11516,
+        "latestContentModificationAfterNativeOutputSeconds": 61.123
+      },
+      {
+        "category": "web_storage",
+        "logicalDelta": 8720,
+        "latestContentModificationAfterNativeOutputSeconds": 59.471
+      },
+      {
+        "category": "profile_cache_shared",
+        "logicalDelta": 4530,
+        "latestContentModificationAfterNativeOutputSeconds": 73.392
+      }
+    ],
+    "causeEvidence": "Every differing scope has a content file modified after native output; live browser logs/journals/cache writes continued. No tolerance or expected-value adjustment. Controlled native fixtures use strict accounting equality.",
+    "comparisonRun": "preceding browser-final-release, same JSON-producing scan logic; human lower-bound rendering subsequently adjusted"
+  },
+  "yarnOperation": {
+    "logicalBytes": "5058552311",
+    "allocatedBytesPathSum": "6074273792",
+    "regularFiles": 335276,
+    "latestContentMtimeLocal": "2025-12-09T20:41:38.482916+08:00",
+    "latestContentAtimeLocal": "2025-12-09T20:41:44.686260+08:00",
+    "activityMeaning": "Content timestamps only, not proof of last Yarn execution. Allocation sums do not account for shared blocks or clone extents.",
+    "scannerLogicalTotalMatchesIndependentWalk": true,
+    "trashExitCode": 0,
+    "originalDeviceInodeVerifiedInTrash": true,
+    "sourceAbsent": true,
+    "permanentFallback": false,
+    "releasedSpaceClaim": false
+  },
+  "npxObservation": {
+    "installationDirectories": 89,
+    "logicalBytes": "14972230756",
+    "allocatedBytesPathSum": "15206469632",
+    "largestToolVersions": 63,
+    "activityMeaning": "Bounded top-level and installed-package manifest observations plus filesystem timestamps; 63 largest-tool installs resolve to 63 versions. No reference or inactivity authority. No npx install removed.",
+    "largestToolDistinctResolvedVersions": 63
+  },
+  "validation": {
+    "fmt": "passed",
+    "diffCheck": "passed",
+    "docsLint": "passed",
+    "workspaceTests": {
+      "command": "cargo test --workspace --all-features -- --test-threads=4",
+      "exitCode": 0,
+      "wallSeconds": 113.928,
+      "passed": 1266,
+      "skipped": 0,
+      "ignored": 3,
+      "ignoredReason": "Existing opt-in historical-cache, cache-preparation and native enumeration benchmarks",
+      "scope": "Full matrix before final human-only rendering adjustment and isolated test synchronization; final full CLI matrix and lint cover later changes. Passing unchanged crate results reused."
+    },
+    "initialTrashFixtureFailure": "Ordinary sandbox denied native Trash access, exit 8. Same unchanged test passed in authorized host context; entire final workspace matrix passed there. Not a product fix or retry-to-pass claim.",
+    "workspaceClippy": "passed: --workspace --all-targets --all-features -- -D warnings",
+    "crossClippy": {
+      "x86_64-unknown-linux-gnu": "passed",
+      "x86_64-pc-windows-gnu": "passed",
+      "method": "Temporary copy of scripts/cross-lint.sh with Windows GNU case and Zig 0.16.0 path; no production cfg changes."
+    },
+    "unverified": [
+      "Linux/Windows native runtime",
+      "Windows MSVC",
+      "Redirected profiles and non-default StoragePartitions",
+      "Real cloud providers",
+      "Browser inactivity and modern bucket removal",
+      "Standalone new IndexedDB SQLite attribution",
+      "Complete browser footprint or full-volume coverage",
+      "General warm-scan acceleration"
+    ],
+    "defaultParallelCliFailure": "Existing row/refresh fixtures exceeded the intentional four-session cap. Setup unwrap failed with ResourceLimit, leaving integration/elevation steps untested. Added explicit test fixture synchronization through worker exit; production limits unchanged.",
+    "finalCliTests": {
+      "command": "cargo test -p sweepx-cli --all-features",
+      "exitCode": 0,
+      "wallSeconds": 8.351,
+      "passed": 131,
+      "skipped": 0,
+      "ignored": 0,
+      "reason": "Default parallelism verified after fixture synchronization and final human lower-bound rendering."
+    }
+  },
+  "testFixtureCommit": "138e10b"
+}
