@@ -2,9 +2,15 @@ use super::*;
 use std::fs;
 use std::time::{Duration, Instant};
 
+// These fixtures test row/refresh contracts, not process-wide session admission. Hold this gate
+// until each test has explicitly observed worker exit so default harness parallelism cannot
+// consume the production four-session allowance or inherit a closing worker from another test.
+static SESSION_FIXTURE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(target_os = "linux")]
 #[test]
 fn temporary_reports_keep_logical_bytes_and_refuse_generic_trash_then_refresh_all() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     use sweepx_core::junk::linux_temp::{
         LinuxTempCandidate, LinuxTempDiscovery, LinuxTempMeasurement, report_candidates,
     };
@@ -205,6 +211,7 @@ fn stop_adapter_fixture(provider: &mut Provider, rows: &[Arc<Row>]) {
 
 #[test]
 fn private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let (_fixture, mut provider, rows) = adapter_fixture();
     provider.limits.rows = 1;
     provider.translate_event(
@@ -281,6 +288,7 @@ fn private_registry_keeps_cancelled_rows_under_one_cross_revision_row_budget() {
 
 #[test]
 fn replacement_debits_old_bytes_and_rejected_growth_keeps_old_evidence() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let (_fixture, mut provider, rows) = adapter_fixture();
     provider.translate_event(
         2,
@@ -364,6 +372,7 @@ fn replacement_debits_old_bytes_and_rejected_growth_keeps_old_evidence() {
 
 #[test]
 fn cancelled_base_selection_refreshes_all_without_promoting_its_native_key() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let fixture = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     let root = fs::canonicalize(fixture.path()).unwrap();
@@ -441,6 +450,7 @@ fn cancelled_base_selection_refreshes_all_without_promoting_its_native_key() {
 
 #[test]
 fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without_native_mutation() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let fixture = tempfile::TempDir::new().unwrap();
     #[cfg(unix)]
     let root = fs::canonicalize(fixture.path()).unwrap();
@@ -500,6 +510,7 @@ fn confirmed_moves_remove_descendants_and_invalidate_ancestor_accounting_without
 
 #[test]
 fn local_refresh_keeps_ancestor_bindings_but_requires_refresh_before_trash() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let fixture = tempfile::TempDir::new().unwrap();
     #[cfg(unix)]
     let root = fs::canonicalize(fixture.path()).unwrap();
@@ -568,6 +579,7 @@ fn local_refresh_keeps_ancestor_bindings_but_requires_refresh_before_trash() {
 
 #[test]
 fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_trash() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
     let fixture = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     let root = fs::canonicalize(fixture.path()).unwrap();
