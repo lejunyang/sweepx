@@ -33,7 +33,8 @@ impl Worker {
         writer: &mut Writer,
     ) -> Result<(), JunkSessionFailure> {
         let platform_rules = if self.request.include_platform_rules {
-            super::super::platform::load_platform_junk_rules().unwrap_or_default()
+            super::super::platform::select_platform_rules(&self.request.platform_rule_ids)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };

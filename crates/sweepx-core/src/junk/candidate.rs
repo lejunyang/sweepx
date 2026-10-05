@@ -88,6 +88,9 @@ pub enum JunkExecutionPolicy {
     /// Platform candidate continues through its existing current native and coverage guards;
     /// this label does not itself authorize a move or waive any platform-specific blocker.
     NativeRevalidationRequired,
+    /// Browser offline/application state is diagnostic only in junk views. Removing user data
+    /// requires a separate explicit origin/path selection; generic junk Trash must refuse it.
+    RequireUserDataSelection,
 }
 
 impl From<sweepx_catalog::junk::ProjectExecutionPolicy> for JunkExecutionPolicy {
@@ -114,8 +117,9 @@ pub struct GitIgnoreEvidence {
 }
 
 impl JunkCandidate {
-    /// Current project execution requirements cannot be established by a name, marker, content
-    /// signature, risk tier or Git ignore. Historical facts also need current rule interpretation.
+    /// Current junk execution blockers include project ownership/activity and explicit user-data
+    /// selection. Names, markers, size, risk or Git ignore cannot waive these requirements;
+    /// historical facts also need current rule interpretation.
     pub fn project_execution_blocker(&self) -> Option<&'static str> {
         if self.execution_policy == JunkExecutionPolicy::NotChecked {
             return Some("rule_evidence_not_revalidated");
@@ -125,6 +129,9 @@ impl JunkCandidate {
             return Some("project_ownership_not_verified");
         }
         match self.execution_policy {
+            JunkExecutionPolicy::RequireUserDataSelection => {
+                Some("user_data_requires_explicit_selection")
+            }
             JunkExecutionPolicy::ReportOnly => Some("project_report_only"),
             JunkExecutionPolicy::RequireProjectOwnershipAndActivity => {
                 Some("project_ownership_not_verified")
@@ -148,6 +155,7 @@ impl JunkCandidate {
                     | "project_ownership_not_verified"
                     | "project_activity_not_verified"
                     | "rule_evidence_not_revalidated"
+                    | "user_data_requires_explicit_selection"
             )
         });
         if let Some(blocker) = self.project_execution_blocker() {
@@ -359,13 +367,26 @@ pub fn assemble_platform_candidate(
         git: None,
         classification: None,
         confidence: None,
-        blockers: Vec::new(),
+        blockers: if rule.root_kind == "macos_browser_state" {
+            vec!["user_data_requires_explicit_selection".into()]
+        } else {
+            Vec::new()
+        },
         project_format: None,
         project_context: None,
-        execution_policy: JunkExecutionPolicy::NativeRevalidationRequired,
+        execution_policy: platform_execution_policy(rule),
         git_scan_facts: None,
         source_entry: Some(entry.clone()),
     })
+}
+
+// Interpret the admitted rule's purpose, not its risk label or a cache-looking path.
+fn platform_execution_policy(rule: &PlatformJunkRule) -> JunkExecutionPolicy {
+    if rule.root_kind == "macos_browser_state" {
+        JunkExecutionPolicy::RequireUserDataSelection
+    } else {
+        JunkExecutionPolicy::NativeRevalidationRequired
+    }
 }
 
 /// Rebuilds transient interpretation of cached filesystem/rule facts for this invocation.
@@ -414,7 +435,11 @@ pub fn refresh_candidate_interpretation(
         .iter()
         .find(|rule| rule.id == candidate.rule_id)
         .map(|rule| rule.execution_policy.into())
-        .unwrap_or(JunkExecutionPolicy::NativeRevalidationRequired);
+        .unwrap_or_else(|| {
+            platform_rule
+                .map(platform_execution_policy)
+                .unwrap_or(JunkExecutionPolicy::NativeRevalidationRequired)
+        });
     candidate.project_format = project_rules
         .iter()
         .find(|rule| rule.id == candidate.rule_id)

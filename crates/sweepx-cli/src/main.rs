@@ -237,8 +237,8 @@ enum Commands {
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
-        /// Linux/macOS show historical caches first; Linux reobserves all files, macOS validates indexes.
-        /// Only freshly verified rows can be moved; Windows currently scans fresh.
+        /// Linux/macOS/Windows show historical caches first; current results always traverse live.
+        /// macOS additionally validates file indexes. Only freshly verified rows can be moved.
         /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
         #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
@@ -252,6 +252,10 @@ enum Commands {
         /// npm inventory also bounds filesystem observations and reports incomplete discovery.
         #[arg(long)]
         system: bool,
+        /// Limit --system discovery and classification to a platform rule ID. Repeat to select
+        /// multiple categories, e.g. --rule tool.npm-cache. Other categories are outside this scan.
+        #[arg(long = "rule", requires = "system", value_name = "RULE_ID")]
+        rules: Vec<String>,
         /// Move approved stale Linux temporary objects to a recoverable quarantine.
         ///
         /// Requires `--system`, human output, and a foreground terminal. The full plan digest
@@ -684,6 +688,7 @@ fn main() -> ProcessExitCode {
             tui,
             timings,
             system,
+            rules,
             clean_temp,
             trash,
             quarantine_dir,
@@ -724,7 +729,7 @@ fn main() -> ProcessExitCode {
                     .filter(|root| root.join("junk-cache").as_os_str().len() <= 64 * 1024);
                 return junk_tui::run(
                     roots,
-                    system,
+                    system.then_some(rules),
                     context.locale(),
                     size_unit,
                     sort,
@@ -745,7 +750,7 @@ fn main() -> ProcessExitCode {
                 false,
                 format == OutputFormat::Human,
             );
-            let normalized_roots = match normalize_junk_roots(system, &roots) {
+            let normalized_roots = match normalize_junk_roots(system, &roots, &rules) {
                 Ok(roots) => roots,
                 Err(error) => {
                     eprintln!("{error}");
@@ -1593,9 +1598,22 @@ fn run_junk_scan(
             let Some(entry) = candidate.source_entry.as_ref() else {
                 continue;
             };
-            // Eligibility is the row's own coverage: a directory that was scanned completely can
-            // be reclaimed; an incomplete row stays ineligible so the move fails closed.
-            let eligible = entry.coverage.complete && !entry.coverage.details_lost;
+            // Observing the directory inode alone does not cover its descendants. Match its
+            // current aggregate too; a missing/partial subtree cannot enter bulk junk Trash.
+            let eligible = entry.coverage.complete
+                && !entry.coverage.details_lost
+                && scan.as_ref().is_some_and(|scan| {
+                    scan.scan
+                        .summary
+                        .aggregates
+                        .iter()
+                        .find(|aggregate| {
+                            aggregate.directory_identity == candidate.entry_id.as_str()
+                        })
+                        .is_some_and(|aggregate| {
+                            aggregate.coverage.complete && !aggregate.coverage.details_lost
+                        })
+                });
             items.push(trash_command::BulkTrashItem {
                 path: candidate.path.clone(),
                 size: junk_evidence_bytes(&candidate.reclaimable).unwrap_or(0),
@@ -1700,6 +1718,10 @@ fn run_junk_scan(
                     })
                     .unwrap_or_default(),
                 execution_note = match (context.locale(), candidate.project_execution_blocker()) {
+                    (sweepx_i18n::Locale::ZhCn, Some("user_data_requires_explicit_selection")) =>
+                        " [用户数据待确认：请独立明确选择来源或路径；垃圾列表不能回收]",
+                    (sweepx_i18n::Locale::EnUs, Some("user_data_requires_explicit_selection")) =>
+                        " [User data needs review: select an origin/path separately; junk Trash is blocked]",
                     (sweepx_i18n::Locale::ZhCn, Some(_)) =>
                         " [回收受限：规则仅报告或所有权/活动未核验]",
                     (sweepx_i18n::Locale::EnUs, Some(_)) =>
@@ -2895,6 +2917,7 @@ struct NormalizedJunkRoots {
 fn normalize_junk_roots(
     system: bool,
     raw_roots: &[OsString],
+    rule_ids: &[String],
 ) -> Result<NormalizedJunkRoots, String> {
     if !system {
         return Ok(NormalizedJunkRoots {
@@ -2921,7 +2944,10 @@ fn normalize_junk_roots(
                 .filter(|root| root.as_path() != temp_root.as_path())
                 .cloned()
                 .collect::<Vec<_>>();
-            let platform = PlatformJunkSetup::discover()?;
+            let platform = PlatformJunkSetup::discover_selected_with_cancel(
+                rule_ids,
+                CancellationToken::new(),
+            )?;
             return Ok(NormalizedJunkRoots {
                 scan_roots: default_platform_junk_roots(&platform),
                 temp_roots,
@@ -2937,7 +2963,8 @@ fn normalize_junk_roots(
         return Err("junk --system cannot be combined with explicit roots".to_string());
     }
 
-    let platform = PlatformJunkSetup::discover()?;
+    let platform =
+        PlatformJunkSetup::discover_selected_with_cancel(rule_ids, CancellationToken::new())?;
     let scan_roots = default_platform_junk_roots(&platform);
     if scan_roots.is_empty() {
         return Err("no supported platform junk root is available".to_string());
@@ -3444,6 +3471,25 @@ mod tests {
     }
 
     #[test]
+    fn junk_rule_selection_requires_system_and_is_preserved_for_tui() {
+        assert!(Cli::try_parse_from(["sweepx", "junk", "--rule", "tool.pip-cache", "."]).is_err());
+        let cli = Cli::try_parse_from([
+            "sweepx",
+            "junk",
+            "--system",
+            "--tui",
+            "--rule",
+            "tool.pip-cache",
+            "--rule",
+            "tool.npm-cache",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::Junk { system: true, tui: true, rules, .. } if rules == ["tool.pip-cache", "tool.npm-cache"])
+        );
+    }
+
+    #[test]
     fn quarantine_location_accepts_system_tui_and_requires_system_scope() {
         let cli = Cli::try_parse_from([
             "sweepx",
@@ -3515,7 +3561,7 @@ mod tests {
     #[test]
     fn junk_system_rejects_explicit_roots() {
         let roots = vec![OsString::from(".")];
-        assert!(normalize_junk_roots(true, &roots).is_err());
+        assert!(normalize_junk_roots(true, &roots, &[]).is_err());
     }
 
     #[test]

@@ -118,6 +118,8 @@ cargo run -p sweepx-cli -- junk --tui ~/Projects
 cargo run -p sweepx-cli -- junk --system
 # 系统垃圾实时视图：发现与扫描都在后台进行
 cargo run -p sweepx-cli -- junk --system --tui
+# 只扫描所选缓存类别，避免无关受保护目录阻塞
+cargo run -p sweepx-cli -- junk --system --rule tool.npm-cache --rule tool.pnpm-store
 # 分阶段诊断：stderr 输出计时 JSON，stdout 报告格式保持不变
 cargo run -p sweepx-cli -- --format json junk --timings ~/Projects
 # Linux：生成陈旧临时对象计划，精确确认后复制到异盘恢复区
@@ -135,7 +137,11 @@ Linux 临时对象分析的目录名称、递归身份指纹及进程表读取�
 
 Linux 临时对象的隔离预览与执行已独立为 core 服务，CLI 负责打印和精确确认。预览保留私有原生身份并绑定实际规则字节摘要；交互调用可额外绑定所选行的原测量。每批最多 256 项，默认清理路径累计准入 64 MiB、访问上限 1,000,000、深度 128、复制/核验 I/O 预算 1 TiB、合作期限 15 分钟。取消或超限停止后续工作；源移除开始后可能留下部分源树和完整恢复副本，不承诺原子回滚。这不是 RSS 上限或内核调用的硬超时，TUI 已接入隔离预览与精确确认；Linux 宿主上的完整运行仍待验证。
 
+`junk --system --rule RULE_ID` 可重复指定类别，普通报告和 TUI 均适用；未选择的类别不在本次扫描范围内。规则 ID 必须适用于当前平台。默认 `--system` 仍扫描全部支持类别，原生受保护目录调用可能等待系统响应。npm 默认目录在 Unix 为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；只报告具备 `content-v2` 和 `index-v5` 目录的 `_cacache` 下载缓存，保留 `_npx` 与自定义同级内容。工具回答不可用时，活动保持 unknown。pnpm 的 256 分片识别允许普通 `.DS_Store` 元数据文件，其他额外条目仍拒绝。
+
 macOS 垃圾扫描将文件索引集中做一次事件历史验证，并以现场枚举的文件类型和长度再次确认；每个根都重新遍历，整根候选记录仅用于 TUI 历史首屏。可用 `junk --timings` 查看实际阶段耗时和命中数；可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
+
+普通扫描详情共享 128 MiB 保留估算，包含原生祖先身份链和容器开销；超限明确截断详情，保留已累计的递归统计及独立大文件观察。该额度不是全进程 RSS 上限。目录句柄 frontier 默认 128，宽目录延后同级目录并优先深入子树，为共享原生 I/O 额度保留余量。
 
 `scan --large-files --min-file-bytes 104857600 --top-files 100 ROOT...` 在同一次元数据遍历中输出独立大文件榜单。默认阈值 100 MiB、最多 100 行保留结果；阈值包含等于，排序按逻辑大小降序，分配大小单独显示，未知不当作零。human 大文件表最多显示 40 行，JSON 的 `data.largeFiles` 保留全部 top-K、计数和覆盖缺口；普通扫描列表截断不会漏掉后半段的大文件。只观察普通文件，不读内容、不沿链接越界，也不把大小变成垃圾或删除授权。加上 `--tui` 可动态浏览榜单并显式选择文件移到回收站；大小本身不提供回收依据。
 
@@ -307,7 +313,7 @@ macOS 垃圾缓存的根记录和逐文件索引现在按根独立保存，不�
 macOS 变更历史查询最多接受 256 个绝对 UTF-8 根和 1 MiB 路径字节；应用保留的历史最多 65,536 条事件、16 MiB 估算字节（包括路径及 Vec 容量）。缺口、ID 回绕、挂载变化、无法无损解释的路径或预算耗尽会清空历史并拒绝文件索引复用。各根现在共享一份按路径去重的变更索引，保留最大事件游标；该索引占用磁盘缓存读取后剩余的 128 MiB 估算额度，自身最多 16 MiB，不再按根复制完整变更集合。这些额度均不是进程 RSS 上限。
 
 
-项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
+项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。浏览器离线/应用状态使用 `require_user_data_selection`，并以 `user_data_requires_explicit_selection` 阻止普通垃圾批量回收及垃圾 TUI 删除；目录自身和递归汇总的覆盖也必须同时完整。需独立明确选择来源或路径。其他平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
 
 SvelteKit 1.0.0/2.0.0 的格式回归现包含实际 SDK `sync` 生成的原始文件、依赖锁及字节校验记录，普通测试离线消费；目录混入用户文件时依旧只报告。采集方式和证据边界见[项目规则执行样本](docs/development/project-rule-corpus.md)。
 

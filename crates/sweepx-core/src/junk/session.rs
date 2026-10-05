@@ -358,8 +358,11 @@ pub struct JunkSessionRequest {
     pub project_rule_bytes: Vec<u8>,
     /// Discover current platform context on the worker for each revision; false avoids tool probes.
     pub include_platform_rules: bool,
-    /// Optional private Linux/macOS history directory; filesystem reuse requires macOS history.
-    /// Windows currently scans fresh. All cache IO stays on the worker.
+    /// Optional host/portable platform rule IDs for system discovery; empty selects all rules.
+    /// Narrowing discovery never makes historical rows current or relaxes clean guards.
+    pub platform_rule_ids: Vec<String>,
+    /// Optional private Linux/macOS/Windows history directory; filesystem reuse requires macOS
+    /// history. Windows displays historical rows and scans fresh. All cache IO stays on the worker.
     pub cache_dir: Option<PathBuf>,
     /// Explicit shared state scope for history writes. Must pair with `<root>/junk-cache`;
     /// None retains the standalone cache API and its local limits.
@@ -375,6 +378,7 @@ impl JunkSessionRequest {
             system: false,
             project_rule_bytes: PROJECT_RULES_JSON.as_bytes().to_vec(),
             include_platform_rules: false,
+            platform_rule_ids: Vec::new(),
             cache_dir: None,
             cache_state_root: None,
             limits: JunkSessionLimits::default(),
@@ -427,6 +431,15 @@ impl JunkSession {
     /// Starts junk analysis; no traversal, rule parsing, system discovery or tool probe runs here.
     pub fn start(mut request: JunkSessionRequest) -> Result<Self, JunkSessionControlError> {
         if (request.roots.is_empty() && !request.system)
+            || (!request.system && !request.platform_rule_ids.is_empty())
+            || request.platform_rule_ids.len() > 64
+            || request.platform_rule_ids.iter().fold(
+                request
+                    .platform_rule_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+                |bytes, id| bytes.saturating_add(id.capacity()),
+            ) > 16 * 1024
             || (request.system && (!request.roots.is_empty() || !request.include_platform_rules))
             || request.limits.max_events == 0
             || request.limits.max_event_bytes < 4096
@@ -633,8 +646,9 @@ struct Worker {
 impl Worker {
     fn run(&mut self, job: &Job, writer: &mut Writer) -> Result<(), JunkSessionFailure> {
         let system = self.request.system;
+        let rule_ids = self.request.platform_rule_ids.clone();
         self.run_with_discovery(job, writer, move |cancel| {
-            PlatformJunkSetup::discover_with_cancel(cancel).map(|setup| {
+            PlatformJunkSetup::discover_selected_with_cancel(&rule_ids, cancel).map(|setup| {
                 let roots = if system {
                     default_platform_junk_roots(&setup)
                 } else {
@@ -989,7 +1003,13 @@ impl Worker {
             self.current.insert(*key, Arc::clone(row));
         }
         #[cfg(target_os = "linux")]
-        if self.request.system && job.selected.is_none() {
+        if self.request.system
+            && job.selected.is_none()
+            && platform
+                .rules
+                .iter()
+                .any(|rule| rule.root_kind == "linux_tmp")
+        {
             partial |=
                 self.observe_temporary_objects(&platform, &mut pending, rules_digest, job, writer)?;
         }

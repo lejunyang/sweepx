@@ -837,10 +837,40 @@ impl PlatformJunkSetup {
     /// Shares the caller's cancellation token across tool and native layout discovery.
     /// Cancellation is checked between native calls; OS calls themselves may block.
     pub fn discover_with_cancel(cancel: CancellationToken) -> Result<Self, String> {
-        let rules = load_platform_junk_rules().map_err(|error| error.to_string())?;
+        Self::discover_selected_with_cancel(&[], cancel)
+    }
+
+    /// Discovers only selected host/portable rule IDs; an empty selection keeps the default.
+    /// Validation precedes all native/tool observations. Selecting rules narrows discovery and
+    /// classification together; it never grants freshness or permission to clean a candidate.
+    pub fn discover_selected_with_cancel(
+        rule_ids: &[String],
+        cancel: CancellationToken,
+    ) -> Result<Self, String> {
+        let rules = select_platform_rules(rule_ids)?;
         let evidence = PlatformJunkEvidence::precompute_with_cancel(&rules, cancel);
         Ok(Self { rules, evidence })
     }
+}
+
+pub(super) fn select_platform_rules(rule_ids: &[String]) -> Result<Vec<PlatformJunkRule>, String> {
+    let mut rules = load_platform_junk_rules().map_err(|error| error.to_string())?;
+    if rule_ids.is_empty() {
+        return Ok(rules);
+    }
+    if rule_ids.len() > 64 {
+        return Err("select at most 64 platform rules".into());
+    }
+    for id in rule_ids {
+        if !rules
+            .iter()
+            .any(|rule| rule.id == *id && rule_applies_to_host(rule))
+        {
+            return Err(format!("unknown or unsupported platform rule: {id}"));
+        }
+    }
+    rules.retain(|rule| rule_ids.contains(&rule.id));
+    Ok(rules)
 }
 
 /// Selects platform scan roots from this invocation's shared discovery evidence.
@@ -874,7 +904,7 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
     {
         // XDG_CACHE_HOME is valid only as an absolute path. Falling back to ~/.cache follows the
         // XDG Base Directory specification; data/config homes are intentionally excluded.
-        if rules.iter().any(|rule| rule.platform == "linux")
+        if rules.iter().any(|rule| rule.root_kind == "xdg_cache_home")
             && let Some(cache) = std::env::var_os("XDG_CACHE_HOME")
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
@@ -892,7 +922,9 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
     {
         // Apple defines Library/Caches as discardable, but candidate classification remains
         // report-only and no broader Library/Application Support root is admitted here.
-        if rules.iter().any(|rule| rule.platform == "macos")
+        if rules
+            .iter()
+            .any(|rule| rule.root_kind == "macos_user_caches")
             && let Some(cache) = user_home_dir()
                 .filter(|home| home.is_absolute())
                 .map(|home| home.join("Library/Caches"))
@@ -905,7 +937,9 @@ pub fn default_platform_junk_roots(platform: &PlatformJunkSetup) -> Vec<PathBuf>
     {
         // LocalCache is narrower than LocalAppData. SweepX does not classify an application's
         // LocalFolder or the whole LocalAppData tree as disposable.
-        if rules.iter().any(|rule| rule.platform == "windows")
+        if rules
+            .iter()
+            .any(|rule| rule.root_kind == "windows_packages")
             && let Some(packages) = std::env::var_os("LOCALAPPDATA")
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
@@ -1048,6 +1082,8 @@ struct ToolCacheProfile {
     fingerprint: StructuralFingerprint,
     /// Format generations within a single root, oldest first. Empty when the cache has only one.
     generations: &'static [FormatGeneration],
+    /// Narrow the candidate to this verified child rather than reclaiming unrelated siblings.
+    candidate_child: Option<&'static str>,
 }
 
 /// Maps a `rootKind` to the additional locations and content checks for that tool.
@@ -1069,6 +1105,7 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
                 hex_shard_count: Some(256),
             },
             generations: &[],
+            candidate_child: None,
         }),
         "pip_reported_cache" => Some(ToolCacheProfile {
             sources: CandidateSources {
@@ -1092,11 +1129,16 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
                     current: true,
                 },
             ],
+            candidate_child: None,
         }),
         "npm_reported_cache" => Some(ToolCacheProfile {
             sources: CandidateSources {
                 env_overrides: &["NPM_CONFIG_CACHE"],
-                relative_defaults: &["npm-cache"],
+                relative_defaults: if cfg!(windows) {
+                    &["npm-cache"]
+                } else {
+                    &[".npm"]
+                },
                 versioned_child_prefix: None,
             },
             fingerprint: StructuralFingerprint {
@@ -1105,6 +1147,7 @@ fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
                 hex_shard_count: None,
             },
             generations: &[],
+            candidate_child: Some("_cacache"),
         }),
         _ => None,
     }
@@ -1174,14 +1217,35 @@ fn tool_cache_candidates_with_root(
             let Some(root) = discovery.directory(path) else {
                 return;
             };
-            if out.iter().any(|existing| existing.same_object(&root)) {
-                return;
-            }
             if !discovery.has_markers(&root, &rule.required_markers)
                 || profile.as_ref().is_some_and(|profile| {
                     !matches_structural_fingerprint(&root, &profile.fingerprint, discovery)
                 })
             {
+                return;
+            }
+            // Activity describes the tool's configured parent. npm's content cache is a child:
+            // `_npx` can contain running tools and custom siblings have no disposability evidence.
+            let activity = match &reported {
+                Some(reported) if root.same_object(reported) => ToolRootActivity::Live,
+                Some(_) => ToolRootActivity::Stale,
+                None => ToolRootActivity::Unknown,
+            };
+            let root = if let Some(child) = profile.as_ref().and_then(|p| p.candidate_child) {
+                let Some(child) = discovery.directory(&root.path.join(child)) else {
+                    return;
+                };
+                // Require the independently documented cacache layout, not merely its name.
+                if !discovery.has_directory(&child, "content-v2")
+                    || !discovery.has_directory(&child, "index-v5")
+                {
+                    return;
+                }
+                child
+            } else {
+                root
+            };
+            if out.iter().any(|existing| existing.same_object(&root)) {
                 return;
             }
             // Native root refs, public path copies and interpretation storage are reserved together.
@@ -1193,11 +1257,6 @@ fn tool_cache_candidates_with_root(
             if out.len() == count {
                 return;
             }
-            let activity = match &reported {
-                Some(reported) if root.same_object(reported) => ToolRootActivity::Live,
-                Some(_) => ToolRootActivity::Stale,
-                None => ToolRootActivity::Unknown,
-            };
             let superseded = observed_generations(rule, &root, discovery);
             snapshots.reserve_exact(1);
             snapshots.push(ToolRootSnapshot {
@@ -1358,6 +1417,64 @@ mod tests {
     use super::super::candidate::junk_size_for;
     use super::*;
     use sweepx_model::{ByteValue, ReasonCode};
+
+    #[test]
+    fn selected_rules_are_validated_and_deduplicated_before_discovery() {
+        let rules =
+            select_platform_rules(&["tool.pip-cache".into(), "tool.pip-cache".into()]).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, "tool.pip-cache");
+        assert!(select_platform_rules(&["not-a-rule".into()]).is_err());
+        assert!(select_platform_rules(&vec!["tool.pip-cache".into(); 65]).is_err());
+        let foreign = if cfg!(target_os = "macos") {
+            "linux.xdg-user-cache"
+        } else {
+            "macos.user-caches"
+        };
+        assert!(select_platform_rules(&[foreign.into()]).is_err());
+        let project = JunkService::built_in().unwrap();
+        let npm_rules = select_platform_rules(&["tool.npm-cache".into()]).unwrap();
+        let mut evidence = PlatformJunkEvidence::default();
+        for rule in rules.iter().chain(&npm_rules) {
+            evidence.by_rule.insert(
+                rule.id.clone(),
+                PlatformRuleEvidence {
+                    cache_candidates: Vec::new(),
+                    reported_root: None,
+                },
+            );
+        }
+        let first = project
+            .with_platform(&rules, &evidence)
+            .classification_context_digest()
+            .expect("complete empty discovery");
+        assert_ne!(
+            Some(first),
+            project
+                .with_platform(&npm_rules, &evidence)
+                .classification_context_digest(),
+        );
+    }
+
+    #[test]
+    fn narrow_rules_do_not_add_an_unrelated_platform_cache_root() {
+        let mut rule = select_platform_rules(&["tool.pip-cache".into()])
+            .unwrap()
+            .remove(0);
+        rule.platform = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(windows) {
+            "windows"
+        } else {
+            "linux"
+        }
+        .into();
+        let setup = PlatformJunkSetup {
+            rules: vec![rule],
+            evidence: PlatformJunkEvidence::default(),
+        };
+        assert!(default_platform_junk_roots(&setup).is_empty());
+    }
 
     #[test]
     fn classification_context_tracks_rules_and_discovery_but_not_activity() {
@@ -1787,6 +1904,60 @@ mod tests {
             })
     }
     #[test]
+    fn npm_default_discovery_reports_only_verified_content_child_without_tool_answer() {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = owner.path().to_path_buf();
+        let cache = base.join(if cfg!(windows) { "npm-cache" } else { ".npm" });
+        let content = cache.join("_cacache");
+        std::fs::create_dir_all(content.join("content-v2")).unwrap();
+        std::fs::create_dir(content.join("index-v5")).unwrap();
+        std::fs::create_dir(cache.join("_npx")).unwrap();
+        std::fs::write(cache.join("personal-notes"), b"not cache data").unwrap();
+        let rules = select_platform_rules(&["tool.npm-cache".into()]).unwrap();
+        let discover = |reported: Option<PathBuf>| {
+            PlatformJunkEvidence::precompute_with_layout(
+                &rules,
+                |_| reported.clone(),
+                Vec::new(),
+                LayoutDiscoveryLimits::default(),
+                CancellationToken::new(),
+                |_| Some(base.clone()),
+            )
+        };
+        let evidence = discover(None);
+        assert!(evidence.layout_failure().is_none());
+        assert_eq!(
+            evidence.for_rule(&rules[0]).unwrap().cache_candidates,
+            vec![content.clone()]
+        );
+        assert_eq!(
+            evidence.tool_snapshots[&rules[0].id][0].activity,
+            ToolRootActivity::Unknown
+        );
+        let reported = discover(Some(cache));
+        assert_eq!(
+            reported.for_rule(&rules[0]).unwrap().cache_candidates,
+            vec![content.clone()]
+        );
+        assert_eq!(
+            reported.tool_snapshots[&rules[0].id][0].activity,
+            ToolRootActivity::Live
+        );
+        std::fs::remove_dir(content.join("index-v5")).unwrap();
+        assert!(
+            discover(None)
+                .for_rule(&rules[0])
+                .unwrap()
+                .cache_candidates
+                .is_empty(),
+            "a named content directory without the supported cacache layout is not admitted"
+        );
+    }
+
+    #[test]
     fn system_root_selection_reuses_the_classifiers_tool_probe() {
         let fixture = tempfile::tempdir().unwrap();
         let cache = fixture.path().canonicalize().unwrap();
@@ -2134,6 +2305,91 @@ mod tests {
             before,
             expanded.len(),
             "expanded roots must be deduplicated"
+        );
+    }
+
+    #[test]
+    fn browser_user_state_is_reported_but_generic_junk_trash_remains_blocked() {
+        let owner = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = owner.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = owner.path().to_path_buf();
+        let cache = base.join("Microsoft Edge/Default/Service Worker/CacheStorage");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("offline-draft"), b"irreplaceable local state").unwrap();
+        let mut rule = load_platform_junk_rules()
+            .unwrap()
+            .into_iter()
+            .find(|rule| rule.root_kind == "macos_browser_state")
+            .unwrap();
+        // This native lower-layer fixture exercises the rule on every host backend.
+        rule.platform = "any".into();
+        let rules = vec![rule];
+        let evidence = PlatformJunkEvidence::precompute_with_layout(
+            &rules,
+            |_| None,
+            Vec::new(),
+            LayoutDiscoveryLimits::default(),
+            CancellationToken::new(),
+            |anchor| (anchor == "application_support").then(|| base.clone()),
+        );
+        let project = JunkService::built_in().unwrap();
+        let context = crate::CoreContext::new(sweepx_i18n::LocaleResolution::new(
+            sweepx_i18n::Locale::EnUs,
+            sweepx_i18n::LocaleSource::Explicit,
+        ));
+        let scan = crate::scan_junk_with_store::<crate::MemorySnapshotStore>(
+            &context,
+            &crate::ScanRequest {
+                roots: vec![cache.clone()],
+                state_dir: None,
+            },
+            None,
+            &project.with_platform(&rules, &evidence),
+            None,
+        )
+        .unwrap();
+        let aggregates = scan
+            .scan
+            .summary
+            .aggregates
+            .iter()
+            .map(|aggregate| (aggregate.directory_identity.as_str(), aggregate))
+            .collect();
+        let mut candidate = project
+            .interpret(
+                "platform:macos.browser-state-diagnostics",
+                &scan.scan.summary.roots[0],
+                &aggregates,
+                &rules,
+                &evidence,
+            )
+            .unwrap();
+        assert_eq!(
+            candidate.project_execution_blocker(),
+            Some("user_data_requires_explicit_selection")
+        );
+        assert!(
+            candidate
+                .blockers
+                .contains(&"user_data_requires_explicit_selection".into())
+        );
+        candidate.execution_policy = super::super::candidate::JunkExecutionPolicy::NotChecked;
+        let restored = super::super::candidate::refresh_candidate_interpretation(
+            candidate,
+            &[],
+            &rules,
+            &evidence,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.project_execution_blocker(),
+            Some("user_data_requires_explicit_selection")
+        );
+        assert_eq!(
+            std::fs::read(cache.join("offline-draft")).unwrap(),
+            b"irreplaceable local state"
         );
     }
 

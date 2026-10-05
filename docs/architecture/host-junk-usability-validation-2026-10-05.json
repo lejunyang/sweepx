@@ -1,0 +1,381 @@
+{
+  "schema": "sweepx.host-junk-usability-validation/v1",
+  "date": "2026-10-05",
+  "startingCommit": "a345b86",
+  "host": {
+    "os": "macOS 26.5.2 (25F84)",
+    "arch": "arm64",
+    "rust": "1.98.0",
+    "fullDiskAccess": "effective during final verification"
+  },
+  "privacy": "Raw user paths, app/profile inventory and operation responses stay in a private local report directory, outside version control.",
+  "sourceFingerprints": {
+    "crates/sweepx-catalog/resources/platform-junk-rules.json": "9569dc66d4ac61cca1c4be18f54161ee18f88086104ac7d3ad56c8c614d0d258",
+    "crates/sweepx-core/src/junk/platform.rs": "aa9f2210b17d0fa0e981af1c58c62ee0d61eeae488a37a08721d1c17aa48a4e3",
+    "crates/sweepx-core/src/junk/layout.rs": "4b5a9f7a7c29d38ba00b78a497e738779c4df329120e793d4391d020a3378124",
+    "crates/sweepx-core/src/junk/candidate.rs": "8465bcc60b8a17c92a32597a1adcb1594ae2e4e9f786379440d8dccdca379a6e",
+    "crates/sweepx-core/src/junk/session.rs": "a96e86e299d941a33063c3ba40e0616dc9d2068548486ac6b289750fa75bc8d4",
+    "crates/sweepx-core/src/junk/session/cache.rs": "624aed3c6b4673082770ea0e71de02daf3cebf3cb7d97ecf655a00599cf89a89",
+    "crates/sweepx-cli/src/main.rs": "048c924d8dc449826457965354933c61b30da32f1bc5a71b1853ac51cb613261",
+    "crates/sweepx-cli/src/junk_tui.rs": "7fa41b08d809b307f6fc48e2cbbfa4f9d86cc09212a454bd8df883406fa41bc3",
+    "crates/sweepx-cli/tests/cli_contract.rs": "ceb9d9f9b070a7908065776bd249a3b90484f234fa33cbfff9191621bf5fec59"
+  },
+  "behavior": [
+    "Repeatable --system --rule narrows native/tool discovery, fresh classification and TUI history together; validates host/portable IDs before observation.",
+    "npm Unix default is ~/.npm; independently verified _cacache child is the candidate, while parent, _npx and custom siblings remain outside its classification. Activity derives from the tool-reported parent; absent answers remain unknown.",
+    "pnpm requires exact 256 two-hex directory shards, permitting only a native regular no-follow .DS_Store file as extra metadata.",
+    "Browser offline/application state retains R3 diagnostics but generic junk Trash refuses require_user_data_selection and user_data_requires_explicit_selection, including reinterpreted historical rows.",
+    "Bulk junk Trash requires complete directory and matching recursive aggregate coverage."
+  ],
+  "contractEvidence": [
+    "selected_rules_are_validated_and_deduplicated_before_discovery",
+    "narrow_rules_do_not_add_an_unrelated_platform_cache_root",
+    "npm_default_discovery_reports_only_verified_content_child_without_tool_answer",
+    "finder_metadata_is_allowed_only_as_an_observed_regular_file",
+    "browser_user_state_is_reported_but_generic_junk_trash_remains_blocked",
+    "selected_npm_rule_finds_only_content_cache_and_keeps_unknown_activity",
+    "junk_rule_selection_requires_system_and_is_preserved_for_tui"
+  ],
+  "systemScan": {
+    "scope": "All discovered host system-junk rules after four cache moves; no mount crossing. Current app writes are uncontrolled.",
+    "status": "partial",
+    "candidateCount": 187,
+    "unknownSizes": 0,
+    "riskCounts": {
+      "R2": 171,
+      "R3": 16
+    },
+    "genericUserDataTrashBlockedCount": 15,
+    "ruleCounts": {
+      "macos.user-caches": 105,
+      "macos.browser-state-diagnostics": 15,
+      "tool.pnpm-store": 1,
+      "macos.yarn-cache": 2,
+      "macos.uv-cache": 1,
+      "macos.gradle-cache": 6,
+      "macos.go-cache": 2,
+      "macos.browser-derived-cache": 50,
+      "macos.bun-cache": 1,
+      "macos.homebrew-cache": 1,
+      "macos.safari-cache": 3
+    },
+    "layoutDiscovery": {
+      "complete": true,
+      "incompleteReason": null
+    },
+    "npmDiscovery": {
+      "complete": false,
+      "incompleteReason": "observation_unavailable"
+    },
+    "discoveryGap": "Default node selector shim has no selected version; installation/cache probes cannot establish complete npm inventory. No user tool configuration changed.",
+    "candidateSizeSumBytes": "74724736207",
+    "sizeSumInterpretation": "Mixed evidence, predominantly logical bytes; no nested candidate paths found in this sample. Not exclusive allocation or actual free-space gain.",
+    "binarySha256": "2af6b88a49526bc3e60a972908f59065f44ac090120eb260d7492c18f15d9ac9",
+    "operationalRuns": [
+      {
+        "cache": "cold",
+        "elapsedSeconds": 70.214,
+        "exitCode": 4,
+        "termination": null,
+        "peakSampledRssBytes": 404520960,
+        "outputBytes": 177249,
+        "phases": {
+          "discovery": 10148622750,
+          "setup": 982500,
+          "rootCacheValidation": 1665041,
+          "subtreeCacheValidation": 84,
+          "traversal": 58164029583,
+          "classification": 13056250,
+          "projectFormats": 22983083,
+          "gitEvidence": 591917,
+          "cacheWrite": 38628500,
+          "report": 10705375,
+          "tail": 76869083
+        }
+      },
+      {
+        "cache": "warm",
+        "elapsedSeconds": 61.066,
+        "exitCode": 4,
+        "termination": null,
+        "peakSampledRssBytes": 399147008,
+        "outputBytes": 177255,
+        "phases": {
+          "discovery": 10287007125,
+          "setup": 925250,
+          "rootCacheValidation": 35333833,
+          "subtreeCacheValidation": 42,
+          "traversal": 50448324375,
+          "classification": 12523000,
+          "projectFormats": 20620083,
+          "gitEvidence": 518750,
+          "cacheWrite": 28326500,
+          "report": 9909375,
+          "tail": 70507917
+        }
+      }
+    ],
+    "comparisonQualification": {
+      "candidatePathsEquivalent": true,
+      "allCandidateFactsEquivalent": false,
+      "changedActiveCandidateSizes": 5,
+      "coldRunConcurrentWithPnpmDiagnostic": true,
+      "speedupClaimPermitted": false
+    }
+  },
+  "pairedPnpmBenchmark": {
+    "build": "release binary SHA256 2af6b88a49526bc3e60a972908f59065f44ac090120eb260d7492c18f15d9ac9; final human wording and ordinary detail-byte limiter came later. Neither affects this classified JSON workload.",
+    "workload": {
+      "scope": "One real tool.pnpm-store candidate",
+      "logicalBytes": "5975106431",
+      "independentAllocatedGiB": 6.28,
+      "ruleSelection": [
+        "tool.pnpm-store"
+      ]
+    },
+    "cacheStates": "Each pair starts in a newly UUID-named empty SweepX state directory; the second uses its resulting state. OS caches not flushed.",
+    "repetitions": 3,
+    "osCacheControlled": false,
+    "factsEquivalentWithinEachPair": true,
+    "otherSweepXScansConcurrent": false,
+    "hostActivity": "Uncontrolled; a short final clippy run overlapped the beginning of the first pair.",
+    "elapsedSecondsMedian": {
+      "empty": 7.178,
+      "warm": 6.698
+    },
+    "pairs": [
+      {
+        "pair": 0,
+        "cache": "empty",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 7.178,
+        "peakSampledRssBytes": 129417216,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 6880557208,
+          "phasesNs": {
+            "discovery": 233786542,
+            "setup": 519166,
+            "rootCacheValidation": 1013459,
+            "subtreeCacheValidation": 41,
+            "traversal": 6464380792,
+            "classification": 12000,
+            "projectFormats": 55500,
+            "gitEvidence": 83,
+            "cacheWrite": 159838000,
+            "report": 189584,
+            "tail": 20757000
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      },
+      {
+        "pair": 0,
+        "cache": "warm",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 6.698,
+        "peakSampledRssBytes": 127369216,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 6589252875,
+          "phasesNs": {
+            "discovery": 129054916,
+            "setup": 306792,
+            "rootCacheValidation": 312240750,
+            "subtreeCacheValidation": 125,
+            "traversal": 6105204958,
+            "classification": 9625,
+            "projectFormats": 16042,
+            "gitEvidence": 292,
+            "cacheWrite": 21081750,
+            "report": 208750,
+            "tail": 21125000
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      },
+      {
+        "pair": 1,
+        "cache": "empty",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 6.173,
+        "peakSampledRssBytes": 125370368,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 5990081584,
+          "phasesNs": {
+            "discovery": 117152375,
+            "setup": 279500,
+            "rootCacheValidation": 215209,
+            "subtreeCacheValidation": 41,
+            "traversal": 5837393125,
+            "classification": 16417,
+            "projectFormats": 12875,
+            "gitEvidence": 42,
+            "cacheWrite": 16022833,
+            "report": 82000,
+            "tail": 18903083
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      },
+      {
+        "pair": 1,
+        "cache": "warm",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 7.205,
+        "peakSampledRssBytes": 127107072,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 7120849583,
+          "phasesNs": {
+            "discovery": 113021125,
+            "setup": 292166,
+            "rootCacheValidation": 14904667,
+            "subtreeCacheValidation": 42,
+            "traversal": 6950823916,
+            "classification": 13167,
+            "projectFormats": 12083,
+            "gitEvidence": 42,
+            "cacheWrite": 22996458,
+            "report": 76375,
+            "tail": 18703500
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      },
+      {
+        "pair": 2,
+        "cache": "empty",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 7.708,
+        "peakSampledRssBytes": 126287872,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 7589979375,
+          "phasesNs": {
+            "discovery": 128319250,
+            "setup": 286250,
+            "rootCacheValidation": 208708,
+            "subtreeCacheValidation": 42,
+            "traversal": 7418168542,
+            "classification": 8500,
+            "projectFormats": 13333,
+            "gitEvidence": 42,
+            "cacheWrite": 24281083,
+            "report": 77750,
+            "tail": 18608917
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      },
+      {
+        "pair": 2,
+        "cache": "warm",
+        "factsEquivalent": true,
+        "status": "ok",
+        "candidateCount": 1,
+        "elapsedSeconds": 6.17,
+        "peakSampledRssBytes": 129220608,
+        "timings": {
+          "schema": "sweepx.junk.timings/v1",
+          "complete": true,
+          "totalNs": 5811014583,
+          "phasesNs": {
+            "discovery": 116066000,
+            "setup": 290250,
+            "rootCacheValidation": 11765250,
+            "subtreeCacheValidation": 250,
+            "traversal": 5647189292,
+            "classification": 12250,
+            "projectFormats": 10875,
+            "gitEvidence": 291,
+            "cacheWrite": 18213834,
+            "report": 69083,
+            "tail": 17391500
+          },
+          "rootCount": 1,
+          "rootCacheHits": 0,
+          "rootCacheMisses": 1,
+          "candidateCount": 1
+        }
+      }
+    ],
+    "conclusion": "Modest median improvement; no universal warm-scan acceleration or tail-latency claim. Whole-root hit counters intentionally remain zero; current directories are traversed."
+  },
+  "cleanup": {
+    "method": "SweepX standalone native Trash after source native identity capture; independent Trash device/inode match afterward.",
+    "successfulRecoverableMoves": 4,
+    "targets": [
+      "npm content cache only",
+      "Homebrew download cache",
+      "pip cache",
+      "Cargo registry download archives"
+    ],
+    "npmIndependentAllocatedBytes": "31850811392",
+    "otherApproximateLogicalBytes": [
+      "223972545",
+      "168438064",
+      "56788030"
+    ],
+    "sizeInterpretation": "Approximately 30 GiB moved using mixed evidence, not an exact independently reclaimable sum.",
+    "permanentFallback": false,
+    "trashEmptied": false,
+    "freeSpaceGainClaimed": false,
+    "confirmation": "Three old sources absent; Homebrew source recreated with a different identity while old identity remains in Trash."
+  },
+  "independentOverview": {
+    "scopeTasks": 212,
+    "complete": 202,
+    "incompleteWithoutTimeout": 8,
+    "timedOut": 2,
+    "elapsedSeconds": 143.316,
+    "method": "Three bounded ordinary du tasks concurrently; no foreign-device traversal. Parent/child sizes are not summed. Active apps and cleanup overlap; not an atomic whole-disk inventory."
+  },
+  "validation": {
+    "workspaceTests": "passed, exit 0, 117.889 seconds, test-threads=4; no skipped tests; 3 existing opt-in benchmarks ignored",
+    "foundationTrash": "passed on this host after Full Disk Access",
+    "workspaceClippy": "passed, all-targets/all-features, warnings denied",
+    "linuxGnuCrossClippy": "passed",
+    "windowsGnuCrossClippy": "passed",
+    "formatAndDiff": "passed"
+  },
+  "remainingProductGaps": [
+    "Complete disk coverage and practical coarse directory overview",
+    "Meaningful warm-scan and selected-refresh acceleration",
+    "Fine-grained ownership/activity for osdk, npx and browser runtime caches",
+    "macOS per-origin site-storage discovery and explicit review; current command uses Windows locations",
+    "Project-junk ownership/activity proof before generic Trash",
+    "Linux/Windows native runtime and target Trash qualification"
+  ]
+}

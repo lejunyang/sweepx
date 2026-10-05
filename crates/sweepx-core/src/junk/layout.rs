@@ -441,15 +441,20 @@ impl LayoutDiscovery {
     }
 
     /// Exact count requires clean EOF and independently admitted no-follow directories. A bounded
-    /// prefix never establishes the layout. Each child must remain on the observed parent's mount.
+    /// prefix never establishes the layout. Each shard must remain on the parent's mount. Finder's
+    /// `.DS_Store` is allowed only as a native no-follow regular file; other extra entries reject.
     pub fn has_hex_shards(&mut self, parent: &LayoutRoot, expected: usize) -> bool {
         let listing = self.children(&parent.path, ChildSelection::All);
-        if !listing.complete || listing.paths.len() != expected {
+        if !listing.complete
+            || listing.paths.len() < expected
+            || listing.paths.len() > expected.saturating_add(1)
+        {
             return false;
         }
         let Some(admitted) = self.open_observed(parent) else {
             return false;
         };
+        let mut shards = 0;
         for path in listing.paths.iter() {
             if !self.available() {
                 return false;
@@ -463,7 +468,8 @@ impl LayoutDiscovery {
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             });
-            if !valid_name {
+            let finder_metadata = name == std::ffi::OsStr::new(".DS_Store");
+            if !valid_name && !finder_metadata {
                 return false;
             }
             let Ok(record) = child_record(&parent.path, name) else {
@@ -479,8 +485,16 @@ impl LayoutDiscovery {
                 &self.cancel,
             ) {
                 Ok(sweepx_platform::WalkEntry::Directory(child))
-                    if child.metadata.filesystem_identity.as_ref() == Some(&parent.filesystem)
-                        && child.metadata.mount_identity.as_ref() == Some(&parent.mount) => {}
+                    if valid_name
+                        && child.metadata.filesystem_identity.as_ref()
+                            == Some(&parent.filesystem)
+                        && child.metadata.mount_identity.as_ref() == Some(&parent.mount) =>
+                {
+                    shards += 1;
+                }
+                Ok(sweepx_platform::WalkEntry::File(child))
+                    if finder_metadata
+                        && child.filesystem_identity.as_ref() == Some(&parent.filesystem) => {}
                 Ok(sweepx_platform::WalkEntry::Error(_))
                 | Ok(sweepx_platform::WalkEntry::Boundary(_)) => {
                     self.fail(LayoutDiscoveryFailure::ObservationUnavailable);
@@ -494,7 +508,7 @@ impl LayoutDiscovery {
             }
         }
         // Detect parent replacement/mutation during the interval; this is not an atomic tree snapshot.
-        self.open_observed(parent).is_some()
+        shards == expected && self.open_observed(parent).is_some()
     }
 
     fn children(&mut self, path: &Path, selection: ChildSelection) -> ChildListing {
@@ -822,6 +836,33 @@ mod tests {
             wrong_type.failure.is_none(),
             "ordinary files are intentional exclusions"
         );
+    }
+
+    #[test]
+    fn finder_metadata_is_allowed_only_as_an_observed_regular_file() {
+        let (_owner, root) = fixture();
+        std::fs::create_dir(root.join("00")).unwrap();
+        let metadata = root.join(".DS_Store");
+        std::fs::write(&metadata, b"Finder metadata").unwrap();
+        let check = || {
+            let mut discovery =
+                LayoutDiscovery::new(LayoutDiscoveryLimits::default(), CancellationToken::new());
+            let observed = discovery.directory(&root).unwrap();
+            discovery.has_hex_shards(&observed, 1)
+        };
+        assert!(check());
+        std::fs::write(root.join("personal-file"), b"not metadata").unwrap();
+        assert!(!check(), "unrecognized extra files still reject the layout");
+        std::fs::remove_file(root.join("personal-file")).unwrap();
+        std::fs::remove_file(&metadata).unwrap();
+        std::fs::create_dir(&metadata).unwrap();
+        assert!(!check(), "the metadata name cannot hide a directory");
+        std::fs::remove_dir(&metadata).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("00"), &metadata).unwrap();
+            assert!(!check(), "metadata symlinks must not be followed");
+        }
     }
 
     #[cfg(unix)]

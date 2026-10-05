@@ -34,6 +34,8 @@ cargo run -p sweepx-cli -- --locale zh-CN capabilities
 
 普通 `scan` 的 human 摘要直接从扫描事实筛选前 40 行；JSON 为紧凑单文档，逐行写出全部已保留事实，字段、原生路径编码和证据状态保持稳定。这仍是扫描结束后的导出，不是实时事件流，也不限制总导出字节。stdout 写入或 flush 失败返回 8；中断的 JSON 不能作为完整结果使用，已完成扫描的持久状态不因此回滚。
 
+普通扫描详情共享 128 MiB 保留估算，包括原生祖先身份链、容器容量和额外开销；这不是全进程 RSS 上限。超过预算会标记 `resource_limit` 并截断详情，已经累计的递归统计和独立大文件观察仍保留。目录句柄 frontier 默认 128，为共享原生 I/O 额度留出余量；宽目录通过延后同级目录并优先深入已打开子树完成遍历。
+
 ### P4a.2 资格记录不是新命令
 
 协议现在能用 typed/validated 记录表达一个精确 capability/平台 tuple 及其 evidence。mutation 不使用宽泛的 delete 标记，而是分成 `trash.local.file`、`trash.local.directory`、`permanent.local.file`、`permanent.local.directory` 和 `permanent.local.link`。当前主机的两个 Trash cell 与 Linux file/directory Permanent 为 `degraded` preview；link 和其他平台 Permanent 仍为 `disabled`。
@@ -299,6 +301,8 @@ blockfile 后端的着色器缓存体积包含固定骨架 —— 即使缓存�
 因此空缓存仍占约 0.5 MB。
 ### 工具缓存：识别每一份副本，而不只是在用的那份
 
+`junk --system --rule RULE_ID` 只扫描一个类别，可重复指定并结合 `--tui`。未知或其他平台的 ID 在发现前拒绝；未选类别不在本次扫描范围内。不传 `--rule` 仍执行完整系统发现，受保护目录的原生调用仍可能等待系统响应。Unix npm 默认目录为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；只报告有 `content-v2` 和 `index-v5` 目录的 `_cacache`，保留 `_npx` 工具及自定义同级文件。工具回答缺失时保持 `activity: unknown`。pnpm 的 256 分片目录允许额外的普通 `.DS_Store` 文件，但仍拒绝未知额外条目及该名称的目录或链接。
+
 npm、pnpm、pip 的规则不依赖单一位置。发现阶段会枚举工具报告的路径、工具自身的环境变量覆盖，以及
 文档记载的平台默认位置；随后只有目录**自身内容**符合该缓存的结构特征时才纳入 —— 对 pnpm store 来说，
 是 `files/` 下恰好 256 个两位十六进制分片目录。
@@ -542,7 +546,7 @@ macOS 垃圾缓存的根记录和逐文件索引现在按根独立保存，不�
 macOS 变更历史查询最多接受 256 个绝对 UTF-8 根和 1 MiB 路径字节；应用保留的历史最多 65,536 条事件、16 MiB 估算字节（包括路径及 Vec 容量）。缺口、ID 回绕、挂载变化、无法无损解释的路径或预算耗尽会清空历史并拒绝文件索引复用。各根现在共享一份按路径去重的变更索引，保留最大事件游标；该索引占用磁盘缓存读取后剩余的 128 MiB 估算额度，自身最多 16 MiB，不再按根复制完整变更集合。这些额度均不是进程 RSS 上限。
 
 
-项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
+项目规则的 JSON `executionPolicy` 只接受 `report_only` 或 `require_ownership_and_activity`；省略时采用后者，不继承旧的删除准入。通用 `dist/build/out/.next/.turbo` 及 Dart/SvelteKit 明确仅报告，Rust/Node/Python/Maven 则仍缺独占所有权和无活动的独立证明，因此当前所有项目候选均不能通过 `junk --trash`、TUI 或后台 worker 回收。名称、风险等级、完整覆盖、格式识别或 Git `ignored/high` 均不能替代这些证明。报告新增稳定 `executionPolicy` 字段，项目值为 `report_only` 或 `require_project_ownership_and_activity`；缓存恢复先为 `not_checked`，按本次规则重建，不保存旧准入。浏览器离线/应用状态使用 `require_user_data_selection`，并以 `user_data_requires_explicit_selection` 阻止普通垃圾批量回收及垃圾 TUI 删除；目录自身和递归汇总的覆盖也必须同时完整。需独立明确选择来源或路径。其他平台候选的 `native_revalidation_required` 仍须通过既有原生身份、覆盖与平台边界检查，并不自行提供执行权限。独立 `trash PATH` 的明确路径操作仍遵守其原有检查。
 
 Dart 2.18.0/3.6.0 的真实生成样本覆盖单项目和共享 workspace；中文/空格成员路径的百分号 UTF-8 签名现可识别。无效或不支持的 URI 形式仍报告 unknown，配置中的 URI 不会被打开；recognized 也不能让共享根或混入个人文件的项目候选获得回收资格。
 

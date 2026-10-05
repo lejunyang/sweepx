@@ -1888,6 +1888,47 @@ fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn selected_npm_rule_finds_only_content_cache_and_keeps_unknown_activity() {
+    let (_owner, root) = duplicate_fixture();
+    let home = root.join("home");
+    let local = root.join("local");
+    let cache = if cfg!(windows) {
+        local.join("npm-cache")
+    } else {
+        home.join(".npm")
+    };
+    let content = cache.join("_cacache");
+    fs::create_dir_all(content.join("content-v2")).unwrap();
+    fs::create_dir(content.join("index-v5")).unwrap();
+    fs::write(content.join("content-v2/payload"), b"recoverable download").unwrap();
+    fs::create_dir(cache.join("_npx")).unwrap();
+    fs::write(cache.join("personal"), b"preserved").unwrap();
+    let empty_path = root.join("no-tools");
+    fs::create_dir(&empty_path).unwrap();
+    let mut cmd = cli_command();
+    cmd.env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("LOCALAPPDATA", &local)
+        .env("PATH", &empty_path)
+        .env_remove("NPM_CONFIG_CACHE")
+        .args(["--format", "json", "--state-dir"])
+        .arg(root.join("state"))
+        .args(["junk", "--system", "--rule", "tool.npm-cache"]);
+    let output = cmd.output().unwrap();
+    assert!(matches!(output.status.code(), Some(0 | 4)), "{:?}", output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidates = report["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["path"], content.display().to_string());
+    assert_eq!(candidates[0]["activity"], "unknown");
+    assert_eq!(candidates[0]["reclaimable"]["state"], "known");
+    assert_eq!(report["layoutDiscovery"]["complete"], true);
+    assert!(cache.join("_npx").is_dir());
+    assert_eq!(fs::read(cache.join("personal")).unwrap(), b"preserved");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn junk_system_reports_incomplete_discovery_without_following_layout_ancestor_links() {

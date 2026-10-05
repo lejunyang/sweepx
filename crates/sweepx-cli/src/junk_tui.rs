@@ -20,7 +20,7 @@ mod quarantine;
 
 pub(crate) fn run(
     roots: Vec<PathBuf>,
-    system: bool,
+    system_rules: Option<Vec<String>>,
     locale: Locale,
     unit: HumanSizeUnit,
     sort: ScanSort,
@@ -32,8 +32,10 @@ pub(crate) fn run(
         eprintln!("--quarantine-dir is available only for Linux temporary objects");
         return ExitCode::from(2);
     }
-    let mut request = if system {
-        JunkSessionRequest::system()
+    let mut request = if let Some(rule_ids) = system_rules {
+        let mut request = JunkSessionRequest::system();
+        request.platform_rule_ids = rule_ids;
+        request
     } else {
         JunkSessionRequest::new(roots)
     };
