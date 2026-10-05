@@ -421,7 +421,9 @@ impl TrashCandidate {
         })
     }
 
-    fn from_scanned_entry(entry: &ScannedEntry) -> Result<Self, TrashError> {
+    /// Captures the exact native scanner object, independently of its display spelling.
+    /// Callers revalidate directory lineage and application facts before this final Trash seam.
+    pub(crate) fn from_scanned_entry(entry: &ScannedEntry) -> Result<Self, TrashError> {
         let path = path_from_live_locator(entry)?;
         Self::capture(path, Some(entry))
     }
@@ -431,7 +433,7 @@ impl TrashCandidate {
     }
 
     /// Whether the caller must obtain an explicit confirmation before moving this target.
-    fn requires_confirmation(&self) -> bool {
+    pub(crate) fn requires_confirmation(&self) -> bool {
         self.important
     }
 
@@ -728,7 +730,9 @@ pub(crate) fn confirm(path: &Path, locale: Locale) -> bool {
         && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-fn path_from_live_locator(entry: &ScannedEntry) -> Result<PathBuf, TrashError> {
+/// Decodes a bounded executable native locator for scope comparison; never uses display paths.
+/// This supplies a lossless observation path, not permission to mutate without native revalidation.
+pub(crate) fn path_from_live_locator(entry: &ScannedEntry) -> Result<PathBuf, TrashError> {
     let locator = entry
         .executable_native_locator()
         .map_err(|_| TrashError::MissingLiveIdentity)?

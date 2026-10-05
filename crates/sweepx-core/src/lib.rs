@@ -6,8 +6,11 @@ mod cargo_cleaner_evidence;
 mod duplicates;
 pub mod junk;
 mod large_files;
+/// Native inventory and explicit selection of npx tool installations.
+pub mod npx;
 mod scan_output;
 mod snapshot_store;
+mod storage_inventory;
 pub use duplicates::scan_duplicates_with_store;
 pub use scan_output::ScanOutput;
 pub mod tools;

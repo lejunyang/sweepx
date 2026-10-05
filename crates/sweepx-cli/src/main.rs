@@ -27,6 +27,7 @@ use sweepx_core::junk::load_project_rules as load_project_junk_rules;
 mod file_tui;
 mod junk_timings;
 mod junk_tui;
+mod npx_command;
 mod site_storage_command;
 mod trash_command;
 mod tui_adapter;
@@ -283,6 +284,26 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    /// List npx tool versions and whole-installation sizes; preview or Trash selected slots.
+    NpxCache {
+        /// Explicit npm cache/_npx root. Defaults to ~/.npm/_npx; redirected caches require this.
+        #[arg(long, value_name = "ABSOLUTE_DIRECTORY")]
+        root: Option<PathBuf>,
+        /// Show slots that directly request this exact package name.
+        #[arg(long)]
+        package: Option<String>,
+        /// Select complete installation slots by their current ID (repeatable).
+        #[arg(long, conflicts_with = "older_versions")]
+        entry: Vec<String>,
+        /// Select strictly lower installed semantic versions; retain each package's highest.
+        /// Multi-package, unknown and duplicate-highest versions are excluded.
+        #[arg(long)]
+        older_versions: bool,
+        /// Apply the selection through recoverable OS Trash after current native/activity checks.
+        /// Without this flag the command only reports the plan.
+        #[arg(long)]
+        trash: bool,
     },
     /// Report Chromium site data by domain, preserving each full storage key and bucket.
     /// Native scans cover default macOS/Linux/Windows profile locations. Shared databases remain
@@ -780,6 +801,32 @@ fn main() -> ProcessExitCode {
                 trash,
                 cache_state_root,
                 timings,
+            );
+        }
+        Commands::NpxCache {
+            root,
+            package,
+            entry,
+            older_versions,
+            trash,
+        } => {
+            let Some(root) = root.or_else(sweepx_core::npx::default_root) else {
+                eprintln!("npx cache root unavailable; supply --root");
+                return ProcessExitCode::from(2);
+            };
+            if !root.is_absolute() {
+                eprintln!("--root must be absolute");
+                return ProcessExitCode::from(2);
+            }
+            return npx_command::run(
+                &root,
+                package.as_deref(),
+                &entry,
+                older_versions,
+                trash,
+                format,
+                size_unit,
+                context.locale(),
             );
         }
         Commands::SiteStorage {

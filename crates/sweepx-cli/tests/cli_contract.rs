@@ -4612,3 +4612,53 @@ fn junk_system_reports_bounded_tool_discovery_in_both_locales() {
     }
     assert_eq!(fs::read(payload).unwrap(), b"unchanged discovery fixture");
 }
+
+#[test]
+fn npx_cache_previews_actual_versions_and_rejects_an_unknown_selection() {
+    let (_temp, root) = duplicate_fixture();
+    for (id, version) in [
+        ("0123456789abcdef", "1.9.0"),
+        ("abcdef0123456789", "1.10.0"),
+    ] {
+        let slot = root.join(id);
+        fs::create_dir_all(slot.join("node_modules/tool")).unwrap();
+        fs::write(
+            slot.join("package.json"),
+            r#"{"dependencies":{"tool":"*"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            slot.join("node_modules/tool/package.json"),
+            format!(r#"{{"name":"tool","version":"{version}"}}"#),
+        )
+        .unwrap();
+    }
+    let output = cli_command()
+        .args([
+            "--format",
+            "json",
+            "npx-cache",
+            "--older-versions",
+            "--root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["readOnly"], true);
+    assert_eq!(v["selection"], json!(["0123456789abcdef"]));
+    assert_eq!(v["results"], json!([]));
+    assert_eq!(v["permanentDeletion"], false);
+    cli_command()
+        .args(["npx-cache", "--root"])
+        .arg(&root)
+        .args(["--entry", "bad", "--trash"])
+        .assert()
+        .code(2);
+    assert!(root.join("0123456789abcdef").exists());
+}

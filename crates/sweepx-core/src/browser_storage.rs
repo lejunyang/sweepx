@@ -4,18 +4,16 @@
 //! paths in this report are display information, not authority to remove a directory. Chromium's
 //! on-disk formats are internal: unknown directories and unsupported metadata stay visible.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::storage_inventory::{entry_bytes, observe_directories};
 use rusqlite::Connection;
 use serde::Serialize;
-use sweepx_model::{ByteValue, EvidenceValue, NativeName, ObjectType, ScanEntryId, ScannedEntry};
-use sweepx_platform::{CancellationToken, ScanRoot};
-use sweepx_scanner::{
-    ClassifiedScanObserver, HostPlatformScanner, JunkClassifier, LocatorReadLimits, LocatorReader,
-    ProgressEvent, ScanSummary, Scanner, ScannerOptions,
-};
+use sweepx_model::{NativeName, ScannedEntry};
+use sweepx_platform::CancellationToken;
+use sweepx_scanner::{HostPlatformScanner, LocatorReadLimits, LocatorReader};
 
 use crate::junk::layout::{LayoutDiscovery, LayoutDiscoveryLimits};
 use crate::junk::native_rule_name;
@@ -375,39 +373,6 @@ enum Kind {
     Shared,
 }
 
-// Classification here selects aggregation rows, not junk. One traversal provides the parent total
-// and each immediate child's share, avoiding the old repeated walks and discarded failure flags.
-struct StorageRows;
-impl JunkClassifier for StorageRows {
-    fn uses_only_local_markers(&self) -> bool {
-        true
-    }
-    fn needs_file_marker(&self, _: &NativeName) -> bool {
-        false
-    }
-    fn classify(
-        &self,
-        entry: &ScannedEntry,
-        _: &BTreeMap<ScanEntryId, BTreeSet<String>>,
-    ) -> Option<String> {
-        let id = entry.identity.as_ref()?;
-        (entry.object_type == ObjectType::Directory
-            && (id.parent_id.is_none() || id.parent_id.as_ref() == Some(&id.scan_root_id)))
-        .then(|| "browser_storage_observation".into())
-    }
-}
-struct Deadline<'a> {
-    until: Instant,
-    cancel: &'a CancellationToken,
-}
-impl ClassifiedScanObserver for Deadline<'_> {
-    fn on_progress(&mut self, _: &Path, _: &ProgressEvent) {
-        if Instant::now() >= self.until {
-            self.cancel.cancel();
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn analyze_subsystem(
     install: &BrowserInstallation,
@@ -433,32 +398,10 @@ fn analyze_subsystem(
         origins: Vec::new(),
         issues: Vec::new(),
     };
-    let mut options = ScannerOptions::default();
-    options.resource_limits.max_visited_entries = 2_000_000;
-    options.resource_limits.max_retained_aggregates = 16_384;
-    options.resource_limits.max_classified_metadata_bytes = 64 * 1024 * 1024;
-    options.resource_limits.max_classified_root_metadata_bytes = 64 * 1024 * 1024;
-    let root = match ScanRoot::new(path.to_path_buf()) {
-        Ok(root) => root,
+    let scan = match observe_directories(path, cancel, deadline) {
+        Ok(scan) => scan,
         Err(e) => {
-            report.issues.push(e.to_string());
-            return report;
-        }
-    };
-    let scan = match Scanner::new(HostPlatformScanner::new(), options)
-        .scan_classified_with_observer(
-            &[root],
-            cancel,
-            &StorageRows,
-            None,
-            &mut Deadline {
-                until: deadline,
-                cancel,
-            },
-        ) {
-        Ok(scan) => scan.summary,
-        Err(e) => {
-            report.issues.push(e.to_string());
+            report.issues.push(e);
             return report;
         }
     };
@@ -604,28 +547,6 @@ fn analyze_subsystem(
         && report.origins.iter().all(|r| r.complete)
         && report.unattributed_bytes.as_deref() == Some("0");
     report
-}
-
-fn entry_bytes(scan: &ScanSummary, entry: &ScannedEntry) -> (Option<u128>, bool) {
-    let Some(id) = &entry.identity else {
-        return (None, false);
-    };
-    let Some(aggregate) = scan
-        .aggregates
-        .iter()
-        .find(|a| a.directory_identity == id.entry_id.as_str())
-    else {
-        return (None, false);
-    };
-    let value: &ByteValue = &aggregate.apparent_logical_bytes;
-    match value {
-        EvidenceValue::Known { value } => (
-            Some(value.0),
-            aggregate.coverage.complete && !aggregate.coverage.details_lost,
-        ),
-        EvidenceValue::LowerBound { value, .. } => (Some(value.0), false),
-        _ => (None, false),
-    }
 }
 
 fn read_metadata(

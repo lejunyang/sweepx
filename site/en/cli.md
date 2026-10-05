@@ -440,6 +440,20 @@ sweepx execute ... --dangerously-delete
 
 P3 has library models and fake-execution tests for related concepts, but there is still no general plan/approve/execute CLI. Linux bounded file/directory `delete` is a separate preview rather than that general surface.
 
+## `npx-cache`
+
+One native traversal lists directly requested tools, actual installed versions and the logical size of each complete installation including dependencies.
+
+```sh
+sweepx npx-cache
+sweepx npx-cache --package PACKAGE --older-versions
+sweepx npx-cache --package PACKAGE --older-versions --trash
+sweepx npx-cache --entry 0123456789abcdef --trash
+sweepx --format json npx-cache --root /absolute/npm-cache/_npx
+```
+
+The default is `~/.npm/_npx`; use `--root` for redirected caches. Without `--trash`, only a plan is shown. `--older-versions` retains the highest installed semantic version per package without querying a registry; equal precedence, including different build metadata, is retained. Unknown versions, multi-package slots and incomplete size coverage are excluded. Unknown or multi-package members exclude their version group; an unrelated identified linked package does not block other complete groups. Package filtering selects direct dependencies; Trash moves whole slots and never splits their shared dependency graph. Execution rereads native identity-bound manifests. macOS/Linux check current-user process arguments and open files; Windows removal lacks an activity adapter. Refusal, partial failure and incomplete coverage remain explicit. All moves use OS Trash. Activity observations are not an exclusive lock; concurrent launches and the final pathname replacement window remain. JSON `inventory` retains the full root report, while `selection` describes this plan; fields remain locale-independent.
+
 ## `site-storage`
 
 Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. This is read-only and separate from `junk`; application state is not automatically disposable.

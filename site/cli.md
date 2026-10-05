@@ -429,6 +429,20 @@ sweepx execute ... --dangerously-delete
 
 P3 中有对应概念的 library model 与 fake execution tests，但仍没有通用 plan/approve/execute CLI。Linux 有界文件/目录 `delete` 是独立 preview，不使用这组通用命令。
 
+## `npx-cache`
+
+一次原生遍历列出 npx 缓存槽中的直接工具、实际安装版本和整套依赖的逻辑大小。
+
+```sh
+sweepx npx-cache
+sweepx npx-cache --package PACKAGE --older-versions
+sweepx npx-cache --package PACKAGE --older-versions --trash
+sweepx npx-cache --entry 0123456789abcdef --trash
+sweepx --format json npx-cache --root /absolute/npm-cache/_npx
+```
+
+默认位置为 `~/.npm/_npx`；重定向缓存请指定 `--root`。没有 `--trash` 时只预览。`--older-versions` 保留每个包的最高已安装语义版本（不访问注册表），同版本及仅 build metadata 不同的版本都保留；未知版本、多包槽、覆盖不完整不进入自动计划；有未知或多包成员的版本组整体排除，已识别的其他工具组可独立计划。包过滤只选择直接依赖；回收单位是整个槽，不拆除共享依赖。执行前重新读取绑定原生身份的 manifest，macOS/Linux 检查当前用户的进程参数与打开文件；Windows 活动适配尚不支持回收。拒绝、部分失败和未完成分别返回结果；始终使用 OS 回收站。活动观察不是排他锁，新的启动与最终路径替换窗口仍存在。JSON `inventory` 保留完整根报告，`selection` 是本次计划，字段不随语言变化。
+
 ## `site-storage`
 
 按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。该命令只读，不预选删除项；网站应用状态与 `junk` 分开。

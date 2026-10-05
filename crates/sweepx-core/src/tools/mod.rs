@@ -4,6 +4,9 @@
 //! threads to outlive cancellation when a descendant inherits the write end. Stderr is discarded
 //! because these probes consume a single machine-readable answer, not diagnostic transcripts.
 
+/// Current process and open-file references to explicit cache scopes.
+pub mod scoped_activity;
+
 mod installations;
 pub use installations::{
     ToolDiscoveryFailure, ToolDiscoveryLimits, ToolDiscoveryReport, ToolInstallation,

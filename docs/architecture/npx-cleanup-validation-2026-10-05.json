@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-05",
+  "host": "macOS arm64",
+  "build": "release all-features Rust 1.98.0",
+  "npx": {
+    "slotsBefore": 89,
+    "singleNativeReadOnlyScanSeconds": 5.02679629198974,
+    "scanRepetitions": 1,
+    "sweepxCacheState": "not_used_by_inventory",
+    "osCacheState": "uncontrolled",
+    "slotTotalsMatchPreviousIndependentDirectoryWalk": 89,
+    "selectedOldKabooVersions": 62,
+    "retainedVersion": "1.3.448",
+    "logicalBytesMoved": 13911764697,
+    "trashOperationSeconds": 23.288231917016674,
+    "successfulMoves": 62,
+    "sourceAbsenceAndTrashIdentityVerified": 62,
+    "unknownLocalLinkedInstallationRetained": true,
+    "inventoryStatus": "partial",
+    "trashCleared": false,
+    "spaceFreedClaimed": false
+  },
+  "limits": {
+    "activity": "current-user process arguments and open files; time-local, not an exclusive lock",
+    "nativeTrash": "final native identity validation, remaining pathname replacement window",
+    "windowsNpxRemoval": "unsupported activity adapter"
+  },
+  "initialValidationFailures": [
+    {
+      "check": "native npx fixtures",
+      "cause": "relative batch inputs require the base locator; reused existing opaque captured-directory file reader",
+      "fixed": true
+    },
+    {
+      "check": "native Trash CLI fixture in ordinary sandbox",
+      "cause": "OS Trash denied sandbox file access",
+      "productCodeChangedForFailure": false,
+      "authorizedHostRun": "passed"
+    },
+    {
+      "check": "node test through osdk shim",
+      "cause": "no selected node version",
+      "resolution": "existing bundled Node runtime; no user configuration change"
+    }
+  ],
+  "verification": {
+    "affectedCrates": [
+      "test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s",
+      "test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.46s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "test result: ok. 374 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 26.70s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.21s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.42s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.20s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "fmt": "passed",
+    "hostWorkspaceClippy": "passed",
+    "linuxGnuWorkspaceClippy": "passed",
+    "windowsGnuWorkspaceClippy": "passed",
+    "nativeLinuxWindowsAndMsvc": "not_run",
+    "reusedUnchangedWorkspaceTests": "previous_delivery_passes"
+  }
+}

@@ -32,6 +32,8 @@ CLI 和 TUI 支持 `zh-CN` 与 `en-US`。它们会从 locale 环境自动选择�
 
 库调用扫描与分类只需 `sweepx-core`，不依赖终端浏览器。CLI 在 `tui_adapter` 模块连接 `sweepx-scanner` 和 `sweepx-tui`；身份重验、取消和扫描资源限制继续由 scanner 负责。
 
+npx 工具可用 `sweepx npx-cache` 查看实际版本与包含依赖的安装大小；`--package NAME --older-versions` 预览保留最高已安装版本的计划，加 `--trash` 放入回收站，也可用 `--entry ID` 选择整套安装。活动或原生校验不可用时拒绝回收；多包安装不能拆删。详见 [CLI 说明](site/cli.md#npx-cache)。
+
 浏览器网站数据可用 `sweepx site-storage` 按域名查看；`--browser edge --domain example.com` 展示具体 profile、完整存储键与 bucket。支持 macOS/Linux/Windows 默认位置、旧 CacheStorage/IndexedDB 和现代 WebStorage。共享数据库及 HTTP 缓存只统计整体大小，报告为逻辑长度和非原子观察。旧 `--trash-origin` / `--browse` 因缺少浏览器活动与映射校验暂时拒绝；网站数据不走通用垃圾删除。详见 [CLI 说明](site/cli.md#site-storage)。
 
 ## 安装
