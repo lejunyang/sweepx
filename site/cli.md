@@ -453,7 +453,7 @@ sweepx browser-model --disable-download-config /absolute/chrome-no-model.mobilec
 
 本轮支持 Chrome legacy `OptGuideOnDeviceModel/<version>` 的原生大小、manifest/config 识别与元数据重验；macOS 明确选择后回收整个版本目录，拒绝正在运行的 Chrome、不可用活动观察、原生变化或不完整数据。其他平台回收、Edge 与 Manifest Broker 资产尚未支持；预测模型和整个 User Data 不是替代目标。模型回收不保证持久禁用重下。
 
-macOS 配置导出只包含 `GenAILocalFoundationalModelSettings=1`，不关闭其他组件更新。请手动安装并在 `chrome://policy` 确认该值与正常状态。此策略禁止基础模型下载，Chrome 自身可能删除已有模型，依赖该模型的能力将不可用；策略自动清除不经过 SweepX 回收站，建议先退出 Chrome 并回收载荷。移除该配置描述文件恢复默认策略。导出不等于安装或验证。
+这个入口只导出配置文件，不自动写入或安装系统策略。macOS 配置导出只包含 `GenAILocalFoundationalModelSettings=1`，不关闭其他组件更新。请手动安装并在 `chrome://policy` 确认该值与正常状态。此策略禁止基础模型下载，Chrome 自身可能删除已有模型，依赖该模型的能力将不可用；策略自动清除不经过 SweepX 回收站，建议先退出 Chrome 并回收载荷。移除该配置描述文件恢复默认策略。导出不等于安装或验证。
 
 ## `site-storage`
 
@@ -546,4 +546,4 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
 ```
 
-将本地计划导入 [可选 Chromium 清理扩展](../integrations/chromium-cleanup/README.md)，在匹配的浏览器个人资料里审阅范围后执行。扩展调用浏览器 `browsingData` API，支持网站缓存或缓存及 IndexedDB、Local Storage、Service Worker、网站文件；不直接移走共享数据库。只使用 `browsingData` 权限，无网络请求。Cookie、历史、密码、权限、扩展数据和受保护网页应用不清除；同 origin 的分区由浏览器处理，不能选单个 bucket。清除不可由 SweepX 撤销。扩展无法独立绑定原生 profile 身份，需要用户确认。完成 API 请求后重新扫描，不能把 callback 当作字节释放证明。扩展实际安装/删除仍待本机验收；企业策略拒绝安装时不绕过。旧文件级回收参数保持拒绝。
+仅安装 SweepX 时，按域分析和计划导出可用，按域清除不可用；必须另行安装浏览器扩展。将本地计划导入 [可选 Chromium 清理扩展](../integrations/chromium-cleanup/README.md)，在匹配的浏览器个人资料里审阅范围后执行。扩展调用浏览器 `browsingData` API，支持网站缓存或缓存及 IndexedDB、Local Storage、Service Worker、网站文件；不直接移走共享数据库。只使用 `browsingData` 权限，无网络请求。Cookie、历史、密码、权限、扩展数据和受保护网页应用不清除；同 origin 的分区由浏览器处理，不能选单个 bucket。清除不可由 SweepX 撤销。扩展无法独立绑定原生 profile 身份，需要用户确认。完成 API 请求后重新扫描，不能把 callback 当作字节释放证明。扩展实际安装/删除仍待本机验收；企业策略拒绝安装时不绕过。旧文件级回收参数保持拒绝。

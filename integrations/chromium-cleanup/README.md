@@ -1,6 +1,6 @@
 # Browser-managed website removal
 
-This optional local extension clears selected origins using Chrome/Edge's `browsingData` API. It does not unlink browser database directories. No network, host permission, remote debugging, telemetry or external service is used. Its only permission is `browsingData`; install it manually only in the browser profile you intend to clean.
+The extension must be installed separately in Chrome/Edge. SweepX alone can analyze and export plans but cannot perform domain removal. This optional local extension clears selected origins using Chrome/Edge's `browsingData` API. It does not unlink browser database directories. No network, host permission, remote debugging, telemetry or external service is used. Its only permission is `browsingData`; install it manually only in the browser profile you intend to clean.
 
 1. Export an explicit selection: `sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json`.
 2. In the matching browser profile, enable extension developer mode and load this directory as an unpacked extension. Organizational policy may prohibit this; SweepX does not bypass it.
