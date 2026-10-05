@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>PayloadType</key><string>Configuration</string>
+<key>PayloadVersion</key><integer>1</integer>
+<key>PayloadIdentifier</key><string>org.sweepx.chrome.no-local-foundation-model</string>
+<key>PayloadUUID</key><string>04A838C9-BD02-45EC-BA9F-65B651BF4F75</string>
+<key>PayloadDisplayName</key><string>SweepX: 禁止 Chrome 基础模型下载</string>
+<key>PayloadDescription</key><string>Only disables Chrome's local foundational GenAI model. Chrome may remove the existing model. Local model features become unavailable. Remove this profile to restore the default policy.</string>
+<key>PayloadRemovalDisallowed</key><false/>
+<key>PayloadContent</key><array><dict>
+<key>PayloadType</key><string>com.google.Chrome</string>
+<key>PayloadVersion</key><integer>1</integer>
+<key>PayloadIdentifier</key><string>org.sweepx.chrome.no-local-foundation-model.policy</string>
+<key>PayloadUUID</key><string>95AC580F-8199-4054-A613-A8C4D7A2F351</string>
+<key>PayloadDisplayName</key><string>Chrome model policy</string>
+<key>GenAILocalFoundationalModelSettings</key><integer>1</integer>
+</dict></array>
+</dict></plist>

@@ -18,7 +18,7 @@
 | --- | --- | --- | --- |
 | 精简 crates | 已完成本轮收敛 | 22 → 17；规则三包合入 catalog、平台四包合入 platform；core 不再依赖 TUI | 当前没有继续合包的明确收益；不再把包数量当作目标 |
 | 减少重复代码和设计 | 部分完成 | 规则评估、候选解释、Git 证据、工具发现和原生存储等已有共享实现 | 普通垃圾命令与 TUI 会话仍各自编排部分阶段；未做可信的全仓重复量统计 |
-| 垃圾识别更可靠、更有用 | 部分完成 | 本机 187 项有大小；npm 只识别 `_cacache`，pnpm 允许 Finder 元数据；5 个缓存目录及 62 个 npx 旧安装已回收；Chromium 有域名/分区/bucket 报告及可选浏览器 API 适配器 | osdk/Playwright 引用和活动仍待确认；浏览器适配器实际安装/删除与 TUI 接入待验收；项目所有权/活动仍限制回收 |
+| 垃圾识别更可靠、更有用 | 部分完成 | 本机 187 项有大小；npm 只识别 `_cacache`，pnpm 允许 Finder 元数据；5 个缓存目录及 62 个 npx 旧安装已回收；Chromium 有域名/分区/bucket 报告、可选浏览器 API 适配器与模型选择 | osdk/Playwright 引用和活动仍待确认；浏览器适配器实际安装/删除与 TUI 接入待验收；项目所有权/活动仍限制回收 |
 | 大文件扫描 | 主功能已实现 | 同次元数据遍历、阈值、top-K、大小与覆盖状态；普通输出及动态 TUI | 更大真实负载和目标平台运行验收；大文件本身不等于垃圾 |
 | 重复文件扫描 | 主功能已实现 | 显式内容阶段、完整 SHA-256、硬链接别名排除、变化复验和读取预算；TUI 可选择保留项 | 真实云 provider、目标平台及大负载验收；完整组不代表扫描范围完整 |
 | 动态展示、交互与回收 | 主功能已实现，待完整验收 | 实时列表、选择/取消/刷新、后台 Trash；系统规则可选；浏览器离线状态禁止普通垃圾回收 | 持续交互与其他平台运行验收；本机授权后 Trash 成功，不代表所有系统挂起已消除；项目回收仍受限 |
@@ -69,7 +69,7 @@
 
 ### R3：细分常用垃圾类别并实际回收（当前优先）
 
-常用目录继续以真实占用与可回收流程推进。npx 已有核心/CLI 的工具、实际版本、整套安装大小及显式选择；保留最高已安装版本后，本机 62 个 kaboo-cli 旧安装共约 12.96 GiB 逻辑长度已放入回收站，逐项核对原目录消失与 Trash 身份；一个链接到项目的安装保持待确认。浏览器已有完整存储键/bucket 报告和可选浏览器 API 清理适配器，按域导出计划后由用户在对应浏览器个人资料确认；无法选单个分区/bucket，清除无回收站，实际扩展安装/删除尚待验收。此前 npm 等四项约 30 GiB、Yarn 约 4.71 GiB 仍在回收站，未清空、不宣称释放空间。osdk、Playwright 版本、现有通用缓存的内容细分与 TUI 选择接入仍待推进。Cargo 既有回收限制保留，Dart/SvelteKit 暂缓。
+常用目录继续以真实占用与可回收流程推进。npx 已有核心/CLI 的工具、实际版本、整套安装大小及显式选择；保留最高已安装版本后，本机 62 个 kaboo-cli 旧安装共约 12.96 GiB 逻辑长度已放入回收站，逐项核对原目录消失与 Trash 身份；一个链接到项目的安装保持待确认。浏览器已有完整存储键/bucket 报告和可选浏览器 API 清理适配器，按域导出计划后由用户在对应浏览器个人资料确认；无法选单个分区/bucket，清除无回收站，实际扩展安装/删除尚待验收。Chrome legacy 模型已有版本回收入口与专用策略配置导出；本机约 3.98 GiB 模型因 Chrome 运行而拒绝回收；专用配置已安装，用户核验 Chrome 策略值为 1、状态正常，载荷自动清除仍待观察。此前 npm 等四项约 30 GiB、Yarn 约 4.71 GiB 仍在回收站，未清空、不宣称释放空间。osdk、Playwright 版本、现有通用缓存的内容细分与 TUI 选择接入仍待推进。Cargo 既有回收限制保留，Dart/SvelteKit 暂缓。
 
 完成条件：支持范围内有正例、误报反例、变化/活动拒绝和真实用户流程；确实具备证据的类别可以从 TUI 确认回收，无法闭合的明确保留报告限制。不能把更多名称规则或更多 report-only 行视为“可清理能力已完成”。新的 Dart/SvelteKit 工作按用户调序继续暂缓。
 
@@ -96,7 +96,7 @@ Linux/Windows 原生测试、Windows MSVC、Linux bind mount/OFD/journal/隔离�
 - [当前垃圾结果现场遍历与缓存回退](current-junk-traversal-validation-2026-10-03.json)、[可移植垃圾历史](portable-junk-history-validation-2026-10-03.json)、[Windows 历史存储](windows-junk-history-validation-2026-10-03.json)。
 - [大文件/重复文件动态 TUI](file-analysis-tui-pty-2026-10-02.json)、[分析终态与呈现预算](analysis-completion-validation-2026-10-03.json)、[取消后行替换](cancelled-junk-rows-validation-2026-10-03.json)。
 - [普通扫描输出资源修复](scan-output-resource-validation-2026-10-03.json)、[多根缓存准备与负结果](cache-preparation-benchmark-2026-10-03.json)、[递归详情资源修复](detail-traversal-validation-2026-10-04.json)。
-- [npx 实际版本回收](npx-cleanup-validation-2026-10-05.json)、[浏览器清理适配器](browser-cleanup-validation-2026-10-05.json)。
+- [npx 实际版本回收](npx-cleanup-validation-2026-10-05.json)、[浏览器适配器与模型边界](browser-cleanup-validation-2026-10-05.json)。
 - [实际 debug 回收记录](../development/debug-cleanup-evidence-2026-10-03.json)：约 43.323 GiB 构建产物已通过 SweepX 放入回收站，未清空；这是操作记录，不是已释放磁盘空间或扫描性能基准。
 
 后续只需阅读本页。具体实现经过、历次检查命令与完整失败记录保留在[历史归档](design-review-history-2026-10-01-to-2026-10-04.md)和上述证据中。

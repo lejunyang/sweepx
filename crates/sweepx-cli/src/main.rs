@@ -24,6 +24,7 @@ use sweepx_core::junk::JunkService;
 use sweepx_core::junk::ProjectJunkRule as JunkRule;
 #[cfg(test)]
 use sweepx_core::junk::load_project_rules as load_project_junk_rules;
+mod browser_model_command;
 mod file_tui;
 mod junk_timings;
 mod junk_tui;
@@ -284,6 +285,20 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    /// Inspect Chrome foundation-model versions, Trash closed-browser payloads, or export a policy.
+    BrowserModel {
+        /// Select one exact installed component version; otherwise list/select all known versions.
+        #[arg(long)]
+        version: Option<String>,
+        /// Move positively identified model versions to OS Trash; requires Chrome to be stopped.
+        /// This does not disable redownloading. Model removal currently supports macOS only.
+        #[arg(long, conflicts_with = "disable_download_config")]
+        trash: bool,
+        /// Export a new macOS configuration profile with the dedicated no-download policy.
+        /// This does not install the profile; verify value 1 in chrome://policy after installation.
+        #[arg(long, value_name = "NEW_MOBILECONFIG", conflicts_with = "version")]
+        disable_download_config: Option<PathBuf>,
     },
     /// List npx tool versions and whole-installation sizes; preview or Trash selected slots.
     NpxCache {
@@ -805,6 +820,20 @@ fn main() -> ProcessExitCode {
                 trash,
                 cache_state_root,
                 timings,
+            );
+        }
+        Commands::BrowserModel {
+            version,
+            trash,
+            disable_download_config,
+        } => {
+            return browser_model_command::run(
+                version.as_deref(),
+                trash,
+                disable_download_config.as_deref(),
+                format,
+                size_unit,
+                context.locale(),
             );
         }
         Commands::NpxCache {

@@ -454,6 +454,18 @@ sweepx --format json npx-cache --root /absolute/npm-cache/_npx
 
 The default is `~/.npm/_npx`; use `--root` for redirected caches. Without `--trash`, only a plan is shown. `--older-versions` retains the highest installed semantic version per package without querying a registry; equal precedence, including different build metadata, is retained. Unknown versions, multi-package slots and incomplete size coverage are excluded. Unknown or multi-package members exclude their version group; an unrelated identified linked package does not block other complete groups. Package filtering selects direct dependencies; Trash moves whole slots and never splits their shared dependency graph. Execution rereads native identity-bound manifests. macOS/Linux check current-user process arguments and open files; Windows removal lacks an activity adapter. Refusal, partial failure and incomplete coverage remain explicit. All moves use OS Trash. Activity observations are not an exclusive lock; concurrent launches and the final pathname replacement window remain. JSON `inventory` retains the full root report, while `selection` describes this plan; fields remain locale-independent.
 
+## `browser-model`
+
+```sh
+sweepx browser-model
+sweepx browser-model --version 2025.8.8.1141 --trash
+sweepx browser-model --disable-download-config /absolute/chrome-no-model.mobileconfig
+```
+
+The current adapter measures Chrome legacy `OptGuideOnDeviceModel/<version>` and validates component manifest/config metadata. Explicit macOS selections move whole version directories to Trash; active Chrome, unavailable activity observations, native changes and incomplete data are refused. Removal on other platforms, Edge and Manifest Broker assets are unsupported. Prediction models and whole User Data are not substitute targets. Trash alone does not prevent redownload.
+
+The macOS configuration export contains only `GenAILocalFoundationalModelSettings=1`, preserving other component updates. Install it manually and verify value 1 with an OK status in `chrome://policy`. This blocks the foundation model and Chrome may remove its existing payload; features depending on that model become unavailable. Automatic policy removal does not use SweepX Trash, so quit Chrome and move payloads first if recovery is required. Removing the profile restores the default policy. Export is not installation or verification.
+
 ## `site-storage`
 
 Groups Chromium site data by domain while retaining browser, profile, full storage key, partition and bucket details. The default report is read-only and separate from `junk`; application state is not automatically disposable.

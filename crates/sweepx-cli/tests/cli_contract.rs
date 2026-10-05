@@ -4698,3 +4698,32 @@ fn npx_cache_previews_actual_versions_and_rejects_an_unknown_selection() {
         .code(2);
     assert!(root.join("0123456789abcdef").exists());
 }
+
+#[test]
+fn browser_model_policy_export_is_explicit_and_does_not_overwrite() {
+    let (_temp, root) = duplicate_fixture();
+    let path = root.join("policy.mobileconfig");
+    let output = cli_command()
+        .args([
+            "--format",
+            "json",
+            "browser-model",
+            "--disable-download-config",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["installed"], false);
+    assert_eq!(v["verified"], false);
+    assert_eq!(v["value"], 1);
+    let bytes = fs::read(&path).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("GenAILocalFoundationalModelSettings"));
+    cli_command()
+        .args(["browser-model", "--disable-download-config"])
+        .arg(&path)
+        .assert()
+        .code(3);
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}

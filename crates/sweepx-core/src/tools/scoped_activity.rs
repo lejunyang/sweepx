@@ -119,6 +119,46 @@ fn check_open_files(text: &str, scopes: &[&str], own: u32) -> Result<(), String>
     }
     Ok(())
 }
+/// Conservative browser-wide refusal for the model Trash preview on macOS. A process under any
+/// matching branded application path blocks the move even when another profile is active.
+/// This is a current-user observation, not a process singleton lock or cross-user guarantee.
+pub fn check_chrome_inactive(cancel: &CancellationToken) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // SAFETY: getuid only reads the current process identity.
+        let uid = unsafe { libc::getuid() }.to_string();
+        let mut runner = ProbeRunner::new(
+            ProbeLimits {
+                total_timeout: Duration::from_secs(5),
+                probe_timeout: Duration::from_secs(4),
+                max_processes: 1,
+                max_stdout_bytes: 8 * 1024 * 1024,
+            },
+            cancel.clone(),
+        );
+        let out = runner
+            .run(Command::new("/bin/ps").args(["-u", &uid, "-o", "pid=,command="]))
+            .map_err(|e| format!("browser_activity_unavailable: {e}"))?;
+        if !out.status.success() {
+            return Err("browser_process_list_failed".into());
+        }
+        let text = std::str::from_utf8(&out.stdout).map_err(|_| "browser_activity_encoding")?;
+        if text.is_empty() {
+            return Err("browser_process_list_empty".into());
+        }
+        if text.contains("Google Chrome.app/Contents/") || text.contains("Google Chrome Helper") {
+            return Err("running_browser: fully quit Chrome before moving models".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cancel;
+        Err("model_activity_host_unsupported".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

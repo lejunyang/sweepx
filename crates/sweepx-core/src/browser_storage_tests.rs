@@ -350,3 +350,46 @@ fn browser_managed_plan_has_exact_origins_without_paths_or_cookie_authority() {
     assert!(cleanup_plan(&analysis, "edge", "Default", "absent.example").is_err());
     assert!(cleanup_plan(&analysis, "edge", "../Default", "chosen.example").is_err());
 }
+
+#[test]
+fn model_versions_bind_component_metadata_and_preserve_unknown_assets() {
+    let (_temp, mut install, _profile) = fixture();
+    install.browser = "chrome".into();
+    let path = install
+        .user_data
+        .join("OptGuideOnDeviceModel/2025.8.8.1141");
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("manifest.json"),r#"{"name":"Optimization Guide On Device Model","version":"2025.8.8.1141","manifest_version":2}"#).unwrap();
+    fs::write(path.join("on_device_model_execution_config.pb"), [1u8, 2]).unwrap();
+    fs::write(path.join("weights.bin"), [3u8; 17]).unwrap();
+    let inventory = models::inventory(&install, &CancellationToken::new());
+    assert!(inventory.complete);
+    assert_eq!(inventory.versions.len(), 1);
+    let row = &inventory.versions[0];
+    assert_eq!(
+        row.bytes.as_ref().unwrap().parse::<u128>().unwrap(),
+        ordinary_bytes(&path)
+    );
+    row.revalidate(&CancellationToken::new()).unwrap();
+    fs::write(
+        path.join("manifest.json"),
+        r#"{"name":"Another model","version":"2025.8.8.1141","manifest_version":2}"#,
+    )
+    .unwrap();
+    assert!(row.revalidate(&CancellationToken::new()).is_err());
+    let inventory = models::inventory(&install, &CancellationToken::new());
+    assert!(!inventory.versions[0].complete);
+    let prediction = install.user_data.join("OptimizationGuidePredictionModels");
+    fs::create_dir(&prediction).unwrap();
+    fs::write(prediction.join("keep"), [9u8; 100]).unwrap();
+    assert_eq!(
+        models::inventory(&install, &CancellationToken::new())
+            .versions
+            .len(),
+        1
+    );
+    assert!(prediction.join("keep").exists());
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(row.revalidate(&cancel).is_err());
+}

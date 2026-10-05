@@ -26,8 +26,39 @@
     "actualExtensionInstallAndRemoval": "not_run_requires_user_browser_installation",
     "browserUiToolBlocked": "chrome://policy rejected by browser URL security policy; no workaround attempted"
   },
+  "chromeModel": {
+    "component": "OptGuideOnDeviceModel",
+    "version": "2025.8.8.1141",
+    "logicalBytes": "4269934835",
+    "metadataAndSizeComplete": true,
+    "trashAttemptExit": 8,
+    "trashAttempt": "blocked_running_browser",
+    "moved": 0,
+    "policyExport": "GenAILocalFoundationalModelSettings integer 1; standalone removable macOS profile",
+    "policyInstalled": true,
+    "policyEffective": "user_confirmed_value_1_status_ok_after_reload",
+    "redownloadDisabled": true,
+    "unrelatedComponentUpdatesChanged": false,
+    "manifestBrokerAndEdgeRemoval": "unsupported",
+    "installationEvidence": "System Settings Device Management installed-profile details; 2026-10-05 20:12 Asia/Shanghai; exact value 1",
+    "permanentPolicyRemovalAuthorized": true,
+    "postInstallObservation": {
+      "version": "2025.8.8.1141",
+      "logicalBytes": "4269934835",
+      "present": true,
+      "policyEffective": "user_confirmed_value_1_status_ok_after_reload",
+      "automaticPayloadRemoval": "not_observed",
+      "timeRelationship": "inventory repeated after manual policy acceptance"
+    },
+    "policyVerificationEvidence": "human user manually reloaded chrome://policy and confirmed value 1, status OK",
+    "futureDownloadsObserved": "not_measured"
+  },
   "sources": [
-    "https://developer.chrome.com/docs/extensions/reference/api/browsingData"
+    "https://developer.chrome.com/docs/extensions/reference/api/browsingData",
+    "https://chromeenterprise.google/intl/en_au/policies/gen-ai-local-foundational-model-settings/",
+    "https://support.google.com/chrome/a/answer/9020077?hl=en",
+    "https://raw.githubusercontent.com/chromium/chromium/main/components/policy/resources/templates/policy_definitions/GenerativeAI/GenAILocalFoundationalModelSettings.yaml",
+    "https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/GenerativeAI/GenAILocalFoundationalModelSettings.yaml"
   ],
   "validation": {
     "affectedCoreCliTests": {

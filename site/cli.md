@@ -443,6 +443,18 @@ sweepx --format json npx-cache --root /absolute/npm-cache/_npx
 
 默认位置为 `~/.npm/_npx`；重定向缓存请指定 `--root`。没有 `--trash` 时只预览。`--older-versions` 保留每个包的最高已安装语义版本（不访问注册表），同版本及仅 build metadata 不同的版本都保留；未知版本、多包槽、覆盖不完整不进入自动计划；有未知或多包成员的版本组整体排除，已识别的其他工具组可独立计划。包过滤只选择直接依赖；回收单位是整个槽，不拆除共享依赖。执行前重新读取绑定原生身份的 manifest，macOS/Linux 检查当前用户的进程参数与打开文件；Windows 活动适配尚不支持回收。拒绝、部分失败和未完成分别返回结果；始终使用 OS 回收站。活动观察不是排他锁，新的启动与最终路径替换窗口仍存在。JSON `inventory` 保留完整根报告，`selection` 是本次计划，字段不随语言变化。
 
+## `browser-model`
+
+```sh
+sweepx browser-model
+sweepx browser-model --version 2025.8.8.1141 --trash
+sweepx browser-model --disable-download-config /absolute/chrome-no-model.mobileconfig
+```
+
+本轮支持 Chrome legacy `OptGuideOnDeviceModel/<version>` 的原生大小、manifest/config 识别与元数据重验；macOS 明确选择后回收整个版本目录，拒绝正在运行的 Chrome、不可用活动观察、原生变化或不完整数据。其他平台回收、Edge 与 Manifest Broker 资产尚未支持；预测模型和整个 User Data 不是替代目标。模型回收不保证持久禁用重下。
+
+macOS 配置导出只包含 `GenAILocalFoundationalModelSettings=1`，不关闭其他组件更新。请手动安装并在 `chrome://policy` 确认该值与正常状态。此策略禁止基础模型下载，Chrome 自身可能删除已有模型，依赖该模型的能力将不可用；策略自动清除不经过 SweepX 回收站，建议先退出 Chrome 并回收载荷。移除该配置描述文件恢复默认策略。导出不等于安装或验证。
+
 ## `site-storage`
 
 按域名汇总 Chromium 网站数据，并保留浏览器、profile、完整存储键、分区和 bucket 明细。默认报告只读；网站应用状态与 `junk` 分开。

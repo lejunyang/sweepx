@@ -4,6 +4,10 @@
 //! paths in this report are display information, not authority to remove a directory. Chromium's
 //! on-disk formats are internal: unknown directories and unsupported metadata stay visible.
 
+/// Positively identified Chrome foundation-model versions and policy export.
+#[path = "browser_storage_models.rs"]
+pub mod models;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
