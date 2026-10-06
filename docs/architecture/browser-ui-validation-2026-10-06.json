@@ -126,5 +126,63 @@
     "hostSha256": "a93704eca6e0efe9c36dff2f6145b8e19db9e82d9ee18aecaddbf730cc716d87",
     "previousBundlePreserved": true
   },
-  "performanceClaims": []
+  "performanceClaims": [],
+  "fixedPathUpdate": {
+    "baseCommit": "b21a19e",
+    "bundle": "/Users/bytedance/Documents/SweepX-Browser-Extension",
+    "extensionVersion": "0.3.0",
+    "previousBundleVersion": "0.2.0",
+    "command": "browser-extension bundle --output /Users/bytedance/Documents/SweepX-Browser-Extension --update",
+    "replacementScope": "generated files only; isolated fixture root/extension notes preserved",
+    "publication": "atomic per file; not a whole-bundle transaction; interrupted updates can be retried",
+    "export": "passed, seven shipped assets match source",
+    "hostSha256": "6bf0e479ccd464b97746de079af1aaf724b30e176cf39c1b0fcfb74363864860",
+    "edgeHostRegistration": "passed, fixed bundle path and unchanged allowed origin",
+    "observedEdgeLoadedPath": "/Users/bytedance/Documents/SweepX-Browser-Extension-0.2.1/extension",
+    "browserNextStep": "load fixed extension directory once, then reload/reopen for subsequent updates",
+    "checks": [
+      {
+        "command": "cargo fmt --all --check"
+      },
+      {
+        "command": "cargo test -p sweepx-cli --all-features browser_extension::tests --bin sweepx",
+        "tests": 11
+      },
+      {
+        "command": "cargo test -p sweepx-cli --test browser_bridge --all-features",
+        "tests": 3
+      },
+      {
+        "command": "cargo test -p sweepx-cli --all-features",
+        "context": "outside filesystem sandbox for isolated macOS Trash fixture",
+        "unit": 66,
+        "browserBridge": 3,
+        "cliContract": 77,
+        "elevationRelay": 1
+      },
+      {
+        "command": "cargo clippy -p sweepx-cli --all-targets --all-features -- -D warnings"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+        "target": "host macOS aarch64"
+      },
+      {
+        "command": "cargo build -p sweepx-cli --release --all-features"
+      },
+      {
+        "command": "python3 scripts/lint_docs.py",
+        "markdownFiles": 58
+      },
+      {
+        "command": "python3 -m unittest discover -s scripts/tests -p 'test_lint_docs.py'",
+        "tests": 23
+      }
+    ],
+    "frontendChecks": "reused passing checks from unchanged b21a19e UI assets",
+    "runtimePlatformsTested": [
+      "macOS aarch64"
+    ],
+    "realBrowserRemovalExecuted": false
+  }
 }

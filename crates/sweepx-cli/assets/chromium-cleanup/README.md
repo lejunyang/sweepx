@@ -5,15 +5,21 @@ SweepX embeds this Manifest V3 extension and exports a private bundle containing
 ## Installation and updates
 
 ```sh
-sweepx browser-extension bundle --output /absolute/new-bundle
-sweepx browser-extension register --browser chrome --bundle /absolute/new-bundle
+sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension
+sweepx browser-extension register --browser chrome --bundle /absolute/SweepX-Browser-Extension
 ```
 
-In the matching browser profile, open Extensions, enable Developer mode and load `/absolute/new-bundle/extension` unpacked. For Edge register with `--browser edge`. Click SweepX and use Site storage to connect and scan. Choose the actual browser and profile directory (e.g. `Default`) in Connection & settings. Check the profile directory in the browser version information if unsure: extensions cannot prove the native profile identity.
+In the matching browser profile, open Extensions, enable Developer mode and load `/absolute/SweepX-Browser-Extension/extension` unpacked. For Edge register with `--browser edge`. Click SweepX and use Site storage to connect and scan. Choose the actual browser and profile directory (e.g. `Default`) in Connection & settings. Check the profile directory in the browser version information if unsure: extensions cannot prove the native profile identity.
 
 `register` supports stable Chrome/Edge on macOS/Linux, uses the current user's official NativeMessagingHosts location and only allows the fixed unpacked extension ID. Existing final registration directories must be current-user private; unsafe permissions or linked ancestors are refused without repair. Exported bundles must match this SweepX build's embedded assets and executable digest. Windows bundles include the host executable and manifest, but require manual HKCU registration following `INSTALL.txt`; no registry automation is implemented. Beta/Dev native registration is not automated.
 
-Update by exporting a NEW bundle from the new SweepX build, registering it with `--replace`, then loading/reloading the new extension directory in the browser. The old bundle is preserved. Replacement only admits an existing SweepX host registration and never overwrites another host. Keep the registered bundle at its installed location. This is a local development distribution, not a signed/store release; silent install and automatic store updates are not implemented. Organizational refusal is never bypassed.
+Keep one stable bundle directory. Update its generated files in place with the new SweepX build:
+
+```sh
+sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension --update
+```
+
+Then reload the installed extension and close/reopen the workbench tab. Registration is not needed again when the host path stays the same. `--update` requires an identified private SweepX bundle, refuses linked/unsafe generated files and preserves unrelated files. Files are replaced atomically one at a time; the whole bundle is not a transaction, so repeat an interrupted update before reloading. On Windows disconnect browser connections to the native host before updating. If previously loading a versioned directory, switch to the fixed `extension` directory once and use `register --replace` to point the existing host registration there. Registration replacement only admits an existing SweepX host and never overwrites another host. Keep the registered bundle at its installed location. This is a local development distribution, not a signed/store release; silent install and automatic store updates are not implemented. Organizational refusal is never bypassed.
 
 The public manifest key pins the development ID `bcidfcdfefinmefhopannchcnicdopad`. It is not a secret, a code signature or user authentication; the private generation key is not shipped. Publishing to a store needs a separately verified signing/store identity and corresponding allowlist registration. Do not widen the allowlist to arbitrary extensions.
 

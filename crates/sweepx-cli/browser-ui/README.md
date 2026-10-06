@@ -20,6 +20,9 @@ pnpm preview
 
 `build` generates embedded assets. `check` compares all generated output with the
 committed files; CI refuses stale output. Format source with Prettier before building.
+After building the frontend, rebuild the SweepX binary and export with
+`browser-extension bundle --output /absolute/SweepX-Browser-Extension --update`
+to keep the installed path stable. Reload the extension and reopen the workbench.
 Dependency installation scripts are disabled; esbuild uses its optional platform binary.
 
 `preview` serves a static, whitelisted development page at `http://127.0.0.1:4173/`.

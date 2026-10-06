@@ -61,12 +61,15 @@ const ASSETS: &[(&str, &str)] = &[
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
-    /// Export embedded extension and a stable host executable into a NEW private directory.
+    /// Export embedded extension and a stable host executable into a private directory.
     /// Direct website clearing works without the host; register it for storage inventory.
-    /// For updates export a new bundle, register it with --replace, then load the new directory.
+    /// Use --update to refresh the same bundle, then reload the extension in the browser.
     Bundle {
-        #[arg(long, value_name = "NEW_ABSOLUTE_DIRECTORY")]
+        #[arg(long, value_name = "ABSOLUTE_DIRECTORY")]
         output: PathBuf,
+        /// Update only generated files in an existing SweepX bundle; preserve other files.
+        #[arg(long)]
+        update: bool,
     },
     /// Register the bundled host for stable Chrome/Edge on macOS/Linux, without admin policy.
     /// This grants the fixed extension ID access to read-only SweepX inventory and requests.
@@ -94,7 +97,7 @@ pub(crate) enum Commands {
 
 pub(crate) fn run(command: Commands) -> ExitCode {
     let result = match command {
-        Commands::Bundle { output } => export_bundle(&output),
+        Commands::Bundle { output, update } => export_bundle(&output, update),
         Commands::Register {
             browser,
             bundle,
@@ -160,42 +163,80 @@ fn host_manifest(bundle: &Path) -> io::Result<Value> {
     )
 }
 
-fn export_bundle(output: &Path) -> io::Result<Value> {
+fn export_bundle(output: &Path, update: bool) -> io::Result<Value> {
     if !output.is_absolute() {
         return Err(io::Error::other("bundle_path_must_be_absolute"));
     }
-    match std::fs::symlink_metadata(output) {
-        Ok(_) => return Err(io::Error::other("bundle_directory_already_exists")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-        Err(e) => return Err(e),
+    if !update {
+        match std::fs::symlink_metadata(output) {
+            Ok(_) => return Err(io::Error::other("bundle_directory_already_exists")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+        }
     }
-    let root = Directory::open(output, true)?;
-    let extension = root.create_child("extension")?;
-    for (name, contents) in ASSETS {
-        let mut file = extension.create_state_file(name)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
+    // Other Unix targets do not expose the retained executable-permission operation.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    if update {
+        return Err(io::Error::other("bundle_update_unsupported_platform"));
     }
+    let root = Directory::open(output, !update)?;
+    let _lock = root.lock()?;
+    let extension = if update {
+        let extension = root.child("extension")?;
+        validate_update(&root, &extension, output)?;
+        extension
+    } else {
+        root.create_child("extension")?
+    };
     let mut source = File::open(std::env::current_exe()?)?;
-    if source.metadata()?.len() > EXECUTABLE_CAP {
+    let source_length = source.metadata()?.len();
+    if source_length > EXECUTABLE_CAP {
         return Err(io::Error::other("executable_size_limit"));
     }
-    let mut executable = root.create_state_file(host_filename())?;
-    let copied = io::copy(
-        &mut Read::by_ref(&mut source).take(EXECUTABLE_CAP + 1),
-        &mut executable,
-    )?;
-    if copied > EXECUTABLE_CAP {
-        return Err(io::Error::other("executable_size_limit"));
+    let replacement = if update {
+        let mut bytes = Vec::new();
+        let length = usize::try_from(source_length).map_err(io::Error::other)?;
+        bytes.try_reserve_exact(length).map_err(io::Error::other)?;
+        bytes.resize(length, 0);
+        source.read_exact(&mut bytes)?;
+        if source.read(&mut [0])? != 0 {
+            return Err(io::Error::other("executable_changed_during_read"));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    for (name, contents) in ASSETS {
+        write_bundle_file(&extension, name, contents.as_bytes(), INPUT_CAP, update)?;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        executable.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    if let Some(bytes) = replacement {
+        // Publish a new inode rather than truncating a host that the browser may be running.
+        root.write_synced_bytes(host_filename(), &bytes, EXECUTABLE_CAP as usize)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let (executable, _) = root.state_file(host_filename(), false)?;
+            executable.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            executable.sync_all()?;
+        }
+    } else {
+        let mut executable = root.create_state_file(host_filename())?;
+        let copied = io::copy(
+            &mut Read::by_ref(&mut source).take(EXECUTABLE_CAP + 1),
+            &mut executable,
+        )?;
+        if copied > EXECUTABLE_CAP {
+            return Err(io::Error::other("executable_size_limit"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            executable.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        }
+        executable.sync_all()?;
+        // Windows exclusive creation denies other readers until close, including digest checks.
+        drop(executable);
     }
-    executable.sync_all()?;
-    // Windows exclusive creation denies other readers until close, including digest checks.
-    drop(executable);
     let manifest = host_manifest(output)?;
     root.write_json("org.sweepx.browser_bridge.json", &manifest, INPUT_CAP)?;
     root.write_json(
@@ -205,16 +246,71 @@ fn export_bundle(output: &Path) -> io::Result<Value> {
         "hostSha256":hash_file(&output.join(host_filename()))?}),
         INPUT_CAP,
     )?;
-    let mut guide = root.create_state_file("INSTALL.txt")?;
-    guide.write_all(format!(
-        "SweepX 浏览器扩展 / Browser extension\n\n1. In the matching browser profile, open its Extensions page, enable Developer mode, Load unpacked: {}/extension\n2. Click SweepX. Clear a website works independently: enter an exact hostname or HTTP(S) origin, review scope and confirm the current profile. Size remains unknown.\n   指定网站清理无需连接本地组件；输入精确网站并确认范围，大小为未知。\n3. For disk inventory and SweepX requests, register the optional native host:\n   sweepx browser-extension register --browser chrome --bundle '{}'\n   Edge: --browser edge. Updating an existing SweepX host: add --replace.\n4. In Connection & settings choose the matching browser/profile directory, then use Scan storage. Review each domain before removal.\n\n更新 / Update: export a NEW bundle with the new SweepX version, register --replace, and load the new extension directory (remove the old unpacked entry if the browser refuses the same ID). Reloading the OLD directory does not switch paths. Local unpacked updates are manual; no store release exists.\n\nmacOS/Linux registration supported. Windows: register HKCU Software\\Google\\Chrome (or Microsoft\\Edge)\\NativeMessagingHosts\\{HOST} default REG_SZ as the absolute path to org.sweepx.browser_bridge.json. Registry installation is not automated.\n\nPermissions: browsingData, nativeMessaging; no host/all-URL, cookie, history or page-injection permission. Browser policy may refuse; do not bypass it. Removal has no Trash. Keep this bundle at its installed path. Extension ID {EXTENSION_ID}.\n",
-        output.display(),output.display()).as_bytes())?;
-    guide.sync_all()?;
+    let guide = format!(
+        "SweepX 浏览器扩展 / Browser extension\n\n1. In the matching browser profile, open its Extensions page, enable Developer mode, Load unpacked: {}/extension\n2. Click SweepX. Clear a website works independently: enter an exact hostname or HTTP(S) origin, review scope and confirm the current profile. Size remains unknown.\n   指定网站清理无需连接本地组件；输入精确网站并确认范围，大小为未知。\n3. For disk inventory and SweepX requests, register the optional native host:\n   sweepx browser-extension register --browser chrome --bundle '{}'\n   Edge: --browser edge. Updating an existing SweepX host: add --replace.\n4. In Connection & settings choose the matching browser/profile directory, then use Scan storage. Review each domain before removal.\n\n更新 / Update: keep this bundle at the same path. With the new SweepX build run:\n   sweepx browser-extension bundle --output '{}' --update\nThen reload the installed extension and close/reopen its workbench tab. Only generated files are replaced; other files are preserved. The native host path stays the same, so registration is not needed again. Close browser connections to the host before updating on Windows. Files are replaced individually; if interrupted, repeat the update before reloading.\n   更新直接写回此目录，然后重新加载扩展并重新打开工作台。若之前加载的是另一个版本目录，需先切换到此 extension 目录一次；之后只需重新加载。\nLocal unpacked updates are manual; no store release exists.\n\nmacOS/Linux registration supported. Windows: register HKCU Software\\Google\\Chrome (or Microsoft\\Edge)\\NativeMessagingHosts\\{HOST} default REG_SZ as the absolute path to org.sweepx.browser_bridge.json. Registry installation is not automated.\n\nPermissions: browsingData, nativeMessaging; no host/all-URL, cookie, history or page-injection permission. Browser policy may refuse; do not bypass it. Removal has no Trash. Keep this bundle at its installed path. Extension ID {EXTENSION_ID}.\n",
+        output.display(),
+        output.display(),
+        output.display()
+    );
+    write_bundle_file(&root, "INSTALL.txt", guide.as_bytes(), INPUT_CAP, update)?;
     Ok(
         json!({"schema":"sweepx.browser_extension.bundle/v1","bundle":output,
         "extensionDirectory":output.join("extension"),"extensionId":EXTENSION_ID,
         "hostRegistered":false,"extensionInstalled":false,"guide":output.join("INSTALL.txt")}),
     )
+}
+
+// A fixed-path update is a software deployment, never a browser-data cleanup. Admit only an
+// identified private SweepX bundle and preflight every generated entry before replacing any.
+// Publication is atomic per file, not across the bundle. Deliberately accept an old host digest:
+// an interrupted update must be retryable even after the executable or metadata was replaced.
+fn validate_update(root: &Directory, extension: &Directory, output: &Path) -> io::Result<()> {
+    let metadata = read_json(root, "bundle.json")?
+        .ok_or_else(|| io::Error::other("bundle_metadata_missing"))?;
+    let manifest = read_json(extension, "manifest.json")?
+        .ok_or_else(|| io::Error::other("bundle_extension_manifest_missing"))?;
+    let expected: Value = serde_json::from_str(ASSETS[0].1).map_err(io::Error::other)?;
+    if metadata["schema"] != "sweepx.browser_extension.bundle/v1"
+        || metadata["extensionId"] != EXTENSION_ID
+        || manifest["manifest_version"] != 3
+        || manifest["key"] != expected["key"]
+        || read_json(root, "org.sweepx.browser_bridge.json")? != Some(host_manifest(output)?)
+    {
+        return Err(io::Error::other(
+            "bundle_update_requires_existing_sweepx_bundle",
+        ));
+    }
+    for (name, _) in ASSETS {
+        require_bundle_file(extension, name, INPUT_CAP as u64)?;
+    }
+    require_bundle_file(root, host_filename(), EXECUTABLE_CAP)?;
+    require_bundle_file(root, "INSTALL.txt", INPUT_CAP as u64)
+}
+
+fn require_bundle_file(directory: &Directory, name: &str, cap: u64) -> io::Result<()> {
+    if directory.read_bytes(name, cap)?.contents.is_none() {
+        return Err(io::Error::other("bundle_file_size_limit"));
+    }
+    Ok(())
+}
+
+fn write_bundle_file(
+    directory: &Directory,
+    name: &str,
+    bytes: &[u8],
+    cap: usize,
+    update: bool,
+) -> io::Result<()> {
+    if update {
+        directory.write_synced_bytes(name, bytes, cap)
+    } else {
+        if bytes.len() > cap {
+            return Err(io::Error::other("bundle_file_size_limit"));
+        }
+        let mut file = directory.create_state_file(name)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
 }
 
 fn read_json(directory: &Directory, name: &str) -> io::Result<Option<Value>> {

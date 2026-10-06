@@ -245,6 +245,24 @@ fn registration_updates_only_owned_host_and_preserves_old_bundle_and_foreign_man
     let original = std::fs::read(&manifest).unwrap();
     assert!(!register(bundle, false).status.success());
     assert_eq!(std::fs::read(&manifest).unwrap(), original);
+    // Fixed-path software updates leave the existing registration valid and executable.
+    std::fs::write(bundle.join("user-note"), b"keep").unwrap();
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sweepx"))
+        .args(["browser-extension", "bundle", "--update", "--output"])
+        .arg(bundle)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), original);
+    assert_eq!(std::fs::read(bundle.join("user-note")).unwrap(), b"keep");
+    let mut host = Host::start(&executable, &home);
+    host.send(json!({"op":"hello","id":"updated"}));
+    assert_eq!(host.next()["kind"], "hello");
+    drop(host);
     let updated = home.join("updated-bundle");
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sweepx"))
         .args(["browser-extension", "bundle", "--output"])

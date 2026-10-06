@@ -143,7 +143,7 @@ fn expired_requests_cannot_report_new_browser_success() {
 #[test]
 fn bundles_are_embedded_reproducible_and_do_not_overwrite_user_files() {
     let (_temp, root) = fixture();
-    let exported = export_bundle(&root).unwrap();
+    let exported = export_bundle(&root, false).unwrap();
     assert_eq!(exported["extensionInstalled"], false);
     assert_eq!(exported["hostRegistered"], false);
     let directory = Directory::open(&root, false).unwrap();
@@ -165,10 +165,108 @@ fn bundles_are_embedded_reproducible_and_do_not_overwrite_user_files() {
         hash_file(&std::env::current_exe().unwrap()).unwrap()
     );
     std::fs::write(root.join("user-note"), "keep").unwrap();
-    assert!(export_bundle(&root).is_err());
+    assert!(export_bundle(&root, false).is_err());
     assert_eq!(
         std::fs::read_to_string(root.join("user-note")).unwrap(),
         "keep"
+    );
+}
+
+#[test]
+fn fixed_bundle_updates_replace_generated_files_preserve_notes_and_allow_retry() {
+    let (_temp, root) = fixture();
+    export_bundle(&root, false).unwrap();
+    std::fs::write(root.join("user-note"), "keep root note").unwrap();
+    std::fs::write(root.join("extension/user-note"), "keep extension note").unwrap();
+    std::fs::write(root.join("extension/review.mjs"), "old UI").unwrap();
+    // Simulate an interrupted deployment: an old digest must not prevent repair/retry.
+    let directory = Directory::open(&root, false).unwrap();
+    let mut metadata = read_json(&directory, "bundle.json").unwrap().unwrap();
+    metadata["hostSha256"] = json!("previous build");
+    directory
+        .write_json("bundle.json", &metadata, INPUT_CAP)
+        .unwrap();
+    export_bundle(&root, true).unwrap();
+    for (name, contents) in ASSETS {
+        assert_eq!(
+            std::fs::read(root.join("extension").join(name)).unwrap(),
+            contents.as_bytes()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("user-note")).unwrap(),
+        "keep root note"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("extension/user-note")).unwrap(),
+        "keep extension note"
+    );
+    assert_eq!(
+        read_json(&directory, "bundle.json").unwrap().unwrap()["hostSha256"],
+        hash_file(&std::env::current_exe().unwrap()).unwrap()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(root.join(host_filename()))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+}
+
+#[test]
+fn updates_refuse_foreign_or_incomplete_bundles_before_replacing_any_asset() {
+    let (_temp, root) = fixture();
+    assert!(export_bundle(&root, true).is_err());
+    assert!(!root.exists());
+    export_bundle(&root, false).unwrap();
+    let directory = Directory::open(&root, false).unwrap();
+    let mut metadata = read_json(&directory, "bundle.json").unwrap().unwrap();
+    let first_asset = root.join("extension/open.js");
+    std::fs::write(&first_asset, "keep unchanged before refusal").unwrap();
+    metadata["extensionId"] = json!("foreign");
+    directory
+        .write_json("bundle.json", &metadata, INPUT_CAP)
+        .unwrap();
+    assert!(export_bundle(&root, true).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&first_asset).unwrap(),
+        "keep unchanged before refusal"
+    );
+    metadata["extensionId"] = json!(EXTENSION_ID);
+    directory
+        .write_json("bundle.json", &metadata, INPUT_CAP)
+        .unwrap();
+    std::fs::remove_file(root.join("INSTALL.txt")).unwrap();
+    assert!(export_bundle(&root, true).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&first_asset).unwrap(),
+        "keep unchanged before refusal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn updates_preflight_links_without_touching_any_asset_or_link_target() {
+    use std::os::unix::fs::symlink;
+    let (_temp, root) = fixture();
+    export_bundle(&root, false).unwrap();
+    let first_asset = root.join("extension/open.js");
+    std::fs::write(&first_asset, "keep unchanged before refusal").unwrap();
+    let target = root.with_file_name("user-data");
+    std::fs::write(&target, "never replace").unwrap();
+    std::fs::remove_file(root.join("extension/bridge.mjs")).unwrap();
+    symlink(&target, root.join("extension/bridge.mjs")).unwrap();
+    assert!(export_bundle(&root, true).is_err());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "never replace");
+    assert_eq!(
+        std::fs::read_to_string(&first_asset).unwrap(),
+        "keep unchanged before refusal"
     );
 }
 
@@ -182,7 +280,7 @@ fn mailbox_and_export_refuse_symlinked_ancestors_without_touching_targets() {
     symlink(&root, &linked).unwrap();
     assert!(publish_request(&linked, plan()).is_err());
     assert!(!root.join("pending.json").exists());
-    assert!(export_bundle(&linked.join("bundle")).is_err());
+    assert!(export_bundle(&linked.join("bundle"), false).is_err());
     assert!(!root.join("bundle").exists());
 }
 

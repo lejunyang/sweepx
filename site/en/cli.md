@@ -469,19 +469,19 @@ This command only exports a configuration file; it does not write or install a s
 ## `browser-extension`
 
 ```sh
-sweepx browser-extension bundle --output /absolute/new-bundle
-sweepx browser-extension register --browser chrome --bundle /absolute/new-bundle
+sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension
+sweepx browser-extension register --browser chrome --bundle /absolute/SweepX-Browser-Extension
 sweepx browser-extension request --browser chrome --profile Default --domain example.com
 sweepx browser-extension status
 ```
 
-`bundle` exports embedded assets, a copied native host and `INSTALL.txt` into a new private directory; existing directories are refused. `register` supports current-user stable Chrome/Edge on macOS/Linux; use `--browser edge` for Edge. Windows HKCU registration is manual using the exported guide; Beta/Dev registration is not automated. Unsafe final-directory permissions or linked ancestors are refused without repair.
+`bundle` exports embedded assets, a copied native host and `INSTALL.txt` into a new private directory; existing directories are refused by default. `--update` replaces generated files only in an identified private SweepX bundle, preserving other files. `register` supports current-user stable Chrome/Edge on macOS/Linux; use `--browser edge` for Edge. Windows HKCU registration is manual using the exported guide; Beta/Dev registration is not automated. Unsafe final-directory permissions or linked ancestors are refused without repair.
 
 First load the exported `extension` directory unpacked from the matching browser's Extensions page with Developer mode enabled. The workbench provides usage summaries, searchable/sortable websites, partition details and a separate clearing confirmation. Scan storage connects automatically; check the browser/profile directory in Connection & settings. Clear a website also works without SweepX: enter an exact hostname or HTTP(S) origin, confirm the current browser profile and choose scope; its size remains unknown. A hostname explicitly includes HTTP/HTTPS default ports, while an explicit origin preserves its port. Subdomains are excluded. The browser launches the local host; no always-running SweepX daemon or network service is needed. Inventory covers recognized native storage, with shared/unattributed categories shown separately, not every site's total footprint.
 
 `request` queues one exact selection for 15 minutes, without removal. Open the matching extension review tab to apply or reject it. `status` reports the pending request and last browser-reported result. Connecting checks immediately; visible, idle pages check every five seconds without replacing a domain under review. The manual Check requests button works during domain review. An incoming request resets removal confirmations; reconnecting can display the same unhandled request again. Empty results, expired requests, browser/profile mismatches and read errors are distinct. The request deadline is rechecked immediately before the browser clearing call. API completion does not prove reclaimed bytes. Clearing has no Trash, storage may contain unsynced work, and native profile identity requires user confirmation. Cookies, history, passwords and extension data are excluded.
 
-Update by exporting a **new directory** from the new SweepX build, registering with `--replace`, then loading/reloading that extension directory in the browser. The old bundle is preserved. No store publication, silent installation or automatic store update is implemented; organizational refusal is never bypassed. User screenshots confirm actual domain/detail display in Edge; browser-managed removal still awaits native acceptance. See the [adapter guide](../../integrations/chromium-cleanup/README.md).
+Keep the same directory for updates: run `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update` with the new build, then reload the extension and close/reopen its workbench tab. The registered host path stays valid. If previously loading a versioned directory, switch to the fixed `extension` directory once and use `register --replace` to adjust the existing SweepX registration. Files are replaced atomically one at a time; the whole bundle is not a transaction. Repeat an interrupted update before reloading. On Windows disconnect browser connections to the native host before updating. No store publication, silent installation or automatic store update is implemented; organizational refusal is never bypassed. User screenshots confirm actual domain/detail display in Edge; browser-managed removal still awaits native acceptance. See the [adapter guide](../../integrations/chromium-cleanup/README.md).
 
 ## `site-storage`
 

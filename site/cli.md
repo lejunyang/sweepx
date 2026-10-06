@@ -458,19 +458,19 @@ sweepx browser-model --disable-download-config /absolute/chrome-no-model.mobilec
 ## `browser-extension`
 
 ```sh
-sweepx browser-extension bundle --output /absolute/new-bundle
-sweepx browser-extension register --browser chrome --bundle /absolute/new-bundle
+sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension
+sweepx browser-extension register --browser chrome --bundle /absolute/SweepX-Browser-Extension
 sweepx browser-extension request --browser chrome --profile Default --domain example.com
 sweepx browser-extension status
 ```
 
-程序内置扩展源文件，`bundle` 创建新的私有目录，包含扩展、独立通信组件及 `INSTALL.txt`，拒绝覆盖已有目录。`register` 在 macOS/Linux 为当前用户的稳定版 Chrome/Edge 注册通信组件；Edge 使用 `--browser edge`。Windows 注册需依导出的说明手动设置 HKCU；Beta/Dev 注册未自动化。最后一级注册目录权限不安全或祖先含链接时拒绝，且不修复现有权限。
+程序内置扩展源文件，`bundle` 创建新的私有目录，包含扩展、独立通信组件及 `INSTALL.txt`，默认拒绝覆盖已有目录；`--update` 只更新已识别的私有 SweepX bundle 中的生成文件，保留其他文件。`register` 在 macOS/Linux 为当前用户的稳定版 Chrome/Edge 注册通信组件；Edge 使用 `--browser edge`。Windows 注册需依导出的说明手动设置 HKCU；Beta/Dev 注册未自动化。最后一级注册目录权限不安全或祖先含链接时拒绝，且不修复现有权限。
 
 首次需在对应浏览器的扩展页启用开发者模式并加载导出的 `extension` 目录。扩展工作台支持占用概览、搜索排序的网站列表、存储分区明细和独立的清理确认。点击「扫描占用」可自动连接；在「连接与设置」核对当前浏览器和 profile 目录。也可在「指定网站清理」输入精确域名或 HTTP(S) origin，完全不连接 SweepX，由当前浏览器确认清理；此模式的大小为未知。裸域名明确包含 HTTP/HTTPS 默认端口，显式 origin 保留端口，不包含子域名。浏览器启动本地组件，不需要一直运行 SweepX 或网络服务。扩展只能展示 SweepX 已识别的存储；共享及未归属数据单独显示，不声称覆盖所有网站数据。
 
 `request` 仅排队一个精确域名的待确认计划，15 分钟有效；打开匹配的扩展确认页处理或拒绝，`status` 查看待处理和最后回传结果。连接后立即检查请求，空闲且可见的页面每五秒检查一次；自动检查不覆盖正在核对的域名，手动“检查待确认请求”可在选中域名时使用。新请求重置清理范围和确认信息；重新连接后可再次查看尚未处理的同一请求，无请求、请求过期、浏览器/profile 不匹配或读取错误均有提示；实际调用清理接口前再次检查请求有效期。完成报告表示浏览器 API 已完成，不证明空间释放。网站存储可能有未同步内容，清除无回收站；Cookie、历史、密码和扩展数据不清除，个人资料身份需用户确认。
 
-更新时用新版 SweepX 导出**新目录**，`register --replace` 替换原 SweepX 通信注册，再在浏览器加载/重新加载新扩展目录。旧目录保留。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。用户已在 Edge 展示实际域名明细，实际删除仍待本机验收。详见[扩展指南](../integrations/chromium-cleanup/README.md)。
+更新时保持目录不变，用新版 SweepX 执行 `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update`，然后在浏览器重新加载扩展并重新打开工作台；原通信注册路径不变，无需重复注册。此前若加载了版本目录，先切换到固定 `extension` 目录一次，并用 `register --replace` 调整原 SweepX 注册。更新逐个原子替换文件，整个 bundle 不是原子事务；中断后重新执行更新，成功后再重新加载。Windows 更新前需断开使用本地组件的浏览器连接。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。用户已在 Edge 展示实际域名明细，实际删除仍待本机验收。详见[扩展指南](../integrations/chromium-cleanup/README.md)。
 
 ## `site-storage`
 
