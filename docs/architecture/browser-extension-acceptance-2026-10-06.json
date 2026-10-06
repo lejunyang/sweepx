@@ -122,8 +122,24 @@
       }
     },
     "installedBrowserRetest": {
-      "status": "awaiting_user_reload_and_rejection",
-      "reason": "Fresh 0.2.1 bundle exported and registered; user asked to load it and reject the test request because browser tool blocks extension pages"
+      "status": "passed_user_operated_rejection",
+      "build": "4c405c8 release",
+      "extensionVersion": "0.2.1",
+      "userReportedInstallation": true,
+      "userConfirmedRejection": true,
+      "profile": "Default",
+      "browser": "edge",
+      "cliQueuedExactRequest": true,
+      "resultMatchesPublishedRequestId": true,
+      "resultStatus": "rejected",
+      "resultMode": null,
+      "pendingRequestRemoved": true,
+      "cliStatusConfirmsResult": true,
+      "evidence": "browser_extension_report",
+      "browserManagedDeletionTested": false,
+      "reclaimedBytes": null,
+      "independentlyVerifiedRemoval": false,
+      "rawRequestAndResultCommitted": false
     },
     "bundleDelivery": {
       "status": "passed",
@@ -132,6 +148,18 @@
       "hostSha256": "872fa983004c5dfe6925a0c1913b1bcb648d06fc54889f49f6b8421fd08418cd",
       "edgeRegistrationUpdated": true,
       "oldBundlePreserved": true
+    },
+    "expiredRequestDiagnostic": {
+      "observedDate": "2026-10-06",
+      "userObservedStatus": "edge / Default: No active pending request",
+      "requestExpiredAtObservation": true,
+      "secondsAfterExpiry": 374,
+      "nativePendingQueryCompleted": true,
+      "communicationTimeoutObserved": false,
+      "installedPathMatchesUpdatedBundle": true,
+      "stateFilesOwnedByCurrentUserWithPrivateModes": true,
+      "freshRequestThenRejectionVerified": true,
+      "remainingUsabilityGap": "Expired and absent requests share the same empty-state message"
     }
   }
 }
