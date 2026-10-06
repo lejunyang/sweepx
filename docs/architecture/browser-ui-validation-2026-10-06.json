@@ -1,0 +1,130 @@
+{
+  "schema": "sweepx.browser_ui.validation/v1",
+  "date": "2026-10-06",
+  "host": "macOS aarch64",
+  "rust": "1.98.0",
+  "node": "24.19.0",
+  "extensionVersion": "0.3.0",
+  "baseCommit": "e1271b8",
+  "crateCountChange": 0,
+  "architecture": {
+    "frontend": "modular ESM with esbuild; no runtime framework",
+    "source": "crates/sweepx-cli/browser-ui",
+    "embedded": "review.html, review.css, review.mjs; shared logic.mjs/bridge.mjs",
+    "standaloneRemoval": true,
+    "standaloneFullProfileByteInventory": false,
+    "standaloneBytes": "unknown",
+    "permissions": [
+      "browsingData",
+      "nativeMessaging"
+    ],
+    "nativeDaemonRequired": false,
+    "previewReadsRealProfile": false,
+    "previewMutatesBrowserData": false
+  },
+  "passedChecks": [
+    {
+      "command": "pnpm install --frozen-lockfile --ignore-scripts",
+      "context": "browser-ui, pinned pnpm 11.25.0"
+    },
+    {
+      "command": "pnpm check",
+      "context": "browser-ui and caller-independent build regression"
+    },
+    {
+      "command": "pnpm format:check",
+      "context": "frontend source"
+    },
+    {
+      "command": "pnpm test",
+      "tests": 22
+    },
+    {
+      "command": "cargo fmt --all --check"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+    },
+    {
+      "command": "cargo test -p sweepx-cli browser_extension --all-features",
+      "tests": 8
+    },
+    {
+      "command": "cargo test -p sweepx-cli --test browser_bridge --all-features",
+      "tests": 3
+    },
+    {
+      "command": "cargo test -p sweepx-cli --test elevation_relay --all-features",
+      "tests": 1
+    },
+    {
+      "command": "cargo test -p sweepx-cli --test cli_contract trash_moves_ordinary_paths_without_confirmation_in_machine_invocations --all-features -- --exact",
+      "tests": 1,
+      "context": "outside filesystem sandbox; isolated temporary file only"
+    },
+    {
+      "command": "cargo build -p sweepx-cli --release --all-features"
+    },
+    {
+      "command": "cargo clippy -p sweepx-cli --all-targets --all-features -- -D warnings",
+      "context": "after installation-guide update"
+    }
+  ],
+  "initialFailures": [
+    {
+      "command": "cargo test -p sweepx-cli --all-features",
+      "passed": {
+        "unit": 63,
+        "browserBridge": 3,
+        "cliContract": 76
+      },
+      "failed": [
+        "trash_moves_ordinary_paths_without_confirmation_in_machine_invocations"
+      ],
+      "reason": "macOS trashItemAtURL denied sandbox access to Trash",
+      "laterStepUntested": "elevation_relay did not run in the failed full command; it passed separately",
+      "resolution": "Same exact test passed outside the sandbox without product/test changes. The original sandbox suite is not reported as green."
+    },
+    {
+      "command": "frontend install using host default internal registry",
+      "reason": "registry lacked transitive tr46 version; project explicitly uses npm public registry"
+    },
+    {
+      "command": "pnpm check from browser-ui before fixing build cwd",
+      "reason": "generated section comments depended on caller working directory",
+      "resolution": "Build absWorkingDir fixed to source root; independent temp-directory regression passes"
+    }
+  ],
+  "uiPreview": {
+    "environment": "loopback static synthetic fixture, Codex in-app browser",
+    "compiledOutputExercised": true,
+    "observed": [
+      "empty state",
+      "scan connects automatically",
+      "scan completion and partial status",
+      "domain list and detail breakdown",
+      "exact-origin clearing dialog",
+      "scope/profile/domain confirmation gates",
+      "simulated API pending and completion",
+      "disconnect and direct clearing view",
+      "search filter",
+      "Chinese and English",
+      "390px narrow layout without document horizontal overflow",
+      "1440px desktop layout"
+    ],
+    "consoleErrors": 0,
+    "screenshot": "/private/tmp/sweepx-browser-ui-0.3.0.jpg",
+    "realBrowserRemovalExecuted": false
+  },
+  "delivery": {
+    "bundle": "/Users/bytedance/Documents/SweepX-Browser-Extension-0.3.0",
+    "extensionInstallation": "pending user load of new directory",
+    "realBrowserManagedDeletion": "not tested",
+    "previousEdgeRejection": "0.2.1 previously confirmed; see browser-extension-acceptance-2026-10-06.json",
+    "export": "passed, fresh directory; seven shipped assets match source",
+    "edgeHostRegistration": "passed, same fixed ID and permissions",
+    "hostSha256": "a93704eca6e0efe9c36dff2f6145b8e19db9e82d9ee18aecaddbf730cc716d87",
+    "previousBundlePreserved": true
+  },
+  "performanceClaims": []
+}

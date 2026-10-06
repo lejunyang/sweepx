@@ -62,7 +62,8 @@ const ASSETS: &[(&str, &str)] = &[
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
     /// Export embedded extension and a stable host executable into a NEW private directory.
-    /// For updates export a new bundle, register it with --replace, then reload the extension.
+    /// Direct website clearing works without the host; register it for storage inventory.
+    /// For updates export a new bundle, register it with --replace, then load the new directory.
     Bundle {
         #[arg(long, value_name = "NEW_ABSOLUTE_DIRECTORY")]
         output: PathBuf,
@@ -206,7 +207,7 @@ fn export_bundle(output: &Path) -> io::Result<Value> {
     )?;
     let mut guide = root.create_state_file("INSTALL.txt")?;
     guide.write_all(format!(
-        "SweepX 浏览器扩展 / Browser extension\n\n1. sweepx browser-extension register --browser chrome --bundle '{}'\n   Edge: --browser edge. Updating an existing SweepX host: add --replace.\n2. In the matching browser profile, open its Extensions page, enable Developer mode, Load unpacked: {}/extension\n3. Click SweepX, choose the matching browser/profile and scan. Review each domain before removal.\n\n更新 / Update: export a NEW bundle with the new SweepX version, register --replace, and load/reload the new extension directory. Local unpacked updates are manual; no store release exists.\n\nmacOS/Linux registration supported. Windows: register HKCU Software\\Google\\Chrome (or Microsoft\\Edge)\\NativeMessagingHosts\\{HOST} default REG_SZ as the absolute path to org.sweepx.browser_bridge.json. Registry installation is not automated.\n\nPermissions: browsingData, nativeMessaging; no host/all-URL, cookie, history or page-injection permission. Browser policy may refuse; do not bypass it. Removal has no Trash. Keep this bundle at its installed path. Extension ID {EXTENSION_ID}.\n",
+        "SweepX 浏览器扩展 / Browser extension\n\n1. In the matching browser profile, open its Extensions page, enable Developer mode, Load unpacked: {}/extension\n2. Click SweepX. Clear a website works independently: enter an exact hostname or HTTP(S) origin, review scope and confirm the current profile. Size remains unknown.\n   指定网站清理无需连接本地组件；输入精确网站并确认范围，大小为未知。\n3. For disk inventory and SweepX requests, register the optional native host:\n   sweepx browser-extension register --browser chrome --bundle '{}'\n   Edge: --browser edge. Updating an existing SweepX host: add --replace.\n4. In Connection & settings choose the matching browser/profile directory, then use Scan storage. Review each domain before removal.\n\n更新 / Update: export a NEW bundle with the new SweepX version, register --replace, and load the new extension directory (remove the old unpacked entry if the browser refuses the same ID). Reloading the OLD directory does not switch paths. Local unpacked updates are manual; no store release exists.\n\nmacOS/Linux registration supported. Windows: register HKCU Software\\Google\\Chrome (or Microsoft\\Edge)\\NativeMessagingHosts\\{HOST} default REG_SZ as the absolute path to org.sweepx.browser_bridge.json. Registry installation is not automated.\n\nPermissions: browsingData, nativeMessaging; no host/all-URL, cookie, history or page-injection permission. Browser policy may refuse; do not bypass it. Removal has no Trash. Keep this bundle at its installed path. Extension ID {EXTENSION_ID}.\n",
         output.display(),output.display()).as_bytes())?;
     guide.sync_all()?;
     Ok(
@@ -550,10 +551,7 @@ pub(crate) fn host_main() -> ExitCode {
                 Request::Pending { browser, profile, .. } => {
                     valid_selection(&browser, &profile)?;
                     let status = mailbox_status(&bridge_root())?;
-                    let pending = status["pending"].as_object().filter(|p|
-                        p.get("expiresAt").and_then(Value::as_u64).is_some_and(|t| t > now().unwrap_or(u64::MAX))
-                        && p.get("plan").is_some_and(|v| v["browser"] == browser && v["profile"] == profile));
-                    json!({"kind":"pending","id":id,"request":pending})
+                    pending_response(&status["pending"], &id, &browser, &profile, now()?)
                 }
                 Request::Complete { request_id, status, mode, .. } => {
                     let result = complete_request(&bridge_root(), &request_id, status, mode)?;
@@ -571,6 +569,22 @@ pub(crate) fn host_main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+// Preserve the reason a queued request cannot be shown. Only a live request for
+// this selection exposes a plan; diagnostics never relax expiry/profile checks.
+fn pending_response(pending: &Value, id: &str, browser: &str, profile: &str, at: u64) -> Value {
+    let state = if pending.is_null() {
+        "none"
+    } else if pending["expiresAt"].as_u64().is_none_or(|t| t <= at) {
+        "expired"
+    } else if pending["plan"]["browser"] != browser || pending["plan"]["profile"] != profile {
+        "different_selection"
+    } else {
+        "ready"
+    };
+    json!({"kind":"pending","id":id,"state":state,
+        "request":if state == "ready" { pending } else { &Value::Null }})
 }
 
 fn complete_request(

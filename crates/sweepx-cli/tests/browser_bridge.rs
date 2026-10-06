@@ -187,12 +187,17 @@ fn exported_host_rejects_unregistered_origin_and_cli_can_queue_then_record_rejec
     assert_eq!(queued["applied"], false);
     let mut host = Host::start(&executable, &home);
     host.send(json!({"op":"pending","id":"r1","browser":"edge","profile":"Default"}));
-    assert!(host.next()["request"].is_null());
+    let other_selection = host.next();
+    assert!(other_selection["request"].is_null());
+    assert_eq!(other_selection["state"], "different_selection");
     host.send(json!({"op":"pending","id":"r2","browser":"chrome","profile":"Default"}));
     let pending = host.next();
+    assert_eq!(pending["state"], "ready");
     assert_eq!(pending["request"]["plan"]["domain"], "example.test");
     host.send(json!({"op":"complete","id":"r3","request_id":pending["request"]["requestId"],"status":"rejected","mode":null}));
     assert_eq!(host.next()["result"]["status"], "rejected");
+    host.send(json!({"op":"pending","id":"r4","browser":"chrome","profile":"Default"}));
+    assert_eq!(host.next()["state"], "none");
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sweepx"))
         .env("HOME", &home)
         .env("LOCALAPPDATA", &home)

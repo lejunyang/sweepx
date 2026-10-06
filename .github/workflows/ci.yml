@@ -48,6 +48,28 @@ jobs:
       - name: Validate crate packaging and dependency order
         run: scripts/publish-crates.sh --check
 
+  browser-ui:
+    name: Browser UI and adapter contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/sweepx-cli/browser-ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked frontend tools without install scripts
+        run: npx --yes pnpm@11.25.0 install --frozen-lockfile --ignore-scripts
+      - name: Check embedded assets, source formatting and adapter contracts
+        run: |
+          npx --yes pnpm@11.25.0 check
+          npx --yes pnpm@11.25.0 format:check
+          npx --yes pnpm@11.25.0 test
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
@@ -62,10 +84,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test full workspace
         run: cargo test --workspace --all-features --locked
-      - name: Test bundled browser adapter contracts
-        run: |
-          node --version
-          node --test crates/sweepx-cli/assets/chromium-cleanup/logic.test.mjs crates/sweepx-cli/assets/chromium-cleanup/bridge.test.mjs crates/sweepx-cli/assets/chromium-cleanup/review.test.mjs
       # Rule packages ship unsigned and are meant to be editable. What still has to hold is that an
       # edit is never silent: `content_digest` binds a clean authorization to the rule bytes that
       # produced the scan. `editing_a_rule_changes_the_content_digest_but_still_loads` covers this

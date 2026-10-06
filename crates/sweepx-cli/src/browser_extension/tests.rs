@@ -243,3 +243,39 @@ fn inventory_pages_preserve_cli_accounting_without_paths_or_false_zeroes() {
     assert!(categories[0]["unattributedBytes"].is_null());
     assert!(categories[0].get("subsystemPath").is_none());
 }
+#[test]
+fn pending_diagnostics_distinguish_expiry_selection_and_absence_without_exposing_a_plan() {
+    let pending = json!({"expiresAt":200,"plan":{"browser":"edge","profile":"Default"}});
+    for (value, browser, profile, at, expected) in [
+        (Value::Null, "edge", "Default", 100, "none"),
+        (pending.clone(), "edge", "Default", 200, "expired"),
+        (
+            pending.clone(),
+            "chrome",
+            "Default",
+            100,
+            "different_selection",
+        ),
+        (
+            pending.clone(),
+            "edge",
+            "Profile 1",
+            100,
+            "different_selection",
+        ),
+        (
+            json!({"expiresAt":"invalid"}),
+            "edge",
+            "Default",
+            100,
+            "expired",
+        ),
+    ] {
+        let response = pending_response(&value, "r1", browser, profile, at);
+        assert_eq!(response["state"], expected);
+        assert!(response["request"].is_null());
+    }
+    let ready = pending_response(&pending, "r2", "edge", "Default", 199);
+    assert_eq!(ready["state"], "ready");
+    assert_eq!(ready["request"], pending);
+}

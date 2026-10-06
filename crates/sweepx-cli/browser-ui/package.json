@@ -1,0 +1,21 @@
+{
+  "name": "sweepx-browser-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node --test ../assets/chromium-cleanup/logic.test.mjs ../assets/chromium-cleanup/bridge.test.mjs test/*.test.mjs",
+    "preview": "node preview.mjs",
+    "format:check": "prettier --check src build.mjs preview.mjs test package.json"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "jsdom": "30.1.2",
+    "prettier": "3.9.9"
+  },
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24.15.0"
+  }
+}
