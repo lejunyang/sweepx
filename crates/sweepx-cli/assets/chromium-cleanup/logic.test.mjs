@@ -13,12 +13,12 @@ test("exact origins preserve ports and require explicit scope and profile confir
   const selected = validatePlan(plan);
   assert.deepEqual(selected.origins, plan.origins);
   for (const args of [
-    ["cache", "wrong.example", true],
-    ["", "example.com", true],
-    ["storage", "example.com", false],
+    ["cache", false],
+    ["", true],
+    ["storage", false],
   ])
     assert.throws(() => removalRequest(selected, ...args));
-  const r = removalRequest(selected, "storage", "example.com", true);
+  const r = removalRequest(selected, "storage", true);
   assert.deepEqual(r.options, {
     since: 0,
     origins: plan.origins,
@@ -36,10 +36,10 @@ test("exact origins preserve ports and require explicit scope and profile confir
     serviceWorkers: true,
     fileSystems: true,
   });
-  assert.deepEqual(
-    removalRequest(selected, "cache", "example.com", true).types,
-    { cache: true, cacheStorage: true },
-  );
+  assert.deepEqual(removalRequest(selected, "cache", true).types, {
+    cache: true,
+    cacheStorage: true,
+  });
 });
 test("foreign domains paths schemes credentials and empty wildcard selections are rejected", () => {
   for (const origins of [
@@ -57,7 +57,7 @@ test("real API completion is awaited and failures cannot become success", async 
   let finish,
     calls = 0,
     completed = false;
-  const req = removalRequest(validatePlan(plan), "cache", "example.com", true);
+  const req = removalRequest(validatePlan(plan), "cache", true);
   const pending = removeWithBrowser(
     {
       remove: (options, types) => {
@@ -96,7 +96,7 @@ test("manual site selection is explicit, independent of native profile, and keep
   const origin = manualSelection("https://example.com:8443/");
   assert.deepEqual(origin.origins, ["https://example.com:8443"]);
   assert.deepEqual(
-    removalRequest(origin, "cache", "example.com", true).options.origins,
+    removalRequest(origin, "cache", true).options.origins,
     origin.origins,
   );
   for (const value of [
@@ -114,7 +114,6 @@ test("manual site selection is explicit, independent of native profile, and keep
     removalRequest(
       { ...origin, origins: ["https://evil.test"] },
       "cache",
-      "example.com",
       true,
     ),
   );

@@ -40,4 +40,7 @@ no scan facts, plan, confirmation or cleanup result is persisted as authority.
 DOM tests exercise the compiled page against an independently controlled native port
 and removal promise. They cover reconnection, manual versus automatic checks, request
 expiry at action time, rejection, cancellation, standalone scope, failure and completion.
+Clearing uses scope/profile confirmation and an explicit action, without hostname
+retyping. The letter avatars and plan-file import entry are removed; footer metadata
+stays grouped at the start of the row and wraps on narrow screens.
 See [the installation and cleanup guide](../assets/chromium-cleanup/README.md).

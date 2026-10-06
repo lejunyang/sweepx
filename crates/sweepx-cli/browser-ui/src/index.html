@@ -247,7 +247,6 @@
               </div>
               <div id="detail-content" hidden>
                 <div class="detail-heading">
-                  <div id="detail-avatar" class="site-avatar"></div>
                   <div>
                     <span
                       class="eyebrow"
@@ -273,8 +272,8 @@
                 <div id="details"></div>
                 <div class="detail-footer">
                   <p
-                    data-zh="存储分区会一起清理，暂不支持单独删除某个 bucket。"
-                    data-en="Clearing covers partitions together; individual buckets cannot be removed."
+                    data-zh="不能单选存储分区或 bucket；清理按网址来源与数据类型执行，实际处理范围由浏览器决定。"
+                    data-en="Partitions and buckets cannot be selected individually. The browser determines coverage for the chosen origins and data types."
                   ></p>
                   <button
                     id="prepare"
@@ -380,23 +379,6 @@
                 data-en="The extension can clear site data, but cannot independently inventory disk usage across the whole profile. Use Site storage for sizes and partitions."
               ></p>
             </div>
-            <details class="import-panel">
-              <summary
-                data-zh="导入 SweepX 清理计划"
-                data-en="Import a SweepX cleanup plan"
-              ></summary>
-              <p
-                class="muted"
-                data-zh="已有本地计划时，也可以离线核对并清理。计划文件上限 64 KiB。"
-                data-en="Review an exported plan offline. Maximum plan size: 64 KiB."
-              ></p>
-              <input
-                id="file"
-                type="file"
-                accept="application/json,.json"
-                aria-label="Import cleanup plan"
-              />
-            </details>
           </section>
         </section>
         <section id="settings-view" class="view" hidden>
@@ -551,27 +533,15 @@
             data-en="Clearing cannot be undone and does not use Trash."
           ></strong
           ><span
-            data-zh="不清理 Cookie、历史记录、密码和扩展数据。所列来源的存储分区会一起处理。"
-            data-en="Cookies, history, passwords and extension data are excluded. Partitions for the listed origins are handled together."
+            data-zh="不清理 Cookie、历史记录、密码和扩展数据。无法单选存储分区或 bucket，实际覆盖以浏览器接口为准。"
+            data-en="Cookies, history, passwords and extension data are excluded. Individual partitions or buckets cannot be selected; coverage follows the browser API."
           ></span>
         </div>
         <label class="profile-check"
           ><input id="profile" type="checkbox" /><span
             id="profile-confirm-label"
-          ></span></label
-        ><label
-          class="confirm-label"
-          for="confirm"
-          data-zh="输入完整域名以确认"
-          data-en="Type the exact hostname to confirm"
-        ></label
-        ><input
-          id="confirm"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          maxlength="253"
-        />
+          ></span
+        ></label>
         <p id="operation-status" role="status" hidden></p>
         <div class="dialog-actions">
           <button

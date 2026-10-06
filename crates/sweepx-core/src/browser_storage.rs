@@ -792,7 +792,8 @@ pub struct BrowserCleanupPlan {
     /// Exact selected hostname, excluding subdomains.
     pub domain: String,
     /// HTTP(S) origins derived from observed keys, preserving non-default ports.
-    /// The browser origin API handles partitions together and cannot select one bucket.
+    /// The browser origin API cannot select one storage partition or bucket.
+    /// Actual partition coverage follows the browser implementation, not individual report rows.
     pub origins: Vec<String>,
     /// Browser API clearing has no Trash recovery; no action has occurred during export.
     pub recoverable: bool,

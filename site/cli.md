@@ -563,4 +563,4 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
 ```
 
-SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extension`](#browser-extension)。仅安装 SweepX 时可扫描和导出计划；完成按域清除仍需在匹配的浏览器个人资料加载扩展。可以连接 SweepX 直接查看域名、存储键/bucket 和共享分类占用，也可不连接，直接指定精确网站或导入 `--export-delete-plan` 的计划。扩展只申请 `browsingData`、`nativeMessaging` 权限，无网络请求，不直接移走共享数据库。清理范围、确认要求和验收边界见[扩展指南](../integrations/chromium-cleanup/README.md)。旧文件级回收参数保持拒绝。
+SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extension`](#browser-extension)。仅安装 SweepX 时可扫描和导出计划；完成按域清除仍需在匹配的浏览器个人资料加载扩展。可以连接 SweepX 直接查看域名、存储键/bucket 和共享分类占用，也可不连接，直接指定精确网站；扩展不再提供计划文件导入。扩展只申请 `browsingData`、`nativeMessaging` 权限，无网络请求，不直接移走共享数据库。清理时选择数据范围、确认当前个人资料后点击「确认清理」，无需重复输入域名。清理范围、确认要求和验收边界见[扩展指南](../integrations/chromium-cleanup/README.md)。旧文件级回收参数保持拒绝。

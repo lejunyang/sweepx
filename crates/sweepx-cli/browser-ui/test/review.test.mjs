@@ -48,7 +48,7 @@ async function page(
   let interval,
     nativeCalls = 0;
   const runtime = {
-    getManifest: () => ({ version: "0.3.0" }),
+    getManifest: () => ({ version: "0.3.1" }),
     connectNative() {
       nativeCalls++;
       let receive, disconnected;
@@ -176,8 +176,7 @@ async function page(
   const confirm = async () => {
     document.querySelector('[name="mode"][value="cache"]').checked = true;
     el("profile").checked = true;
-    el("confirm").value = "example.test";
-    await act("confirm", "input");
+    await act("profile", "input");
   };
   try {
     await run({
@@ -245,7 +244,6 @@ test("manual poll replaces a reviewed plan and resets confirmations; automatic c
       await act("poll");
       assert.match(el("review-source").textContent, /PENDING SWEEPX/);
       assert.equal(el("profile").checked, false);
-      assert.equal(el("confirm").value, "");
       assert.equal(el("remove").disabled, true);
       assert.equal(removals.length, 0);
     },
@@ -331,6 +329,11 @@ test("standalone cleanup needs no native connection, preserves the port and awai
       el("direct-site").value = "https://example.test:8443";
       await act("direct-form", "submit");
       assert.match(el("review-target").textContent, /size unknown/);
+      assert.equal(el("confirm"), null);
+      assert.equal(el("file"), null);
+      assert.equal(el("remove").disabled, true);
+      document.querySelector('[name="mode"][value="cache"]').checked = true;
+      await act("profile", "input");
       assert.equal(el("remove").disabled, true);
       await confirm();
       await act("remove");
@@ -413,8 +416,9 @@ test("partial scan is never published and cancellation rejects unfinished data",
   );
 });
 test("unknown sizes, partitions, search, language switch and profile invalidation remain distinct", async () => {
-  await page(async ({ el, act, selectDomain }) => {
+  await page(async ({ el, act, selectDomain, document }) => {
     await selectDomain();
+    assert.equal(document.querySelector(".site-avatar"), null);
     assert.equal(el("stat-size").textContent, "≥ 7 B");
     assert.equal(el("stat-shared").textContent, "Unknown");
     assert.match(el("details").textContent, /embedded in top.test/);

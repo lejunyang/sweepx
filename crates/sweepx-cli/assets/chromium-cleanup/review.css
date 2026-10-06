@@ -475,20 +475,6 @@ td.numeric {
   background: transparent;
   width: 100%;
 }
-.site-avatar {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid #e5e8e1;
-  border-radius: 8px;
-  background: #f2f4ee;
-  color: #697a60;
-  font-size: 13px;
-  font-weight: 700;
-  flex-shrink: 0;
-  text-transform: uppercase;
-}
 .site-name {
   overflow-wrap: anywhere;
   line-height: 1.6;
@@ -711,8 +697,9 @@ td.numeric {
 }
 .page-footer {
   display: flex;
-  justify-content: space-between;
-  gap: 15px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 15px;
   font-size: 10px;
   color: #94a093;
   padding: 28px 0;
@@ -811,17 +798,6 @@ td.numeric {
   color: #74816d;
   margin-top: 7px;
   font-size: 12px;
-}
-.import-panel {
-  margin-top: 30px;
-  font-size: 12px;
-}
-.import-panel summary {
-  cursor: pointer;
-  color: var(--green);
-}
-.import-panel p {
-  margin: 12px 0;
 }
 .settings-panel h2 {
   margin-bottom: 10px;
@@ -962,15 +938,6 @@ dialog::backdrop {
   line-height: 1.8;
   margin: 17px 0;
 }
-.confirm-label {
-  font-size: 11px;
-  color: var(--muted);
-  display: block;
-  margin-bottom: 8px;
-}
-#confirm {
-  width: 100%;
-}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -1022,10 +989,6 @@ dialog::backdrop {
   th {
     padding-left: 17px;
     padding-right: 17px;
-  }
-  .site-avatar {
-    width: 27px;
-    height: 27px;
   }
   .site-button {
     gap: 8px;
@@ -1186,9 +1149,6 @@ dialog::backdrop {
   .list-toolbar select {
     font-size: 10px;
     max-width: 115px;
-  }
-  .site-avatar {
-    display: none;
   }
   .site-button {
     font-size: 11px;

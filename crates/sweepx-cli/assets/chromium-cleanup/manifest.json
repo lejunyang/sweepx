@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SweepX \u7f51\u7ad9\u6e05\u7406 / Site cleanup",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minimum_chrome_version": "96",
   "description": "Inspect website storage with SweepX, or independently clear an exact website in this browser.",
   "permissions": [

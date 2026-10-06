@@ -184,5 +184,38 @@
       "macOS aarch64"
     ],
     "realBrowserRemovalExecuted": false
+  },
+  "uiSimplification": {
+    "baseCommit": "28977f9",
+    "extensionVersion": "0.3.1",
+    "changes": [
+      "remove letter avatars in list and details",
+      "remove hostname retyping and its action guard",
+      "remove plan-file import UI and handler",
+      "group footer metadata at start with wrapping",
+      "clarify origin API has no partition/bucket selector or per-row deletion guarantee"
+    ],
+    "frontendTests": 22,
+    "rustBrowserUnitTests": 11,
+    "exportedHostTests": 3,
+    "checks": "frontend format/build reproducibility, Rust format, host workspace lint, release build and documentation lint passed; unchanged CLI contracts reuse the prior complete suite",
+    "manualPreview": {
+      "data": "synthetic and clearing inert",
+      "letterAvatars": 0,
+      "hostnameConfirmationInputs": 0,
+      "planImports": 0,
+      "footerHorizontalGapPixels": 15,
+      "clearButton": "enabled after scope/profile selection without hostname input; cancelled without invoking removal",
+      "consoleErrorsOrWarnings": 0,
+      "screenshots": [
+        "/private/tmp/sweepx-browser-ui-0.3.1.png",
+        "/private/tmp/sweepx-browser-ui-confirm-0.3.1.png"
+      ]
+    },
+    "bundle": "/Users/bytedance/Documents/SweepX-Browser-Extension",
+    "export": "seven assets match source and native host matches release build; existing Edge registration points to fixed directory",
+    "hostSha256": "25074a843d52b72adae9688aa335a7560b880a6de24d78fc9e40bad62c0d2d68",
+    "realBrowserRemovalExecuted": false,
+    "partitionScopeEvidence": "public RemovalOptions has no storage-key/top-level-site/bucket selector; Chromium extension code uses default origin filter. Browser implementation determines coverage, not report rows. Live Edge partition removal was not tested."
   }
 }

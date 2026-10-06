@@ -243,10 +243,7 @@ export function createApp({
         text(`查看 ${row.domain}`, `Review ${row.domain}`),
       );
       button.disabled = busy;
-      button.append(
-        node("span", row.domain[0], "site-avatar"),
-        node("span", row.domain, "site-name"),
-      );
+      button.append(node("span", row.domain, "site-name"));
       button.addEventListener("click", () => {
         if (!busy) {
           selected = row.domain;
@@ -322,7 +319,6 @@ export function createApp({
     el("detail-content").hidden = !row;
     if (!row) return;
     el("detail-domain").textContent = row.domain;
-    el("detail-avatar").textContent = row.domain[0];
     el("detail-size").textContent = size(row.bytes, row.sizeComplete);
     const details = inventory.origins.filter((r) => r.domain === selected),
       groups = new Map();
@@ -429,7 +425,6 @@ export function createApp({
     for (const input of document.querySelectorAll('[name="mode"]'))
       input.checked = false;
     el("profile").checked = false;
-    el("confirm").value = "";
     el("operation-status").hidden = true;
     update();
   }
@@ -448,7 +443,6 @@ export function createApp({
     for (const input of document.querySelectorAll('[name="mode"]'))
       input.checked = false;
     el("profile").checked = false;
-    el("confirm").value = "";
     el("operation-status").hidden = true;
     renderPlan();
     lastFocus = document.activeElement;
@@ -490,7 +484,6 @@ export function createApp({
           `我确认当前浏览器与个人资料是 ${plan.browser} / ${plan.profile}。`,
           `I confirm the current browser and profile are ${plan.browser} / ${plan.profile}.`,
         );
-    el("confirm").placeholder = plan.domain;
     update();
   }
   function request() {
@@ -501,12 +494,7 @@ export function createApp({
           "Request expired; send a new request from SweepX.",
         ),
       );
-    return removalRequest(
-      plan,
-      mode(),
-      el("confirm").value,
-      el("profile").checked,
-    );
+    return removalRequest(plan, mode(), el("profile").checked);
   }
   function update() {
     try {
@@ -517,7 +505,6 @@ export function createApp({
     }
     for (const id of [
       "language",
-      "file",
       "browser",
       "native-profile",
       "connect",
@@ -529,9 +516,7 @@ export function createApp({
       "prepare",
     ])
       el(id).disabled = busy;
-    for (const input of document.querySelectorAll(
-      '[name="mode"],#confirm,#profile',
-    ))
+    for (const input of document.querySelectorAll('[name="mode"],#profile'))
       input.disabled = busy;
     el("prepare").disabled = busy || !selected || !connected();
     el("poll").disabled = busy || !connected();
@@ -787,23 +772,7 @@ export function createApp({
       say(`请检查网址：${e.message}`, `Check the website: ${e.message}`, true);
     }
   });
-  on(el("file"), "change", async () => {
-    const current = ++generation;
-    closeDialog();
-    try {
-      const file = el("file").files[0];
-      if (!file || file.size > 65536)
-        throw new Error("Plan missing or exceeds 64 KiB");
-      const value = JSON.parse(await file.text());
-      if (current === generation) showPlan(value);
-    } catch (e) {
-      if (current === generation)
-        say(`计划不可用：${e.message}`, `Plan unavailable: ${e.message}`, true);
-    }
-  });
-  for (const input of document.querySelectorAll(
-    '[name="mode"],#confirm,#profile',
-  ))
+  for (const input of document.querySelectorAll('[name="mode"],#profile'))
     on(input, "input", update);
   on(el("dialog-close"), "click", closeDialog);
   on(el("dialog-cancel"), "click", closeDialog);

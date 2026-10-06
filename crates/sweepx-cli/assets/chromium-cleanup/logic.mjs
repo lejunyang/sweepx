@@ -90,7 +90,7 @@ export function manualSelection(input) {
     origins: Object.freeze(exactOrigins(origins, domain)),
   });
 }
-export function removalRequest(plan, mode, confirmedDomain, matchingProfile) {
+export function removalRequest(plan, mode, matchingProfile) {
   // Revalidate even already-reviewed objects at the action boundary. Manual
   // selections do not have native profile claims and cannot impersonate a plan.
   const selection =
@@ -101,14 +101,8 @@ export function removalRequest(plan, mode, confirmedDomain, matchingProfile) {
           schema: "sweepx.browser_cleanup.plan/v1",
           operation: "browser_managed_origin_removal",
         });
-  if (
-    !matchingProfile ||
-    confirmedDomain !== selection.domain ||
-    !["cache", "storage"].includes(mode)
-  ) {
-    throw new Error(
-      "请确认范围、浏览器个人资料和域名 / Confirm scope, profile and domain",
-    );
+  if (!matchingProfile || !["cache", "storage"].includes(mode)) {
+    throw new Error("请确认范围与浏览器个人资料 / Confirm scope and profile");
   }
   return {
     options: {

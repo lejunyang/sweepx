@@ -80,7 +80,7 @@ const categories = [
   },
 ];
 const runtime = {
-  getManifest: () => ({ version: "0.3.0" }),
+  getManifest: () => ({ version: "0.3.1" }),
   connectNative() {
     let listener, disconnect;
     let closed = false;
