@@ -1,0 +1,137 @@
+{
+  "schema": "sweepx.browser_extension.acceptance/v1",
+  "date": "2026-10-06",
+  "host": "macOS aarch64",
+  "build": "8b0d6ff release, rustc 1.98.0",
+  "browser": "edge",
+  "profile": "Default",
+  "checks": {
+    "extensionInstallation": {
+      "status": "user_reported",
+      "extensionVersion": "0.2.0",
+      "extensionId": "bcidfcdfefinmefhopannchcnicdopad",
+      "reviewTabPresentInBrowserInventory": true
+    },
+    "nativeHostRegistration": {
+      "status": "passed",
+      "previousRegistration": "absent",
+      "manifestMode": "0600",
+      "registrationDirectoryMode": "0700",
+      "allowedOrigins": [
+        "chrome-extension://bcidfcdfefinmefhopannchcnicdopad/"
+      ],
+      "bundleAssetsAndHostMatchCurrentBuild": true
+    },
+    "exportedHostHandshake": {
+      "status": "passed",
+      "protocol": 1,
+      "hostVersion": "0.0.1",
+      "browserLaunched": false
+    },
+    "liveNativeInventory": {
+      "status": "passed",
+      "workload": "Edge Default live browser storage through exported stdio host",
+      "browserState": "active",
+      "phase": "scan request through final done frame, including serialization and receipt",
+      "repetitions": 1,
+      "seconds": 1.692,
+      "osCache": "uncontrolled",
+      "sweepxFilesystemCache": "unused by browser storage analysis",
+      "inventoryStatus": "ok",
+      "domains": 123,
+      "storageRows": 199,
+      "categories": 9,
+      "issues": [],
+      "attributedDomainLogicalBytes": "18626315753",
+      "reportedCategoryLogicalBytes": "20066835623",
+      "sizeKind": "logical",
+      "snapshotConsistency": "non_atomic_live_observations",
+      "warmScanAccelerationClaim": false
+    },
+    "nativePlanAndProfileRefusal": {
+      "status": "passed",
+      "exactDomainPlanProduced": true,
+      "planOriginCount": 1,
+      "differentProfileRefused": true,
+      "connectionSurvivesBusinessRefusal": true,
+      "browserRemovalRequested": false
+    },
+    "installedExtensionConnectionAndDisplay": {
+      "status": "passed_user_screenshots",
+      "domainListVisible": true,
+      "selectedDomainDetailsVisible": true,
+      "selectedDomainStorageRows": 8,
+      "displayedTopDomainSizesMatchNativeReportRounding": true,
+      "automation": "blocked",
+      "reason": "Browser tool URL policy rejects the chrome-extension protocol; no alternate UI surface or browser command was used",
+      "evidence": "User supplied two screenshots of the installed extension's populated domain list and selected domain details; private screenshots are not committed"
+    },
+    "browserManagedDeletion": {
+      "status": "not_run",
+      "reason": "No reviewed origin and removal mode confirmed for a real browser operation"
+    },
+    "cliRequestThroughInstalledExtensionAcknowledgement": {
+      "status": "failed_user_report",
+      "cliQueued": true,
+      "applied": false,
+      "purpose": "rejection acknowledgement only; no removal mode selected",
+      "requestTtlSeconds": 900,
+      "reason": "Installed extension UI is unavailable to automation; user asked to reconnect and reject the pending request",
+      "userObserved": "Edge / Default connected; reconnecting did not display a request and manual Check requests did nothing",
+      "nativePendingQuery": "passed_against_exported_host",
+      "requestDeliveryToPage": "not_confirmed",
+      "browserRemovalRequested": false
+    }
+  },
+  "limitations": [
+    "Direct native-host timing excludes the browser UI; installed list/detail display is supported separately by user screenshots",
+    "Counts cover recognized default-location/default-partition storage, not every browser byte",
+    "Logical observations do not establish garbage classification, physical allocation or reclaimed space",
+    "Local State profile metadata suggests Default but does not replace action-time profile confirmation"
+  ],
+  "repair": {
+    "extensionVersion": "0.2.1",
+    "changes": [
+      "Manual request check can query while a domain is selected; automatic checks preserve domain review",
+      "Connection resets the seen request and immediately checks for pending work",
+      "Empty results, mailbox errors and disconnects are displayed",
+      "Delayed disconnects from old ports cannot overwrite the active connection"
+    ],
+    "regressionEvidence": {
+      "originalManualCheck": "reproduced_failure_against_original_shipped_review_module",
+      "fixedAdapterAndPageTests": {
+        "status": "passed",
+        "tests": 12
+      },
+      "rustBridgeUnit": {
+        "status": "passed",
+        "tests": 7
+      },
+      "exportedHostIntegration": {
+        "status": "passed",
+        "tests": 3
+      },
+      "hostWorkspaceClippy": {
+        "status": "passed",
+        "allTargets": true,
+        "allFeatures": true,
+        "warningsDenied": true
+      },
+      "format": {
+        "status": "passed"
+      }
+    },
+    "installedBrowserRetest": {
+      "status": "awaiting_user_reload_and_rejection",
+      "reason": "Fresh 0.2.1 bundle exported and registered; user asked to load it and reject the test request because browser tool blocks extension pages"
+    },
+    "bundleDelivery": {
+      "status": "passed",
+      "allSevenAssetsMatchSource": true,
+      "hostMatchesReleaseBinary": true,
+      "hostSha256": "872fa983004c5dfe6925a0c1913b1bcb648d06fc54889f49f6b8421fd08418cd",
+      "edgeRegistrationUpdated": true,
+      "oldBundlePreserved": true
+    }
+  }
+}

@@ -32,14 +32,14 @@ sweepx browser-extension request --browser chrome --profile Default --domain exa
 sweepx browser-extension status
 ```
 
-The CLI scans and queues one exact selection for up to 15 minutes. It does not delete, open a page, install software or silently choose a removal mode. Open/connect the extension review tab in the matching profile and check requests. Visible, idle review tabs also poll every five seconds. The user can reject the request or confirm clearing. Acknowledgements retain the selected plan, mode and browser-reported status; they explicitly leave reclaimed bytes unknown and independent verification false. Requests expire; an expired or mismatched acknowledgement is refused. If a browser operation finishes but acknowledgement fails, the extension distinguishes that failure from the completed operation.
+The CLI scans and queues one exact selection for up to 15 minutes. It does not delete, open a page, install software or silently choose a removal mode. Open/connect the extension review tab in the matching profile and check requests. Connecting checks requests immediately; visible, idle review tabs also poll every five seconds without replacing a domain under review. The explicit Check requests button works during domain review, and an incoming request resets all removal confirmations. Request status shows an empty result or a read error instead of failing silently. Reconnecting allows the same unhandled request to be reviewed again. The user can reject the request or confirm clearing. Acknowledgements retain the selected plan, mode and browser-reported status; they explicitly leave reclaimed bytes unknown and independent verification false. Requests expire; an expired or mismatched acknowledgement is refused. If a browser operation finishes but acknowledgement fails, the extension distinguishes that failure from the completed operation.
 
 A separate private `.sweepx-browser-bridge` root stores at most `pending.json`, `result.json` and its lock, rather than an unbounded queue/history. The host exposes only hello, scan, plan, pending and completion messages: no arbitrary paths, shell commands or filesystem deletion. Input is capped at 64 KiB, output at 768 KiB per frame, input queue at eight frames; inventory is paged and staged until completion. The extension bounds retained pages and pending requests, disconnects on timeout and rejects unfinished responses. Browser disconnect cancels cooperative native traversal; a blocking OS call can still delay cancellation.
 
 ## Verification
 
 ```sh
-node --test crates/sweepx-cli/assets/chromium-cleanup/logic.test.mjs crates/sweepx-cli/assets/chromium-cleanup/bridge.test.mjs
+node --test crates/sweepx-cli/assets/chromium-cleanup/logic.test.mjs crates/sweepx-cli/assets/chromium-cleanup/bridge.test.mjs crates/sweepx-cli/assets/chromium-cleanup/review.test.mjs
 cargo test -p sweepx-cli browser_extension --all-features
 cargo test -p sweepx-cli --test browser_bridge --all-features
 ```

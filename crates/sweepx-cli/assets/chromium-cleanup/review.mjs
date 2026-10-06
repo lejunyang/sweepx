@@ -3,6 +3,7 @@ import {Bridge,matchingRequest,formatBytes} from './bridge.mjs';
 const byId=id=>document.getElementById(id);
 let plan=null,busy=false,removing=false,generation=0,bridge=null,pendingRequest=null,seenRequest=null,polling=false,inventory=null,page=0;
 const status=text=>byId('status').textContent=text;
+const requestStatus=text=>byId('request-status').textContent=text;
 const selection=()=>({browser:byId('browser').value,profile:byId('native-profile').value});
 const controls=['file','mode','confirm','profile','browser','native-profile','connect','scan','poll','reject','domain-filter'];
 function request(){return removalRequest(plan,byId('mode').value,byId('confirm').value,byId('profile').checked);}
@@ -53,24 +54,36 @@ byId('page-prev').addEventListener('click',()=>{if(!busy && page>0){page--;rende
 byId('page-next').addEventListener('click',()=>{if(!busy && inventory && (page+1)*100<filteredDomains().length){page++;renderDomains();}});
 byId('disconnect').addEventListener('click',()=>{bridge?.close();byId('connection').textContent='已断开 / Disconnected';status('已请求取消，原生阻塞调用可能延迟结束 / Cancellation requested; a blocking native call may delay completion');update();});
 
-async function poll(){
-  if(!bridge || bridge.closed || busy || pendingRequest || plan || polling)return;
-  const {browser,profile}=selection();polling=true;let response;
-  try{response=await bridge.request('pending',{browser,profile});}finally{polling=false;}
-  if(selection().browser!==browser || selection().profile!==profile)return;
-  if(matchingRequest(response.request,browser,profile) && response.request.requestId!==seenRequest){seenRequest=response.request.requestId;showPlan(response.request.plan,response.request);status('收到 SweepX 请求，请确认后处理 / SweepX request received; review before applying');}
+async function poll(manual=false){
+  if(!bridge || bridge.closed || busy || polling)return;
+  if(pendingRequest){if(manual)byId('preview').scrollIntoView({block:'nearest'});return;}
+  // Automatic checks must not replace a domain under review. An explicit check may
+  // show a queued request, but still resets every removal confirmation in showPlan.
+  if(plan && !manual)return;
+  const currentBridge=bridge,{browser,profile}=selection();polling=true;
+  const current=()=>bridge===currentBridge && !currentBridge.closed && selection().browser===browser && selection().profile===profile;
+  try{
+    const response=await currentBridge.request('pending',{browser,profile});
+    if(!current())return;
+    if(matchingRequest(response.request,browser,profile)){
+      if(manual || response.request.requestId!==seenRequest){seenRequest=response.request.requestId;showPlan(response.request.plan,response.request);requestStatus('收到 SweepX 待确认请求 / Pending SweepX request received');status('收到 SweepX 请求，请确认后处理 / SweepX request received; review before applying');}
+    }else requestStatus(`${browser} / ${profile}：暂无有效待确认请求 / No active pending request`);
+  }catch(e){
+    if(bridge===currentBridge && selection().browser===browser && selection().profile===profile)requestStatus(`读取待确认请求失败 / Could not check requests: ${e.message}`);
+  }finally{polling=false;}
 }
-byId('connect').addEventListener('click',()=>perform(async()=>{
-  if(bridge)bridge.close();clearPlan();
-  bridge=new Bridge(chrome.runtime,reason=>{byId('connection').textContent=`未连接 / Disconnected: ${reason}`;update();});
+byId('connect').addEventListener('click',async()=>{await perform(async()=>{
+  const previous=bridge;bridge=null;previous?.close();seenRequest=null;clearPlan();requestStatus('正在连接并检查请求 / Connecting and checking requests');
+  // A delayed disconnect from the previous port must not overwrite the new connection.
+  const connected=new Bridge(chrome.runtime,reason=>{if(bridge!==connected)return;byId('connection').textContent=`未连接 / Disconnected: ${reason}`;requestStatus(`连接已断开，无法检查请求 / Cannot check requests while disconnected: ${reason}`);update();});bridge=connected;
   const hello=await bridge.request('hello');if(hello.protocol!==1)throw new Error('Unsupported bridge version');
   byId('connection').textContent=`已连接 / Connected · SweepX ${hello.hostVersion}`;status('连接成功。选择当前浏览器和个人资料，再扫描。 / Select the active browser and profile, then scan.');
-}));
+});await poll();});
 byId('scan').addEventListener('click',()=>perform(async()=>{
   clearPlan();byId('details').textContent='';status('正在扫描，请保持此页打开… / Scanning; keep this page open…');
   const data=await bridge.request('scan',selection());renderInventory(data);status('扫描完成；无法归属域名的占用见分类表 / Scan complete; shared and unattributed bytes are in the categories table');
 }));
-byId('poll').addEventListener('click',()=>poll().catch(e=>status(e.message)));
+byId('poll').addEventListener('click',()=>poll(true));
 for(const id of ['browser','native-profile'])byId(id).addEventListener('change',()=>{generation++;seenRequest=null;inventory=null;page=0;clearPlan();byId('page-label').textContent='0 / 0';byId('domains').replaceChildren();byId('categories').replaceChildren();byId('details').textContent='';byId('inventory-status').textContent='个人资料已改变，请重新扫描 / Profile changed; rescan';});
 byId('file').addEventListener('change',async()=>{
   const current=++generation;clearPlan();status('');
@@ -86,5 +99,5 @@ byId('remove').addEventListener('click',()=>perform(async()=>{
   clearPlan();status(`浏览器已完成请求。请重新扫描验证占用；网站可能重新创建数据。 / Browser request completed; rescan to verify.${delivery}`);
 }));
 // Poll only while the review tab is visible and idle. No background automatic deletion.
-setInterval(()=>{if(!document.hidden)poll().catch(()=>{});},5000);
+setInterval(()=>{if(!document.hidden)void poll();},5000);
 window.addEventListener('beforeunload',()=>bridge?.close());update();
