@@ -83,6 +83,9 @@ pub struct PlatformJunkRule {
     pub platform: String,
     /// Discovery contract associated with this rule.
     pub root_kind: String,
+    /// Dedicated item inventory required instead of blanket root Trash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_inventory: Option<String>,
     /// Matching contract validated together with platform, root kind and depth.
     pub match_kind: String,
     /// Native basename alternatives for a named descendant.
@@ -108,7 +111,7 @@ pub struct PlatformJunkRule {
     pub evidence: String,
     /// Primary-source review date in YYYY-MM-DD notation.
     pub source_reviewed_at: String,
-    /// HTTPS primary-source references for this rule.
+    /// HTTPS primary sources, or the repository-owned contract for the selected OSDK inventory.
     pub references: Vec<String>,
 }
 
@@ -210,7 +213,10 @@ fn validate_platform_rules(rules: Vec<PlatformJunkRule>) -> Result<Vec<PlatformJ
             "any" => {
                 if !matches!(
                     rule.root_kind.as_str(),
-                    "npm_reported_cache" | "pnpm_reported_store" | "pip_reported_cache"
+                    "npm_reported_cache"
+                        | "pnpm_reported_store"
+                        | "pip_reported_cache"
+                        | "osdk_reported_data"
                 ) {
                     return Err(format!(
                         "platform junk rule {} names an unresolvable root kind: {}",
@@ -234,13 +240,14 @@ fn validate_platform_rules(rules: Vec<PlatformJunkRule>) -> Result<Vec<PlatformJ
                 rule.depth,
             ) != expected
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
+            || rule.item_inventory.as_deref().is_some_and(|kind| !matches!((kind,rule.root_kind.as_str()),("pnpm","pnpm_reported_store")|("osdk","osdk_reported_data")))
             || rule.evidence.trim().is_empty()
             || !valid_verification_date(&rule.source_reviewed_at)
             || rule.references.is_empty()
             || !rule
                 .references
                 .iter()
-                .all(|reference| reference.starts_with("https://"))
+                .all(|reference| reference.starts_with("https://") || (rule.root_kind=="osdk_reported_data" && rule.item_inventory.as_deref()==Some("osdk") && reference=="repo:docs/architecture/managed-cache-inventory.md"))
             || !rule
                 .names
                 .iter()

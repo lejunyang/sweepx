@@ -415,8 +415,12 @@ struct Provider {
     dismissed: Vec<u64>,
     keepers: Vec<String>,
     inspected: Vec<String>,
+    detail_text: Option<String>,
 }
 impl JunkProvider for Provider {
+    fn inspect_text(&self, _: &str) -> Option<String> {
+        self.detail_text.clone()
+    }
     fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
         self.inspected.push(key.into());
         Err("controlled native directory unavailable".into())
@@ -1259,4 +1263,59 @@ fn complete_report_only_project_rows_remain_visible_without_offering_trash() {
         phase: "formats",
     });
     assert_eq!(model.phase_label(), "Checking project file formats");
+}
+
+#[test]
+fn managed_details_scroll_and_return_without_a_cleanup_request() {
+    let mut provider = Provider {
+        events: initial(),
+        detail_text: Some(
+            "/projects/one total=4096\n/projects/two total=8192\nSingle link can be a clone import"
+                .into(),
+        ),
+        ..Default::default()
+    };
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    model.presentation = ResultPresentation::ManagedCaches;
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut input = Events(VecDeque::from([
+        KeyCode::Enter,
+        KeyCode::PageDown,
+        KeyCode::Esc,
+        KeyCode::Char('q'),
+    ]));
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut input,
+            &mut provider,
+            &NeverTerminate
+        )
+        .unwrap(),
+        0
+    );
+    assert!(model.inspection_text.is_none());
+    assert!(provider.trashed.is_empty());
+    assert!(provider.inspected.is_empty());
+    model.inspection_text = Some((provider.detail_text.unwrap(), 0));
+    terminal.draw(|f| render_junk(f, &model)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("/projects/one total=4096"));
+    assert!(screen.contains("Single link can be a clone import"));
+    let line = |y: usize| -> String {
+        terminal.backend().buffer().content[y * 100..(y + 1) * 100]
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    };
+    assert!(line(1).contains("/projects/one total=4096"));
+    assert!(line(2).contains("/projects/two total=8192"));
+    assert!(line(3).contains("Single link can be a clone import"));
 }

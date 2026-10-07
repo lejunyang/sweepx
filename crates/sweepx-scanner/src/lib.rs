@@ -2798,6 +2798,7 @@ where
                                         object_type: ObjectType::Other,
                                         logical_bytes: unknown_u128(error.reason.clone()),
                                         allocated_bytes: unknown_u128(error.reason.clone()),
+                                        hard_link_count: None,
                                         reclaimable_estimate: unknown_u128(error.reason.clone()),
                                         metadata_fingerprint: format!("error:{}", error.detail),
                                         coverage: Coverage {
@@ -3390,6 +3391,7 @@ fn scanned_entry_from_metadata(
         },
         logical_bytes: metadata.logical_bytes.clone(),
         allocated_bytes: metadata.allocated_bytes.clone(),
+        hard_link_count: Some(metadata.hard_link_count.clone()),
         reclaimable_estimate: match metadata.kind {
             EntryKind::File => {
                 if matches!(

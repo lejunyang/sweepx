@@ -29,6 +29,8 @@ pub enum ResultPresentation {
     LargeFiles,
     /// Complete content hashes; an explicit keeper is required before Trash.
     Duplicates,
+    /// Individually selected managed caches; references and links are evidence, not garbage proof.
+    ManagedCaches,
 }
 mod quarantine;
 use quarantine::QuarantineView;
@@ -131,6 +133,10 @@ pub enum JunkEvent {
 
 /// Nonblocking bridge to scanning and Trash workers. Implementations must not do native work here.
 pub trait JunkProvider {
+    /// Return already-computed, bounded inspection text. No IO runs on the terminal thread.
+    fn inspect_text(&self, _key: &str) -> Option<String> {
+        None
+    }
     /// Meaning of this list, independent of rendering and execution authority.
     fn presentation(&self) -> ResultPresentation {
         ResultPresentation::Junk
@@ -202,6 +208,7 @@ pub struct JunkModel {
     quarantine: Option<QuarantineView>,
     /// Latest modal's display-only choices; at most 32 bounded paths, never provider Trash keys.
     review_paths: Vec<String>,
+    inspection_text: Option<(String, u16)>,
 }
 
 impl JunkModel {
@@ -230,6 +237,7 @@ impl JunkModel {
             rejected: false,
             quarantine: None,
             review_paths: Vec::new(),
+            inspection_text: None,
         }
     }
 
@@ -547,6 +555,10 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
             "重复内容组（明确选择保留者）",
             "Duplicate content (choose a keeper)",
         ),
+        ResultPresentation::ManagedCaches => model.text(
+            "缓存逐项查看（项目引用与链接线索）",
+            "Cache items (project references and link clues)",
+        ),
     };
     frame.render_widget(
         Paragraph::new(format!(
@@ -676,6 +688,8 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         model.text("↑↓ 移动 · Space 选择 · p 保留/取消保留 · r/R 全量刷新 · c 取消 · d/Delete 回收所选副本 · q 退出", "↑↓ Move · Space Select · p Choose/clear keeper · r/R Refresh all · c Cancel · d/Delete Trash selected copies · q Quit")
     } else if model.presentation == ResultPresentation::LargeFiles {
         model.text("↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 全量刷新 · c 取消 · d/Delete 回收所选文件 · q 退出", "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh all · c Cancel · d/Delete Trash selected files · q Quit")
+    } else if model.presentation == ResultPresentation::ManagedCaches {
+        model.text("↑↓ 移动 · Enter 项目/占用详情 · Space 选择 · r 刷新 · c 取消 · d/Delete 回收所选缓存 · q 退出", "↑↓ Move · Enter Projects/sizes · Space Select · r Refresh · c Cancel · d/Delete Trash selected caches · q Quit")
     } else {
         model.text(
         "↑↓ 移动 · Enter 细分 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新 · c 取消 · d/Delete 回收 · x 临时对象隔离 · q 退出",
@@ -688,6 +702,24 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
             .block(Block::default().borders(Borders::ALL)),
         help,
     );
+    if let Some((text, offset)) = &model.inspection_text {
+        frame.render_widget(ratatui::widgets::Clear, frame.area());
+        frame.render_widget(
+            Paragraph::new(
+                text.lines()
+                    .map(crate::live::sanitize_terminal_text)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((*offset, 0))
+            .block(Block::default().borders(Borders::ALL).title(model.text(
+                "详情 · ↑↓/PgUp/PgDn 滚动 · Esc 返回",
+                "Details · ↑↓/PgUp/PgDn Scroll · Esc Back",
+            ))),
+            frame.area(),
+        );
+    }
 }
 
 // Presentation labels leave the classifier's IDs unchanged for reports and authorization guards.
@@ -762,10 +794,36 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(130);
         }
+        if let Some((_, offset)) = &mut model.inspection_text {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => model.inspection_text = None,
+                KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *offset = offset.saturating_add(1),
+                KeyCode::PageUp => *offset = offset.saturating_sub(10),
+                KeyCode::PageDown => *offset = offset.saturating_add(10),
+                _ => {}
+            }
+            continue;
+        }
         if model.quarantine_key(key, provider) {
             continue;
         }
         match key.code {
+            KeyCode::Enter if model.presentation == ResultPresentation::ManagedCaches => {
+                if let Some(key) = model.order.get(model.cursor)
+                    && let Some(mut text) = provider.inspect_text(key)
+                {
+                    if text.len() > 64 * 1024 {
+                        let mut end = 64 * 1024;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.truncate(end);
+                        text.push_str("\n[detail text limit]");
+                    }
+                    model.inspection_text = Some((text, 0));
+                }
+            }
             KeyCode::Char('q') | KeyCode::Esc => {
                 return Ok(match model.outcome {
                     Some(JunkOutcome::Complete)

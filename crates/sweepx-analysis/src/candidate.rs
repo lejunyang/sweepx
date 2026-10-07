@@ -850,6 +850,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: DecimalU128::new(12),
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: DecimalU128::new(4),
             },

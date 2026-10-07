@@ -419,6 +419,7 @@ mod tests {
                     value: DecimalU128::new(8),
                     reason: ReasonCode::Unknown,
                 },
+                hard_link_count: None,
                 reclaimable_estimate: EvidenceValue::NotChecked {
                     reason: ReasonCode::Unknown,
                 },

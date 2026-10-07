@@ -152,6 +152,13 @@ pub enum DetailRescanError {
     Unavailable,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetTraversal {
+    Recursive,
+    DirectPartial,
+    DirectStrict,
+}
+
 /// Scanner-owned, read-only targeted rescans.
 ///
 /// Only the lossless native root in `NativeLocatorEvidence` is admitted as a root. Every
@@ -171,6 +178,73 @@ where
         Self { platform, limits }
     }
 
+    /// Observes one fixed native child without enumerating siblings or following links.
+    /// Revalidates the captured root and entire parent lineage, and requires the original mount.
+    /// Returned metadata is time-local evidence; callers must revalidate again before mutation.
+    pub fn observe_child(
+        &self,
+        request: DetailRescanRequest<'_>,
+        name: &sweepx_model::NativeName,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+    ) -> Result<ScannedEntry, DetailRescanError> {
+        self.validate_request(&request, ids)?;
+        let reopened = self.reopen_target(&request, cancel)?;
+        let child = DirectoryEntryRecord::from_parent_and_name(
+            &reopened.target_metadata.path,
+            name.clone(),
+        )
+        .map_err(|_| DetailRescanError::InvalidRequest)?;
+        let walked = inspect_bound_child_with_mount_identity_and_directory_admission(
+            &self.platform,
+            &reopened.target_handle,
+            &reopened.target_metadata.path,
+            &child,
+            cancel,
+            detail_directory_admission(self.limits.max_frontier_entries, 1),
+        )
+        .map_err(map_platform_error)?;
+        let metadata = match walked {
+            WalkEntry::Directory(opened) => opened.metadata,
+            WalkEntry::File(metadata) => metadata,
+            WalkEntry::Link(_) => return Err(DetailRescanError::SymlinkOrReparse),
+            WalkEntry::Boundary(boundary) => return Err(map_boundary(&boundary.kind)),
+            WalkEntry::Error(error) => return Err(map_walk_error(error.kind)),
+            WalkEntry::CachedFile(_) => return Err(DetailRescanError::IdentityUnavailable),
+        };
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+        require_same_mount(&self.platform, &reopened.root_metadata, &metadata)?;
+        let identity = scan_object_identity(
+            ids.allocate()?,
+            request.source_root_identity.entry_id.clone(),
+            Some(request.source_directory_identity.entry_id.clone()),
+            &metadata,
+        );
+        if !identity_is_known(&identity) {
+            return Err(DetailRescanError::IdentityUnavailable);
+        }
+        let mut parents = reopened.observed_locator.parent_reopen_recipe;
+        parents.push(reopened.observed_locator.entry);
+        Ok(scanned_entry_from_metadata(
+            request.source_scan_id,
+            &metadata,
+            identity.clone(),
+            native_locator_evidence(
+                request
+                    .directory_locator
+                    .scan_root_absolute_path
+                    .as_ref()
+                    .ok_or(DetailRescanError::InvalidRequest)?,
+                &request.directory_locator.scan_root,
+                &parents,
+                &native_path_component(&identity, &metadata),
+            ),
+            complete_coverage(),
+        ))
+    }
+
     pub fn rescan(
         &self,
         request: DetailRescanRequest<'_>,
@@ -185,8 +259,14 @@ where
         let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
-        let (rows, aggregate) =
-            self.scan_target_directory(&request, reopened, ids, cancel, true, None)?;
+        let (rows, aggregate) = self.scan_target_directory(
+            &request,
+            reopened,
+            ids,
+            cancel,
+            TargetTraversal::Recursive,
+            None,
+        )?;
 
         Ok(DetailRescanResult {
             observed_root,
@@ -244,7 +324,7 @@ where
             reopened,
             ids,
             cancel,
-            true,
+            TargetTraversal::Recursive,
             Some(&mut on_progress),
         )?;
 
@@ -272,14 +352,46 @@ where
         let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
-        let (rows, aggregate) =
-            self.scan_target_directory(&request, reopened, ids, cancel, false, None)?;
+        let (rows, aggregate) = self.scan_target_directory(
+            &request,
+            reopened,
+            ids,
+            cancel,
+            TargetTraversal::DirectPartial,
+            None,
+        )?;
         Ok(DetailRescanResult {
             observed_root,
             observed_directory,
             rows,
             aggregate,
         })
+    }
+
+    /// Enumerates every immediate child with current native metadata, or returns a failure.
+    /// This strict inventory contract does not provide recursive totals. It shares the detail
+    /// traversal's no-follow/mount checks but declines boundary/errors instead of returning the
+    /// partial siblings that a progressive browser can display. Enumeration remains non-atomic.
+    pub fn observe_direct_children(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ScannedEntry>, DetailRescanError> {
+        self.validate_request(&request, ids)?;
+        if cancel.is_cancelled() {
+            return Err(DetailRescanError::Cancelled);
+        }
+        let reopened = self.reopen_target(&request, cancel)?;
+        self.scan_target_directory(
+            &request,
+            reopened,
+            ids,
+            cancel,
+            TargetTraversal::DirectStrict,
+            None,
+        )
+        .map(|(rows, _)| rows)
     }
 
     fn validate_request(
@@ -475,9 +587,11 @@ where
         reopened: ReopenedTarget<P::DirectoryHandle>,
         ids: &mut DetailEntryIdAllocator,
         cancel: &CancellationToken,
-        recursive: bool,
+        mode: TargetTraversal,
         mut on_progress: Option<&mut dyn FnMut(DetailRescanProgress)>,
     ) -> Result<(Vec<ScannedEntry>, DirectoryAggregate), DetailRescanError> {
+        let recursive = mode == TargetTraversal::Recursive;
+        let strict = mode == TargetTraversal::DirectStrict;
         let ReopenedTarget {
             root_metadata,
             target_metadata,
@@ -719,6 +833,9 @@ where
                             ));
                         }
                         WalkEntry::Boundary(boundary) => {
+                            if strict {
+                                return Err(map_boundary(&boundary.kind));
+                            }
                             if matches!(
                                 boundary.kind,
                                 BoundaryKind::ResourceLimit | BoundaryKind::Cancelled
@@ -730,6 +847,9 @@ where
                             aggregate.mark_incomplete(boundary.reason);
                         }
                         WalkEntry::Error(error) => {
+                            if strict {
+                                return Err(map_walk_error(error.kind));
+                            }
                             if matches!(
                                 error.kind,
                                 ErrorKind::Interrupted | ErrorKind::ResourceLimit

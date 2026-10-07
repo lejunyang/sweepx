@@ -32,10 +32,11 @@ impl JunkClassifier for DirectoryRows {
 struct Deadline<'a> {
     until: Instant,
     cancel: &'a CancellationToken,
+    caller_cancel: &'a CancellationToken,
 }
 impl ClassifiedScanObserver for Deadline<'_> {
     fn on_progress(&mut self, _: &Path, _: &ProgressEvent) {
-        if Instant::now() >= self.until {
+        if self.caller_cancel.is_cancelled() || Instant::now() >= self.until {
             self.cancel.cancel();
         }
     }
@@ -44,6 +45,27 @@ impl ClassifiedScanObserver for Deadline<'_> {
 pub(crate) fn observe_directories(
     path: &Path,
     cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<ScanSummary, String> {
+    observe_directories_with_cancel(path, cancel, cancel, deadline)
+}
+/// A total's deadline does not cancel the caller's independent project-reference discovery.
+/// Caller cancellation is forwarded at scanner progress boundaries, alongside deadline checks.
+pub(crate) fn observe_directories_isolated_deadline(
+    path: &Path,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<ScanSummary, String> {
+    let local = CancellationToken::new();
+    if cancel.is_cancelled() || Instant::now() >= deadline {
+        local.cancel();
+    }
+    observe_directories_with_cancel(path, &local, cancel, deadline)
+}
+fn observe_directories_with_cancel(
+    path: &Path,
+    cancel: &CancellationToken,
+    caller_cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<ScanSummary, String> {
     let mut options = ScannerOptions::default();
@@ -61,6 +83,7 @@ pub(crate) fn observe_directories(
             &mut Deadline {
                 until: deadline,
                 cancel,
+                caller_cancel,
             },
         )
         .map(|s| s.summary)

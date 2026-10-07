@@ -25,6 +25,7 @@ fn file(name: &str, size: usize, inode: u128) -> ScannedEntry {
         allocated_bytes: EvidenceValue::Unknown {
             reason: ReasonCode::UnknownIdentity,
         },
+        hard_link_count: None,
         reclaimable_estimate: EvidenceValue::NotChecked {
             reason: ReasonCode::NotRevalidated,
         },

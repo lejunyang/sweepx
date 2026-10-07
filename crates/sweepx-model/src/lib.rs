@@ -1349,6 +1349,10 @@ pub struct ScannedEntry {
     pub object_type: ObjectType,
     pub logical_bytes: ByteValue,
     pub allocated_bytes: ByteValue,
+    /// Current native hard-link observation. Legacy and length-only cache rows omit this fact.
+    /// Link count alone does not establish dependency usage or unique physical allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_link_count: Option<CountValue>,
     pub reclaimable_estimate: ByteValue,
     pub metadata_fingerprint: String,
     pub coverage: Coverage,
@@ -2025,6 +2029,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
@@ -2073,6 +2078,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
@@ -2246,6 +2252,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },

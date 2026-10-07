@@ -472,7 +472,31 @@ sweepx browser-extension status
 
 `request` 仅排队一个精确域名的待确认计划，15 分钟有效；打开匹配的扩展确认页处理或拒绝，`status` 查看待处理和最后回传结果。连接后立即检查请求，空闲且可见的页面每五秒检查一次；自动检查不覆盖正在核对的域名，手动“检查待确认请求”可在选中域名时使用。新请求重置清理范围和确认信息；重新连接后可再次查看尚未处理的同一请求，无请求、请求过期、浏览器/profile 不匹配或读取错误均有提示；实际调用清理接口前再次检查请求有效期。完成报告表示浏览器 API 已完成，不证明空间释放。网站存储可能有未同步内容，清除无回收站；Cookie、历史、密码和扩展数据不清除，个人资料身份需用户确认。
 
-更新时保持目录不变，用新版 SweepX 执行 `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update`，然后在浏览器重新加载扩展并重新打开工作台；原通信注册路径不变，无需重复注册。此前若加载了版本目录，先切换到固定 `extension` 目录一次，并用 `register --replace` 调整原 SweepX 注册。更新逐个原子替换文件，整个 bundle 不是原子事务；中断后重新执行更新，成功后再重新加载。Windows 更新前需断开使用本地组件的浏览器连接。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。用户已在 Edge 展示实际域名明细，实际删除仍待本机验收。详见[扩展指南](../integrations/chromium-cleanup/README.md)。
+更新时保持目录不变，用新版 SweepX 执行 `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update`，然后在浏览器重新加载扩展并重新打开工作台；原通信注册路径不变，无需重复注册。此前若加载了版本目录，先切换到固定 `extension` 目录一次，并用 `register --replace` 调整原 SweepX 注册。更新逐个原子替换文件，整个 bundle 不是原子事务；中断后重新执行更新，成功后再重新加载。Windows 更新前需断开使用本地组件的浏览器连接。目前无商店发布、静默安装或商店自动更新；企业策略拒绝时不绕过。用户已在 Edge 展示实际域名明细，实际删除仍待本机验收。详见[扩展指南](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md)。
+
+
+## `pnpm-store` / `osdk-cache`
+
+按包名与版本、模型别名、下载缓存目录逐项查看和选择；`junk --trash` 和通用垃圾 TUI 不再允许整库清理 pnpm/osdk。
+
+```bash
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --tui
+sweepx --format json pnpm-store --root /absolute/pnpm/store/v10 --project-root /absolute/projects --max-links 1 --unobserved
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --entry CURRENT_ID --trash
+sweepx osdk-cache --project-root /absolute/projects --tui
+sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_DOWNLOAD_ID --trash
+sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_MODEL_ID --remove-models
+```
+
+`--root` 必须为 pnpm 的确切版本目录，支持 v3/v10 JSON 索引与 v11 SQLite/msgpackr 索引。报告展示原生文件链接数范围、单链接文件数、已观察到引用的项目目录及项目逻辑总大小。`--project-root` 可重复，默认只搜索当前目录；`--unobserved` 表示指定范围内未观察到引用，不表示全盘未使用。单链接也可能被项目通过复制/APFS 克隆使用。
+
+`--entry` 本身只预览，`--trash` 才回收选中的独占、单链接 pnpm 内容，保留其他包索引共享的文件与多链接文件，也保留包索引供 pnpm 后续重新下载。索引/扫描不完整、已观察到项目引用或校验失败时拒绝执行。逻辑大小不等于释放空间，项目嵌套时总大小也会重叠。
+
+osdk 从离线配置读取数据/缓存位置，可用 `--root` / `--cache-root` 指定重定向位置。下载缓存按仓库目录细分并进入回收站；模型按别名列出（大小包含该别名的全部快照）及 `[models]` 项目声明。`--remove-models` 单独调用 osdk 移除本地模型，**不进入回收站**；声明、锁文件和共享 CAS 保留，后续同步可能再次下载。TUI 的 `d` 只处理可回收缓存，模型行显示绑定数据目录与逐项 ID 的移除命令；Enter 查看可滚动的项目/占用详情。
+
+清理依赖 macOS/Linux 的当前用户进程和打开文件检查；Windows 当前缺少等价活动检查，保持只读并拒绝执行。
+
+JSON 使用 `sweepx.managed_cache.result/v1`，保留 `rulesDigest`、`projectDiscoveryComplete`、`indexComplete`、逐项 `eligible` 与未知/下界大小。详见[原生库存与执行约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md)。
 
 ## `site-storage`
 
@@ -565,8 +589,8 @@ Windows 垃圾 TUI 现可读取历史首屏；读写、发布和缓存淘汰沿�
 sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
 ```
 
-SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extension`](#browser-extension)。仅安装 SweepX 时可扫描和导出计划；完成按域清除仍需在匹配的浏览器个人资料加载扩展。可以连接 SweepX 直接查看域名、存储键/bucket 和共享分类占用，也可不连接，直接指定精确网站；扩展不再提供计划文件导入。扩展只申请 `browsingData`、`nativeMessaging` 权限，无网络请求，不直接移走共享数据库。清理时选择数据范围、确认当前个人资料后点击「确认清理」，无需重复输入域名。清理范围、确认要求和验收边界见[扩展指南](../integrations/chromium-cleanup/README.md)。旧文件级回收参数保持拒绝。
+SweepX 已内置扩展和本地通信组件，安装入口见 [`browser-extension`](#browser-extension)。仅安装 SweepX 时可扫描和导出计划；完成按域清除仍需在匹配的浏览器个人资料加载扩展。可以连接 SweepX 直接查看域名、存储键/bucket 和共享分类占用，也可不连接，直接指定精确网站；扩展不再提供计划文件导入。扩展只申请 `browsingData`、`nativeMessaging` 权限，无网络请求，不直接移走共享数据库。清理时选择数据范围、确认当前个人资料后点击「确认清理」，无需重复输入域名。清理范围、确认要求和验收边界见[扩展指南](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md)。旧文件级回收参数保持拒绝。
 
 ## 项目产物细分
 
-使用 `sweepx junk --details ROOT`，或 `--format json junk --details ROOT`，查看 Rust 子产物、Python 环境和 Vite 依赖缓存。父子行占用重叠，汇总只计上层候选。TUI 显示细分类别，Enter 可继续只读查看目录。这些新规则均只报告，`--details` 与清理选项冲突。见[产物细分约定](../docs/architecture/project-artifact-details-2026-10-07.md)。
+使用 `sweepx junk --details ROOT`，或 `--format json junk --details ROOT`，查看 Rust 子产物、Python 环境和 Vite 依赖缓存。父子行占用重叠，汇总只计上层候选。TUI 显示细分类别，Enter 可继续只读查看目录。这些新规则均只报告，`--details` 与清理选项冲突。见[产物细分约定](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/project-artifact-details-2026-10-07.md)。

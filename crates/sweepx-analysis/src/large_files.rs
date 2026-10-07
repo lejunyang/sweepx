@@ -233,6 +233,7 @@ mod tests {
             allocated_bytes: EvidenceValue::NotChecked {
                 reason: ReasonCode::NotRevalidated,
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Unknown {
                 reason: ReasonCode::UnknownIdentity,
             },

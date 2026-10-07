@@ -38,7 +38,7 @@ features:
 `junk --details ROOT` 可查看嵌套规则：Rust 增量缓存、依赖与测试产物、构建脚本输出、编译指纹、示例程序及常规 `--target` 构建分组；Python `.venv`/`venv` 和 Vite `.vite/deps` 另外核验当前、有界的格式签名。Rust 子项要求普通 `.cargo-lock`、原生 debug/release 父目录和常规 target 祖先链；目标分组还需编译器信息与 cache-tag 文件。不解析自定义 profile/build 路径。这些规则均只报告，恢复所需输入、夹杂的个人文件和进程活动仍未验证。TUI 显示中文/英文类别，并保留只读目录细分。JSON 增加 `entryId`、`parentCandidateEntryId`、`detailsIncluded`、`topLevelCandidateCount`、`sizeSummaryScope`；ID 只用于本次扫描的分组，不授权操作。子项字节已包含在上层目录中，汇总只计不重叠的上层候选；分配/逻辑占用不证明实际可释放空间。`--details` 与清理选项冲突。
 
 
-`junk --tui` 可按 `Enter` 查看当前目录候选的只读细分，继续进入子目录及文件，分别查看逻辑大小与文件系统报告分配空间。`Space` 记录最多 32 个待核验路径，`p` 查看完整路径，`q` 返回候选；退出后打印最近一次细分清单。清单不授权删除，大小不建立垃圾分类，细分内 `d/Delete` 不执行回收。历史行先刷新；查看期间监听继续积累变更，自动刷新在返回后恢复。详情复用后台身份绑定扫描与原有边界、取消及额度。参见 [CLI/TUI 架构](../docs/architecture/cli-tui-and-plugins.md)。
+`junk --tui` 可按 `Enter` 查看当前目录候选的只读细分，继续进入子目录及文件，分别查看逻辑大小与文件系统报告分配空间。`Space` 记录最多 32 个待核验路径，`p` 查看完整路径，`q` 返回候选；退出后打印最近一次细分清单。清单不授权删除，大小不建立垃圾分类，细分内 `d/Delete` 不执行回收。历史行先刷新；查看期间监听继续积累变更，自动刷新在返回后恢复。详情复用后台身份绑定扫描与原有边界、取消及额度。参见 [CLI/TUI 架构](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/cli-tui-and-plugins.md)。
 
 | 能力 | 当前状态 |
 |---|---|
@@ -83,3 +83,5 @@ SweepX 已经从纯设计进入**可运行的开发预览阶段**：扫描/TUI�
 
 
 项目垃圾候选仍可展示、选择和刷新，但当前尚无独占所有权和活动证明，不能由 `junk --trash` 或 TUI 回收。名称、风险等级、格式和 Git ignore 都不能替代这些证明；通用 build-output 规则明确仅报告。
+
+`pnpm-store` / `osdk-cache` 支持包版本、模型别名和下载缓存逐项查看。pnpm 列出链接数、引用项目和项目逻辑总大小，保护共享内容；单链接与范围内未观察到引用都不证明全盘未使用。osdk 下载缓存可回收，模型使用独立管理操作。[查看命令与边界](cli.md#pnpm-store--osdk-cache)。

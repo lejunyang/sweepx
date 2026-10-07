@@ -1012,7 +1012,16 @@ impl ToolReportedRoot {
             let Ok(text) = String::from_utf8(output.stdout) else {
                 continue;
             };
-            let Some(line) = text.lines().next() else {
+            let line = if self.program == "osdk" {
+                text.lines().find_map(|line| {
+                    line.split_once('=')
+                        .filter(|(key, _)| key.trim() == "data_dir")
+                        .map(|(_, v)| v.trim())
+                })
+            } else {
+                text.lines().next()
+            };
+            let Some(line) = line else {
                 continue;
             };
             let path = PathBuf::from(line.trim());
@@ -1092,6 +1101,20 @@ struct ToolCacheProfile {
 /// keeps a rule working before its profile is measured on a real host.
 fn tool_cache_profile(root_kind: &str) -> Option<ToolCacheProfile> {
     match root_kind {
+        "osdk_reported_data" => Some(ToolCacheProfile {
+            sources: CandidateSources {
+                env_overrides: &["OSDK_DATA_DIR"],
+                relative_defaults: &[],
+                versioned_child_prefix: None,
+            },
+            fingerprint: StructuralFingerprint {
+                required_children: &["models", "store"],
+                required_child: "installs",
+                hex_shard_count: None,
+            },
+            generations: &[],
+            candidate_child: None,
+        }),
         "pnpm_reported_store" => Some(ToolCacheProfile {
             sources: CandidateSources {
                 // `PNPM_HOME` names the install dir, not the store; the store honors this one.
@@ -1394,6 +1417,10 @@ pub fn tool_reported_root_for(root_kind: &str) -> Option<ToolReportedRoot> {
         "npm_reported_cache" => Some(ToolReportedRoot {
             program: "npm",
             arguments: &["config", "get", "cache"],
+        }),
+        "osdk_reported_data" => Some(ToolReportedRoot {
+            program: "osdk",
+            arguments: &["--offline", "config", "list"],
         }),
         "pnpm_reported_store" => Some(ToolReportedRoot {
             program: "pnpm",
@@ -2167,7 +2194,13 @@ mod tests {
     #[test]
     fn embedded_platform_junk_rules_are_narrow_and_evidence_bearing() {
         let rules = load_platform_junk_rules().unwrap();
-        assert_eq!(rules.len(), 26);
+        assert_eq!(rules.len(), 27);
+        let osdk = rules
+            .iter()
+            .find(|rule| rule.id == "tool.osdk-data")
+            .unwrap();
+        assert_eq!(osdk.root_kind, "osdk_reported_data");
+        assert_eq!(osdk.item_inventory.as_deref(), Some("osdk"));
         assert!(rules.iter().all(|rule| !rule.references.is_empty()));
         assert!(
             rules
@@ -2479,7 +2512,11 @@ mod tests {
             .filter(|rule| rule.match_kind == "verified_tool_root")
             .collect();
 
-        assert_eq!(tool_rules.len(), 3, "expected the npm, pnpm, and pip rules");
+        assert_eq!(
+            tool_rules.len(),
+            4,
+            "expected npm, pnpm, pip and osdk roots"
+        );
         for rule in tool_rules {
             assert!(
                 tool_reported_root_for(&rule.root_kind).is_some(),

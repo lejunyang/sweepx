@@ -6,6 +6,8 @@ mod cargo_cleaner_evidence;
 mod duplicates;
 pub mod junk;
 mod large_files;
+/// Package/model inventories with explicit item selection and current native evidence.
+pub mod managed_cache;
 /// Native inventory and explicit selection of npx tool installations.
 pub mod npx;
 mod scan_output;

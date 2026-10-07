@@ -483,7 +483,31 @@ First load the exported `extension` directory unpacked from the matching browser
 
 `request` queues one exact selection for 15 minutes, without removal. Open the matching extension review tab to apply or reject it. `status` reports the pending request and last browser-reported result. Connecting checks immediately; visible, idle pages check every five seconds without replacing a domain under review. The manual Check requests button works during domain review. An incoming request resets removal confirmations; reconnecting can display the same unhandled request again. Empty results, expired requests, browser/profile mismatches and read errors are distinct. The request deadline is rechecked immediately before the browser clearing call. API completion does not prove reclaimed bytes. Clearing has no Trash, storage may contain unsynced work, and native profile identity requires user confirmation. Cookies, history, passwords and extension data are excluded.
 
-Keep the same directory for updates: run `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update` with the new build, then reload the extension and close/reopen its workbench tab. The registered host path stays valid. If previously loading a versioned directory, switch to the fixed `extension` directory once and use `register --replace` to adjust the existing SweepX registration. Files are replaced atomically one at a time; the whole bundle is not a transaction. Repeat an interrupted update before reloading. On Windows disconnect browser connections to the native host before updating. No store publication, silent installation or automatic store update is implemented; organizational refusal is never bypassed. User screenshots confirm actual domain/detail display in Edge; browser-managed removal still awaits native acceptance. See the [adapter guide](../../integrations/chromium-cleanup/README.md).
+Keep the same directory for updates: run `browser-extension bundle --output /absolute/SweepX-Browser-Extension --update` with the new build, then reload the extension and close/reopen its workbench tab. The registered host path stays valid. If previously loading a versioned directory, switch to the fixed `extension` directory once and use `register --replace` to adjust the existing SweepX registration. Files are replaced atomically one at a time; the whole bundle is not a transaction. Repeat an interrupted update before reloading. On Windows disconnect browser connections to the native host before updating. No store publication, silent installation or automatic store update is implemented; organizational refusal is never bypassed. User screenshots confirm actual domain/detail display in Edge; browser-managed removal still awaits native acceptance. See the [adapter guide](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md).
+
+
+## `pnpm-store` / `osdk-cache`
+
+Inspect and select individual package versions, model aliases and download-cache units. Generic `junk --trash` and the junk TUI block whole pnpm/osdk roots.
+
+```bash
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --tui
+sweepx --format json pnpm-store --root /absolute/pnpm/store/v10 --project-root /absolute/projects --max-links 1 --unobserved
+sweepx pnpm-store --root /absolute/pnpm/store/v11 --project-root /absolute/projects --entry CURRENT_ID --trash
+sweepx osdk-cache --project-root /absolute/projects --tui
+sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_DOWNLOAD_ID --trash
+sweepx osdk-cache --project-root /absolute/projects --entry CURRENT_MODEL_ID --remove-models
+```
+
+`--root` is the exact versioned pnpm directory; v3/v10 JSON and v11 SQLite/msgpackr indexes are supported. Reports show native file link ranges, single-link counts, observed installed-project directories and whole-project logical totals. Repeat `--project-root` to expand the search; the default is the current directory. `--unobserved` means no reference observed in this scope, not globally unused. Copy/APFS clone imports can leave a single-link store file in active use.
+
+`--entry` previews; `--trash` moves only selected exclusive single-link pnpm content. Content shared with unselected indexes and multi-link files stay, as do package indexes for pnpm refetch/repair. Incomplete indexes/scans, observed project references and failed revalidation block execution. Logical size is not freed space; nested project totals can overlap.
+
+OSDK roots come from offline configuration, with `--root`/`--cache-root` for redirects. Download units are split by repository and use recoverable Trash. Model rows show aliases (including all snapshots) and observed `[models]` declarations. `--remove-models` separately invokes OSDK local removal, **not recoverable Trash**; declarations, locks and shared CAS stay, and sync may download again. TUI `d` handles cache units only; model rows show their scoped removal command. Enter opens scrollable project/size details.
+
+Execution requires the macOS/Linux current-user process/open-file guard. Windows currently lacks this guard and refuses execution while retaining read-only inventories.
+
+JSON uses `sweepx.managed_cache.result/v1`, preserving `rulesDigest`, `projectDiscoveryComplete`, `indexComplete`, per-item `eligible` and unknown/lower-bound sizes. See [native inventory and execution contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/managed-cache-inventory.md).
 
 ## `site-storage`
 
@@ -582,8 +606,8 @@ Browser-managed domain removal:
 sweepx site-storage --browser edge --profile Default --domain example.com --export-delete-plan /absolute/new-plan.json
 ```
 
-SweepX now embeds the extension and native host; see [`browser-extension`](#browser-extension). Clearing still requires loading the extension in the matching profile. Connect for domain/key/bucket and shared-category inventory, or specify a website without connecting. The plan-file import entry is removed. Choose scope, confirm the current profile and click Confirm clearing; no hostname retyping is required. Only browsingData and nativeMessaging permissions are requested, with no network calls or direct database-directory removal. See the [adapter guide](../../integrations/chromium-cleanup/README.md) for scope, confirmation and acceptance limits. Legacy filesystem removal flags remain refused.
+SweepX now embeds the extension and native host; see [`browser-extension`](#browser-extension). Clearing still requires loading the extension in the matching profile. Connect for domain/key/bucket and shared-category inventory, or specify a website without connecting. The plan-file import entry is removed. Choose scope, confirm the current profile and click Confirm clearing; no hostname retyping is required. Only browsingData and nativeMessaging permissions are requested, with no network calls or direct database-directory removal. See the [adapter guide](https://github.com/lejunyang/sweepx/blob/main/integrations/chromium-cleanup/README.md) for scope, confirmation and acceptance limits. Legacy filesystem removal flags remain refused.
 
 ## Nested project artifacts
 
-Use `sweepx junk --details ROOT` (or `--format json junk --details ROOT`) to include nested Rust outputs, Python environments and Vite dependency bundles. Parent/child rows overlap; summary bytes count outer candidates only. TUI shows the nested categories and Enter opens read-only detail. These new rules are report-only, and `--details` conflicts with cleanup flags. See [artifact detail contracts](../../docs/architecture/project-artifact-details-2026-10-07.md).
+Use `sweepx junk --details ROOT` (or `--format json junk --details ROOT`) to include nested Rust outputs, Python environments and Vite dependency bundles. Parent/child rows overlap; summary bytes count outer candidates only. TUI shows the nested categories and Enter opens read-only detail. These new rules are report-only, and `--details` conflicts with cleanup flags. See [artifact detail contracts](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/project-artifact-details-2026-10-07.md).

@@ -397,6 +397,7 @@ mod tests {
                     value: sweepx_model::DecimalU128::new(2),
                     reason: ReasonCode::IncompleteStreamCoverage,
                 },
+                hard_link_count: None,
                 reclaimable_estimate: EvidenceValue::Unknown {
                     reason: ReasonCode::Unknown,
                 },
@@ -457,6 +458,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(2),
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(1),
             },
@@ -525,6 +527,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(2),
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: sweepx_model::DecimalU128::new(1),
             },

@@ -27,6 +27,8 @@ mod browser_model_command;
 mod file_tui;
 mod junk_timings;
 mod junk_tui;
+mod managed_cache;
+mod managed_cache_tui;
 mod npx_command;
 mod site_storage_command;
 mod trash_command;
@@ -333,6 +335,10 @@ enum Commands {
         #[arg(long)]
         trash: bool,
     },
+    /// Inspect individual pnpm packages, link counts, project references and project sizes.
+    PnpmStore(managed_cache::Arguments),
+    /// Inspect and select osdk model aliases and model/download cache units.
+    OsdkCache(managed_cache::Arguments),
     /// Report Chromium site data by domain, preserving each full storage key and bucket.
     /// Native scans cover default macOS/Linux/Windows profile locations. Shared databases remain
     /// unattributed; byte totals are logical and do not establish disposable or reclaimable space.
@@ -884,6 +890,12 @@ fn main() -> ProcessExitCode {
                 size_unit,
                 context.locale(),
             );
+        }
+        Commands::PnpmStore(args) => {
+            return managed_cache::run("pnpm", args, format, size_unit, context.locale(), sort);
+        }
+        Commands::OsdkCache(args) => {
+            return managed_cache::run("osdk", args, format, size_unit, context.locale(), sort);
         }
         Commands::SiteStorage {
             browser,

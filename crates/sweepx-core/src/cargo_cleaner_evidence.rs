@@ -4474,6 +4474,7 @@ mod tests {
             object_type: ObjectType::Directory,
             logical_bytes: known_bytes(),
             allocated_bytes: known_bytes(),
+            hard_link_count: None,
             reclaimable_estimate: known_bytes(),
             metadata_fingerprint: "fp-6".into(),
             coverage: complete_coverage(),
@@ -4543,6 +4544,7 @@ mod tests {
             allocated_bytes: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },
+            hard_link_count: None,
             reclaimable_estimate: EvidenceValue::Known {
                 value: DecimalU128::ZERO,
             },

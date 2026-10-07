@@ -1310,6 +1310,7 @@ mod tests {
             allocated_bytes: sweepx_model::EvidenceValue::Known {
                 value: DecimalU128::new(1),
             },
+            hard_link_count: None,
             reclaimable_estimate: sweepx_model::EvidenceValue::LowerBound {
                 value: DecimalU128::new(1),
                 reason: ReasonCode::IncompleteStreamCoverage,

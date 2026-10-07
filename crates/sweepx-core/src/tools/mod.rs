@@ -123,6 +123,16 @@ pub struct ProbeRunner {
 }
 
 impl ProbeRunner {
+    /// Runs a caller-authorized, noninteractive tool operation with the same bounded containment.
+    /// The caller must supply current native authority and explicit item selection. This provides
+    /// cancellation/output limits, not a transaction or rollback: timeout/failure may have changed
+    /// tool state and must be reported as uncertain, never retried as a permanent-delete fallback.
+    pub fn run_authorized_operation(
+        &mut self,
+        command: &mut Command,
+    ) -> Result<ProbeOutput, ProbeError> {
+        self.run(command)
+    }
     /// Starts a batch using the provided limits and cancellation token.
     pub fn new(limits: ProbeLimits, cancel: CancellationToken) -> Self {
         Self {

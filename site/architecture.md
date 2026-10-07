@@ -92,7 +92,7 @@ CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并�
 
 默认三平台垃圾扫描通过 platform 的 `observe_file_length` 消费当前普通文件长度：Linux 使用相对父目录的 no-follow `statx`，核对设备及 mount ID；macOS 使用本次 `getattrlistbulk`；Windows 使用当前枚举批次，排除 reparse、offline/recall、设备项与无效身份。scanner 仅将名称 marker 与逻辑字节折叠到本代目录状态。`supports_file_length_observation` 只声明可选优化能力，无法保证每个文件系统或子项都能提供所需事实；缺失、旧批次、链接、外设备/挂载、负长度及伪造父绑定均回到普通检查。`.git` 保留完整观察，要求文件事实的 observer、普通 scan、大文件与重复内容路径不使用逻辑长度捷径。该 payload 不提供文件身份、分配、唯一性或回收授权。
 
-默认三平台 CLI/TUI 不保留可选逐文件长度索引；macOS 不再为该索引准备、发布或查询 FSEvents 历史；历史候选首屏及选中刷新后的历史片段合并仍可用。scanner 的逻辑累计直接沿现有目录状态索引更新，省去每文件祖先路径向量。独立 `SubtreeCacheProvider` 兼容接口仍保留有界、一次性 FSEvents 历史读取与当前类型/长度确认，不是持续监听服务。空历史、目录 mtime/ctime 或旧候选不能证明当前整棵树未变；跳过子树仍未建立资格，参见[扫描与缓存设计](../docs/architecture/scanner-and-cache.md#portable-live-file-length)。
+默认三平台 CLI/TUI 不保留可选逐文件长度索引；macOS 不再为该索引准备、发布或查询 FSEvents 历史；历史候选首屏及选中刷新后的历史片段合并仍可用。scanner 的逻辑累计直接沿现有目录状态索引更新，省去每文件祖先路径向量。独立 `SubtreeCacheProvider` 兼容接口仍保留有界、一次性 FSEvents 历史读取与当前类型/长度确认，不是持续监听服务。空历史、目录 mtime/ctime 或旧候选不能证明当前整棵树未变；跳过子树仍未建立资格，参见[扫描与缓存设计](https://github.com/lejunyang/sweepx/blob/main/docs/architecture/scanner-and-cache.md#portable-live-file-length)。
 
 `junk --tui` 在 macOS、Linux、Windows 的会话存续期间默认持续监听文件系统变更，自动刷新受影响的目录及必要祖先，不进入无关兄弟子树。监听在遍历前安装；扫描期间的新事件留给下一轮，短时连续变更合并处理。新增或删除的候选也按目录范围发现/撤下，`.git` 内变更扩展到仓库范围。祖先旧总量保持历史，局部结果不宣称整根当前精确。通知丢失、溢出或根身份变化会完整重扫；监听失败提示 `watch_unavailable`，完成一次完整回退后停用自动刷新，手动刷新仍可用。`c` 取消并暂停自动刷新，`r/R` 重新观察后恢复；退出结束监听。回收与 Linux 隔离预览/执行原子持有扫描准入，监听继续积累变更，操作结束再刷新。只监听当前发现的目录根；独立 Linux 临时对象事实仍需全量刷新，新增范围之外的系统根需 `R` 重新发现。一次性 `junk`、普通 `scan`、大文件与重复内容视图不启动常驻监听；本轮没有跨进程后台服务或凭空的整树缓存命中。
 

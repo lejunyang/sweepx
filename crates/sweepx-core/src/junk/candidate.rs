@@ -382,7 +382,11 @@ pub fn assemble_platform_candidate(
 
 // Interpret the admitted rule's purpose, not its risk label or a cache-looking path.
 fn platform_execution_policy(rule: &PlatformJunkRule) -> JunkExecutionPolicy {
-    if rule.root_kind == "macos_browser_state" {
+    if rule.root_kind == "macos_browser_state"
+        || rule.root_kind == "pnpm_reported_store"
+        || rule.root_kind == "osdk_reported_data"
+        || rule.item_inventory.is_some()
+    {
         JunkExecutionPolicy::RequireUserDataSelection
     } else {
         JunkExecutionPolicy::NativeRevalidationRequired
@@ -693,6 +697,28 @@ mod execution_tests {
             assert_eq!(
                 refreshed.project_execution_blocker(),
                 Some("project_report_only")
+            );
+        }
+    }
+    #[test]
+    fn managed_tool_roots_cannot_become_blanket_trash_authority() {
+        let rules = sweepx_catalog::junk::platform::load_platform_junk_rules().unwrap();
+        for mut rule in rules.into_iter().filter(|r| {
+            matches!(
+                r.root_kind.as_str(),
+                "pnpm_reported_store" | "osdk_reported_data"
+            )
+        }) {
+            assert_eq!(
+                platform_execution_policy(&rule),
+                JunkExecutionPolicy::RequireUserDataSelection
+            );
+            rule.item_inventory = None;
+            rule.risk = "R1".into();
+            assert_eq!(
+                platform_execution_policy(&rule),
+                JunkExecutionPolicy::RequireUserDataSelection,
+                "editing presentation fields cannot promote a managed root"
             );
         }
     }
