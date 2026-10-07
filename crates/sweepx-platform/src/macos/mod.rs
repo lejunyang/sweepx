@@ -551,6 +551,21 @@ mod backend {
             Ok(())
         }
 
+        fn current_bulk_file_length(
+            parent: &OpenDirectory,
+            child: &DirectoryEntryRecord,
+        ) -> Option<u128> {
+            child.validate_for_parent(&parent.path).ok()?;
+            let NativeName::UnixBytes(bytes) = &child.file_name else {
+                return None;
+            };
+            let stat = parent.bulk_attributes.get(bytes)?;
+            (kind_from_mode(stat.st_mode) == EntryKind::File
+                && stat.st_dev as u64 == parent.identity.device
+                && stat.st_size >= 0)
+                .then_some(stat.st_size as u128)
+        }
+
         fn open_bound_regular_file(
             parent: &OpenDirectory,
             request: &BoundedRegularFileReadRequest,
@@ -1102,24 +1117,32 @@ mod backend {
             }
         }
 
+        fn supports_file_length_observation(&self) -> bool {
+            true
+        }
+
+        fn observe_file_length(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+        ) -> Option<crate::CachedFileEntry> {
+            let logical_bytes = Self::current_bulk_file_length(parent, child)?;
+            // The exclusively owned parent's current bulk batch already supplied these facts.
+            // As with cache confirmation, no per-file syscall or pathname reopen is needed.
+            Some(crate::CachedFileEntry {
+                path: child.path.clone(),
+                file_name: child.file_name.clone(),
+                logical_bytes,
+            })
+        }
+
         fn confirms_cached_file(
             &self,
             parent: &Self::DirectoryHandle,
             child: &DirectoryEntryRecord,
             logical_bytes: u128,
         ) -> bool {
-            if child.validate_for_parent(&parent.path).is_err() {
-                return false;
-            }
-            let NativeName::UnixBytes(bytes) = &child.file_name else {
-                return false;
-            };
-            parent.bulk_attributes.get(bytes).is_some_and(|stat| {
-                kind_from_mode(stat.st_mode) == EntryKind::File
-                    && stat.st_dev as u64 == parent.identity.device
-                    && stat.st_size >= 0
-                    && stat.st_size as u128 == logical_bytes
-            })
+            Self::current_bulk_file_length(parent, child) == Some(logical_bytes)
         }
 
         fn inspect_child_with_directory_admission(
@@ -1432,6 +1455,48 @@ mod backend {
     mod device_boundary_tests {
         use super::*;
         use std::os::unix::fs::MetadataExt;
+
+        #[test]
+        fn bulk_file_lengths_refuse_foreign_devices_and_invalid_native_lengths() {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().canonicalize().unwrap();
+            fs::write(path.join("file"), b"observed bytes").unwrap();
+            let scanner = MacosPlatformScanner::new();
+            let cancel = CancellationToken::new();
+            let mut admission = scanner
+                .admit_root(&ScanRoot::new(&path).unwrap(), &cancel)
+                .unwrap();
+            let child = DirectoryEntryRecord::from_parent_and_name(
+                &path,
+                NativeName::UnixBytes(b"file".to_vec()),
+            )
+            .unwrap();
+            let name = MacosPlatformScanner::name_c_string(&child.file_name).unwrap();
+            let observed = MacosPlatformScanner::fstatat_raw(
+                MacosPlatformScanner::dirfd(&admission.directory).unwrap(),
+                &name,
+            )
+            .unwrap();
+            // Inject only the two inadmissible fields into otherwise independently observed
+            // metadata. These guards must hold even if a filesystem reports malformed hints.
+            for (device, length) in [
+                (observed.stat.st_dev.wrapping_add(1), observed.stat.st_size),
+                (observed.stat.st_dev, -1),
+            ] {
+                let mut stat = observed.stat;
+                stat.st_dev = device;
+                stat.st_size = length;
+                admission
+                    .directory
+                    .bulk_attributes
+                    .insert(b"file".to_vec(), stat);
+                assert!(
+                    scanner
+                        .observe_file_length(&admission.directory, &child)
+                        .is_none()
+                );
+            }
+        }
 
         #[test]
         fn foreign_directory_is_rejected_before_attempting_to_open_it() {
@@ -2146,6 +2211,12 @@ mod tests {
                     };
                     assert!(seen.insert(bytes.clone()), "duplicate enumeration");
                     let metadata = fs::symlink_metadata(&child.path).unwrap();
+                    let observed = scanner
+                        .observe_file_length(&admission.directory, child)
+                        .expect("current bulk file facts");
+                    assert_eq!(observed.path, child.path);
+                    assert_eq!(observed.file_name, child.file_name);
+                    assert_eq!(observed.logical_bytes, metadata.len() as u128);
                     assert!(scanner.confirms_cached_file(
                         &admission.directory,
                         child,
@@ -2168,6 +2239,12 @@ mod tests {
                 panic!("Unix child")
             };
             assert!(!backend::bulk_hints_helper(&admission.directory).contains(bytes));
+            assert!(
+                scanner
+                    .observe_file_length(&admission.directory, &old)
+                    .is_none(),
+                "older batches cannot lend current lengths"
+            );
             fs::write(&old.path, b"a changed length after enumeration").unwrap();
             let metadata = fs::symlink_metadata(&old.path).unwrap();
             assert!(!scanner.confirms_cached_file(
@@ -2196,6 +2273,7 @@ mod tests {
         fs::create_dir(temp.path().join("directory")).unwrap();
         symlink("file", temp.path().join("link")).unwrap();
         let scanner = MacosPlatformScanner::new();
+        assert!(scanner.supports_file_length_observation());
         let cancel = CancellationToken::new();
         let mut admission = scanner
             .admit_root(&ScanRoot::new(temp.path()).unwrap(), &cancel)
@@ -2212,12 +2290,22 @@ mod tests {
             .unwrap();
         for child in &batch.entries {
             let metadata = fs::symlink_metadata(&child.path).unwrap();
+            let observed = scanner.observe_file_length(&admission.directory, child);
+            assert_eq!(observed.is_some(), metadata.is_file());
+            if let Some(observed) = observed {
+                assert_eq!(observed.logical_bytes, metadata.len() as u128);
+            }
             assert_eq!(
                 scanner.confirms_cached_file(&admission.directory, child, metadata.len() as u128),
                 metadata.is_file()
             );
             let mut forged = child.clone();
             forged.path = temp.path().join("other");
+            assert!(
+                scanner
+                    .observe_file_length(&admission.directory, &forged)
+                    .is_none()
+            );
             assert!(!scanner.confirms_cached_file(
                 &admission.directory,
                 &forged,
@@ -2229,6 +2317,20 @@ mod tests {
             &child_record(temp.path(), b"absent"),
             0
         ));
+        assert!(
+            scanner
+                .observe_file_length(&admission.directory, &child_record(temp.path(), b"absent"))
+                .is_none()
+        );
+        let unsupported = DirectoryEntryRecord {
+            path: temp.path().join("file"),
+            file_name: NativeName::WindowsUtf16("file".encode_utf16().collect()),
+        };
+        assert!(
+            scanner
+                .observe_file_length(&admission.directory, &unsupported)
+                .is_none()
+        );
     }
 
     #[test]

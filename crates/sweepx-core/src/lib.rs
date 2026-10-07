@@ -1090,7 +1090,13 @@ pub fn scan_junk_with_store<S: SnapshotStore>(
         context,
         request,
         store,
-        ScannerOptions::default(),
+        ScannerOptions {
+            retain_file_index: reuse.is_some()
+                || !sweepx_platform::PlatformScanner::supports_file_length_observation(
+                    &HostPlatformScanner::new(),
+                ),
+            ..ScannerOptions::default()
+        },
         Some(classifier),
         reuse,
         None,
@@ -1121,7 +1127,13 @@ pub fn scan_junk_with_observer<S: SnapshotStore>(
         context,
         request,
         store,
-        ScannerOptions::default(),
+        ScannerOptions {
+            retain_file_index: reuse.is_some()
+                || !sweepx_platform::PlatformScanner::supports_file_length_observation(
+                    &HostPlatformScanner::new(),
+                ),
+            ..ScannerOptions::default()
+        },
         Some(classifier),
         reuse,
         Some(JunkScanObservation { cancel, observer }),

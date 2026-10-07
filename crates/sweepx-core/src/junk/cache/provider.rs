@@ -140,7 +140,7 @@ impl SubtreeCacheProvider {
 
     /// Loads original-scope historical candidates and file indexes under the same shared read
     /// budget before one history query. Used only for local fragment publication, never replay.
-    pub(crate) fn prepare_fragments(
+    pub fn prepare_fragments(
         cache_dir: &Path,
         roots: &[PathBuf],
         scope: &[PathBuf],
@@ -447,7 +447,7 @@ impl SubtreeCacheProvider {
     /// A missing/unusable history retains the old generation and returns false. The cursor
     /// must have been captured before this provider's history query and the new traversal.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn store_observed_fragment(
+    pub fn store_observed_fragment(
         &mut self,
         source: &sweepx_model::ScannedEntry,
         all_roots: &[PathBuf],

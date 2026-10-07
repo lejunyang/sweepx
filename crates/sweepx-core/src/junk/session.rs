@@ -693,10 +693,6 @@ impl Worker {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         let mut cache = if let Some(directory) = self.request.cache_dir.clone() {
             writer.phase(JunkSessionPhase::Cache)?;
-            // Capture before preview reads, validation and traversal. Racing changes belong to
-            // the next cache generation even if this revision later publishes complete facts.
-            #[cfg(target_os = "macos")]
-            let cursor = crate::current_event_id();
             let mut reader = super::cache::CacheReader::with_rule_bytes(
                 &directory,
                 &self.request.project_rule_bytes,
@@ -705,14 +701,7 @@ impl Worker {
             if job.revision.0 == 1 && !self.request.system {
                 self.restore_history(&mut reader, &service, rules_digest, job, writer)?;
             }
-            #[cfg(target_os = "macos")]
-            {
-                Some((directory, cursor, reader))
-            }
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            {
-                Some((directory, reader))
-            }
+            Some((directory, reader))
         } else {
             None
         };
@@ -748,15 +737,7 @@ impl Worker {
                 ));
             }
         }
-        #[cfg(target_os = "macos")]
-        if self.request.system
-            && job.revision.0 == 1
-            && let Some((_, _, reader)) = &mut cache
-        {
-            writer.phase(JunkSessionPhase::Cache)?;
-            self.restore_history(reader, &service, rules_digest, job, writer)?;
-        }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if self.request.system
             && job.revision.0 == 1
             && let Some((_, reader)) = &mut cache
@@ -839,39 +820,8 @@ impl Worker {
             .map(ScanRoot::new)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| JunkSessionFailure::new("root_invalid", error.to_string()))?;
-        #[cfg(target_os = "macos")]
-        if cache.is_some() {
-            writer.phase(JunkSessionPhase::Cache)?;
-        }
-        #[cfg(target_os = "macos")]
-        let mut cache = cache.map(|(directory, cursor, reader)| {
-            let paths: Vec<_> = roots.iter().map(|root| root.path().to_path_buf()).collect();
-            let provider = if job.selected.is_some() {
-                super::cache::provider::SubtreeCacheProvider::prepare_fragments(
-                    &directory,
-                    &paths,
-                    &self.scan_roots,
-                    reader,
-                )
-            } else {
-                super::cache::provider::SubtreeCacheProvider::prepare_files(
-                    &directory, &paths, reader,
-                )
-            };
-            let provider = if let Some(root) = &self.request.cache_state_root {
-                provider
-                    .with_state_directory(root)
-                    .expect("validated state cache scope")
-            } else {
-                provider
-            };
-            (directory, cursor, provider)
-        });
-        #[cfg(target_os = "macos")]
-        let reuse = cache
-            .as_ref()
-            .map(|(_, _, provider)| provider as &dyn crate::SubtreeReuse);
-        #[cfg(not(target_os = "macos"))]
+        // Current native bulk observations supply lengths without reading another file index.
+        // Historical candidate rows stay in the reader for bounded selected-preview merges.
         let reuse = None;
         writer.phase(JunkSessionPhase::Traversal)?;
         let mut pending = Rows::new();
@@ -897,6 +847,10 @@ impl Worker {
             ScannerOptions {
                 scan_id: ScanId::new(format!("{}:{}", self.session_id, job.revision.0)),
                 resource_limits: self.request.limits.scan,
+                retain_file_index:
+                    !sweepx_platform::PlatformScanner::supports_file_length_observation(
+                        &HostPlatformScanner::new(),
+                    ),
                 ..ScannerOptions::default()
             },
         );
@@ -1020,23 +974,7 @@ impl Worker {
             writer.finish(JunkSessionOutcome::Cancelled, false, pending.len());
             return Ok(());
         }
-        #[cfg(target_os = "macos")]
-        if let Some((directory, cursor, provider)) = &mut cache {
-            writer.phase(JunkSessionPhase::CacheWrite)?;
-            self.store_cache(
-                directory,
-                *cursor,
-                provider,
-                &scanned,
-                &pending,
-                &service,
-                &platform,
-                job,
-                partial || writer.error_count > 0,
-                writer,
-            )?;
-        }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if let Some((directory, reader)) = &mut cache {
             writer.phase(JunkSessionPhase::CacheWrite)?;
             self.store_history(

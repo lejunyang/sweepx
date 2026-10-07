@@ -14,8 +14,6 @@ use sweepx_core::junk::linux_temp;
 #[cfg(target_os = "linux")]
 mod permanent_delete_command;
 #[cfg(target_os = "macos")]
-use sweepx_core::junk::cache::provider as subtree_provider;
-#[cfg(target_os = "macos")]
 mod tcc_access;
 #[cfg(target_os = "linux")]
 mod temp_clean_command;
@@ -1397,28 +1395,11 @@ fn run_junk_scan(
         .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
         .collect();
 
-    // Capture before cache validation and traversal: writes during the scan must invalidate the next reuse.
-    #[cfg(target_os = "macos")]
-    let scan_event_id = sweepx_core::current_event_id();
-
     timings.phase("setup");
 
-    // Only file indexes participate in acceleration. Their lengths must match live native
-    // enumeration; an advisory event history cannot authorize skipping a whole root.
-    #[cfg(target_os = "macos")]
-    let subtree_provider = subtree_provider::SubtreeCacheProvider::prepare_files(
-        cache_dir.as_deref().unwrap_or(Path::new("/nonexistent")),
-        &canonical_roots,
-        junk_cache::CacheReader::new(cache_dir.as_deref().unwrap_or(Path::new("/nonexistent"))),
-    );
-    #[cfg(target_os = "macos")]
-    let subtree_provider = if let Some(root) = &cache_state_root {
-        subtree_provider
-            .with_state_directory(root)
-            .expect("explicit absolute state scope")
-    } else {
-        subtree_provider
-    };
+    // Darwin's bounded bulk pages already observe current file type and length. Reading a
+    // persisted length index and draining advisory history adds work without removing I/O.
+    // Keep historical candidate publication for the TUI, but use current bulk facts here.
     let miss_indexes: Vec<usize> = (0..canonical_roots.len()).collect();
 
     let miss_roots: Vec<PathBuf> = miss_indexes
@@ -1432,7 +1413,7 @@ fn run_junk_scan(
     );
     timings.phase("rootCacheValidation");
 
-    // File-index validation was included in the shared root-cache phase above.
+    // Retain stable diagnostic fields; neither phase reads a redundant file-length index.
     timings.phase("subtreeCacheValidation");
     let classified = if miss_roots.is_empty() {
         None
@@ -1445,9 +1426,6 @@ fn run_junk_scan(
             },
             Option::<&sweepx_core::MemorySnapshotStore>::None,
             &classifier,
-            #[cfg(target_os = "macos")]
-            Some(&subtree_provider),
-            #[cfg(not(target_os = "macos"))]
             None,
         ))
     };
@@ -1571,14 +1549,22 @@ fn run_junk_scan(
             let Some(groups) = &grouped_candidates else {
                 continue;
             };
+            let Some(source) = scan
+                .observed_roots
+                .iter()
+                .find(|source| root.to_str() == Some(source.display_path.as_str()))
+            else {
+                continue;
+            };
             match groups
                 .project_root(*index, &cancel)
                 .and_then(|stored| {
-                    junk_cache::StoredJunkRoot::capture(
-                        root,
+                    junk_cache::StoredJunkRoot::capture_historical_with_rule_bytes(
+                        source,
                         stored,
-                        scan_event_id,
-                        classification_context,
+                        Some(classification_context),
+                        sweepx_core::junk::PROJECT_RULES_JSON.as_bytes(),
+                        sweepx_core::junk::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
                     )
                 })
                 .and_then(|mut record| {
@@ -1603,24 +1589,6 @@ fn run_junk_scan(
                 ),
             }
         }
-
-        // Persist file lengths only. Candidate rows cannot reconstruct subtree accounting or
-        // current scan identities; directories are always traversed on a root-cache miss.
-        drop(grouped_candidates);
-        subtree_provider.store_observed_indexes(
-            &scan.observed_roots,
-            &canonical_roots,
-            scan_event_id,
-            &scan.covered_paths,
-            &scan.dir_listings,
-            &cancel,
-            |root, error| {
-                eprintln!(
-                    "could not update subtree index for {}: {error}",
-                    root.display()
-                );
-            },
-        );
     }
 
     #[cfg(target_os = "macos")]

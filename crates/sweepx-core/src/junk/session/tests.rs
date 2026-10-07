@@ -744,7 +744,7 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
     assert!(
         crate::junk::cache::CacheReader::new(&cache)
             .index(&root)
-            .is_some()
+            .is_none()
     );
     fs::write(
         target.join("payload"),
@@ -827,7 +827,7 @@ fn cached_session_shows_history_before_discovery_then_replaces_with_new_scan_id(
     assert!(
         crate::junk::cache::CacheReader::new(&cache)
             .index(&root)
-            .is_some()
+            .is_none()
     );
     shutdown(&last);
 }
@@ -947,14 +947,28 @@ fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_fac
         .find(|(_, row)| row.observed_native_path().as_ref() == Some(&a))
         .unwrap()
         .0;
-    let old_index = crate::junk::cache::CacheReader::new(&cache)
-        .index(&root)
-        .unwrap();
-    let old_index = serde_json::to_value(old_index).unwrap();
-    assert_eq!(
-        old_index["listings"][b.to_str().unwrap()]["files"]["payload"],
-        serde_json::json!(fs::symlink_metadata(b.join("payload")).unwrap().len())
+    assert!(
+        crate::junk::cache::CacheReader::new(&cache)
+            .index(&root)
+            .is_none()
     );
+    // Seed the actual managed file before corrupting it. A malformed legacy index must
+    // neither prevent historical candidate merges nor be overwritten by them.
+    let legacy =
+        crate::junk::cache::StoredSubtreeIndex::new(&root, 42, BTreeMap::new(), BTreeMap::new())
+            .unwrap();
+    crate::junk::cache::write_subtree_index(&cache, &legacy).unwrap();
+    let legacy_path = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("f-")
+        })
+        .unwrap();
+    fs::write(&legacy_path, b"invalid").unwrap();
     fs::write(a.join("payload"), b"larger-current-payload").unwrap();
     let revision = session.refresh_selected(&[key]).unwrap();
     let events = drain(&session, revision);
@@ -967,38 +981,19 @@ fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_fac
         }
     ));
     assert_eq!(current(&events).len(), 1);
-    let merged = crate::junk::cache::CacheReader::new(&cache)
-        .index(&root)
-        .unwrap();
-    let merged = serde_json::to_value(merged).unwrap();
     assert!(
-        merged["since_event_id"].as_u64().unwrap() >= old_index["since_event_id"].as_u64().unwrap()
+        crate::junk::cache::CacheReader::new(&cache)
+            .index(&root)
+            .is_none()
     );
-    assert_eq!(
-        merged["listings"][a.to_str().unwrap()]["files"]["payload"],
-        serde_json::json!(fs::symlink_metadata(a.join("payload")).unwrap().len()),
-        "independent history diagnosis: {:?}",
-        crate::events_since(
-            &[root.as_path()],
-            old_index["since_event_id"].as_u64().unwrap(),
-            Duration::from_secs(2)
-        )
-    );
-    assert!(merged["covered"].get(root.to_str().unwrap()).is_none());
-    // Delayed fixture events may correctly invalidate a sibling. If retained, its file
-    // facts must still agree with the ordinary metadata oracle, never the selected payload.
-    if let Some(listing) = merged["listings"].get(b.to_str().unwrap()) {
-        assert_eq!(
-            listing["files"]["payload"],
-            serde_json::json!(fs::metadata(b.join("payload")).unwrap().len())
-        );
-    }
+    assert_eq!(fs::read(&legacy_path).unwrap(), b"invalid");
     let preview = crate::junk::cache::CacheReader::new(&cache)
         .historical_roots(std::slice::from_ref(&root))[0]
         .take()
         .unwrap();
     let preview = serde_json::to_value(preview).unwrap();
     assert_eq!(preview["preview_only"], true);
+    assert!(preview["since_event_id"].is_null());
     assert_eq!(preview["candidates"].as_array().unwrap().len(), 2);
     assert!(
         crate::junk::cache::CacheReader::new(&cache)
@@ -1061,18 +1056,19 @@ fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_fac
             .values()
             .all(|row| row.candidate.project_execution_blocker().is_some())
     );
-    let index = crate::junk::cache::CacheReader::new(&cache)
-        .index(&root)
-        .unwrap();
-    let index = serde_json::to_value(index).unwrap();
+    assert!(
+        crate::junk::cache::CacheReader::new(&cache)
+            .index(&root)
+            .is_none()
+    );
     let complete = crate::junk::cache::CacheReader::new(&cache)
         .historical_roots(std::slice::from_ref(&root))[0]
         .take()
         .unwrap();
-    assert_eq!(
-        serde_json::to_value(complete).unwrap()["preview_only"],
-        false
-    );
+    let complete = serde_json::to_value(complete).unwrap();
+    assert_eq!(complete["preview_only"], true);
+    assert!(complete["since_event_id"].is_null());
+    assert_eq!(complete["candidates"].as_array().unwrap().len(), 2);
     for path in [&a, &b] {
         let row = fresh
             .values()
@@ -1083,11 +1079,6 @@ fn selected_refresh_publishes_fragments_as_history_and_restarts_with_current_fac
             .map(|entry| u128::from(fs::symlink_metadata(entry.unwrap().path()).unwrap().len()))
             .sum();
         assert_eq!(row.logical_bytes(), &sweepx_platform::known_u128(expected));
-        let payload = path.join("payload");
-        assert_eq!(
-            index["listings"][path.to_str().unwrap()]["files"]["payload"],
-            serde_json::json!(fs::symlink_metadata(payload).unwrap().len())
-        );
     }
     shutdown(&session);
 }
@@ -1111,7 +1102,7 @@ fn cancelled_selected_refresh_keeps_the_published_generation() {
     let first = drain(&session, JunkSessionRevision(1));
     let key = *current(&first).keys().next().unwrap();
     let before = published_cache(&cache);
-    assert_eq!(before.len(), 2);
+    assert_eq!(before.len(), 1);
     fs::write(target.join("payload"), b"fresh longer generation").unwrap();
     let revision = session.refresh_selected(&[key]).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1853,7 +1844,7 @@ fn incomplete_refresh_does_not_remove_old_candidates_when_retained_boundaries_ar
     #[cfg(target_os = "macos")]
     let published_before = published_cache(&cache);
     #[cfg(target_os = "macos")]
-    assert_eq!(published_before.len(), 2);
+    assert_eq!(published_before.len(), 1);
     fs::remove_file(target.parent().unwrap().join("Cargo.toml")).unwrap();
     // Pressure must be inside the selected subtree. Unrelated siblings are deliberately
     // omitted by local refresh and no longer consume its required classification metadata.

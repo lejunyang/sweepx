@@ -7,21 +7,10 @@ use crate::junk::cache::{
         DEFAULT_GROUPING_BYTES, GroupingBudget, RootGroups, RootScope, group_native, group_sources,
     },
 };
-#[cfg(target_os = "macos")]
-use crate::junk::cache::{grouping::group_listings, provider::SubtreeCacheProvider};
 use sweepx_model::{
     ArithmeticState, ByteValue, CountValue, Coverage, CoverageState, DecimalU128, FieldProvenance,
     ReasonCode,
 };
-
-/// A single root can project directly and stop at its optional wire limit. Only multiple roots
-/// need a shared partition; unavailable views must never be treated as successfully empty facts.
-#[cfg(target_os = "macos")]
-enum ListingPublication<'a> {
-    SingleRoot,
-    Grouped(RootGroups<(&'a String, &'a sweepx_scanner::DirListing)>),
-    Unavailable,
-}
 
 impl Worker {
     pub(super) fn restore_history(
@@ -117,7 +106,7 @@ impl Worker {
 
     /// Historical-only publication does not qualify a root/file index as unchanged. This policy
     /// is exercised on macOS too; each platform retains its native storage/runtime boundary.
-    #[cfg(any(target_os = "linux", target_os = "windows", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn store_history(
         &self,
@@ -233,223 +222,6 @@ impl Worker {
                 )))?;
             }
             debug_assert!(root.is_absolute() && budget.used_bytes() <= DEFAULT_GROUPING_BYTES);
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(target_os = "macos")]
-    pub(super) fn store_cache(
-        &self,
-        directory: &Path,
-        cursor: crate::FsEventId,
-        provider: &mut SubtreeCacheProvider,
-        scanned: &sweepx_scanner::ClassifiedScan,
-        pending: &Rows,
-        service: &JunkService,
-        platform: &PlatformJunkSetup,
-        job: &Job,
-        partial: bool,
-        writer: &mut Writer,
-    ) -> Result<(), JunkSessionFailure> {
-        let context = service
-            .with_platform(&platform.rules, &platform.evidence)
-            .classification_context_digest();
-        // Complete local observations replace only selected subtrees. The provider retains
-        // siblings only with complete history and the original root binding; candidate rows
-        // become historical previews because shallow ancestor totals are not recomputed.
-        let selected = job
-            .selected
-            .as_ref()
-            .map(|keys| {
-                keys.iter()
-                    .map(|key| {
-                        self.current
-                            .get(key)
-                            .and_then(|row| row.observed_native_path())
-                            .ok_or_else(|| {
-                                JunkSessionFailure::new(
-                                    "refresh_binding_unavailable",
-                                    "selected cache path unavailable",
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?;
-        if selected.is_some() && partial {
-            return Ok(());
-        }
-        if scanned.observed_roots.is_empty() {
-            return Ok(());
-        }
-        // Publication is optional. These views borrow bounded scan facts and charge spare Vec
-        // capacity independently; allocation pressure never weakens live classification.
-        let mut budget = GroupingBudget::new(DEFAULT_GROUPING_BYTES);
-        let Some(scope) = RootScope::new(&self.scan_roots, &mut budget) else {
-            cache_grouping_warning(writer, &job.cancel)?;
-            return Ok(());
-        };
-        let Some(source_roots) =
-            group_sources(&scope, &scanned.observed_roots, &mut budget, &job.cancel)
-        else {
-            cache_grouping_warning(writer, &job.cancel)?;
-            return Ok(());
-        };
-        if source_roots.is_empty() {
-            return Ok(());
-        }
-        let need_candidates = selected.is_some() || (!partial && context.is_some());
-        let candidates = if need_candidates {
-            group_candidates(
-                &scope,
-                pending,
-                selected.as_deref(),
-                &mut budget,
-                &job.cancel,
-            )
-        } else {
-            None
-        };
-        let listings = if scope.len() == 1 {
-            ListingPublication::SingleRoot
-        } else {
-            match group_listings(
-                &scope,
-                &scanned.covered_paths,
-                &scanned.dir_listings,
-                &mut budget,
-                &job.cancel,
-            ) {
-                Some(groups) => ListingPublication::Grouped(groups),
-                None => ListingPublication::Unavailable,
-            }
-        };
-        if (need_candidates && candidates.is_none())
-            || matches!(&listings, ListingPublication::Unavailable)
-        {
-            cache_grouping_warning(writer, &job.cancel)?;
-        }
-        debug_assert!(budget.used_bytes() <= DEFAULT_GROUPING_BYTES);
-        for (ordinal, root) in self.scan_roots.iter().enumerate() {
-            if job.cancel.is_cancelled() {
-                break;
-            }
-            let Some(source_root) = source_roots.get(ordinal).first() else {
-                continue;
-            };
-            if let Some(paths) = &selected {
-                // Never merge an empty/truncated candidate projection as a complete fragment.
-                // Either shared view failing leaves the original preview/index generation intact.
-                let Some(candidates) = &candidates else {
-                    continue;
-                };
-                if matches!(&listings, ListingPublication::Unavailable) {
-                    continue;
-                }
-                let Some(stored) = stored_candidates(candidates.get(ordinal), &job.cancel) else {
-                    continue;
-                };
-                let result = match &listings {
-                    ListingPublication::SingleRoot => provider.store_observed_fragment(
-                        source_root,
-                        &self.scan_roots,
-                        cursor,
-                        paths,
-                        &scanned.covered_paths,
-                        &scanned.dir_listings,
-                        stored,
-                    ),
-                    ListingPublication::Grouped(listings) => provider
-                        .store_observed_fragment_owned(
-                            source_root,
-                            &self.scan_roots,
-                            cursor,
-                            paths,
-                            &scanned.covered_paths,
-                            listings.get(ordinal).iter().copied(),
-                            stored,
-                        ),
-                    ListingPublication::Unavailable => continue,
-                };
-                if let Err(error) = result {
-                    writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
-                        "cache_fragment_write_failed",
-                        error.to_string(),
-                    )))?;
-                }
-                continue;
-            }
-            if !partial
-                && root
-                    .to_str()
-                    .is_some_and(|path| scanned.covered_paths.get(path) == Some(&true))
-                && let Some(context) = context
-                && let Some(candidates) = &candidates
-            {
-                let Some(stored) = stored_candidates(candidates.get(ordinal), &job.cancel) else {
-                    continue;
-                };
-                let result = StoredJunkRoot::capture_with_rule_bytes(
-                    root,
-                    stored,
-                    cursor,
-                    context,
-                    &self.request.project_rule_bytes,
-                    super::super::platform::PLATFORM_JUNK_RULES_JSON.as_bytes(),
-                )
-                .and_then(|mut record| {
-                    if !record.matches_observed_root(source_root) {
-                        return Err(std::io::Error::other("cache root changed after traversal"));
-                    }
-                    record.bind_scope(&self.scan_roots);
-                    if job.cancel.is_cancelled() {
-                        return Ok(());
-                    }
-                    match &self.request.cache_state_root {
-                        Some(root) => crate::junk::cache::write_in_state(root, &record),
-                        None => crate::junk::cache::write(directory, &record),
-                    }
-                });
-                if let Err(error) = result {
-                    writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
-                        "cache_write_failed",
-                        error.to_string(),
-                    )))?;
-                }
-            }
-            if !root
-                .to_str()
-                .is_some_and(|path| scanned.covered_paths.contains_key(path))
-            {
-                continue;
-            }
-            // Cancellation may arrive during candidate capture in this same root. Avoid
-            // beginning another optional native observation/write after that boundary.
-            if job.cancel.is_cancelled() {
-                break;
-            }
-            let result = match &listings {
-                ListingPublication::SingleRoot => provider.store_observed_index(
-                    source_root,
-                    &self.scan_roots,
-                    cursor,
-                    &scanned.covered_paths,
-                    &scanned.dir_listings,
-                ),
-                ListingPublication::Grouped(listings) => provider.store_observed_index_owned(
-                    source_root,
-                    cursor,
-                    listings.get(ordinal).iter().copied(),
-                ),
-                ListingPublication::Unavailable => continue,
-            };
-            if let Err(error) = result {
-                writer.send(JunkSessionEventKind::CacheWarning(JunkSessionFailure::new(
-                    "cache_index_write_failed",
-                    error.to_string(),
-                )))?;
-            }
         }
         Ok(())
     }

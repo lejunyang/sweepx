@@ -2,6 +2,207 @@
 
 use super::*;
 
+fn enable_fixture_file_lengths(platform: &mut FakePlatform) {
+    platform.file_length_proposals = Some(
+        platform
+            .walk_entries
+            .iter()
+            .filter_map(|(path, entry)| match entry {
+                WalkEntry::File(metadata) => Some((
+                    path.clone(),
+                    sweepx_platform::CachedFileEntry {
+                        path: path.clone(),
+                        file_name: metadata.file_name.clone(),
+                        logical_bytes: extract_known_u128(&metadata.logical_bytes).unwrap(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect(),
+    );
+}
+
+#[test]
+fn classified_live_lengths_keep_markers_git_lineage_and_totals_without_file_index() {
+    let fixture = |fast| {
+        let (mut platform, root, target) = marker_fixture(true);
+        let git = root.join(".git");
+        platform
+            .entries_by_capability
+            .get_mut(&1)
+            .unwrap()
+            .push(DirectoryEntryRecord {
+                path: git.clone(),
+                file_name: test_native_name(".git"),
+            });
+        let mut metadata = test_metadata(git.clone(), ".git", EntryKind::File, Some(1));
+        metadata.logical_bytes = known_u128(9);
+        platform.walk_entries.insert(git, WalkEntry::File(metadata));
+        if fast {
+            enable_fixture_file_lengths(&mut platform);
+        }
+        (platform, root, target)
+    };
+    let classifier = ParentMarker {
+        negative: false,
+        local: true,
+    };
+    let (cold_platform, root, target) = fixture(false);
+    let cold_calls = Arc::clone(&cold_platform.inspect_calls);
+    let cold = Scanner::new(cold_platform, ScannerOptions::default())
+        .scan_classified(
+            &[ScanRoot::new(root.clone()).unwrap()],
+            &CancellationToken::new(),
+            &classifier,
+            None,
+        )
+        .unwrap();
+    let (fast_platform, _, _) = fixture(true);
+    let fast_calls = Arc::clone(&fast_platform.inspect_calls);
+    let hook_calls = Arc::clone(&fast_platform.file_length_calls);
+    let fast = Scanner::new(
+        fast_platform,
+        ScannerOptions {
+            retain_file_index: false,
+            ..Default::default()
+        },
+    )
+    .scan_classified(
+        &[ScanRoot::new(root.clone()).unwrap()],
+        &CancellationToken::new(),
+        &classifier,
+        None,
+    )
+    .unwrap();
+    assert_eq!(cold_calls.load(Ordering::SeqCst), 6);
+    assert_eq!(
+        fast_calls.load(Ordering::SeqCst),
+        3,
+        "two directories and native gitfile only"
+    );
+    assert_eq!(
+        hook_calls.load(Ordering::SeqCst),
+        5,
+        "gitfile never enters the length hook"
+    );
+    assert_eq!(fast.decisions, cold.decisions);
+    assert_eq!(fast.directory_markers, cold.directory_markers);
+    assert_eq!(fast.coverages, cold.coverages);
+    assert_eq!(fast.covered_paths, cold.covered_paths);
+    assert_eq!(fast.observed_roots, cold.observed_roots);
+    assert!(fast.dir_listings.is_empty());
+    assert!(!cold.dir_listings.is_empty());
+    let cold_aggregate = aggregate_for_path(&cold.summary, &target);
+    let fast_aggregate = aggregate_for_path(&fast.summary, &target);
+    assert_eq!(fast_aggregate.apparent_logical_bytes, known_u128(17));
+    assert_eq!(fast_aggregate.direct_child_count, known_count(1));
+    assert_eq!(fast_aggregate.recursive_entry_count, known_count(1));
+    assert_eq!(
+        fast_aggregate.apparent_logical_bytes,
+        cold_aggregate.apparent_logical_bytes
+    );
+    assert_eq!(fast_aggregate.coverage, cold_aggregate.coverage);
+    let gitfile = fast
+        .summary
+        .entries
+        .iter()
+        .find(|entry| entry.display_path == root.join(".git").to_string_lossy())
+        .unwrap();
+    assert_eq!(gitfile.logical_bytes, known_u128(9));
+    assert!(gitfile.identity.is_some() && gitfile.native_locator.is_some());
+}
+
+#[test]
+fn ordinary_scans_and_full_file_observers_bypass_live_length_hook() {
+    let (mut platform, root, _) = marker_fixture(true);
+    enable_fixture_file_lengths(&mut platform);
+    let hook_calls = Arc::clone(&platform.file_length_calls);
+    let scanner = Scanner::new(platform, ScannerOptions::default());
+    let roots = [ScanRoot::new(root).unwrap()];
+    let ordinary = scanner.scan(&roots, &CancellationToken::new()).unwrap();
+    assert_eq!(
+        ordinary
+            .entries
+            .iter()
+            .filter(|entry| entry.object_type == ObjectType::File)
+            .count(),
+        3
+    );
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+
+    #[derive(Default)]
+    struct Files(Vec<ScannedEntry>);
+    impl ClassifiedScanObserver for Files {
+        fn wants_file_observations(&self) -> bool {
+            true
+        }
+        fn on_entry(&mut self, entry: &ScannedEntry) {
+            if entry.object_type == ObjectType::File {
+                self.0.push(entry.clone());
+            }
+        }
+    }
+    let mut files = Files::default();
+    scanner
+        .scan_classified_with_observer(
+            &roots,
+            &CancellationToken::new(),
+            &ParentMarker {
+                negative: false,
+                local: true,
+            },
+            None,
+            &mut files,
+        )
+        .unwrap();
+    assert_eq!(files.0.len(), 3);
+    assert!(
+        files
+            .0
+            .iter()
+            .all(|entry| entry.identity.is_some() && entry.native_locator.is_some())
+    );
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn malformed_live_length_proposals_fall_back_to_bound_inspection() {
+    let (mut platform, root, target) = marker_fixture(true);
+    enable_fixture_file_lengths(&mut platform);
+    let proposals = platform.file_length_proposals.as_mut().unwrap();
+    let marker = proposals.get_mut(&root.join("Cargo.toml")).unwrap();
+    marker.path = root.join("wrong-marker");
+    let payload = proposals.get_mut(&target.join("payload")).unwrap();
+    payload.file_name = test_native_name("wrong-payload");
+    payload.logical_bytes = 999;
+    let calls = Arc::clone(&platform.inspect_calls);
+    let scan = Scanner::new(platform, ScannerOptions::default())
+        .scan_classified(
+            &[ScanRoot::new(root).unwrap()],
+            &CancellationToken::new(),
+            &ParentMarker {
+                negative: false,
+                local: true,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "two directories and two invalid proposals"
+    );
+    assert_eq!(
+        scan.decisions.len(),
+        1,
+        "live fallback preserves required marker"
+    );
+    assert_eq!(
+        aggregate_for_path(&scan.summary, &target).apparent_logical_bytes,
+        known_u128(17)
+    );
+}
+
 #[test]
 fn current_file_observer_bypasses_length_only_reuse_and_sees_unretained_files() {
     struct RefusedPlan;

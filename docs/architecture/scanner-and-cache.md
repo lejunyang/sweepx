@@ -6,6 +6,20 @@
 
 本文沿用上游研究的证据标签：已证事实表示上游一手资料直接支持；推导表示由事实导出的限制；产品设计表示 SweepX 选择；待实测表示发布前必须在真实平台验证、失败时保守降级的假设。平台 adapter 可以增加能力，不能降低共同下限：ordinary-user、metadata-only、no-follow、same-mount/volume、errors-visible。
 
+## 当前实现补充（2026-10-07） {#macos-live-file-length}
+
+本节说明当前 macOS 垃圾入口，后文的 v1 设计预算与未来资格要求不应被视为已实现或已测性能。补充来源访问日期：2026-10-07。
+
+普通 `junk` 报告和垃圾 TUI 使用当前 `getattrlistbulk` 批量枚举给出的普通文件类型、设备和逻辑长度，避免为每个文件重复检查父目录及构造完整文件条目。只有本批原生、no-follow、父名称绑定成立、同设备且长度非负的文件可以走 `observe_file_length`；缺失或旧批次事实回到完整检查。`.git` 继续完整观察，普通 scan、大文件、重复内容及要求文件事实的 observer 沿用原生文件身份与元数据路径。逻辑长度 payload 不提供分配大小、硬链接唯一性、可释放空间或执行授权。
+
+默认 macOS 垃圾入口关闭可选文件索引保留，不再读写该索引或查询 FSEvents；它仍重新遍历全部进入的目录、规则 marker 和候选。逻辑累计沿已有目录状态更新，不再为每文件复制祖先路径列表。候选历史仍可先展示，选中子树完整刷新后只将新候选片段合入原范围历史记录；未刷新兄弟与祖先统计保持历史，不取得本代事实资格。取消、partial 和缓存准入失败保留旧记录。
+
+独立 library `SubtreeCacheProvider` 继续提供兼容的有界文件索引验证：观察前捕获游标、集中查询历史并对每个复用文件确认当前原生类型和长度。FSEvents 是一次性历史查询，当前没有持续订阅或事件触发局部扫描。[Apple 的 FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)将事件列表视为辅助信息，并说明通知存在不确定延迟。HistoryDone 只结束已投递历史，不能将空列表升级为当前整树未变化的证明；固定等待或 flush 不提供额外的递归元数据覆盖合同。
+
+本次也检查了 APFS 的 `ATTR_CMNEXT_RECURSIVE_GENCOUNT`。[Apple 的 getattrlist 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2)将其限定为已标记 maintain-dir-stats 的目录，未标记返回零。2026-10-07 本机只读探针在现有根均返回零；仅在自建临时夹具启用标记后，嵌套写入、改长和名称变化使计数变化，但 chmod/xattr 与未 flush 的 mmap 写入没有立即改变根计数。[原生探针记录](macos-change-evidence-2026-10-07.json)保留方法、操作序列及环境对照。这是局部观测，不能证明所有权限、内容、挂载与 provider 字段；生产代码不改变用户目录的 APFS 标记，也不据此跳过树。
+
+稳定诊断字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 保持 0；这反映默认入口移除索引工作，不代表获得整根命中。完整流程性能需在同构建、同负载下核对事实等价后测量，见[当前设计复审](design-review-2026-10-01.md)。
+
 ## 1. 目标、非目标与不变量
 
 目标：
@@ -365,7 +379,7 @@ MetadataFingerprint 至少覆盖当前平台可取得的：object type、object 
 读取流程：
 
 1. live no-follow admission root，比较 root identity、mount snapshot、当前用户和 policy。
-2. v1 每次扫描都以当前普通用户 live 枚举每个进入的目录；枚举失败立即使 subtree incomplete，绝不复用旧 directory aggregate 来填补 coverage。对本次枚举出的每个 directory entry 做 parent + basename 的轻量 no-follow metadata 查询；这不表示持久化完整 path index。
+2. v1 每次扫描都以当前普通用户 live 枚举每个进入的目录；枚举失败立即使 subtree incomplete，绝不复用旧 directory aggregate 来填补 coverage。对本次枚举出的每个 directory entry 使用 parent + basename 的轻量 no-follow metadata 观察；本次批量枚举已提供所需字段时可以直接消费，不要求额外逐项 syscall，这不表示持久化完整 path index。
 3. 比较 identity、type、mount、link/reparse 和 validation fingerprint；不等即失效 entry 与祖先 aggregate。
 4. v1 不存在可笼统称为“fresh enough”的昂贵字段。所有来源都使用 2.1 的唯一 FieldProvenance tagged union。allocation、provider/offline、link count 等字段只有两种方式能成为本代 current：本代执行相应 live query，记 LiveObservation；或 adapter 有上游一手证据且平台实测证明某 authoritative token 覆盖该精确字段，并在本代 live 读取 token 相等，记 ValidatedCache 且保存 observed_at/method/token。当前没有为三平台批准这种 field-covering token，因此 v1 对这些字段一律 live query；跳过查询时只以 StalePreview 展示并在本代 ScannedEntry 写 Unknown(NotRevalidated)，不能参与 current aggregate/candidate。纯派生字段只有其全部输入是本代 current 且 algorithm_version 相同时才可记 DerivedFromCurrent。
 5. directory aggregate 永不整体作为本次 complete 结果复用；仅“目录 mtime 没变”或 change hint 无事件都不足。上代稀疏保留的 DirectorySummary 可先显示为 StalePreview，首次 live 结果到达即以新 revision 替换。
@@ -425,7 +439,7 @@ oracle manifest 保存每个预期 identity class、边界、错误、logical/al
 
 ### 9.3 场景和步骤
 
-场景：cold full scan、warm OS page cache 但空 SweepX cache、warm sparse-preview cache、1% localized create/delete/rename/resize、notification gap 后失效、schema/policy 全失效、取消、permission error、slow network/FUSE/provider lane、preview writer 限速、correctness-journal failure、preview corruption、preview-quota exhaustion 和 spill-limit。另设 shallow-first、expand/enter priority、evicted-detail live rescan、top-K turnover，以及刚低于/刚高于 B_scan high-water 的成对 run。v1 warm cache 的预期收益只计 time-to-first-preview、dirty/visible-first latency 和 sparse DB write reduction；filesystem metadata ops 必须与正确 cold semantics 等价，不能把少查 metadata 当 v1 成功。全普通小文件 fixture 必须产生零个逐项 preview row；低于 high-water 的 run 必须不创建 spill；quota/cache failure 不得改变最终 aggregate 语义。缓存 mutation 还必须覆盖：Windows ADS-only create/remove/resize，sparse hole punch/fill，compression flag/state 改变，provider offline/dataless/materialized 状态改变，hard-link 在 root 内外 add/remove/rename，symlink/reparse type/payload 变化，mount/bind remap，以及 ACL/TCC/LSM permission 变化。每例验证旧字段只成为 StalePreview/Unknown，除非本代 live query 得到新值。
+场景：cold full scan、warm OS page cache 但空 SweepX cache、warm sparse-preview cache、1% localized create/delete/rename/resize、notification gap 后失效、schema/policy 全失效、取消、permission error、slow network/FUSE/provider lane、preview writer 限速、correctness-journal failure、preview corruption、preview-quota exhaustion 和 spill-limit。另设 shallow-first、expand/enter priority、evicted-detail live rescan、top-K turnover，以及刚低于/刚高于 B_scan high-water 的成对 run。v1 warm cache 的预期收益只计 time-to-first-preview、dirty/visible-first latency 和 sparse DB write reduction；字段语义必须与正确 cold semantics 等价；减少重复 syscall 的当前批量观察优化按本页补充另行测量，不能用历史事件缺失代替字段覆盖。全普通小文件 fixture 必须产生零个逐项 preview row；低于 high-water 的 run 必须不创建 spill；quota/cache failure 不得改变最终 aggregate 语义。缓存 mutation 还必须覆盖：Windows ADS-only create/remove/resize，sparse hole punch/fill，compression flag/state 改变，provider offline/dataless/materialized 状态改变，hard-link 在 root 内外 add/remove/rename，symlink/reparse type/payload 变化，mount/bind remap，以及 ACL/TCC/LSM permission 变化。每例验证旧字段只成为 StalePreview/Unknown，除非本代 live query 得到新值。
 
 每个 scenario 从 immutable VM/disk snapshot 或 fixture generator receipt 重新恢复；删除并重建 SweepX cache/spill、恢复指定 notification cursor、重置 fault-controller script，并记录 pre-run tree receipt/cache DB hash/state ID。warm-OS 与 warm-SweepX 场景按 manifest 明确执行预热步骤；mutation/corruption 只应用于该 run 的可丢 clone，结束后丢弃。cold 场景按 9.1 的 reboot/snapshot 规则恢复。
 

@@ -66,6 +66,11 @@ pub struct ScannerOptions {
     pub resource_limits: ScanResourceLimits,
     /// Requested number of directory workers. Values above 32 are capped at 32.
     pub max_workers: usize,
+    /// Retains optional ordinary-file names and lengths for a later file-cache generation.
+    /// Directory coverage, native root observations and required classification markers remain
+    /// available when disabled. Callers with current bulk length observations can avoid building
+    /// an unused per-file index; the default preserves cache publication for existing consumers.
+    pub retain_file_index: bool,
 }
 
 impl Default for ScannerOptions {
@@ -74,6 +79,7 @@ impl Default for ScannerOptions {
             scan_id: ScanId::new("scan-p1"),
             resource_limits: ScanResourceLimits::default(),
             max_workers: 4,
+            retain_file_index: true,
         }
     }
 }
@@ -224,10 +230,18 @@ pub trait ScanSink {
         aggregate: DirectoryAggregate,
     ) -> Result<(), ScanError>;
 
-    /// Requires full current file observations instead of optional cached logical lengths.
-    /// Consumers needing allocation or native file facts must opt in; cache lengths alone
+    /// Requires full current file observations instead of length-only bulk or cache shortcuts.
+    /// Consumers needing allocation or native file facts must opt in; logical lengths alone
     /// cannot supply those fields. Directory traversal and its boundaries stay unchanged.
     fn wants_file_observations(&self) -> bool {
+        false
+    }
+
+    /// Accepts current ordinary-file lengths without allocating file rows or native recipes.
+    /// This shortcut still requires live, handle-relative backend observations; absent or
+    /// malformed observations fall back to normal inspection. Consumers needing file identity,
+    /// allocation or hard-link facts must leave this disabled. Full-file observers override it.
+    fn accepts_file_lengths(&self) -> bool {
         false
     }
 
@@ -272,7 +286,7 @@ pub trait ScanSink {
     /// consumers needing retained evidence must use `note_directory_coverage` instead.
     fn note_native_directory_coverage(&mut self, _path: &Path, _coverage: &Coverage) {}
 
-    /// Records an unchanged cached file under its current parent, including its next-generation listing.
+    /// Records a length-only ordinary file under its current parent and optional next-generation listing.
     ///
     /// The classified sink uses it to keep the parent's file-marker set complete for marker-based
     /// rules; no row is buffered. Default no-op for sinks that do not classify.
@@ -404,7 +418,8 @@ pub trait ClassifiedScanObserver {
     fn on_entry(&mut self, _entry: &ScannedEntry) {}
 
     /// Requests current file metadata rather than logical-length-only cache reuse.
-    /// Required for analyses consuming `on_entry` for every regular file.
+    /// Required for analyses consuming `on_entry` for every regular file, including backends
+    /// that can otherwise report live logical lengths without building full file rows.
     fn wants_file_observations(&self) -> bool {
         false
     }
@@ -528,6 +543,8 @@ struct CollectingScanSink<'a> {
     covered_paths: BTreeMap<String, bool>,
     /// Captured file/directory children keyed by canonical directory path, for file-level reuse.
     dir_listings: BTreeMap<String, DirListing>,
+    /// Optional file-index retention is independent of required marker and directory evidence.
+    retain_file_index: bool,
     /// Rule id chosen per classified directory, returned with the finished scan.
     decisions: BTreeMap<ScanEntryId, String>,
     // One budget spans required facts and optional reuse indexes. Per-root counters reset only
@@ -573,6 +590,7 @@ impl<'a> CollectingScanSink<'a> {
             coverages: BTreeMap::new(),
             covered_paths: BTreeMap::new(),
             dir_listings: BTreeMap::new(),
+            retain_file_index: true,
             decisions: BTreeMap::new(),
             metadata_bytes: 0,
             root_metadata_bytes: 0,
@@ -680,12 +698,16 @@ impl<'a> CollectingScanSink<'a> {
         path: &Path,
         size: Option<u128>,
     ) {
+        let needs_marker = self
+            .classifier
+            .is_some_and(|classifier| classifier.needs_file_marker(name));
+        if !self.retain_file_index && !needs_marker {
+            return;
+        }
         let Some(marker) = native_basename_marker(name) else {
             return;
         };
-        if self
-            .classifier
-            .is_some_and(|classifier| classifier.needs_file_marker(name))
+        if needs_marker
             && !self
                 .file_markers
                 .get(parent_id)
@@ -702,7 +724,8 @@ impl<'a> CollectingScanSink<'a> {
                 .or_default()
                 .insert(marker.clone());
         }
-        if let Some(parent) = path.parent().and_then(Path::to_str)
+        if self.retain_file_index
+            && let Some(parent) = path.parent().and_then(Path::to_str)
             && let Some(size) = size
         {
             let parent = parent.to_string();
@@ -1099,6 +1122,10 @@ impl ScanSink for CollectingScanSink<'_> {
             .is_some_and(|observer| observer.wants_file_observations())
     }
 
+    fn accepts_file_lengths(&self) -> bool {
+        self.classifier.is_some() && !self.wants_file_observations()
+    }
+
     fn accepts_closed_subtrees(&self) -> bool {
         self.classifier
             .is_some_and(JunkClassifier::uses_only_local_markers)
@@ -1330,6 +1357,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
     cancel: &CancellationToken,
     limits: ScanResourceLimits,
     reuse: Option<&dyn SubtreeReuse>,
+    allow_file_lengths: bool,
     subtree_scope: Option<SubtreeScope<'_>>,
 ) -> DirectoryTaskResult<P::DirectoryHandle> {
     let DirectoryTask {
@@ -1512,6 +1540,18 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             deferred.push(directory_entry);
             continue;
         }
+        // Junk-only consumers need the current logical length and marker, not a full file row
+        // with a cloned native ancestor recipe. The backend's live bulk observation supplies
+        // those facts independently of an on-disk cache or delayed change-history delivery.
+        if allow_file_lengths
+            && native_basename_marker(&directory_entry.file_name).as_deref() != Some(".git")
+            && let Some(observed) = platform.observe_file_length(&current.handle, &directory_entry)
+            && observed.path == directory_entry.path
+            && observed.file_name == directory_entry.file_name
+        {
+            inspected.push(WalkEntry::CachedFile(observed));
+            continue;
+        }
         // History validates old facts, but cannot replace current type evidence. A stale or
         // misaligned plan must not suppress directory traversal or turn a link into a file.
         if let Some(PlannedEntry::ReuseFile(cached)) =
@@ -1638,6 +1678,7 @@ where
         reuse: Option<&dyn SubtreeReuse>,
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        sink.retain_file_index = self.options.retain_file_index;
         self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
     }
@@ -1657,6 +1698,7 @@ where
         observer: &mut dyn ClassifiedScanObserver,
     ) -> Result<ClassifiedScan, ScanError> {
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        sink.retain_file_index = self.options.retain_file_index;
         sink.observer = Some(observer);
         self.scan_with_sink(roots, cancel, reuse, &mut sink)?;
         Ok(sink.finish_classified())
@@ -1693,6 +1735,7 @@ where
             ));
         }
         let mut sink = CollectingScanSink::new_classified(self.options.resource_limits, classifier);
+        sink.retain_file_index = self.options.retain_file_index;
         sink.scoped = true;
         sink.selected_paths = Some(subtrees);
         sink.selected_seen = vec![false; subtrees.len()];
@@ -2001,6 +2044,9 @@ where
         } else {
             reuse
         };
+        let allow_file_lengths = sink.accepts_file_lengths()
+            && !sink.wants_file_observations()
+            && self.platform.supports_file_length_observation();
 
         // Qualify the accelerated path before traversing.
         //
@@ -2111,6 +2157,7 @@ where
                                 cancel,
                                 limits,
                                 reuse,
+                                allow_file_lengths,
                                 subtree_scope,
                             )
                         }))
@@ -2569,8 +2616,8 @@ where
                                 active_frontier_entries += 1;
                             }
                             WalkEntry::CachedFile(cached) => {
-                                // File reused from cache: fold its size and record its marker, but
-                                // make no syscall and keep no row (dropped in classified mode).
+                                // Fold a current bulk or validated cached length and its marker.
+                                // Neither observation has full file facts, so no row is retained.
                                 sink.push_progress(
                                     &root_path,
                                     ProgressEvent::EntryObserved {
@@ -3182,10 +3229,10 @@ fn combine_reasons(left: &ReasonCode, right: &ReasonCode) -> ReasonCode {
 }
 
 fn propagate_directory_entry(states: &mut BTreeMap<PathBuf, DirectoryState>, path: &Path) {
-    for ancestor in ancestors_for_entry(path) {
-        if let Some(state) = states.get_mut(&ancestor) {
+    for ancestor in path.ancestors().skip(1) {
+        if let Some(state) = states.get_mut(ancestor) {
             state.note_recursive_entry();
-            if path.parent() == Some(ancestor.as_path()) {
+            if path.parent() == Some(ancestor) {
                 state.note_direct_child();
             }
         }
@@ -3203,11 +3250,11 @@ fn propagate_file_entry(
         sweepx_model::EvidenceValue::Known { value } if value.0 > 1
     );
 
-    for ancestor in ancestors_for_entry(path) {
-        if let Some(state) = states.get_mut(&ancestor) {
+    for ancestor in path.ancestors().skip(1) {
+        if let Some(state) = states.get_mut(ancestor) {
             state.note_recursive_entry();
             state.apparent_logical_bytes += logical;
-            if path.parent() == Some(ancestor.as_path()) {
+            if path.parent() == Some(ancestor) {
                 state.note_direct_child();
             }
 
@@ -3239,17 +3286,17 @@ fn propagate_file_entry(
     }
 }
 
-/// Folds an unchanged regular file's cached size into every ancestor state.
+/// Folds a regular file's length-only observation into every ancestor state.
 ///
-/// The cache carries logical length only, not physical allocation or hard-link identity.
+/// Bulk and cached shortcuts carry logical length only, not allocation or hard-link identity.
 /// Propagate those missing fields as unknown; logical length is never a reclaimable estimate.
 fn propagate_cached_file(
     states: &mut BTreeMap<PathBuf, DirectoryState>,
     path: &Path,
     logical: u128,
 ) {
-    for ancestor in ancestors_for_entry(path) {
-        if let Some(state) = states.get_mut(&ancestor) {
+    for ancestor in path.ancestors().skip(1) {
+        if let Some(state) = states.get_mut(ancestor) {
             state.note_recursive_entry();
             state.apparent_logical_bytes += logical;
             state.unique_logical_bytes = None;
@@ -3259,7 +3306,7 @@ fn propagate_cached_file(
             state.reclaimable_bytes = EvidenceAccumulator::Unknown {
                 reason: ReasonCode::UnknownIdentity,
             };
-            if path.parent() == Some(ancestor.as_path()) {
+            if path.parent() == Some(ancestor) {
                 state.note_direct_child();
             }
         }
@@ -3273,10 +3320,10 @@ fn add_option_u128(slot: &mut Option<u128>, value: u128) {
 }
 
 fn note_boundary(states: &mut BTreeMap<PathBuf, DirectoryState>, path: &Path, reason: ReasonCode) {
-    for ancestor in state_and_ancestors(path) {
-        if let Some(state) = states.get_mut(&ancestor) {
+    for ancestor in path.ancestors() {
+        if let Some(state) = states.get_mut(ancestor) {
             state.incomplete_reasons.insert(reason.clone());
-            if path.parent() == Some(ancestor.as_path()) {
+            if path.parent() == Some(ancestor) {
                 state.note_direct_child();
             }
         }
@@ -3287,22 +3334,6 @@ fn mark_all_open_incomplete(states: &mut BTreeMap<PathBuf, DirectoryState>, reas
     for state in states.values_mut() {
         state.incomplete_reasons.insert(reason.clone());
     }
-}
-
-fn ancestors_for_entry(path: &Path) -> Vec<PathBuf> {
-    let mut ancestors = Vec::new();
-    let mut current = path.parent();
-    while let Some(path) = current {
-        ancestors.push(path.to_path_buf());
-        current = path.parent();
-    }
-    ancestors
-}
-
-fn state_and_ancestors(path: &Path) -> Vec<PathBuf> {
-    let mut all = vec![path.to_path_buf()];
-    all.extend(ancestors_for_entry(path));
-    all
 }
 
 fn scanned_entry_from_metadata(
@@ -3684,6 +3715,7 @@ mod tests {
                         max_frontier_entries: 3,
                         ..ScanResourceLimits::default()
                     },
+                    ..ScannerOptions::default()
                 },
             )
             .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -3899,6 +3931,7 @@ mod tests {
                     max_frontier_entries: frontier_permits,
                     ..ScanResourceLimits::default()
                 },
+                ..ScannerOptions::default()
             },
         )
         .scan(
@@ -3966,6 +3999,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
+                ..ScannerOptions::default()
             },
         )
         .scan(
@@ -4043,6 +4077,7 @@ mod tests {
                     max_retained_entries: retained_entries,
                     ..ScanResourceLimits::default()
                 },
+                ..ScannerOptions::default()
             },
         )
         .scan(&[ScanRoot::new(root).unwrap()], &CancellationToken::new())
@@ -4777,6 +4812,7 @@ mod tests {
                     max_retained_boundaries: 2,
                     ..ScanResourceLimits::default()
                 },
+                ..ScannerOptions::default()
             },
         )
         .scan(
@@ -6871,6 +6907,8 @@ mod tests {
         cancel_on_inspect: bool,
         replace_child_path_after_open: Arc<AtomicBool>,
         batch_size: Option<usize>,
+        file_length_proposals: Option<BTreeMap<PathBuf, sweepx_platform::CachedFileEntry>>,
+        file_length_calls: Arc<AtomicUsize>,
     }
 
     #[derive(Debug)]
@@ -7600,6 +7638,8 @@ mod tests {
                 cancel_on_inspect: false,
                 replace_child_path_after_open: Arc::new(AtomicBool::new(false)),
                 batch_size: None,
+                file_length_proposals: None,
+                file_length_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -7660,6 +7700,22 @@ mod tests {
 
         fn platform_name(&self) -> &'static str {
             "fake"
+        }
+
+        fn supports_file_length_observation(&self) -> bool {
+            self.file_length_proposals.is_some()
+        }
+
+        fn observe_file_length(
+            &self,
+            _: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+        ) -> Option<sweepx_platform::CachedFileEntry> {
+            self.file_length_calls.fetch_add(1, Ordering::SeqCst);
+            self.file_length_proposals
+                .as_ref()?
+                .get(&child.path)
+                .cloned()
         }
 
         fn admit_root(

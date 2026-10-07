@@ -1,0 +1,199 @@
+{
+  "schema": "sweepx.macos-change-evidence/v1",
+  "date": "2026-10-07",
+  "scope": "Controlled native observation; not subtree-cache qualification or a performance benchmark",
+  "host": {
+    "architecture": "arm64",
+    "os": "macOS 26.5.2",
+    "osBuild": "25F84",
+    "compiler": "Apple clang 21.0.0 (clang-2100.1.1.101)",
+    "sdk": "active CommandLineTools MacOSX SDK"
+  },
+  "primarySources": [
+    {
+      "url": "https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html",
+      "accessed": "2026-10-07",
+      "supports": "FSEvents history is advisory; notification latency is nondeterministic; start monitoring before initial observation."
+    },
+    {
+      "url": "https://developer.apple.com/documentation/coreservices/1441727-fseventstreamflushasync",
+      "accessed": "2026-10-07",
+      "supports": "FlushAsync flushes events buffered by the configured latency and returns the largest queued event ID; it does not establish recursive metadata coverage."
+    },
+    {
+      "url": "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2",
+      "accessed": "2026-10-07",
+      "supports": "ATTR_CMNEXT_RECURSIVE_GENCOUNT is a uint64 for APFS maintain-dir-stats directories; unmarked directories return zero. Per-file ATTR_CMN_GEN_COUNT is invalid while mmap is active."
+    },
+    {
+      "url": "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_attrlist.c",
+      "accessed": "2026-10-07",
+      "supports": "Recursive generation count request maps to va_recursive_gencount and packs a uint64 only when supported."
+    }
+  ],
+  "probe": {
+    "readOnlyQuery": "open directory with O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW; fgetattrlist with commonattr ATTR_CMN_RETURNED_ATTRS and forkattr ATTR_CMNEXT_RECURSIVE_GENCOUNT, FSOPT_ATTR_CMN_EXTENDED; validate returned forkattr bit and decode uint64 at four-byte aligned offset 24; separately fstatfs to identify filesystem.",
+    "queryResultBytes": 32,
+    "returnedCommonMask": "0x80000000",
+    "returnedExtendedMask": "0x00000400",
+    "zeroIsNotCoverage": true,
+    "readOnlyRoots": [
+      {
+        "category": "repository",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "temporary directory",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "user cache directory",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "user library",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "user home",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "applications directory",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      },
+      {
+        "category": "data volume root",
+        "filesystem": "apfs",
+        "result": 0,
+        "recursiveGenerationCount": 0
+      }
+    ],
+    "fixture": "New private temporary directory, initially empty; own nested directory and regular file only; no user root or application cache changed.",
+    "markCommand": "apfs.util -M <empty fixture>",
+    "sandboxResult": {
+      "exitCode": 254,
+      "reason": "Operation not permitted",
+      "recursiveGenerationCount": 0
+    },
+    "hostServiceAccessResult": {
+      "exitCode": 0,
+      "message": "Fixture directory now maintains dir-stats",
+      "observations": [
+        {
+          "operation": "nested directory created",
+          "rootRecursiveGenerationCount": 2,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "nested file created",
+          "rootRecursiveGenerationCount": 5,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "same length file rewrite",
+          "rootRecursiveGenerationCount": 9,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "file extension",
+          "rootRecursiveGenerationCount": 10,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "file truncation",
+          "rootRecursiveGenerationCount": 11,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "descendant chmod",
+          "rootRecursiveGenerationCount": 11,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "descendant xattr change",
+          "rootRecursiveGenerationCount": 11,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "descendant rename",
+          "rootRecursiveGenerationCount": 12,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "writable mmap opened",
+          "rootRecursiveGenerationCount": 12,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "mmap write before flush",
+          "rootRecursiveGenerationCount": 12,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "mmap flush",
+          "rootRecursiveGenerationCount": 13,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "mmap closed",
+          "rootRecursiveGenerationCount": 14,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "hard link created within tree",
+          "rootRecursiveGenerationCount": 15,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "hard link created outside tree",
+          "rootRecursiveGenerationCount": 15,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "extension through outside hard link",
+          "rootRecursiveGenerationCount": 16,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        },
+        {
+          "operation": "nested name unlinked",
+          "rootRecursiveGenerationCount": 18,
+          "nestedDirectoryRecursiveGenerationCount": 0
+        }
+      ]
+    },
+    "sourceDigests": {
+      "cProbeSha256": "745acb59e52ba3861b63c0406b9ce1cfd9357f592f9d9a94160c31b2944aa0de",
+      "fixtureDriverSha256": "63edaecd0754252121c40a05fd308c07ca4ae90be2b85413b2ba3bfca0b372f3"
+    },
+    "reproduction": {
+      "compile": "clang -Wall -Wextra -O2 probe.c -o /private/tmp/sweepx-rgencount",
+      "existingRootCommand": "/private/tmp/sweepx-rgencount <selected existing directory roots>; read-only query only",
+      "controlledFixtureCommand": "python3 fixture.py; run with host service access to compare sandbox mark refusal",
+      "cSource": "#include <sys/attr.h>\n#include <sys/stat.h>\n#include <sys/mount.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <fcntl.h>\n#include <string.h>\n#include <errno.h>\n#include <unistd.h>\nint main(int argc, char **argv) {\n for (int i = 1; i < argc; ++i) {\n  int fd = open(argv[i], O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);\n  if (fd < 0) {printf(\"%s open error %d %s\\n\", argv[i], errno, strerror(errno)); continue;}\n  struct attrlist a = {0}; a.bitmapcount=ATTR_BIT_MAP_COUNT; a.commonattr=ATTR_CMN_RETURNED_ATTRS; a.forkattr=ATTR_CMNEXT_RECURSIVE_GENCOUNT;\n  uint8_t buf[64] = {0}; int rc = fgetattrlist(fd, &a, buf, sizeof(buf), FSOPT_ATTR_CMN_EXTENDED);\n  uint32_t len=0; attribute_set_t set={0}; uint64_t count=0; memcpy(&len,buf,4); memcpy(&set,buf+4,20); memcpy(&count,buf+24,8);\n  struct statfs sf={0}; fstatfs(fd,&sf);\n  printf(\"%s fs=%s rc=%d errno=%d len=%u common=%x ext=%x count=%llu\\n\",argv[i],sf.f_fstypename,rc,errno,len,set.commonattr,set.forkattr,(unsigned long long)count);\n  close(fd);\n }\n}\n",
+      "fixtureDriver": "import tempfile, os, subprocess, mmap, json, pathlib, time\nroot = pathlib.Path(tempfile.mkdtemp(prefix='sweepx-gencount-', dir='/private/tmp'))\nreport={'root':str(root), 'setup':[], 'observations': []}\nmark = subprocess.run(['/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util','-M',str(root)],capture_output=True,text=True)\nreport['setup'].append({'markRc':mark.returncode,'out':mark.stdout,'err':mark.stderr})\nchild = root / 'nested'\nchild.mkdir()\nfile = child / 'data'\ndef obs(label):\n report['observations'].append({'label':label,'out':subprocess.check_output(['/private/tmp/sweepx-rgencount',str(root),str(child)],text=True)})\nobs('root marked, nested created')\nfile.write_bytes(b'abc'); obs('file created')\nfile.write_bytes(b'abd'); obs('same length write')\nwith file.open('ab') as f: f.write(b'efg')\nobs('extension')\nos.truncate(file,2); obs('truncate')\nos.chmod(file,0o400); obs('file chmod')\nos.chmod(file,0o600)\nsubprocess.check_call(['xattr','-w','user.fixture','val',str(file)]); obs('file xattr')\nfile.rename(child / 'renamed'); file=child / 'renamed'; obs('rename')\nwith file.open('r+b') as f:\n m=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_WRITE); obs('mmap opened'); m[0]=ord('x'); obs('mmap written before flush'); m.flush(); obs('mmap flushed'); m.close(); obs('mmap closed')\nlink = root / 'other-link'; os.link(file,link); obs('hardlink within tree')\noutside=root.parent / (root.name+'-outside-link'); os.link(file,outside); obs('hardlink outside tree')\nwith outside.open('ab') as f: f.write(b'a')\nobs('outside hardlink length write')\nfile.unlink(); obs('child unlink')\nos.unlink(outside)\nprint(json.dumps(report,indent=2))\n"
+    }
+  },
+  "limitations": [
+    "One controlled marked-directory fixture and one read-only query per existing root category; no broad target-platform or filesystem qualification.",
+    "APFS marked-dir count changed on ordinary descendant data/namespace mutations but did not immediately change for chmod/xattr or dirty mmap before flush.",
+    "Only the explicitly marked fixture root supplied a nonzero recursive count; its nested directory stayed zero.",
+    "No native mount, provider, offline or cross-volume mutation fixture was run.",
+    "Observed increments are not an expected arithmetic contract; equality cannot be assumed to cover untested fields.",
+    "Production changes do not set maintain-dir-stats on user directories or authorize subtree skipping.",
+    "No latency, throughput, p95/p99 or performance conclusion is derived from these probes."
+  ],
+  "conclusion": "Neither empty FSEvents history nor the probed recursive APFS generation count qualifies whole-subtree replay of current filesystem/classification facts. Default junk optimization consumes current native bulk metadata and still walks directories."
+}

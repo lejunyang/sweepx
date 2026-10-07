@@ -420,12 +420,12 @@ pub struct OpenedDirectory<D> {
     pub handle: D,
 }
 
-/// A regular file reused from a validated cache without a fresh stat.
+/// A logical-length-only observation of an ordinary file.
 ///
-/// Carries only what the classified scan needs: the path and native name (taken from the live
-/// enumeration, so they are trustworthy) and the logical size captured earlier. It never carries
-/// identity beyond the path; file rows are dropped in classified mode, and the cached size is
-/// folded into the directory aggregate exactly as a freshly stated file would be.
+/// The compatibility name covers both validated cached lengths and current metadata supplied by
+/// a backend's bounded directory enumeration. Neither use supplies file identity, allocation,
+/// hard-link uniqueness or execution authority. Consumers needing those facts must request full
+/// file observations. The native child binding must be checked before accepting this payload.
 #[derive(Debug, Clone)]
 pub struct CachedFileEntry {
     pub path: PathBuf,
@@ -438,7 +438,7 @@ pub enum WalkEntry<D> {
     Directory(OpenedDirectory<D>),
     File(EntryMetadata),
     Link(EntryMetadata),
-    /// An unchanged file supplied from cache; no syscall was made for it.
+    /// A logical-length-only file, from current enumeration or validated cache facts.
     CachedFile(CachedFileEntry),
     Boundary(BoundaryRecord),
     Error(ErrorRecord),
@@ -1141,6 +1141,30 @@ pub trait PlatformScanner: Send + Sync {
         limits: DirectoryReadLimits,
     ) -> Result<DirectoryEntryBatch, PlatformError>;
 
+    /// Whether this backend can supply current ordinary-file lengths from directory enumeration.
+    ///
+    /// This advertises an optional optimization, not guaranteed coverage on every filesystem or
+    /// for every child. Callers must still accept [`Self::observe_file_length`] returning `None`
+    /// and perform ordinary inspection. It does not qualify historical tree facts for replay.
+    fn supports_file_length_observation(&self) -> bool {
+        false
+    }
+
+    /// Observes an ordinary file's logical length from the retained parent's current batch.
+    ///
+    /// Only current, no-follow, handle-relative enumeration metadata may qualify. The child must
+    /// have a valid parent/name binding, ordinary-file type, the parent's device and a nonnegative
+    /// length. Missing, older-batch or unsupported facts return `None`, so callers inspect normally.
+    /// This does not establish file identity, allocation, uniqueness or execution authority, and
+    /// cannot replace full observations requested by a consumer. No persisted cache is consulted.
+    fn observe_file_length(
+        &self,
+        _parent: &Self::DirectoryHandle,
+        _child: &DirectoryEntryRecord,
+    ) -> Option<CachedFileEntry> {
+        None
+    }
+
     /// Confirms a proposed cached logical length using current, handle-relative enumeration facts.
     ///
     /// Return true only for a no-follow ordinary file on the retained parent's device, with the
@@ -1790,6 +1814,10 @@ mod tests {
     #[test]
     fn platform_scanner_default_regular_file_read_is_unsupported() {
         let scanner = UnsupportedReadScanner;
+        let child = DirectoryEntryRecord::from_parent_and_name(Path::new("/"), native_name("file"))
+            .unwrap();
+        assert!(!scanner.supports_file_length_observation());
+        assert!(scanner.observe_file_length(&(), &child).is_none());
         let request =
             BoundedRegularFileReadRequest::establish_live(native_name("file"), 4096).unwrap();
 

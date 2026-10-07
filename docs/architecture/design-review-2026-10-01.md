@@ -1,6 +1,6 @@
 # SweepX 设计复审与剩余工作
 
-更新日期：2026-10-05。原复审基线：`e4ce069`；本轮修改与测量见[真实垃圾扫描验证](host-junk-usability-validation-2026-10-05.json)、[扫描保留预算验证](scan-retention-validation-2026-10-05.json)和[浏览器细分验证](browser-storage-usability-validation-2026-10-05.json)。本页是当前路线图；[历史实施记录](design-review-history-2026-10-01-to-2026-10-04.md)保留原文、测量和失败记录，后续实施不再逐段追加到本页。
+更新日期：2026-10-07。原复审基线：`e4ce069`；本轮修改与测量见[真实垃圾扫描验证](host-junk-usability-validation-2026-10-05.json)、[扫描保留预算验证](scan-retention-validation-2026-10-05.json)和[浏览器细分验证](browser-storage-usability-validation-2026-10-05.json)。本页是当前路线图；[历史实施记录](design-review-history-2026-10-01-to-2026-10-04.md)保留原文、测量和失败记录，后续实施不再逐段追加到本页。
 
 ## 结论
 
@@ -29,9 +29,9 @@
 
 - 三平台垃圾 TUI 可以先展示历史结果。历史行不能作为当前事实或回收授权。
 - 当前垃圾结果每次都现场遍历目录、规则标记和候选。旧的整根候选回放已撤回；空事件历史不能证明整棵树没有刚发生的变化。
-- macOS FSEvents 可在下次运行时查询系统保留的变更历史，无需 SweepX 一直运行；历史缺口或覆盖不明时回退现场观察。持续订阅、触发局部重扫的通用监听会话尚未实现，`status --watch` 只是已有状态回放。
-- macOS 文件索引可以辅助复用逻辑长度，但仍须匹配本次原生枚举的类型、长度及有效变更历史。Linux/Windows 尚无同等的文件索引复用资格，继续现场观察。
-- 因此，“看到历史首屏”“文件索引有复用”和“完整扫描更快”是三个不同结果。当前 `rootCacheHits=0` 是有意保留的机器语义，不能据此判断所有缓存失效。
+- 默认 macOS 垃圾报告与 TUI 直接使用当前原生批量文件长度，关闭可选文件索引保留及索引读写/FSEvents 查询；每文件逻辑累计不再复制祖先路径列表。普通 scan、大文件、重复内容与完整文件观察不走该捷径。
+- 独立 library `SubtreeCacheProvider` 仍可集中查询 FSEvents 历史并确认本批文件类型、长度。它是兼容的一次性查询，尚无持续订阅或事件触发局部重扫；`status --watch` 仍只是已有状态回放。Linux/Windows 继续现场观察。
+- 历史首屏与选中刷新后的候选片段合并继续可用，未刷新的兄弟与祖先统计保持历史。`rootCacheHits=0` 有意保留；`rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，不能把移除索引工作解释成整根跳过。完整流程提速仍需配对测量。
 
 以下测量日期、构建、范围不同，不能直接互相比倍数。
 
@@ -87,7 +87,7 @@ Linux/Windows 原生测试、Windows MSVC、Linux bind mount/OFD/journal/隔离�
 
 ## 验证边界与已有证据
 
-最新验证覆盖真实扫描、垃圾识别、回收及对应代码；原始本机路径与应用清单仅保存在私有本地报告，仓库保留脱敏指标。工作区全 features 测试通过（没有显式 skip，3 个既有 opt-in 基准 ignored），host/Linux GNU/Windows GNU 工作区 lint 通过；Linux/Windows 原生运行、MSVC 和真实 provider 未运行。系统垃圾报告仍因 npm 安装发现缺口为 partial，数据卷和独立目录统计均有未覆盖范围，不宣称完整全盘资格。
+以下验证结论截至 2026-10-05，2026-10-07 修改的最终检查与计时另记：此前验证覆盖真实扫描、垃圾识别、回收及对应代码；原始本机路径与应用清单仅保存在私有本地报告，仓库保留脱敏指标。工作区全 features 测试通过（没有显式 skip，3 个既有 opt-in 基准 ignored），host/Linux GNU/Windows GNU 工作区 lint 通过；Linux/Windows 原生运行、MSVC 和真实 provider 未运行。系统垃圾报告仍因 npm 安装发现缺口为 partial，数据卷和独立目录统计均有未覆盖范围，不宣称完整全盘资格。
 
 之前的[扫描/存储共同准入验证](shared-scan-admission-validation-2026-10-04.json)保留当时 Foundation Trash 的挂起与 skip 记录；不得把本轮授权后的成功倒写为过去已经通过。
 
@@ -100,3 +100,17 @@ Linux/Windows 原生测试、Windows MSVC、Linux bind mount/OFD/journal/隔离�
 - [实际 debug 回收记录](../development/debug-cleanup-evidence-2026-10-03.json)：约 43.323 GiB 构建产物已通过 SweepX 放入回收站，未清空；这是操作记录，不是已释放磁盘空间或扫描性能基准。
 
 后续只需阅读本页。具体实现经过、历次检查命令与完整失败记录保留在[历史归档](design-review-history-2026-10-01-to-2026-10-04.md)和上述证据中。
+
+## 2026-10-07：移除默认垃圾热扫的冗余文件索引工作
+
+普通 macOS `junk` 与垃圾 TUI 改为直接消费本次 `getattrlistbulk` 返回的普通文件类型、设备和逻辑长度。旧文件索引原本也必须逐文件与这些当前事实核对，不能减少目录枚举；默认入口现在省去索引读取、FSEvents 查询、计划构造与索引保存，并关闭可选文件索引保留。scanner 直接沿已有目录状态累加逻辑字节，省去每文件复制祖先路径列表。完整文件观察、`.git`、目录身份链、规则 marker、取消与错误边界仍保留；普通 scan、大文件和重复内容行为沿用原路径。
+
+历史候选缓存保留。完整选中刷新只将新候选片段合入原范围历史记录，未刷新兄弟和祖先统计仍是历史，不能供当前回收准入。完整范围重新扫描才能建立本次覆盖；取消、partial 或缓存准入失败保留旧记录。独立 library `SubtreeCacheProvider` 仍保留兼容的有界历史验证与本批原生类型/长度确认，默认产品入口不调用它。
+
+本轮没有建立整棵子树跳过资格。[Apple FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)说明事件投递延迟不确定，历史只作辅助；空 HistoryDone 批次不能封闭即时写入缺口。[Apple getattrlist 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2)将递归 generation count 限定为 maintain-dir-stats 的 APFS 目录，未标记返回零。本机只读根探针为零，自建临时夹具启用后仍发现 chmod/xattr 和未 flush mmap 写入没有立即改变根计数；生产代码不设置用户目录标记或用该计数跳过树。来源访问日期：2026-10-07。合同与局部观测见[原生探针记录](macos-change-evidence-2026-10-07.json)及[扫描/缓存补充](scanner-and-cache.md#macos-live-file-length)。
+
+`rootCacheHits` 继续为 0，既有 `rootCacheValidation`、`subtreeCacheValidation` 名称保留为接近零的阶段边界。它们减少的是默认入口的冗余索引工作，不能单独充当端到端提速证据。[本轮热扫测量](hot-junk-benchmark-2026-10-07.json)保留同一宿主的基线与修改后 release 构建、固定负载、空/热 SweepX 状态及即时变化记录；先核对事实等价再报告阶段与墙钟。
+
+主要配对负载为 arm64 macOS 26.5.2、Rust 1.98.0 release、8 个项目根下 65,536 个构建产物文件、已有 SweepX 历史与旧文件索引。5 组交替顺序测量的墙钟中位数从 666.2 ms 降到 256.8 ms，减少 61.5%（约 2.59 倍）；遍历阶段从 439.5 ms 降到 160.8 ms。每次通过独立普通目录遍历核对候选路径、规则、逻辑长度与候选数量，基线和新实现事实相同；最终入口没有改写旧文件索引。这个等价检查不证明物理分配量或硬链接独占性。OS cache 和宿主其他活动未控制，仅 5 个样本，不推断尾延迟。较小夹具的热扫负结果也保留，不能宣传所有目录都会加速。R2 的整体速度和交互验收仍未勾选。
+
+2026-10-07 最终验证：`cargo test --workspace --all-features` 通过，没有显式 skip；4 个 opt-in 基准默认 ignored，其中 scanner 深树基准另行运行。格式检查、工作区全 target/features Clippy、Linux GNU 与 Windows GNU 工作区交叉 Clippy、文档检查及 41 个脚本测试通过。macOS 原生事件与回收集成测试在宿主环境通过；受限沙箱不能启动 FSEvents 的失败已按环境原因单独诊断。Linux/Windows 原生运行及 Windows MSVC 未验证，交叉 lint 只提供编译证据。

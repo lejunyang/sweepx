@@ -426,38 +426,28 @@ fn cached_roots_without_observed_publication_sources_skip_optional_preparation()
     let shared = Arc::new(Shared::new(limits));
     let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
     let service = JunkService::built_in().unwrap();
-    let mut provider = SubtreeCacheProvider::prepare_files(
-        &cache,
-        &[],
-        crate::junk::cache::CacheReader::new(&cache),
-    );
+    let mut reader = crate::junk::cache::CacheReader::new(&cache);
     // Invalid optional candidate input would fail grouping and emit a warning if the warm
     // path unnecessarily visited it. No-source publication must not inspect pending rows.
     Arc::make_mut(fixture.rows.values_mut().next().unwrap())
         .candidate
         .source_entry = None;
-    let mut unusable_source = fixture.scanned.observed_roots[0].clone();
-    unusable_source.native_locator = None;
     fixture.scanned.observed_roots.clear();
-    for sources in [Vec::new(), vec![unusable_source]] {
-        fixture.scanned.observed_roots = sources;
-        worker
-            .store_cache(
-                &cache,
-                42,
-                &mut provider,
-                &fixture.scanned,
-                &fixture.rows,
-                &service,
-                &PlatformJunkSetup::default(),
-                &job,
-                false,
-                &mut writer,
-            )
-            .unwrap();
-        assert!(shared.pop().is_none());
-        assert!(!cache.exists());
-    }
+    worker
+        .store_history(
+            &cache,
+            &mut reader,
+            &fixture.scanned,
+            &fixture.rows,
+            &service,
+            &PlatformJunkSetup::default(),
+            &job,
+            false,
+            &mut writer,
+        )
+        .unwrap();
+    assert!(shared.pop().is_none());
+    assert!(!cache.exists());
 }
 
 #[test]

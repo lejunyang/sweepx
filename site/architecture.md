@@ -68,13 +68,13 @@ Git 增强由 core 的 `GitEvidenceSession` 共用于普通报告和垃圾会话
 
 Unix 退出状态通过 `waitid(WNOWAIT)` 观察，在尝试清理原进程组后才调用普通 `Child::wait` 回收，并核对两种状态。仍持有 stdout 的后代必须自然完成，才能接受完整答案；失败路径清理不能反过来证明 EOF。启动前只查询 `SIGCHLD` 策略，拒绝已有 `SIG_IGN` / `SA_NOCLDWAIT`，不修改全局信号配置，并在 spawn 前再次检查取消/期限。调用方不得外部回收这些子进程或改变等待策略；无法核验等待权时不发送原编号信号，已经回收后也不重试组信号。原组清理仍是尽力操作，Windows 继续使用独占 Job handle。
 
-大文件分析在既有 `sweepx-analysis` 模块中使用有界 top-K；core 的 `scan_large_files_with_store` 与普通 scan 共享一次 scanner 遍历及输出 envelope。observer 的 `on_entry` 在可选行保留/分类之前传递每个原生观察，`on_directory_coverage` 在可选 aggregate/index 保留之前传递覆盖。所需文件事实使逻辑长度缓存退回当前文件观察，不制造缺失的分配或 mount 证据；普通 junk 路径仍保留原缓存快路径。收集器只复制入榜的原生条目，分类器、垃圾候选和执行授权不参与大小排序。
+大文件分析在既有 `sweepx-analysis` 模块中使用有界 top-K；core 的 `scan_large_files_with_store` 与普通 scan 共享一次 scanner 遍历及输出 envelope。observer 的 `on_entry` 在可选行保留/分类之前传递每个原生观察，`on_directory_coverage` 在可选 aggregate/index 保留之前传递覆盖。所需文件事实使逻辑长度缓存退回当前文件观察，不制造缺失的分配或 mount 证据；默认 macOS junk 路径使用当前批量枚举的逻辑长度快路径。收集器只复制入榜的原生条目，分类器、垃圾候选和执行授权不参与大小排序。
 
 显式内容分析可通过 platform 的 `stream_bound_regular_file` 在保留父目录下分块读取指定范围，固定 64 KiB 缓冲，并检查跨阶段及读后原生身份、mount、大小和 change stamp；失败时 chunk 仅是临时数据，不能形成完整 hash 证明。macOS 在线程上禁止 dataless 下载，Windows 检查 no-recall/provider/reparse 边界，Linux 仅准入 ext4、Btrfs、tmpfs。调用者仍需工作线程、累计 IO/metadata/并发预算；原生同步读取的取消是协作式。重复分析现由 analysis 的 DuplicateCollector 与 core 的 scan_duplicates_with_store 接入显式 scan --duplicates。它共用本次遍历事实，在有界大小索引内排除硬链接别名，采样筛选后才完整 hash；每阶段及最终复验原生身份、大小与变化指纹。共享累计读取、范围请求、文件数量和保留估算预算，取消/期限停止后续内容阶段。失败 chunk 不形成摘要，未知/provider/资源缺口保持 partial；内容 hash 不持久缓存，结果不授予删除权限。
 
 共享实时列表每批最多处理 128 个事件，随后绘制并检查键盘。收到任意事件的批次使用零超时输入检查，下一空批恢复 50 ms 空闲等待；有界队列暂时取空也不会在每个活动批次强加固定等待。完整结果、错误、选择与取消契约保持，大文件/重复内容视图共用这套循环。
 
-`sweepx-core::junk::session` 提供显式目录根或系统自动发现的后台垃圾扫描会话，由 CLI adapter 接入 `junk --tui`。阶段、候选、边界、错误和终态使用有界背压队列，进度与目录统计合并；稳定候选键与 revision 分离。选中刷新复验原生绑定，只有完整观察才能移除旧行；取消或不完整扫描保留未确认的旧证据。TUI 只绘制可见行，选择独立于扫描，后台回收复用原生绑定检查和现有 Trash adapter。macOS 缓存存储和文件复用已迁到 core 共用；会话先发送明确标记的历史候选，再重建当前目录身份、分类及 Git 证据，完整观察后才能移除旧键。缓存失败退回现场扫描。系统全量刷新重新发现根，macOS 缓存绑定本次范围；系统模式先发现范围再读取历史预览，游标仍在发现之前捕获。Linux 临时对象保留独立的测量事实和会话身份，不制造目录 aggregate 或普通 Trash 身份；临时对象刷新整个系统范围，TUI 的 `x` 已接入独立隔离预览、精确摘要确认与结果状态；完整原生运行仍缺 Linux 宿主验证。选中目录刷新保留原始根与原生身份链，只递归所选子树，浅层枚举祖先所需的规则及 Git 标记；祖先旧统计成为历史，原生绑定仍可供再次选中刷新。祖先枚举完整与递归覆盖分开记录，父标记截断不能产生否定分类，所有所选目录都获得完整覆盖后才替换旧行。macOS 完整局部扫描合并所选子树文件索引与历史验证后未变化的兄弟目录，丢弃选中范围的旧后代、浅层祖先及已变化范围外索引；嵌套根仍按原范围独立归属。全局新游标在历史查询和遍历前捕获，竞态变更留给下次验证。候选片段只合并为 v9 历史预览，混合扫描身份和旧祖先统计不能成为整根命中；后续完整扫描恢复完整记录。缺少完整历史、取消或 partial 不推进局部代际。两缓存文件分别有界原子发布，不构成跨文件事务；预算遗漏的索引仍现场检查。自定义全根分类器不能使用该局部接口。会话取消独立于下述持久化 `cancel` 命令。
+`sweepx-core::junk::session` 提供显式目录根或系统自动发现的后台垃圾扫描会话，由 CLI adapter 接入 `junk --tui`。阶段、候选、边界、错误和终态使用有界背压队列，进度与目录统计合并；稳定候选键与 revision 分离。选中刷新复验原生绑定，只有完整观察才能移除旧行；取消或不完整扫描保留未确认的旧证据。TUI 只绘制可见行，选择独立于扫描，后台回收复用原生绑定检查和现有 Trash adapter。三平台历史候选存储由 core 共用；会话先发送明确标记的历史候选，再重建当前目录身份、分类及 Git 证据，完整观察后才能移除旧键。缓存失败退回现场扫描。系统全量刷新重新发现根，macOS 缓存绑定本次范围；系统模式先发现范围再读取历史预览。Linux 临时对象保留独立的测量事实和会话身份，不制造目录 aggregate 或普通 Trash 身份；临时对象刷新整个系统范围，TUI 的 `x` 已接入独立隔离预览、精确摘要确认与结果状态；完整原生运行仍缺 Linux 宿主验证。选中目录刷新保留原始根与原生身份链，只递归所选子树，浅层枚举祖先所需的规则及 Git 标记；祖先旧统计成为历史，原生绑定仍可供再次选中刷新。祖先枚举完整与递归覆盖分开记录，父标记截断不能产生否定分类，所有所选目录都获得完整覆盖后才替换旧行。macOS 完整局部扫描只合并新候选片段与未刷新兄弟的历史候选，移除所选范围的旧后代；嵌套根仍按原范围独立归属，不查询 FSEvents 或合并文件索引。混合扫描身份、旧兄弟与祖先统计只供历史预览，不能成为整根命中；后续完整扫描重新观察全部范围。取消、partial 或缓存准入失败保留旧记录；候选历史有界原子发布。自定义全根分类器不能使用该局部接口。会话取消独立于下述持久化 `cancel` 命令。
 
 Linux 临时对象服务提供共享预算与合作式取消；目录名、递归身份指纹、进程枚举和 mount/socket 表输入都有界。资源失败不可恢复为本次完整阴性结论；报告与清理重验复用同一实现，各次调用独立建立预算和当前引用证据。
 
@@ -89,6 +89,10 @@ CLI scan 当前同步完成。Linux 在 scan 完成后批量构造事件，并�
 与 scan/status 分离，`cache status` 只读取 preview cache 的现存状态。Linux、macOS 与 Windows 支持 human/JSON；NDJSON 是 usage error。缺失 state/cache 返回 `absent` 且不创建目录。`available` 只表示缓存结构和受限校验可读，不代表任何 live/current 文件事实；warning、error 或 quarantine presence 会把结果降为 `degraded`。
 
 项目内容观察由 `junk::format::ProjectFormatSession` 串行执行，独立于纯规则 VM。Dart profile 使用捕获目录的有界原生完整文件读取，按当前内容识别 pub v2 自声明格式及父项目根引用，不打开配置中的 URI、不解析 pubspec YAML、不运行 SDK。每个命令调用/会话 revision 重建观察器，缓存不保存格式答案；历史和 Base 行是 `not_checked`。默认每个文件最多 256 KiB、最多 128 个不同候选、累计预留 32 MiB 内容，每次尝试包括失败均扣除最坏请求预算；祖先与目录枚举受单次限额约束，因此累计元数据工作也受尝试数限制。5 秒是合作期限，不能打断阻塞内核调用。配置无效、provider/权限/身份变化、超限与取消都显式保留；格式识别成功仍有 `project_ownership_not_verified`，Git 不覆盖它，CLI/TUI/后台回收均拒绝此 profile。SvelteKit legacy profile 复用此流程：观察 `tsconfig.json` 与 `ambient.d.ts` 后完整重读各一次，比较身份、变化指纹和内容；发现文件间变化即 unknown，仍不承诺原子快照或完整 TypeScript 语法有效。每项在首次 I/O 前预留四次读取，因此共享 32 MiB 请求预算最多允许 32 项纯 SvelteKit 观察；累计读取/元数据工作也由最大尝试数乘四约束。声明内容不持久化，不求值 JS 配置或访问其中的 alias/glob。独占所有权、活动及更多真实工具版本证据仍待实现。
+
+默认 macOS 垃圾扫描通过 platform 的 `observe_file_length` 消费当前 `getattrlistbulk` 批次的普通文件长度，scanner 仅将名称 marker 与逻辑字节折叠到本代目录状态。`supports_file_length_observation` 只声明可选优化能力，无法保证每个文件系统或子项都有 bulk 事实；缺失、旧批次、链接、外设备、负长度及伪造父绑定均回到普通检查。`.git` 保留完整观察，要求文件事实的 observer、普通 scan、大文件与重复内容路径不使用逻辑长度捷径。该 payload 不提供文件身份、分配、唯一性或回收授权。
+
+默认 macOS CLI/TUI 不再准备、保留或发布逐文件长度索引，也不查询 FSEvents；历史候选首屏及选中刷新后的历史片段合并仍可用。scanner 的逻辑累计直接沿现有目录状态索引更新，省去每文件祖先路径向量。独立 `SubtreeCacheProvider` 兼容接口仍保留有界、一次性 FSEvents 历史读取与当前类型/长度确认，不是持续监听服务。空历史、目录 mtime/ctime 或旧候选不能证明当前整棵树未变；跳过子树仍未建立资格，参见[扫描与缓存设计](../docs/architecture/scanner-and-cache.md#macos-live-file-length)。
 
 ## 导入是明确的信任边界
 
