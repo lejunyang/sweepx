@@ -145,6 +145,9 @@ Linux 临时对象的隔离预览与执行已独立为 core 服务，CLI 负责�
 
 `junk --system --rule RULE_ID` 可重复指定类别，普通报告和 TUI 均适用；未选择的类别不在本次扫描范围内。规则 ID 必须适用于当前平台。默认 `--system` 仍扫描全部支持类别，原生受保护目录调用可能等待系统响应。npm 默认目录在 Unix 为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；只报告具备 `content-v2` 和 `index-v5` 目录的 `_cacache` 下载缓存，保留 `_npx` 与自定义同级内容。工具回答不可用时，活动保持 unknown。pnpm 的 256 分片识别允许普通 `.DS_Store` 元数据文件，其他额外条目仍拒绝。
 
+
+[项目产物细分约定](docs/architecture/project-artifact-details-2026-10-07.md)：`junk --details ROOT` 可查看嵌套规则：Rust 增量缓存、依赖与测试产物、构建脚本输出、编译指纹、示例程序及常规 `--target` 构建分组；Python `.venv`/`venv` 和 Vite `.vite/deps` 另外核验当前、有界的格式签名。Rust 子项要求普通 `.cargo-lock`、原生 debug/release 父目录和常规 target 祖先链；目标分组还需编译器信息与 cache-tag 文件。不解析自定义 profile/build 路径。这些规则均只报告，恢复所需输入、夹杂的个人文件和进程活动仍未验证。TUI 显示中文/英文类别，并保留只读目录细分。JSON 增加 `entryId`、`parentCandidateEntryId`、`detailsIncluded`、`topLevelCandidateCount`、`sizeSummaryScope`；ID 只用于本次扫描的分组，不授权操作。子项字节已包含在上层目录中，汇总只计不重叠的上层候选；分配/逻辑占用不证明实际可释放空间。`--details` 与清理选项冲突。
+
 Linux/macOS/Windows 的普通 `junk` 报告与垃圾 TUI 使用当前原生文件长度观测：Linux 用相对保留父目录的 no-follow `statx` 核对类型、长度、设备和 mount ID；macOS 使用本次 `getattrlistbulk`；Windows 使用当前目录枚举批次的在线普通文件长度，排除 reparse、offline/recall、设备项与无效身份。垃圾入口省去完整文件条目和可选文件索引，macOS 默认不查询 FSEvents。目录、规则 marker 与候选仍现场遍历，缺失或不合格事实回到普通检查；分配大小、硬链接唯一性与可释放空间保持 unknown。普通 `scan`、大文件、重复内容及要求完整文件事实的调用方沿用完整原生观察。可用 `junk --timings` 查看实际阶段耗时；稳定字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 仍为 0。可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
 
 普通扫描详情共享 128 MiB 保留估算，包含原生祖先身份链和容器开销；超限明确截断详情，保留已累计的递归统计及独立大文件观察。该额度不是全进程 RSS 上限。目录句柄 frontier 默认 128，宽目录延后同级目录并优先深入子树，为共享原生 I/O 额度保留余量。

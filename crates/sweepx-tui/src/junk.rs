@@ -605,7 +605,10 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
                     usize::from(list.width.saturating_sub(40) / 2),
                 )
             }),
-            Cell::from(crate::live::sanitize_terminal_text(row.row.rule())),
+            Cell::from(crate::live::sanitize_terminal_text(rule_label(
+                row.row.rule(),
+                model.locale,
+            ))),
             Cell::from(crate::byte_value_label_with_unit(
                 row.row.logical_bytes(),
                 model.unit,
@@ -685,6 +688,25 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
             .block(Block::default().borders(Borders::ALL)),
         help,
     );
+}
+
+// Presentation labels leave the classifier's IDs unchanged for reports and authorization guards.
+fn rule_label(rule: &str, locale: Locale) -> &str {
+    let labels = match rule {
+        "rust.incremental" => ("Rust 增量缓存", "Rust incremental cache"),
+        "rust.dependencies" => ("Rust 依赖与测试产物", "Rust dependencies/tests"),
+        "rust.build-script-output" => ("Rust 构建脚本输出", "Rust build-script output"),
+        "rust.fingerprints" => ("Rust 编译指纹", "Rust fingerprints"),
+        "rust.examples" => ("Rust 示例程序", "Rust examples"),
+        "rust.target-platform" => ("Rust 指定目标构建", "Rust target build"),
+        "python.virtualenv" => ("Python 虚拟环境", "Python environment"),
+        "node.vite-deps" => ("Vite 依赖缓存", "Vite dependency cache"),
+        _ => return rule,
+    };
+    match locale {
+        Locale::ZhCn => labels.0,
+        Locale::EnUs => labels.1,
+    }
 }
 
 /// Runs with injectable terminal/events for independent rendering and interaction tests.

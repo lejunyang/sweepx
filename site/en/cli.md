@@ -583,3 +583,7 @@ sweepx site-storage --browser edge --profile Default --domain example.com --expo
 ```
 
 SweepX now embeds the extension and native host; see [`browser-extension`](#browser-extension). Clearing still requires loading the extension in the matching profile. Connect for domain/key/bucket and shared-category inventory, or specify a website without connecting. The plan-file import entry is removed. Choose scope, confirm the current profile and click Confirm clearing; no hostname retyping is required. Only browsingData and nativeMessaging permissions are requested, with no network calls or direct database-directory removal. See the [adapter guide](../../integrations/chromium-cleanup/README.md) for scope, confirmation and acceptance limits. Legacy filesystem removal flags remain refused.
+
+## Nested project artifacts
+
+Use `sweepx junk --details ROOT` (or `--format json junk --details ROOT`) to include nested Rust outputs, Python environments and Vite dependency bundles. Parent/child rows overlap; summary bytes count outer candidates only. TUI shows the nested categories and Enter opens read-only detail. These new rules are report-only, and `--details` conflicts with cleanup flags. See [artifact detail contracts](../../docs/architecture/project-artifact-details-2026-10-07.md).

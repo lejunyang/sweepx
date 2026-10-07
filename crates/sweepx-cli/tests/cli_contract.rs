@@ -1927,6 +1927,182 @@ fn junk_scan_reports_only_marker_bound_project_artifacts() {
 }
 
 #[test]
+fn junk_details_report_nested_tool_layouts_without_double_counting_or_cleanup() {
+    let (_fixture, base) = duplicate_fixture();
+    let root = base.join("project");
+    for rel in [
+        "target/debug/incremental",
+        "target/debug/deps",
+        "target/debug/build",
+        "target/debug/.fingerprint",
+        "target/debug/examples",
+        "target/x86_64-unknown-linux-gnu/debug/incremental",
+        "node_modules/.vite/deps",
+        ".venv",
+        "decoy/deps",
+        "decoy/incremental",
+    ] {
+        fs::create_dir_all(root.join(rel)).unwrap();
+        fs::write(
+            root.join(rel).join("personal-note"),
+            b"preserve every original byte",
+        )
+        .unwrap();
+    }
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::write(root.join("package.json"), b"{}").unwrap();
+    fs::write(root.join("target/.rustc_info.json"), b"{}").unwrap();
+    fs::write(root.join("target/debug/.cargo-lock"), b"").unwrap();
+    fs::write(
+        root.join("target/x86_64-unknown-linux-gnu/CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("target/x86_64-unknown-linux-gnu/debug/.cargo-lock"),
+        b"",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".venv/pyvenv.cfg"),
+        b"home = /unopened/python\ninclude-system-site-packages = false\nversion = 3.12.14\n",
+    )
+    .unwrap();
+    let metadata = br#"{"hash":"a","configHash":"b","browserHash":"c","optimized":{"vue":{"src":"/never/read/source","file":"vue.js"}}}"#;
+    fs::write(
+        root.join("node_modules/.vite/deps/_metadata.json"),
+        metadata,
+    )
+    .unwrap();
+    fs::write(root.join("decoy/deps/_metadata.json"), metadata).unwrap();
+    fs::write(root.join("decoy/.cargo-lock"), b"").unwrap();
+    let report = |details: bool, locale: &str| {
+        let mut command = cli_command();
+        command
+            .timeout(std::time::Duration::from_secs(30))
+            .args(["--format", "json", "--locale", locale, "--state-dir"])
+            .arg(base.join("state"))
+            .arg("junk");
+        if details {
+            command.arg("--details");
+        }
+        let output = command.arg(&root).assert().get_output().clone();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["status"],
+            "ok",
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        value
+    };
+    let plain = report(false, "en-US");
+    assert_eq!(plain["topLevelCandidateCount"], 3);
+    fn ordinary_file_bytes(path: &std::path::Path, logical: bool) -> u128 {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        if metadata.is_dir() {
+            return fs::read_dir(path)
+                .unwrap()
+                .map(|entry| ordinary_file_bytes(&entry.unwrap().path(), logical))
+                .sum();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if logical {
+                u128::from(metadata.len())
+            } else {
+                u128::from(metadata.blocks()) * 512
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = logical;
+            u128::from(metadata.len())
+        }
+    }
+    // Independent native metadata walk: directory size is not taken from the classifier, its
+    // aggregate or its overlap-suppression result. Finder-created ordinary files are included.
+    let expected = plain["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| {
+            ordinary_file_bytes(
+                std::path::Path::new(candidate["path"].as_str().unwrap()),
+                candidate["sizeIsLogical"].as_bool().unwrap(),
+            )
+        })
+        .sum::<u128>();
+    assert_eq!(
+        plain["knownReclaimableBytes"]
+            .as_str()
+            .unwrap()
+            .parse::<u128>()
+            .unwrap(),
+        expected
+    );
+    for locale in ["en-US", "zh-CN"] {
+        let detailed = report(true, locale);
+        assert_eq!(
+            detailed["knownReclaimableBytes"],
+            plain["knownReclaimableBytes"]
+        );
+        assert_eq!(detailed["topLevelCandidateCount"], 3);
+        assert_eq!(
+            detailed["sizeSummaryScope"],
+            "non_overlapping_top_level_candidates"
+        );
+        let candidates = detailed["candidates"].as_array().unwrap();
+        assert!(candidates.len() > plain["candidates"].as_array().unwrap().len());
+        for rule in [
+            "rust.incremental",
+            "rust.dependencies",
+            "rust.build-script-output",
+            "rust.fingerprints",
+            "rust.examples",
+            "rust.target-platform",
+            "python.virtualenv",
+            "node.vite-deps",
+        ] {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate["ruleId"] == rule)
+                .unwrap();
+            assert_eq!(candidate["executionPolicy"], "report_only");
+            assert!(
+                candidate["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b == "project_activity_not_verified")
+            );
+            if rule.starts_with("rust.") || rule == "node.vite-deps" {
+                assert!(candidate["parentCandidateEntryId"].is_string());
+            }
+        }
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate["path"].as_str().unwrap().contains("decoy"))
+        );
+    }
+    assert_eq!(
+        fs::read(root.join("target/debug/incremental/personal-note")).unwrap(),
+        b"preserve every original byte"
+    );
+    assert_eq!(
+        fs::read(root.join(".venv/personal-note")).unwrap(),
+        b"preserve every original byte"
+    );
+    cli_command()
+        .args(["junk", "--details", "--trash"])
+        .arg(&root)
+        .assert()
+        .code(2);
+}
+
+#[test]
 fn junk_project_layout_corpus_keeps_machine_rules_and_source_payloads() {
     #[cfg(target_os = "linux")]
     let fixture = TempDir::new_in("/dev/shm").unwrap();

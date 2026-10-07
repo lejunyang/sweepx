@@ -2,76 +2,306 @@
   {
     "id": "rust.target",
     "contextProfile": "cargo_manifest",
-    "names": ["target"],
+    "names": [
+      "target"
+    ],
     "risk": "R2",
     "executionPolicy": "require_ownership_and_activity",
-    "requiredParentMarkers": ["Cargo.toml"],
+    "requiredParentMarkers": [
+      "Cargo.toml"
+    ],
     "evidence": "Cargo documents target-dir as the build output directory; the workspace manifest remains outside the selected directory. Layout and Git ignore status do not establish exclusive ownership or inactivity; current observations remain report-only.",
     "sourceReviewedAt": "2026-10-02",
-    "references": ["https://doc.rust-lang.org/cargo/reference/build-cache.html", "https://doc.rust-lang.org/cargo/reference/workspaces.html"]
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+      "https://doc.rust-lang.org/cargo/reference/workspaces.html"
+    ]
   },
   {
     "id": "node.modules",
-    "names": ["node_modules"],
+    "names": [
+      "node_modules"
+    ],
     "risk": "R2",
     "executionPolicy": "require_ownership_and_activity",
-    "requiredParentMarkers": ["package.json"],
+    "requiredParentMarkers": [
+      "package.json"
+    ],
     "evidence": "npm documents node_modules as the local package installation directory; package.json remains outside the selected directory. Layout and Git ignore status do not establish exclusive ownership or inactivity; current observations remain report-only.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://docs.npmjs.com/cli/v11/configuring-npm/folders"]
+    "references": [
+      "https://docs.npmjs.com/cli/v11/configuring-npm/folders"
+    ]
   },
   {
     "id": "python.cache",
-    "names": ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"],
+    "names": [
+      "__pycache__",
+      ".pytest_cache",
+      ".mypy_cache",
+      ".ruff_cache"
+    ],
     "risk": "R1",
     "executionPolicy": "require_ownership_and_activity",
     "requiredParentMarkers": [],
     "evidence": "These names are tool-owned bytecode or analysis caches; source files remain outside the selected directory. Layout and Git ignore status do not establish exclusive ownership or inactivity; current observations remain report-only.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://docs.python.org/3/tutorial/modules.html#compiled-python-files", "https://docs.pytest.org/en/stable/how-to/cache.html"]
+    "references": [
+      "https://docs.python.org/3/tutorial/modules.html#compiled-python-files",
+      "https://docs.pytest.org/en/stable/how-to/cache.html"
+    ]
   },
   {
     "id": "project.build-output",
-    "names": ["dist", "build", "out", ".next", ".turbo"],
+    "names": [
+      "dist",
+      "build",
+      "out",
+      ".next",
+      ".turbo"
+    ],
     "risk": "R3",
     "executionPolicy": "report_only",
-    "requiredParentMarkers": ["package.json", "pyproject.toml", "setup.py", "CMakeLists.txt", "build.gradle", "settings.gradle"],
+    "requiredParentMarkers": [
+      "package.json",
+      "pyproject.toml",
+      "setup.py",
+      "CMakeLists.txt",
+      "build.gradle",
+      "settings.gradle"
+    ],
     "evidence": "A recognized project marker exists beside the output; generic names remain higher-risk and report-only.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://nextjs.org/docs/app/api-reference/config/next-config-js/distDir", "https://cmake.org/cmake/help/latest/manual/cmake-buildsystem.7.html"]
+    "references": [
+      "https://nextjs.org/docs/app/api-reference/config/next-config-js/distDir",
+      "https://cmake.org/cmake/help/latest/manual/cmake-buildsystem.7.html"
+    ]
   },
   {
     "id": "maven.target",
-    "names": ["target"],
+    "names": [
+      "target"
+    ],
     "risk": "R2",
     "executionPolicy": "require_ownership_and_activity",
-    "requiredParentMarkers": ["pom.xml"],
+    "requiredParentMarkers": [
+      "pom.xml"
+    ],
     "evidence": "Maven documents target as the default build output directory; pom.xml remains outside the selected directory. Layout and Git ignore status do not establish exclusive ownership or inactivity; current observations remain report-only.",
     "sourceReviewedAt": "2026-08-29",
-    "references": ["https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html"]
+    "references": [
+      "https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html"
+    ]
   },
   {
     "id": "dart.tool-state",
-    "names": [".dart_tool"],
+    "names": [
+      ".dart_tool"
+    ],
     "risk": "R3",
     "executionPolicy": "report_only",
-    "requiredParentMarkers": ["pubspec.yaml"],
-    "requiredOwnMarkers": ["package_config.json"],
+    "requiredParentMarkers": [
+      "pubspec.yaml"
+    ],
+    "requiredOwnMarkers": [
+      "package_config.json"
+    ],
     "contentFormat": "dart_pub_package_config_v2",
     "evidence": "Dart documents .dart_tool as regenerable project tool state. A sibling pubspec.yaml and an ordinary package_config.json inside the captured directory establish layout only; current content-profile status is reported separately. Self-declared format does not establish exclusive ownership or inactivity, so this profile remains report-only and cannot enter Trash; source and lockfiles remain outside this candidate.",
     "sourceReviewedAt": "2026-10-02",
-    "references": ["https://dart.dev/tools/pub/package-layout", "https://dart.dev/tools/pub/cmd/pub-get", "https://dart.dev/tools/pub/workspaces"]
+    "references": [
+      "https://dart.dev/tools/pub/package-layout",
+      "https://dart.dev/tools/pub/cmd/pub-get",
+      "https://dart.dev/tools/pub/workspaces"
+    ]
   },
   {
     "id": "node.sveltekit-output",
-    "names": [".svelte-kit"],
+    "names": [
+      ".svelte-kit"
+    ],
     "risk": "R3",
     "executionPolicy": "report_only",
-    "requiredParentMarkers": ["svelte.config.js"],
-    "requiredOwnMarkers": ["tsconfig.json", "ambient.d.ts"],
+    "requiredParentMarkers": [
+      "svelte.config.js"
+    ],
+    "requiredOwnMarkers": [
+      "tsconfig.json",
+      "ambient.d.ts"
+    ],
     "contentFormat": "svelte_kit_legacy_sync",
     "evidence": "SvelteKit 1/2 generate tsconfig.json and ambient.d.ts in the default .svelte-kit output directory beside svelte.config.js. These ordinary-file markers establish layout only; current content-profile status is reported separately. Non-atomic generated signatures do not prove exclusive ownership or inactivity, so this profile remains report-only and cannot enter Trash. Custom output paths and SvelteKit 3 layouts are not inferred.",
     "sourceReviewedAt": "2026-10-02",
-    "references": ["https://svelte.dev/docs/kit/project-structure", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/sync.js", "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%401.0.0/packages/kit/src/core/sync/write_tsconfig.js"]
+    "references": [
+      "https://svelte.dev/docs/kit/project-structure",
+      "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%402.0.0/packages/kit/src/core/sync/sync.js",
+      "https://github.com/sveltejs/kit/blob/%40sveltejs/kit%401.0.0/packages/kit/src/core/sync/write_tsconfig.js"
+    ]
+  },
+  {
+    "id": "rust.incremental",
+    "names": [
+      "incremental"
+    ],
+    "parentNames": [
+      "debug",
+      "release"
+    ],
+    "requiredParentMarkers": [
+      ".cargo-lock"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Incremental rustc cache; rebuilding regenerates it and may take longer. An ordinary Cargo profile lock and captured native debug/release parent establish layout only. Custom profiles, relocated build directories, ownership and activity are not inferred.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ],
+    "pathProfile": "cargo_profile_artifact"
+  },
+  {
+    "id": "rust.dependencies",
+    "names": [
+      "deps"
+    ],
+    "parentNames": [
+      "debug",
+      "release"
+    ],
+    "requiredParentMarkers": [
+      ".cargo-lock"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Compiled dependencies and test artifacts; rebuilding recompiles them. An ordinary Cargo profile lock and captured native debug/release parent establish layout only. Custom profiles, relocated build directories, ownership and activity are not inferred.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ],
+    "pathProfile": "cargo_profile_artifact"
+  },
+  {
+    "id": "rust.build-script-output",
+    "names": [
+      "build"
+    ],
+    "parentNames": [
+      "debug",
+      "release"
+    ],
+    "requiredParentMarkers": [
+      ".cargo-lock"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Build-script outputs; rebuilding can rerun project build scripts and their downloads. An ordinary Cargo profile lock and captured native debug/release parent establish layout only. Custom profiles, relocated build directories, ownership and activity are not inferred.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ],
+    "pathProfile": "cargo_profile_artifact"
+  },
+  {
+    "id": "rust.fingerprints",
+    "names": [
+      ".fingerprint"
+    ],
+    "parentNames": [
+      "debug",
+      "release"
+    ],
+    "requiredParentMarkers": [
+      ".cargo-lock"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Cargo dependency fingerprints; deleting them can force recompilation. An ordinary Cargo profile lock and captured native debug/release parent establish layout only. Custom profiles, relocated build directories, ownership and activity are not inferred.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ],
+    "pathProfile": "cargo_profile_artifact"
+  },
+  {
+    "id": "rust.examples",
+    "names": [
+      "examples"
+    ],
+    "parentNames": [
+      "debug",
+      "release"
+    ],
+    "requiredParentMarkers": [
+      ".cargo-lock"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Compiled examples, which may be used directly; rebuilding recreates executables. An ordinary Cargo profile lock and captured native debug/release parent establish layout only. Custom profiles, relocated build directories, ownership and activity are not inferred.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ],
+    "pathProfile": "cargo_profile_artifact"
+  },
+  {
+    "id": "rust.target-platform",
+    "names": [],
+    "namePattern": "cargo_target_name",
+    "parentNames": [
+      "target"
+    ],
+    "requiredParentMarkers": [
+      ".rustc_info.json"
+    ],
+    "requiredOwnMarkers": [
+      "CACHEDIR.TAG"
+    ],
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Cargo --target groups output under a target-named directory. Captured target parent, compiler-info marker and ordinary cache tag establish conventional layout only; this does not prove a different host architecture, resolved custom-target semantics, exclusive ownership or inactivity. The nested profiles may be inspected separately.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/build-cache.html"
+    ]
+  },
+  {
+    "id": "python.virtualenv",
+    "names": [
+      ".venv",
+      "venv"
+    ],
+    "requiredParentMarkers": [],
+    "requiredOwnMarkers": [
+      "pyvenv.cfg"
+    ],
+    "contentFormat": "python_venv_config",
+    "risk": "R3",
+    "executionPolicy": "report_only",
+    "evidence": "Python documents virtual environments as disposable and recreated from dependency declarations. pyvenv.cfg is observed currently and natively, but recovery inputs, local edits, model data, exclusive ownership and activity are not established. An environment is not classified as an unused cache.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://docs.python.org/3/library/venv.html"
+    ]
+  },
+  {
+    "id": "node.vite-deps",
+    "names": [
+      "deps"
+    ],
+    "parentNames": [
+      ".vite"
+    ],
+    "requiredParentMarkers": [],
+    "requiredOwnMarkers": [
+      "_metadata.json"
+    ],
+    "contentFormat": "vite_dependency_metadata",
+    "risk": "R2",
+    "executionPolicy": "report_only",
+    "evidence": "Vite stores generated dependency bundles in node_modules/.vite by default and recreates them. A captured .vite parent and current dependency metadata recognize only this deps layout; referenced paths are not followed, custom cache roots and browser profiles are not inferred, and ownership/activity remain unverified.",
+    "sourceReviewedAt": "2026-10-07",
+    "references": [
+      "https://vite.dev/guide/dep-pre-bundling.html"
+    ]
   }
 ]

@@ -252,6 +252,11 @@ enum Commands {
         /// Measures report-only work; stdout keeps its existing format.
         #[arg(long, conflicts_with_all = ["trash", "clean_temp"])]
         timings: bool,
+        /// Include nested artifact rules in reports (for example Rust incremental and target
+        /// platform outputs). Summary bytes count only non-overlapping outer candidates.
+        /// TUI already displays nested candidates; all project layout rules remain report-only.
+        #[arg(long, conflicts_with_all = ["trash", "clean_temp"])]
+        details: bool,
         /// Scan conservative platform cache roots; conflicts with explicit roots.
         /// Tool discovery has a 10s batch budget, a 2s probe timeout and a 64 KiB answer limit.
         /// npm inventory also bounds filesystem observations and reports incomplete discovery.
@@ -740,6 +745,7 @@ fn main() -> ProcessExitCode {
         Commands::Junk {
             tui,
             timings,
+            details,
             system,
             rules,
             clean_temp,
@@ -827,6 +833,7 @@ fn main() -> ProcessExitCode {
                 normalized_roots.platform,
                 JunkCleanOptions {
                     enabled: clean_temp,
+                    details,
                     quarantine_dir: quarantine_dir.as_deref(),
                     stdin_is_terminal,
                 },
@@ -1212,6 +1219,7 @@ fn platform_privilege_provider() -> Box<dyn PrivilegeProvider> {
 
 struct JunkCleanOptions<'a> {
     enabled: bool,
+    details: bool,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     quarantine_dir: Option<&'a Path>,
     stdin_is_terminal: bool,
@@ -1609,9 +1617,8 @@ fn run_junk_scan(
             .cmp(&right.ancestor_ids.len())
             .then_with(|| left.path.cmp(&right.path))
     });
-    let mut top_level = Vec::with_capacity(candidates.len());
     let mut selected_ids = BTreeSet::new();
-    for candidate in candidates {
+    for candidate in &candidates {
         if candidate
             .ancestor_ids
             .iter()
@@ -1620,15 +1627,24 @@ fn run_junk_scan(
             continue;
         }
         selected_ids.insert(candidate.entry_id.clone());
-        top_level.push(candidate);
     }
-    let mut candidates = top_level;
+    let (known_reclaimable, incomplete_size_count) = junk_size_summary(
+        candidates
+            .iter()
+            .filter(|candidate| selected_ids.contains(&candidate.entry_id)),
+    );
+    if !clean.details {
+        candidates.retain(|candidate| selected_ids.contains(&candidate.entry_id));
+    }
+    let displayed_ids = candidates
+        .iter()
+        .map(|candidate| candidate.entry_id.clone())
+        .collect::<BTreeSet<_>>();
     candidates.sort_by(|left, right| {
         junk_evidence_bytes(&right.reclaimable)
             .cmp(&junk_evidence_bytes(&left.reclaimable))
             .then_with(|| left.path.cmp(&right.path))
     });
-    let (known_reclaimable, incomplete_size_count) = junk_size_summary(&candidates);
     if move_to_trash {
         let mut items = Vec::new();
         for candidate in &candidates {
@@ -1827,6 +1843,17 @@ fn run_junk_scan(
                 ),
             }
         );
+        if clean.details {
+            println!(
+                "{}",
+                match context.locale() {
+                    sweepx_i18n::Locale::ZhCn =>
+                        "已包含细分子项；汇总只计不重叠的上层目录。观测占用不代表实际可释放空间。",
+                    sweepx_i18n::Locale::EnUs =>
+                        "Nested details included; summary counts non-overlapping outer directories only. Observed size is not uniquely reclaimable space.",
+                }
+            );
+        }
     }
     #[cfg(target_os = "linux")]
     if let Some((_, discovery)) = &temp_discovery
@@ -1880,8 +1907,13 @@ fn run_junk_scan(
                     "cacheLastActiveAt": installation.cache_last_active_at,
                     "isPathDefault": installation.is_path_default,
                 })).collect::<Vec<_>>(),
+                "detailsIncluded": clean.details,
+                "topLevelCandidateCount": selected_ids.len(),
+                "sizeSummaryScope": "non_overlapping_top_level_candidates",
                 "candidates": candidates.iter().map(|candidate| json!({
                     "path": candidate.path, "ruleId": candidate.rule_id, "risk": candidate.risk,
+                    "entryId": candidate.entry_id,
+                    "parentCandidateEntryId": junk_parent_candidate_id(candidate, &displayed_ids),
                     "reclaimable": candidate.reclaimable,
                     "evidence": candidate.evidence,
                     "sourceReviewedAt": candidate.source_reviewed_at,
@@ -2031,7 +2063,27 @@ fn junk_size_label(value: &ByteValue, unit: HumanSizeUnit) -> String {
     }
 }
 
-fn junk_size_summary(candidates: &[JunkCandidate]) -> (Option<u128>, usize) {
+// The grouping refers only to captured scan IDs. It is presentation, never path execution
+// authority; absent native lineage (for independent temporary facts) means no parent group.
+fn junk_parent_candidate_id<'a>(
+    candidate: &'a JunkCandidate,
+    displayed: &BTreeSet<sweepx_model::ScanEntryId>,
+) -> Option<&'a sweepx_model::ScanEntryId> {
+    candidate
+        .source_entry
+        .as_ref()?
+        .validated_native_locator()
+        .ok()??
+        .parent_reopen_recipe
+        .iter()
+        .rev()
+        .map(|parent| &parent.entry_id)
+        .find(|id| displayed.contains(*id))
+}
+
+fn junk_size_summary<'a>(
+    candidates: impl IntoIterator<Item = &'a JunkCandidate>,
+) -> (Option<u128>, usize) {
     let mut total = Some(0u128);
     let mut incomplete = 0usize;
     for candidate in candidates {

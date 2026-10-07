@@ -4,7 +4,9 @@
 //! semantics. Unsupported shapes remain unknown. Even a perfect imitation is report-only: a
 //! self-declared generator cannot prove exclusive directory ownership or inactivity.
 
+mod artifacts;
 mod sveltekit;
+pub use artifacts::{inspect_python_venv_config, inspect_vite_dependency_metadata};
 pub use sveltekit::inspect_sveltekit_sync;
 
 use super::candidate::JunkCandidate;
@@ -187,6 +189,8 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
         let reads = match profile {
             ProjectContentFormat::DartPubPackageConfigV2 => 1,
             ProjectContentFormat::SvelteKitLegacySync => 4,
+            ProjectContentFormat::PythonVenvConfig
+            | ProjectContentFormat::ViteDependencyMetadata => 1,
         };
         let evidence = if self.cancel.is_cancelled() {
             outcome(profile, ProjectFormatStatus::Unknown, "cancelled")
@@ -345,6 +349,12 @@ impl<P: PlatformScanner> ProjectFormatSession<P> {
                 .read_file(entry, "package_config.json")
                 .map(|read| inspect_dart_pub_config(&read.bytes)),
             ProjectContentFormat::SvelteKitLegacySync => self.observe_sveltekit(entry),
+            ProjectContentFormat::PythonVenvConfig => self
+                .read_file(entry, "pyvenv.cfg")
+                .map(|read| inspect_python_venv_config(&read.bytes)),
+            ProjectContentFormat::ViteDependencyMetadata => self
+                .read_file(entry, "_metadata.json")
+                .map(|read| inspect_vite_dependency_metadata(&read.bytes)),
         }
         .unwrap_or_else(|reason| outcome(profile, ProjectFormatStatus::Unknown, reason));
         if self.cancel.is_cancelled() {

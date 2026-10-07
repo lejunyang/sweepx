@@ -17,6 +17,18 @@ pub struct ProjectJunkRule {
     pub id: String,
     /// Native basename alternatives for the artifact directory.
     pub names: Vec<String>,
+    /// Optional bounded native-name shape, combined with exact names. This is layout evidence,
+    /// never a resolved compiler target or an assertion about the host architecture.
+    #[serde(default)]
+    pub name_pattern: Option<ProjectNamePattern>,
+    /// Optional direct-parent native basename filter. The captured locator supplies this name;
+    /// a display path, linked ancestor or missing lineage cannot satisfy the filter.
+    #[serde(default)]
+    pub parent_names: Vec<String>,
+    /// Optional conventional layout signature over the captured native directory lineage.
+    /// This does not read or resolve configuration outside the admitted scan root.
+    #[serde(default)]
+    pub path_profile: Option<ProjectPathProfile>,
     /// Stable risk tier (`R1`, `R2` or `R3`).
     pub risk: String,
     /// At least one must occur among the observed parent's files; empty means no parent filter.
@@ -67,6 +79,26 @@ pub enum ProjectContentFormat {
     /// Legacy SvelteKit sync configuration plus generated ambient signatures; non-atomic and
     /// report-only, without evaluating JS configuration or proving TypeScript correctness.
     SvelteKitLegacySync,
+    /// Python/uv virtual-environment configuration; no dependency recovery is inferred.
+    PythonVenvConfig,
+    /// Vite's dependency prebundle metadata; source and cache paths are not followed.
+    ViteDependencyMetadata,
+}
+
+/// Admitted native basename shapes. No arbitrary regular expression runs during a scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectNamePattern {
+    /// A bounded hyphen-separated target name inside a marked Cargo target directory.
+    CargoTargetName,
+}
+
+/// Bounded native directory-lineage signatures; unknown profile names fail admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPathProfile {
+    /// A child of target/{debug,release} or target/<target-name>/{debug,release}.
+    CargoProfileArtifact,
 }
 
 /// Supported fixed-input context observations. Unknown profiles fail catalog admission.
@@ -111,6 +143,7 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
     let mut ids = BTreeSet::new();
     for rule in &rules {
         if rule.names.len() > 64
+            || rule.parent_names.len() > 64
             || rule.required_parent_markers.len() > 64
             || rule.required_own_markers.len() > 64
             || rule.references.len() > 64
@@ -137,6 +170,8 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
                 let required: &[&str] = match profile {
                     ProjectContentFormat::DartPubPackageConfigV2 => &["package_config.json"],
                     ProjectContentFormat::SvelteKitLegacySync => &["tsconfig.json", "ambient.d.ts"],
+                    ProjectContentFormat::PythonVenvConfig => &["pyvenv.cfg"],
+                    ProjectContentFormat::ViteDependencyMetadata => &["_metadata.json"],
                 };
                 required.iter().any(|name| {
                     !rule
@@ -147,7 +182,29 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
             })
             || !ids.insert(&rule.id)
             || !matches!(rule.risk.as_str(), "R1" | "R2" | "R3")
-            || rule.names.is_empty()
+            || (rule.names.is_empty() && rule.name_pattern.is_none())
+            || rule.name_pattern.is_some_and(|_| {
+                !rule.parent_names.iter().any(|name| name == "target")
+                    || !rule
+                        .required_parent_markers
+                        .iter()
+                        .any(|name| name == ".rustc_info.json")
+                    || !rule
+                        .required_own_markers
+                        .iter()
+                        .any(|name| name == "CACHEDIR.TAG")
+            })
+            || rule.path_profile.is_some_and(|_| {
+                !rule
+                    .required_parent_markers
+                    .iter()
+                    .any(|name| name == ".cargo-lock")
+                    || rule.parent_names.is_empty()
+                    || rule
+                        .parent_names
+                        .iter()
+                        .any(|name| !matches!(name.as_str(), "debug" | "release"))
+            })
             || rule.evidence.trim().is_empty()
             || !valid_date
             || rule.references.is_empty()
@@ -158,6 +215,7 @@ pub fn load_project_rule_bytes(bytes: &[u8]) -> Result<Vec<ProjectJunkRule>, Pro
             || !rule
                 .names
                 .iter()
+                .chain(&rule.parent_names)
                 .chain(&rule.required_parent_markers)
                 .chain(&rule.required_own_markers)
                 .all(|name| is_safe_rule_component(name))
@@ -176,6 +234,19 @@ pub fn is_safe_rule_component(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_parent_filters_and_target_patterns_have_strict_admission() {
+        let mut rules: serde_json::Value = serde_json::from_str(PROJECT_RULES_JSON).unwrap();
+        rules[0]["parentNames"] = serde_json::json!(["../debug"]);
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+        rules[0]["parentNames"] = serde_json::json!(["debug"]);
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_ok());
+        rules[0]["namePattern"] = serde_json::json!("cargo_target_name");
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+        rules[0]["namePattern"] = serde_json::json!("arbitrary_regex");
+        assert!(load_project_rule_bytes(&serde_json::to_vec(&rules).unwrap()).is_err());
+    }
 
     #[test]
     fn invalid_rules_cannot_enter_through_the_byte_loader() {

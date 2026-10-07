@@ -55,6 +55,7 @@ pub struct JunkService {
     // Immutable indexes preserve catalog order for overlapping names while avoiding repeated
     // normalization/allocation on every ordinary directory in a large traversal.
     by_name: BTreeMap<String, Vec<usize>>,
+    pattern_rules: Vec<usize>,
     parent_markers: Vec<Vec<String>>,
     own_markers: Vec<Vec<String>>,
     marker_names: BTreeSet<String>,
@@ -106,24 +107,25 @@ impl JunkService {
             .iter()
             .map(|rule| {
                 let name = Predicate::Call {
-                    op: PredicateOp::In,
+                    op: PredicateOp::Eq,
                     args: vec![
                         PredicateArg::FieldRef {
-                            field: "entry.name".into(),
+                            field: "entry.name_matches".into(),
                         },
-                        PredicateArg::StringList(
-                            rule.names
-                                .iter()
-                                .map(|name| normalize_rule_name(name))
-                                .collect(),
-                        ),
+                        PredicateArg::Bool(true),
                     ],
                 };
-                if rule.required_parent_markers.is_empty() && rule.required_own_markers.is_empty() {
+                if rule.required_parent_markers.is_empty()
+                    && rule.required_own_markers.is_empty()
+                    && rule.parent_names.is_empty()
+                    && rule.path_profile.is_none()
+                {
                     return name;
                 }
                 let mut terms = vec![PredicateArg::Predicate(Box::new(name))];
                 for (required, field) in [
+                    (rule.path_profile.is_some(), "entry.path_profile_matches"),
+                    (!rule.parent_names.is_empty(), "parent.name_matches"),
                     (
                         !rule.required_parent_markers.is_empty(),
                         "parent.marker_matches",
@@ -188,6 +190,11 @@ impl JunkService {
             .map(|name| normalize_rule_name(name))
             .collect();
         Ok(Self {
+            pattern_rules: rules
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rule)| rule.name_pattern.map(|_| index))
+                .collect(),
             rule_bytes_digest: {
                 use sha2::Digest;
                 sha2::Sha256::digest(bytes).into()
@@ -227,7 +234,7 @@ impl JunkService {
         parent: Option<&ScanEntryId>,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<&ProjectJunkRule> {
-        self.match_project_context(name, None, parent, markers)
+        self.match_project_context(name, None, parent, None, markers)
     }
 
     /// Matches an ordinary captured directory's own and parent structural markers by scan ID.
@@ -244,10 +251,12 @@ impl JunkService {
             return None;
         }
         let identity = entry.identity.as_ref()?;
+        entry.validated_native_locator().ok()??;
         self.match_project_context(
             &entry.native_basename,
             Some(&identity.entry_id),
             identity.parent_id.as_ref(),
+            Some(entry),
             markers,
         )
     }
@@ -257,12 +266,29 @@ impl JunkService {
         name: &NativeName,
         own: Option<&ScanEntryId>,
         parent: Option<&ScanEntryId>,
+        entry: Option<&ScannedEntry>,
         markers: &BTreeMap<ScanEntryId, BTreeSet<String>>,
     ) -> Option<&ProjectJunkRule> {
         let name = native_rule_name(name)?;
-        let indices = self.by_name.get(&name)?;
+        let exact = self
+            .by_name
+            .get(&name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // Pattern rules are few, admitted and bounded. Merge in catalog order so a pattern cannot
+        // change precedence for exact rules. Ordinary non-target names avoid an allocation.
         let observed_parent = parent.and_then(|id| markers.get(id));
-        for &index in indices {
+        let mut indices = std::borrow::Cow::Borrowed(exact);
+        if observed_parent.is_some_and(|markers| markers.contains(".rustc_info.json"))
+            && cargo_target_name(&name)
+            && !self.pattern_rules.is_empty()
+        {
+            let owned = indices.to_mut();
+            owned.extend(&self.pattern_rules);
+            owned.sort_unstable();
+            owned.dedup();
+        }
+        for &index in indices.iter() {
             let rule = &self.rules[index];
             let predicate = &self.predicates[index];
             // Only matching names reach the VM. Marker sets stay borrowed and identity-bound;
@@ -273,7 +299,26 @@ impl JunkService {
                     .any(|marker| observed.contains(marker))
             });
             let mut context =
-                EvaluationContext::new().insert("entry.name", VmValue::String(name.clone()));
+                EvaluationContext::new().insert("entry.name_matches", VmValue::Bool(true));
+            if !rule.parent_names.is_empty() {
+                let matches = entry
+                    .and_then(|entry| entry.validated_native_locator().ok().flatten())
+                    .and_then(|locator| locator.parent_reopen_recipe.last())
+                    .map(|parent| &parent.native_basename)
+                    .and_then(native_rule_name)
+                    .is_some_and(|parent| {
+                        rule.parent_names
+                            .iter()
+                            .any(|expected| normalize_rule_name(expected) == parent)
+                    });
+                context = context.insert("parent.name_matches", VmValue::Bool(matches));
+            }
+            if rule.path_profile.is_some() {
+                context = context.insert(
+                    "entry.path_profile_matches",
+                    VmValue::Bool(entry.is_some_and(cargo_profile_artifact)),
+                );
+            }
             if let Some(matches) = parent_match {
                 context = context.insert("parent.marker_matches", VmValue::Bool(matches));
             }
@@ -334,6 +379,42 @@ pub fn normalize_rule_name(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn cargo_target_name(name: &str) -> bool {
+    // Covers conventional Rust target names, including two-part WASI targets. Custom target JSON
+    // stems and arbitrary profile names are not resolved. Required ordinary Cargo markers and
+    // native parent context provide the separate structural evidence.
+    name.len() <= 128
+        && name.split('-').count() >= 2
+        && name.split('-').count() <= 6
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+}
+
+fn cargo_profile_artifact(entry: &ScannedEntry) -> bool {
+    let Some(locator) = entry.validated_native_locator().ok().flatten() else {
+        return false;
+    };
+    let mut parents = locator.parent_reopen_recipe.iter().rev();
+    let name = |part: &sweepx_model::NativePathComponent| native_rule_name(&part.native_basename);
+    if !parents
+        .next()
+        .and_then(name)
+        .is_some_and(|name| matches!(name.as_str(), "debug" | "release"))
+    {
+        return false;
+    }
+    let Some(parent) = parents.next().and_then(name) else {
+        return false;
+    };
+    parent == "target"
+        || (cargo_target_name(&parent)
+            && parents.next().and_then(name).as_deref() == Some("target"))
 }
 
 #[cfg(test)]
@@ -491,19 +572,37 @@ mod tests {
         ]);
         assert!(
             service
-                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .match_project_context(
+                    &name(".svelte-kit"),
+                    Some(&own),
+                    Some(&parent),
+                    None,
+                    &markers
+                )
                 .is_none()
         );
         markers.insert(own.clone(), files(&["tsconfig.json"]));
         assert!(
             service
-                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .match_project_context(
+                    &name(".svelte-kit"),
+                    Some(&own),
+                    Some(&parent),
+                    None,
+                    &markers
+                )
                 .is_none()
         );
         markers.insert(own.clone(), files(&["tsconfig.json", "ambient.d.ts"]));
         assert_eq!(
             service
-                .match_project_context(&name(".svelte-kit"), Some(&own), Some(&parent), &markers)
+                .match_project_context(
+                    &name(".svelte-kit"),
+                    Some(&own),
+                    Some(&parent),
+                    None,
+                    &markers
+                )
                 .unwrap()
                 .id,
             "node.sveltekit-output"
@@ -515,7 +614,7 @@ mod tests {
         );
         assert!(
             service
-                .match_project_context(&name(".svelte-kit"), Some(&own), None, &markers)
+                .match_project_context(&name(".svelte-kit"), Some(&own), None, None, &markers)
                 .is_none()
         );
     }

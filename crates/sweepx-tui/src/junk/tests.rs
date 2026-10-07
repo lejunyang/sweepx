@@ -21,7 +21,11 @@ impl JunkRow for FixtureRow {
         self.path
     }
     fn rule(&self) -> &str {
-        "rust_target"
+        if self.key == "artifact" {
+            "rust.incremental"
+        } else {
+            "rust_target"
+        }
     }
     fn evidence(&self) -> &str {
         "controlled rebuildable output"
@@ -68,6 +72,49 @@ fn action_result_stays_visible_above_verbose_rule_context() {
         .collect();
     assert!(screen.contains("Review list (deletion not authorized)"));
     assert!(screen.contains("/project/target/debug"));
+}
+
+#[test]
+fn artifact_rows_render_local_labels_without_changing_rule_or_trash_policy() {
+    for (locale, expected) in [
+        (Locale::ZhCn, "Rust 增量缓存"),
+        (Locale::EnUs, "Rust incremental cache"),
+    ] {
+        let row: Arc<dyn JunkRow> = Arc::new(FixtureRow {
+            key: "artifact",
+            path: "/project/target/debug/incremental",
+            bytes: EvidenceValue::Known {
+                value: DecimalU128::new(8),
+            },
+            complete: true,
+            report_only: true,
+            cost: 256,
+        });
+        assert_eq!(row.rule(), "rust.incremental");
+        assert!(!row.report_allows_trash());
+        let mut model = JunkModel::new(locale, HumanSizeUnit::Bytes);
+        model.apply(JunkEvent::Candidate {
+            revision: 0,
+            current: true,
+            historical: false,
+            row,
+        });
+        model.reorder();
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // TestBackend keeps a blank continuation cell for each double-width Chinese glyph.
+        assert!(
+            screen.replace(' ', "").contains(&expected.replace(' ', "")),
+            "{screen}"
+        );
+    }
 }
 fn row(key: &'static str, path: &'static str) -> Arc<dyn JunkRow> {
     Arc::new(FixtureRow {
