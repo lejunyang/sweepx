@@ -212,7 +212,8 @@ def measure(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=Path("target/release/sweepx"))
+    parser.add_argument("--binary", type=Path, default=Path("target/release") /
+                        ("sweepx.exe" if os.name == "nt" else "sweepx"))
     parser.add_argument("--build-label", default="unspecified")
     parser.add_argument("--root", action="append", type=Path, default=[],
                         help="existing project root (read-only); repeat for multiple roots")

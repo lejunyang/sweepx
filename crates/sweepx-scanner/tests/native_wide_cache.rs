@@ -151,6 +151,101 @@ fn assert_directory_oracle(
     }
 }
 
+#[derive(Default)]
+struct FullFiles(std::collections::BTreeMap<std::path::PathBuf, u128>);
+
+impl sweepx_scanner::ClassifiedScanObserver for FullFiles {
+    fn wants_file_observations(&self) -> bool {
+        true
+    }
+
+    fn on_entry(&mut self, entry: &sweepx_model::ScannedEntry) {
+        if entry.object_type == sweepx_model::ObjectType::File {
+            assert!(entry.identity.is_some() && entry.native_locator.is_some());
+            let ByteValue::Known { value } = entry.logical_bytes else {
+                panic!("ordinary fixture file must have a logical length");
+            };
+            assert!(
+                self.0
+                    .insert(entry.display_path.clone().into(), value.0)
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn native_live_lengths_match_full_file_observations_and_ordinary_walk_after_changes() {
+    let owner = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let root = owner.path().canonicalize().unwrap();
+    #[cfg(windows)]
+    let root = owner.path().to_path_buf();
+    for directory in ["a", "a/deep", "b"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+        for file in 0..17 {
+            std::fs::write(
+                root.join(directory).join(format!("payload-{file}")),
+                vec![1u8; file * 7],
+            )
+            .unwrap();
+        }
+    }
+    std::fs::hard_link(root.join("a/payload-1"), root.join("hard-link")).unwrap();
+    let scanner = Scanner::new(
+        HostPlatformScanner::new(),
+        ScannerOptions {
+            retain_file_index: false,
+            ..Default::default()
+        },
+    );
+    let roots = [ScanRoot::new(&root).unwrap()];
+    for generation in 0..3 {
+        if generation == 1 {
+            std::fs::write(root.join("a/payload-0"), vec![8u8; 4097]).unwrap();
+            std::fs::remove_file(root.join("b/payload-16")).unwrap();
+            std::fs::write(root.join("a/deep/added"), b"new current file").unwrap();
+        } else if generation == 2 {
+            std::fs::remove_file(root.join("a/payload-2")).unwrap();
+            std::fs::create_dir(root.join("a/payload-2")).unwrap();
+            std::fs::write(root.join("a/payload-2/child"), b"file became directory").unwrap();
+        }
+        let mut directories = std::collections::BTreeMap::new();
+        let mut files = std::collections::BTreeMap::new();
+        ordinary_facts(&root, &mut directories, &mut files);
+        let mut full_files = FullFiles::default();
+        let full = scanner
+            .scan_classified_with_observer(
+                &roots,
+                &CancellationToken::new(),
+                &EveryDirectory,
+                None,
+                &mut full_files,
+            )
+            .unwrap();
+        let fast = scanner
+            .scan_classified(&roots, &CancellationToken::new(), &EveryDirectory, None)
+            .unwrap();
+        assert_directory_oracle(&full, &directories);
+        assert_directory_oracle(&fast, &directories);
+        assert_eq!(full_files.0, files);
+        assert_eq!(fast.decisions, full.decisions);
+        assert_eq!(fast.coverages, full.coverages);
+        assert_eq!(fast.observed_roots, full.observed_roots);
+        assert!(fast.dir_listings.is_empty());
+        for aggregate in &fast.summary.aggregates {
+            assert!(!matches!(
+                aggregate.filesystem_reported_allocated_bytes,
+                ByteValue::Known { .. }
+            ));
+            assert!(!matches!(
+                aggregate.unique_logical_bytes,
+                ByteValue::Known { .. }
+            ));
+        }
+    }
+}
+
 #[test]
 #[ignore = "opt-in release native scan benchmark with an ordinary walk oracle; no Trash"]
 fn benchmark_native_cached_deep_tree() {

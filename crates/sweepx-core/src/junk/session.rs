@@ -820,7 +820,7 @@ impl Worker {
             .map(ScanRoot::new)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| JunkSessionFailure::new("root_invalid", error.to_string()))?;
-        // Current native bulk observations supply lengths without reading another file index.
+        // Current native observations supply lengths without reading another file index.
         // Historical candidate rows stay in the reader for bounded selected-preview merges.
         let reuse = None;
         writer.phase(JunkSessionPhase::Traversal)?;

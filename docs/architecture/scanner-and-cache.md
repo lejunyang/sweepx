@@ -20,6 +20,16 @@
 
 稳定诊断字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 保持 0；这反映默认入口移除索引工作，不代表获得整根命中。完整流程性能需在同构建、同负载下核对事实等价后测量，见[当前设计复审](design-review-2026-10-01.md)。
 
+## 2026-10-07 补充：Linux/Windows 当前文件长度观测 {#portable-live-file-length}
+
+三平台默认垃圾报告与 TUI 现在都关闭可选文件索引保留，并通过同一 `observe_file_length` 合同消费当前普通文件逻辑长度。它们继续枚举目录、重建规则标记与原生目录身份，完整文件 observer、普通 scan、大文件与重复内容仍要求完整事实；`.git` 始终完整检查。缓存历史只服务展示，取消或不完整扫描不发布为当前事实。上述 macOS 补充的原生安全边界继续成立。
+
+Linux 保留有界当前批次中的 `readdir` 非文件类型提示，只用它们拒绝额外长度探测，不能据此跳过检查或赋予复用资格；提示随 pending 项保留并在下一批清除，`DT_UNKNOWN` 仍允许当前查询。已提示为目录/链接的项直接回到完整检查，避免目录密集负载多做一次 statx。[readdir 手册](https://man7.org/linux/man-pages/man3/readdir.3.html)明确要求支持未知类型。其余经过验证的单个 basename 执行相对保留父描述符的 `statx`，使用 `AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT` 和普通 stat 同步方式，不使用可能返回近似旧值的 `AT_STATX_DONT_SYNC`。必须返回 `STATX_TYPE | STATX_SIZE | STATX_MNT_ID`，且普通文件类型、设备和 mount ID 均与保留父目录一致；相同设备上的 bind mount 也不能走捷径。缺字段、失败、链接或挂载变化回到完整检查，沿用原错误/边界行为。目录查询的原生搜索权限仍由内核检查，逻辑长度不证明文件内容可读。相较原垃圾路径，合格文件省去 `openat2` 文件 pin、后续 `fstat`/描述符 `statx` 与关闭；目录仍走原生身份绑定和 no-cross-mount 打开。[Linux statx 手册](https://man7.org/linux/man-pages/man2/statx.2.html)是字段、权限和 flags 的合同来源。
+
+Windows 从当前 `NtQueryDirectoryFile(FileIdExtdDirectoryInformation)` 单条记录保存 `EndOfFile`，只有非目录、非 reparse、非设备、非 offline/recall、有效非零 file ID 和非负长度可以提供提示；reparse 包括卷 junction。当前枚举前仍验证保留父目录的对象、类型、卷和 provider 状态。名称按原始 UTF-16 精确匹配，下一批（包括耗尽后的空批次）清除旧提示，路径不能替代父句柄。长度报告不打开文件、不水合内容，也不证明文件 ACL 允许内容读取；完整观察及回收准入仍独立检查当前身份与权限。枚举仍是单条原生查询，此次将 64 KiB scratch 从逐项分配改为每个消费者批次复用一次，不在暂停目录句柄中永久保留。两平台的批次字节准入额外计入所保留的类型/长度提示、名称及身份。[Microsoft 结构合同](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_id_extd_dir_information)定义长度、属性与身份字段。来源访问日期：2026-10-07。
+
+两条路径仅提供当前逻辑长度；物理分配、硬链接唯一性和可释放空间保持 unknown，不建立完整文件身份、原子快照或执行授权。新增跨平台原生 oracle 测试分别与普通目录遍历及请求完整文件事实的扫描对照，覆盖改长、删除、新增、文件转目录和硬链接的逻辑累计；native backend 测试另查链接、缺字段、同设备不同 mount、失效身份、provider 与过期批次。Windows CI 的 native scan-stack 测试已包含 scanner crate，Linux 的工作区测试也会运行该 oracle。[本轮验证记录](portable-file-length-validation-2026-10-07.json)区分 macOS 已运行、GNU 交叉编译及 Linux/Windows 尚未运行的结果；前一轮 macOS 2.59 倍测量不能外推到其他平台。
+
 ## 1. 目标、非目标与不变量
 
 目标：

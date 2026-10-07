@@ -423,9 +423,9 @@ pub struct OpenedDirectory<D> {
 /// A logical-length-only observation of an ordinary file.
 ///
 /// The compatibility name covers both validated cached lengths and current metadata supplied by
-/// a backend's bounded directory enumeration. Neither use supplies file identity, allocation,
-/// hard-link uniqueness or execution authority. Consumers needing those facts must request full
-/// file observations. The native child binding must be checked before accepting this payload.
+/// a backend's bounded directory enumeration or handle-relative query. Neither use supplies file
+/// identity, allocation, hard-link uniqueness or execution authority. Consumers needing those
+/// facts must request full file observations. Check the native child binding before acceptance.
 #[derive(Debug, Clone)]
 pub struct CachedFileEntry {
     pub path: PathBuf,
@@ -1141,7 +1141,7 @@ pub trait PlatformScanner: Send + Sync {
         limits: DirectoryReadLimits,
     ) -> Result<DirectoryEntryBatch, PlatformError>;
 
-    /// Whether this backend can supply current ordinary-file lengths from directory enumeration.
+    /// Whether this backend can supply current ordinary-file lengths without full file rows.
     ///
     /// This advertises an optional optimization, not guaranteed coverage on every filesystem or
     /// for every child. Callers must still accept [`Self::observe_file_length`] returning `None`
@@ -1150,11 +1150,13 @@ pub trait PlatformScanner: Send + Sync {
         false
     }
 
-    /// Observes an ordinary file's logical length from the retained parent's current batch.
+    /// Observes an ordinary file's logical length relative to the retained parent.
     ///
-    /// Only current, no-follow, handle-relative enumeration metadata may qualify. The child must
-    /// have a valid parent/name binding, ordinary-file type, the parent's device and a nonnegative
-    /// length. Missing, older-batch or unsupported facts return `None`, so callers inspect normally.
+    /// Only current, no-follow, handle-relative observations may qualify: either the parent's
+    /// current enumeration batch or a fresh kernel query. The child must have a valid parent/name
+    /// binding, ordinary-file type, the same device/volume and any platform-required mount identity,
+    /// and a nonnegative length. Missing, older-batch or unsupported facts return `None`, so callers
+    /// inspect normally. Provider/reparse entries and failed metadata permissions cannot qualify.
     /// This does not establish file identity, allocation, uniqueness or execution authority, and
     /// cannot replace full observations requested by a consumer. No persisted cache is consulted.
     fn observe_file_length(

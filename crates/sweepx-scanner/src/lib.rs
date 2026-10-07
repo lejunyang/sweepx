@@ -68,7 +68,7 @@ pub struct ScannerOptions {
     pub max_workers: usize,
     /// Retains optional ordinary-file names and lengths for a later file-cache generation.
     /// Directory coverage, native root observations and required classification markers remain
-    /// available when disabled. Callers with current bulk length observations can avoid building
+    /// available when disabled. Callers with current native length observations can avoid building
     /// an unused per-file index; the default preserves cache publication for existing consumers.
     pub retain_file_index: bool,
 }
@@ -1541,7 +1541,7 @@ fn prepare_directory_task<P: PlatformScanner + ?Sized>(
             continue;
         }
         // Junk-only consumers need the current logical length and marker, not a full file row
-        // with a cloned native ancestor recipe. The backend's live bulk observation supplies
+        // with a cloned native ancestor recipe. The backend's current native observation supplies
         // those facts independently of an on-disk cache or delayed change-history delivery.
         if allow_file_lengths
             && native_basename_marker(&directory_entry.file_name).as_deref() != Some(".git")

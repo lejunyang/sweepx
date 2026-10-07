@@ -68,6 +68,11 @@ pub struct LinuxUnavailableDirectory;
 pub struct LinuxDirectoryHandle {
     fd: Admitted<OwnedFd>,
     display_path: PathBuf,
+    /// Observed from the retained descriptor; same-device bind mounts must not qualify.
+    mount_id: u64,
+    device: u64,
+    /// Negative type hints only. They decline a length probe, never qualify cached facts.
+    length_probe_exclusions: Vec<NativeName>,
     cursor: DirectoryCursor,
 }
 
@@ -77,7 +82,7 @@ enum DirectoryCursor {
     NotStarted,
     Active {
         stream: DirectoryStream,
-        pending: Option<DirectoryEntryRecord>,
+        pending: Option<(DirectoryEntryRecord, bool)>,
     },
 }
 
@@ -350,6 +355,19 @@ impl LinuxPlatformScanner {
 
     fn mount_id_for_fd(fd: &OwnedFd) -> Result<u64, io::Error> {
         Ok(Self::statx_for_fd_with_mask(fd, libc::STATX_MNT_ID)?.stx_mnt_id)
+    }
+
+    fn file_length_from_statx(
+        stat: &libc::statx,
+        parent_mount: u64,
+        parent_device: u64,
+    ) -> Option<u128> {
+        let required = libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MNT_ID;
+        (stat.stx_mask & required == required
+            && Self::kind_from_mode(stat.stx_mode.into()) == EntryKind::File
+            && stat.stx_mnt_id == parent_mount
+            && libc::makedev(stat.stx_dev_major, stat.stx_dev_minor) as u64 == parent_device)
+            .then_some(u128::from(stat.stx_size))
     }
 
     fn kind_from_mode(mode: libc::mode_t) -> EntryKind {
@@ -728,6 +746,9 @@ impl PlatformScanner for LinuxPlatformScanner {
             LinuxDirectoryHandle {
                 fd,
                 display_path: root.path().to_path_buf(),
+                mount_id,
+                device: stat.st_dev,
+                length_probe_exclusions: Vec::new(),
                 cursor: DirectoryCursor::NotStarted,
             },
             root_locator,
@@ -775,10 +796,11 @@ impl PlatformScanner for LinuxPlatformScanner {
         };
         let mut entries = Vec::new();
         let mut retained_bytes = 0usize;
+        directory.length_probe_exclusions.clear();
 
         loop {
             Self::ensure_not_cancelled(cancel)?;
-            let child = if let Some(child) = pending.take() {
+            let (child, exclude_length_probe) = if let Some(child) = pending.take() {
                 child
             } else {
                 loop {
@@ -801,7 +823,14 @@ impl PlatformScanner for LinuxPlatformScanner {
                     if name == b"." || name == b".." {
                         continue;
                     }
-                    break DirectoryEntryRecord::from_parent_and_name(
+                    // SAFETY: the same readdir result remains valid until the next call. A type
+                    // hint only rejects the optional probe: directories/links still undergo full
+                    // inspection, and DT_UNKNOWN must not suppress ordinary-file observation.
+                    let exclude_length_probe = !matches!(
+                        unsafe { (*raw_entry).d_type },
+                        libc::DT_REG | libc::DT_UNKNOWN
+                    );
+                    let child = DirectoryEntryRecord::from_parent_and_name(
                         &directory.display_path,
                         NativeName::unix(name.to_vec()),
                     )
@@ -809,14 +838,28 @@ impl PlatformScanner for LinuxPlatformScanner {
                         parent: directory.display_path.clone(),
                         detail: error.to_string(),
                     })?;
+                    break (child, exclude_length_probe);
                 }
             };
-            let record_bytes = child.estimated_retained_bytes().ok_or_else(|| {
-                PlatformError::ResourceLimit(format!(
-                    "directory byte accounting overflow at {}",
-                    directory.display_path.display()
-                ))
-            })?;
+            let exclusion_bytes = if exclude_length_probe {
+                mem::size_of::<NativeName>().checked_add(match &child.file_name {
+                    NativeName::UnixBytes(bytes) => bytes.len(),
+                    NativeName::WindowsUtf16(_) => {
+                        unreachable!("Linux enumeration uses Unix bytes")
+                    }
+                })
+            } else {
+                Some(0)
+            };
+            let record_bytes = child
+                .estimated_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(exclusion_bytes?))
+                .ok_or_else(|| {
+                    PlatformError::ResourceLimit(format!(
+                        "directory byte accounting overflow at {}",
+                        directory.display_path.display()
+                    ))
+                })?;
             let next_bytes = retained_bytes.checked_add(record_bytes).ok_or_else(|| {
                 PlatformError::ResourceLimit(format!(
                     "directory byte accounting overflow at {}",
@@ -824,19 +867,66 @@ impl PlatformScanner for LinuxPlatformScanner {
                 ))
             })?;
             if entries.is_empty() && record_bytes > limits.max_batch_bytes {
-                *pending = Some(child);
+                *pending = Some((child, exclude_length_probe));
                 return Err(PlatformError::ResourceLimit(format!(
                     "single directory entry exceeds the retained-byte cap at {}",
                     directory.display_path.display()
                 )));
             }
             if entries.len() >= limits.max_batch_entries || next_bytes > limits.max_batch_bytes {
-                *pending = Some(child);
+                *pending = Some((child, exclude_length_probe));
                 return Ok(DirectoryEntryBatch::continued(entries));
             }
             retained_bytes = next_bytes;
+            if exclude_length_probe {
+                directory
+                    .length_probe_exclusions
+                    .push(child.file_name.clone());
+            }
             entries.push(child);
         }
+    }
+
+    fn supports_file_length_observation(&self) -> bool {
+        true
+    }
+
+    fn observe_file_length(
+        &self,
+        parent: &Self::DirectoryHandle,
+        child: &DirectoryEntryRecord,
+    ) -> Option<crate::CachedFileEntry> {
+        child.validate_for_parent(&parent.display_path).ok()?;
+        if parent.length_probe_exclusions.contains(&child.file_name) {
+            return None;
+        }
+        let name = Self::child_name_c_string(&child.file_name).ok()?;
+        let mut stat = MaybeUninit::<libc::statx>::zeroed();
+        // SAFETY: the retained fd and validated single basename remain live. No intermediate
+        // component exists, NOFOLLOW reports a link itself, and NO_AUTOMOUNT avoids activating
+        // a terminal automount. Use ordinary stat synchronization, never AT_STATX_DONT_SYNC.
+        // This metadata-only observation needs no new handle or native file identity recipe.
+        if unsafe {
+            libc::statx(
+                parent.fd.as_raw_fd(),
+                name.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT,
+                libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MNT_ID,
+                stat.as_mut_ptr(),
+            )
+        } != 0
+        {
+            // Preserve the ordinary inspection's error/boundary behavior on any failed probe.
+            return None;
+        }
+        // SAFETY: successful statx initialized the output; required fields are checked below.
+        let stat = unsafe { stat.assume_init() };
+        let logical_bytes = Self::file_length_from_statx(&stat, parent.mount_id, parent.device)?;
+        Some(crate::CachedFileEntry {
+            path: child.path.clone(),
+            file_name: child.file_name.clone(),
+            logical_bytes,
+        })
     }
 
     fn inspect_child(
@@ -926,6 +1016,9 @@ impl PlatformScanner for LinuxPlatformScanner {
                 handle: LinuxDirectoryHandle {
                     fd: directory_fd,
                     display_path: path,
+                    mount_id: pinned_mount_id,
+                    device: pinned_stat.st_dev,
+                    length_probe_exclusions: Vec::new(),
                     cursor: DirectoryCursor::NotStarted,
                 },
             }));
@@ -1262,6 +1355,128 @@ mod tests {
     fn live_read_request(name: &[u8], max_bytes: usize) -> BoundedRegularFileReadRequest {
         BoundedRegularFileReadRequest::establish_live(NativeName::unix(name.to_vec()), max_bytes)
             .unwrap()
+    }
+
+    #[test]
+    fn current_file_lengths_use_retained_parent_and_refuse_links_or_missing_fields() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file"), b"ordinary payload").unwrap();
+        fs::create_dir(root.join("directory")).unwrap();
+        std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        assert!(scanner.supports_file_length_observation());
+        let mut admission = scanner
+            .admit_root(&ScanRoot::new(&root).unwrap(), &CancellationToken::new())
+            .unwrap();
+        let children = scanner
+            .enumerate_children(
+                &mut admission.directory,
+                &CancellationToken::new(),
+                limits(64),
+            )
+            .unwrap()
+            .entries;
+        let file = children
+            .iter()
+            .find(|child| child.path == root.join("file"))
+            .unwrap();
+        for child in &children {
+            let metadata = fs::symlink_metadata(&child.path).unwrap();
+            let observed = scanner.observe_file_length(&admission.directory, child);
+            assert_eq!(observed.is_some(), metadata.is_file());
+            if let Some(observed) = observed {
+                assert_eq!(observed.logical_bytes, u128::from(metadata.len()));
+            }
+        }
+        // Rename the display path and replace it with a different directory. Length observation
+        // must stay rooted in the originally admitted descriptor, without a pathname reopen.
+        let displaced = temp.path().join("displaced");
+        fs::rename(&root, &displaced).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file"), b"replacement").unwrap();
+        fs::write(displaced.join("file"), b"changed in retained parent").unwrap();
+        assert_eq!(
+            scanner
+                .observe_file_length(&admission.directory, file)
+                .unwrap()
+                .logical_bytes,
+            u128::from(fs::metadata(displaced.join("file")).unwrap().len())
+        );
+        let mut forged = file.clone();
+        forged.path = root.join("elsewhere");
+        assert!(
+            scanner
+                .observe_file_length(&admission.directory, &forged)
+                .is_none()
+        );
+        fs::remove_file(displaced.join("file")).unwrap();
+        std::os::unix::fs::symlink(root.join("file"), displaced.join("file")).unwrap();
+        assert!(
+            scanner
+                .observe_file_length(&admission.directory, file)
+                .is_none()
+        );
+        fs::remove_file(displaced.join("file")).unwrap();
+        assert!(
+            scanner
+                .observe_file_length(&admission.directory, file)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn length_shortcut_requires_type_size_device_and_mount_including_same_device_bind_mounts() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file"), b"payload").unwrap();
+        let scanner = LinuxPlatformScanner::new();
+        let admission = scanner
+            .admit_root(
+                &ScanRoot::new(temp.path()).unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let name = CString::new("file").unwrap();
+        let pinned = LinuxPlatformScanner::pin_child(&admission.directory.fd, &name).unwrap();
+        let observed = LinuxPlatformScanner::statx_for_fd(&pinned).unwrap();
+        assert_eq!(
+            LinuxPlatformScanner::file_length_from_statx(
+                &observed,
+                admission.directory.mount_id,
+                admission.directory.device
+            ),
+            Some(7)
+        );
+        for required in [libc::STATX_TYPE, libc::STATX_SIZE, libc::STATX_MNT_ID] {
+            let mut incomplete = observed;
+            incomplete.stx_mask &= !required;
+            assert!(
+                LinuxPlatformScanner::file_length_from_statx(
+                    &incomplete,
+                    admission.directory.mount_id,
+                    admission.directory.device
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            LinuxPlatformScanner::file_length_from_statx(
+                &observed,
+                observed.stx_mnt_id.wrapping_add(1),
+                admission.directory.device
+            )
+            .is_none(),
+            "a different mount on the same device must fall back to full inspection"
+        );
+        assert!(
+            LinuxPlatformScanner::file_length_from_statx(
+                &observed,
+                admission.directory.mount_id,
+                admission.directory.device.wrapping_add(1)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1670,7 +1885,22 @@ mod tests {
         }
 
         assert!(batch_count > 1);
-        assert_eq!(paged_entries, single.entries);
+        // Kernel enumeration order is not an API promise, even for two unchanged walks.
+        // Compare exact records by path and separately reject duplicates in either walk.
+        let paged_count = paged_entries.len();
+        let single_count = single.entries.len();
+        let paged: std::collections::BTreeMap<_, _> = paged_entries
+            .into_iter()
+            .map(|child| (child.path.clone(), child))
+            .collect();
+        let single: std::collections::BTreeMap<_, _> = single
+            .entries
+            .into_iter()
+            .map(|child| (child.path.clone(), child))
+            .collect();
+        assert_eq!(paged.len(), paged_count);
+        assert_eq!(single.len(), single_count);
+        assert_eq!(paged, single);
     }
 
     #[test]

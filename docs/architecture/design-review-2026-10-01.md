@@ -29,8 +29,8 @@
 
 - 三平台垃圾 TUI 可以先展示历史结果。历史行不能作为当前事实或回收授权。
 - 当前垃圾结果每次都现场遍历目录、规则标记和候选。旧的整根候选回放已撤回；空事件历史不能证明整棵树没有刚发生的变化。
-- 默认 macOS 垃圾报告与 TUI 直接使用当前原生批量文件长度，关闭可选文件索引保留及索引读写/FSEvents 查询；每文件逻辑累计不再复制祖先路径列表。普通 scan、大文件、重复内容与完整文件观察不走该捷径。
-- 独立 library `SubtreeCacheProvider` 仍可集中查询 FSEvents 历史并确认本批文件类型、长度。它是兼容的一次性查询，尚无持续订阅或事件触发局部重扫；`status --watch` 仍只是已有状态回放。Linux/Windows 继续现场观察。
+- 默认三平台垃圾报告与 TUI 使用当前原生文件长度，关闭可选文件索引保留；macOS 还移除默认索引读写/FSEvents 查询。Linux 使用相对父描述符的 statx，Windows 使用当前目录批次。每文件逻辑累计不再复制祖先路径列表。普通 scan、大文件、重复内容与完整文件观察不走该捷径。
+- 独立 library `SubtreeCacheProvider` 仍可集中查询 FSEvents 历史并确认本批文件类型、长度。它是兼容的一次性查询，尚无持续订阅或事件触发局部重扫；`status --watch` 仍只是已有状态回放。三平台继续现场观察。
 - 历史首屏与选中刷新后的候选片段合并继续可用，未刷新的兄弟与祖先统计保持历史。`rootCacheHits=0` 有意保留；`rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，不能把移除索引工作解释成整根跳过。完整流程提速仍需配对测量。
 
 以下测量日期、构建、范围不同，不能直接互相比倍数。
@@ -114,3 +114,11 @@ Linux/Windows 原生测试、Windows MSVC、Linux bind mount/OFD/journal/隔离�
 主要配对负载为 arm64 macOS 26.5.2、Rust 1.98.0 release、8 个项目根下 65,536 个构建产物文件、已有 SweepX 历史与旧文件索引。5 组交替顺序测量的墙钟中位数从 666.2 ms 降到 256.8 ms，减少 61.5%（约 2.59 倍）；遍历阶段从 439.5 ms 降到 160.8 ms。每次通过独立普通目录遍历核对候选路径、规则、逻辑长度与候选数量，基线和新实现事实相同；最终入口没有改写旧文件索引。这个等价检查不证明物理分配量或硬链接独占性。OS cache 和宿主其他活动未控制，仅 5 个样本，不推断尾延迟。较小夹具的热扫负结果也保留，不能宣传所有目录都会加速。R2 的整体速度和交互验收仍未勾选。
 
 2026-10-07 最终验证：`cargo test --workspace --all-features` 通过，没有显式 skip；4 个 opt-in 基准默认 ignored，其中 scanner 深树基准另行运行。格式检查、工作区全 target/features Clippy、Linux GNU 与 Windows GNU 工作区交叉 Clippy、文档检查及 41 个脚本测试通过。macOS 原生事件与回收集成测试在宿主环境通过；受限沙箱不能启动 FSEvents 的失败已按环境原因单独诊断。Linux/Windows 原生运行及 Windows MSVC 未验证，交叉 lint 只提供编译证据。
+
+## 2026-10-07：将当前长度捷径接入 Linux/Windows
+
+Linux 垃圾扫描的合格普通文件改为一次相对保留父描述符的 no-follow statx，要求当前类型、长度、设备及 mount ID，省去文件 pin 与后续描述符元数据查询。Windows 复用当前目录批次的在线普通文件长度，保留 reparse/provider/无效身份/负长度拒绝；原生枚举的 64 KiB scratch 改为每消费者批次一次分配，仍按单条记录查询。三平台默认垃圾入口都关闭可选文件索引保留，完整文件消费者、目录身份、规则 marker、取消和执行准入仍各自保留合同。详见[平台合同](scanner-and-cache.md#portable-live-file-length)和[本轮验证记录](portable-file-length-validation-2026-10-07.json)。
+
+新增原生 scanner oracle 对照普通目录遍历与完整文件观察，覆盖改长、删除、新增、文件转目录和硬链接计数；Windows CI 的 native scan-stack 已增加 scanner crate。本机为 macOS，没有可运行的 Linux/Windows 宿主、虚拟机或模拟器，因此 Linux/Windows 原生行为、MSVC/provider 和冷热耗时均未实测；GNU 交叉检查只证明选定代码分支可以编译。前一轮 macOS 2.59 倍测量属于前一轮负载，不能声称本轮其他平台取得该加速。R2/R4 的完整平台与性能验收继续保留。
+
+本轮 macOS 工作区全 features 测试及最终 platform/scanner 测试通过，无显式 skip，4 个 opt-in 基准默认 ignored；工作区及最终受影响 crate 的全 target/features Clippy、Linux GNU/Windows GNU 工作区交叉 Clippy、格式、文档、41 个脚本测试及 CI YAML 检查通过。Linux 最终增加当前批次的非文件类型提示，减少目录/链接上多余的 statx 探测，未知类型仍现场查询；更新后重复 Linux 工作区交叉检查，未将编译结果升级为 native 运行资格。Windows 版基准脚本的默认二进制使用 `sweepx.exe`，可在实际宿主运行同一普通遍历 oracle 基准。

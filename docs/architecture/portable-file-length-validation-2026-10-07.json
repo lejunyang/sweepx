@@ -1,0 +1,261 @@
+{
+  "schema": "sweepx.portable-file-length.validation/v1",
+  "dateLocal": "2026-10-07",
+  "timezone": "Asia/Shanghai",
+  "generatedAtUtc": "2026-10-07T06:14:21.241512+00:00",
+  "baseCommit": "db0ba2e4b2f81895329296e5b5757bff2acadc93",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "macos": "26.5.2",
+    "macosBuild": "25F84",
+    "rustToolchain": "1.98.0-aarch64-apple-darwin"
+  },
+  "sourcesSha256": {
+    "crates/sweepx-platform/src/lib.rs": "ef6d9035fcb247082e1d0ba9aac3668f172f9db5d16bd5d33d8b3c448fb088ec",
+    "crates/sweepx-platform/src/linux/mod.rs": "7ce44714b77cc414f7c802ae73687a869eaca63244dc610359d85cb1e9e4c9cd",
+    "crates/sweepx-platform/src/windows/mod.rs": "698af238287a3461f1123098ae95de214a4e3c3ef06c1364d6fe580f312b4f5c",
+    "crates/sweepx-scanner/src/lib.rs": "c04a852ce6bf4c1e58b6caa12359f470efc7a064f2e8ef00435729bb6f141d57",
+    "crates/sweepx-scanner/tests/native_wide_cache.rs": "192e7cb31c93d5c1f1dfa74af0b1685f2c0e268bb1cd7e51225d68f44a9323f0",
+    "crates/sweepx-core/src/junk/session.rs": "fbd85fc851fa1a64fa32ffb26e8c2f2d45889f71712c1146ece8f7cf5a73268b",
+    ".github/workflows/ci.yml": "c49d682da617d2c85a21cea0ab0309579ce33c313ebce780bbae95257d6c07b7",
+    "scripts/benchmark-junk.py": "77358a6d44302c04eacd3834c85cac459e2be825627b113be5b0c2c061fd5142"
+  },
+  "behavior": {
+    "scope": "default CLI/TUI junk logical-length observations; full-file observers and ordinary scan retain native file inspection; Windows scratch reuse also applies to ordinary enumeration",
+    "linux": "one fresh parent-fd-relative no-follow statx for eligible files; type/size/mount mask, same mount and device required; current negative readdir hints only decline probes, DT_UNKNOWN falls through; hints and pending tuples bounded and charged",
+    "windows": "current exact UTF-16 batch binding with online non-directory/non-reparse/non-device, nonzero file ID and nonnegative EndOfFile; empty exhausted pages clear old evidence; evidence charged; one 64 KiB scratch per consumer batch, native queries still ReturnSingleEntry",
+    "defaultFileIndexRetention": false,
+    "directoryTraversalSkipped": false,
+    "persistentChangeWatcherAdded": false,
+    "authority": "logical-only observations supply no file identity, allocation, hard-link uniqueness or cleanup authorization; native directory identities, marker handling and .git full observation preserved"
+  },
+  "checks": [
+    {
+      "name": "workspace_tests",
+      "command": "cargo test --workspace --all-features",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-workspace-tests.log",
+      "logSha256": "8369a504306d9ca1dcd7860f13e5c054cab4d28894393b7ac5b98edf0aafe3a0",
+      "summaries": [
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.67s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s",
+        "test result: ok. 116 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.42s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.08s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.22s",
+        "test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 375 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 33.93s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.81s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s",
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 100 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.23s",
+        "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s",
+        "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.83s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.52s",
+        "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.73s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "name": "final_affected_clippy",
+      "command": "cargo clippy -p sweepx-platform -p sweepx-scanner --all-targets --all-features -- -D warnings",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-final-affected-clippy.log",
+      "logSha256": "ef6f021b0b663d53dd788342a18ec251d6e051c9de0a1c6be2fe084f4dd275f5",
+      "summaries": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.69s"
+      ]
+    },
+    {
+      "name": "workspace_clippy",
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-final-clippy.log",
+      "logSha256": "1a2764dd05902bf947f76b03c8b2ca08e94c17b7e49966518879c665edcaef67",
+      "summaries": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.18s"
+      ]
+    },
+    {
+      "name": "linux_gnu_workspace_clippy",
+      "command": "bash scripts/cross-lint.sh x86_64-unknown-linux-gnu all",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-cross-linux-final.log",
+      "logSha256": "fd792d6d9139f8b3200f438e32ab9e32758af0669d222961586b487da78e104b",
+      "summaries": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.48s"
+      ]
+    },
+    {
+      "name": "windows_gnu_workspace_clippy",
+      "command": "cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings (pinned Zig cross C toolchain)",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-cross-windows.log",
+      "logSha256": "e4e1a71296d8b667bf414fd7723541afc8dd43db6f629f37b0250527b170b4b8",
+      "summaries": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.35s"
+      ]
+    },
+    {
+      "name": "script_tests",
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-script-tests.log",
+      "logSha256": "97dd5492397adaa905e7e41219eebe78cabf8c1ea58a3a6581f574eed0df096e",
+      "summaries": [
+        "Ran 41 tests in 4.000s"
+      ]
+    },
+    {
+      "name": "final_affected_tests",
+      "command": "cargo test -p sweepx-platform -p sweepx-scanner --all-features",
+      "status": "passed",
+      "exitCode": 0,
+      "privateLocalLog": "/private/tmp/sweepx-portable-final-affected-tests.log",
+      "logSha256": "57118f24485c07f7cf021abe612461bf010e48f25732c9151d44a62c640d00fe",
+      "summaries": [
+        "test result: ok. 100 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.55s",
+        "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.91s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.35s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "name": "rust_format",
+      "command": "cargo fmt --all --check",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "name": "diff_whitespace",
+      "command": "git diff --check",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "name": "documentation",
+      "command": "python3 scripts/lint_docs.py",
+      "status": "passed",
+      "exitCode": 0,
+      "markdownFiles": 58
+    },
+    {
+      "name": "workflow_yaml",
+      "command": "Ruby YAML parser plus native Windows scanner test wiring assertion",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "name": "benchmark_help",
+      "command": "python3 scripts/benchmark-junk.py --help",
+      "status": "passed",
+      "exitCode": 0
+    }
+  ],
+  "workspaceIgnoredBenchmarks": [
+    "junk::cache::tests::benchmark_batched_historical_root_reads",
+    "junk::session::cache::benchmark::benchmark_multi_root_cache_preparation",
+    "macos::tests::native_bulk_enumeration_benchmark_smoke",
+    "benchmark_native_cached_deep_tree"
+  ],
+  "explicitSkips": [],
+  "nativeOracle": {
+    "name": "native_live_lengths_match_full_file_observations_and_ordinary_walk_after_changes",
+    "statusMacos": "passed",
+    "statusLinux": "not_run",
+    "statusWindows": "not_run",
+    "ordinaryOracle": "std::fs::read_dir + symlink_metadata independently reconstruct per-directory logical bytes, direct children, recursive entries and per-file paths/lengths",
+    "comparison": "every directory aggregate and full-file callback map equal the ordinary oracle; decisions, coverage and observed roots agree; optional index absent; allocation and unique bytes remain unknown in the length path",
+    "controlledMutations": [
+      "rewrite file length",
+      "remove file",
+      "add file",
+      "replace file with directory and child"
+    ],
+    "hardLinksIncluded": true,
+    "usesOrderEquality": false
+  },
+  "backendNativeTests": {
+    "linux": [
+      "current_file_lengths_use_retained_parent_and_refuse_links_or_missing_fields",
+      "length_shortcut_requires_type_size_device_and_mount_including_same_device_bind_mounts"
+    ],
+    "windows": [
+      "enumerated_lengths_refuse_directory_reparse_provider_device_and_invalid_fields",
+      "current_file_lengths_match_metadata_and_cannot_use_an_older_batch"
+    ],
+    "executedOnThisHost": false,
+    "crossCompiledWithWarningsDenied": true
+  },
+  "environmentDiagnostics": [
+    {
+      "command": "cargo test -p sweepx-platform -p sweepx-scanner --all-features (restricted sandbox)",
+      "result": "97 platform tests passed; 3 FSEvents tests failed; later scanner steps untested in that invocation",
+      "cause": "sandbox current-event ID unavailable and FSEventStreamStart failed; unchanged macOS event code passes on the host",
+      "privateLocalLog": "/private/tmp/sweepx-portable-host-affected-tests.log"
+    }
+  ],
+  "validationLimits": [
+    "No Linux or Windows runtime, VM or emulator is available on this macOS host. Linux/Windows native backend tests, native common oracle and timings were not run; GNU cross lint is compile evidence only.",
+    "Windows MSVC and real provider behavior are not qualified by GNU cross compilation.",
+    "Final Linux-only negative-type hint changes were followed by final Linux all-target/all-feature workspace cross lint. macOS selected runtime behavior was unchanged; its passing workspace tests are reused alongside final affected tests.",
+    "Four opt-in benchmarks were ignored by default; none was explicitly executed in this follow-up."
+  ],
+  "performance": {
+    "newWallTimeMeasurements": [],
+    "claim": "reduced eligible-file operations by implementation; no measured Linux/Windows speedup ratio",
+    "linuxDirectoryTradeoff": "known non-file d_type entries avoid the extra probe; DT_UNKNOWN directories still incur a failed length probe before ordinary inspection",
+    "previousMacosMeasurements": "hot-junk-benchmark-2026-10-07.json measures the prior macOS change, not this Linux/Windows change",
+    "repeatCommand": "cargo build -p sweepx-cli --release; python3 scripts/benchmark-junk.py --build-label release --repetitions 5 --output /absolute/path/to/junk-benchmark.json",
+    "windowsDefaultBinary": "target/release/sweepx.exe"
+  },
+  "primarySources": [
+    {
+      "url": "https://man7.org/linux/man-pages/man2/statx.2.html",
+      "accessDate": "2026-10-07"
+    },
+    {
+      "url": "https://man7.org/linux/man-pages/man3/readdir.3.html",
+      "accessDate": "2026-10-07"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_id_extd_dir_information",
+      "accessDate": "2026-10-07"
+    }
+  ]
+}

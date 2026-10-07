@@ -141,12 +141,13 @@ mod backend {
         STATUS_SUCCESS, UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
-        FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_BASIC_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
-        FileAttributeTagInfo, FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
-        GetFileInformationByHandleEx, GetVolumeNameForVolumeMountPointW, ReadFile, SYNCHRONIZE,
+        FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
+        FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_ID_INFO,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, FileAttributeTagInfo,
+        FileBasicInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+        GetVolumeNameForVolumeMountPointW, ReadFile, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::WindowsProgramming::{
@@ -187,12 +188,15 @@ mod backend {
     struct EnumeratedChild {
         record: DirectoryEntryRecord,
         identity: EnumeratedIdentity,
+        logical_bytes: Option<u128>,
     }
 
     #[derive(Debug)]
     struct EnumeratedChildEvidence {
         file_name: NativeName,
         identity: EnumeratedIdentity,
+        /// Only ordinary online files with valid IDs and nonnegative current lengths qualify.
+        logical_bytes: Option<u128>,
     }
 
     #[derive(Debug)]
@@ -321,12 +325,23 @@ mod backend {
         limits: DirectoryReadLimits,
         directory_path: &Path,
     ) -> Result<Option<DirectoryEntryBatch>, PlatformError> {
-        let record_bytes = child.record.estimated_retained_bytes().ok_or_else(|| {
-            PlatformError::ResourceLimit(format!(
-                "directory byte accounting overflow at {}",
-                directory_path.display()
-            ))
-        })?;
+        // The evidence lives alongside the returned record until the next batch. Charge its
+        // fixed fields and separately cloned native name too, including the new logical length.
+        let evidence_name_bytes = match &child.record.file_name {
+            NativeName::WindowsUtf16(units) => units.len().checked_mul(2),
+            NativeName::UnixBytes(bytes) => Some(bytes.len()),
+        };
+        let record_bytes = child
+            .record
+            .estimated_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(mem::size_of::<EnumeratedChildEvidence>()))
+            .and_then(|bytes| bytes.checked_add(evidence_name_bytes?))
+            .ok_or_else(|| {
+                PlatformError::ResourceLimit(format!(
+                    "directory byte accounting overflow at {}",
+                    directory_path.display()
+                ))
+            })?;
         let next_bytes = retained_bytes.checked_add(record_bytes).ok_or_else(|| {
             PlatformError::ResourceLimit(format!(
                 "directory byte accounting overflow at {}",
@@ -348,6 +363,7 @@ mod backend {
         admitted.push(EnumeratedChildEvidence {
             file_name: child.record.file_name.clone(),
             identity: child.identity,
+            logical_bytes: child.logical_bytes,
         });
         entries.push(child.record);
         Ok(None)
@@ -1262,6 +1278,11 @@ mod backend {
                 mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileAttributes),
                 "FileAttributes",
             )?;
+            let end_of_file = read_directory_query_field::<i64>(
+                buffer,
+                mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, EndOfFile),
+                "EndOfFile",
+            )?;
             let reparse_tag = read_directory_query_field::<u32>(
                 buffer,
                 mem::offset_of!(FILE_ID_EXTD_DIR_INFORMATION, ReparsePointTag),
@@ -1295,6 +1316,7 @@ mod backend {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             Ok(Some(EnumeratedChild {
                 record,
+                logical_bytes: Self::enumerated_file_length(file_id, file_attributes, end_of_file),
                 identity: EnumeratedIdentity {
                     file_id,
                     is_directory: file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
@@ -1307,6 +1329,7 @@ mod backend {
         fn query_next_directory_entry(
             directory: &mut WindowsDirectoryHandle,
             cancel: &CancellationToken,
+            buffer: &mut [u64],
         ) -> Result<Option<EnumeratedChild>, PlatformError> {
             loop {
                 Self::ensure_not_cancelled(cancel)?;
@@ -1319,8 +1342,7 @@ mod backend {
                 };
                 debug_assert!(pending.is_none());
 
-                let mut buffer = vec![0u64; DIRECTORY_QUERY_BUFFER_BYTES / mem::size_of::<u64>()];
-                let buffer_bytes = buffer.len() * mem::size_of::<u64>();
+                let buffer_bytes = mem::size_of_val(buffer);
                 let mut io_status = IO_STATUS_BLOCK::default();
                 // SAFETY: the directory handle is live and has FILE_LIST_DIRECTORY access; the
                 // output buffer and IO_STATUS_BLOCK remain writable for this synchronous call.
@@ -1481,6 +1503,18 @@ mod backend {
                 != 0
         }
 
+        fn enumerated_file_length(file_id: [u8; 16], attributes: u32, length: i64) -> Option<u128> {
+            (file_id != [0; 16]
+                && attributes
+                    & (FILE_ATTRIBUTE_DIRECTORY
+                        | FILE_ATTRIBUTE_REPARSE_POINT
+                        | FILE_ATTRIBUTE_DEVICE)
+                    == 0
+                && !Self::is_provider_boundary(attributes)
+                && length >= 0)
+                .then_some(length as u128)
+        }
+
         fn error_entry(path: &Path, error: io::Error) -> WalkEntry<WindowsDirectoryHandle> {
             WalkEntry::Error(ErrorRecord {
                 path: path.to_path_buf(),
@@ -1592,6 +1626,7 @@ mod backend {
                     directory.display_path.display()
                 )));
             }
+            directory.inspection_batch.clear();
             if matches!(directory.cursor, DirectoryCursor::Exhausted) {
                 return Ok(DirectoryEntryBatch::complete(Vec::new()));
             }
@@ -1603,14 +1638,19 @@ mod backend {
             }
 
             let mut entries = Vec::new();
-            directory.inspection_batch.clear();
             let mut retained_bytes = 0usize;
+            // One bounded scratch allocation per consumer batch, reused for each synchronous
+            // query (including dot entries). Keeping it local avoids charging every paused
+            // directory handle for a permanent 64 KiB buffer.
+            let mut query_buffer = vec![0u64; DIRECTORY_QUERY_BUFFER_BYTES / mem::size_of::<u64>()];
             loop {
                 Self::ensure_not_cancelled(cancel)?;
                 let child = match &mut directory.cursor {
                     DirectoryCursor::Active { pending, .. } => match pending.take() {
                         Some(child) => Some(child),
-                        None => Self::query_next_directory_entry(directory, cancel)?,
+                        None => {
+                            Self::query_next_directory_entry(directory, cancel, &mut query_buffer)?
+                        }
                     },
                     DirectoryCursor::Exhausted => None,
                     DirectoryCursor::NotStarted => {
@@ -1636,6 +1676,31 @@ mod backend {
                     return Ok(batch);
                 }
             }
+        }
+
+        fn supports_file_length_observation(&self) -> bool {
+            true
+        }
+
+        fn observe_file_length(
+            &self,
+            parent: &Self::DirectoryHandle,
+            child: &DirectoryEntryRecord,
+        ) -> Option<crate::CachedFileEntry> {
+            child.validate_for_parent(&parent.display_path).ok()?;
+            let evidence = parent
+                .inspection_batch
+                .iter()
+                .find(|entry| entry.file_name == child.file_name)?;
+            // Enumeration validated this retained parent's current identity and volume. Reparse
+            // points (including volume junctions), offline/recall entries and invalid IDs never
+            // provide length hints. A length-only report neither opens the child nor hydrates it.
+            // The next batch clears this evidence, so an earlier page cannot lend current facts.
+            Some(crate::CachedFileEntry {
+                path: child.path.clone(),
+                file_name: child.file_name.clone(),
+                logical_bytes: evidence.logical_bytes?,
+            })
         }
 
         fn inspect_child(
@@ -1959,6 +2024,7 @@ mod backend {
         fn enumerated(record: DirectoryEntryRecord) -> EnumeratedChild {
             EnumeratedChild {
                 record,
+                logical_bytes: Some(0),
                 identity: EnumeratedIdentity {
                     file_id: [1; 16],
                     is_directory: false,
@@ -2353,8 +2419,12 @@ mod backend {
                 NativeName::windows_utf16("second".encode_utf16().collect::<Vec<_>>()),
             )
             .expect("second record is valid");
-            let first_cost = first.estimated_retained_bytes().unwrap();
-            let second_cost = second.estimated_retained_bytes().unwrap();
+            let first_cost = first.estimated_retained_bytes().unwrap()
+                + mem::size_of::<EnumeratedChildEvidence>()
+                + "first".encode_utf16().count() * 2;
+            let second_cost = second.estimated_retained_bytes().unwrap()
+                + mem::size_of::<EnumeratedChildEvidence>()
+                + "second".encode_utf16().count() * 2;
             let mut pending = None;
             let mut entries = Vec::new();
             let mut evidence = Vec::new();
@@ -2979,6 +3049,124 @@ mod backend {
                 ),
                 Err(PlatformError::RootRejected(_))
             ));
+        }
+
+        #[test]
+        fn enumerated_lengths_refuse_directory_reparse_provider_device_and_invalid_fields() {
+            assert_eq!(
+                WindowsPlatformScanner::enumerated_file_length([9; 16], 0, 37),
+                Some(37)
+            );
+            assert_eq!(
+                WindowsPlatformScanner::enumerated_file_length([9; 16], 0, 0),
+                Some(0)
+            );
+            for attributes in [
+                FILE_ATTRIBUTE_DIRECTORY,
+                FILE_ATTRIBUTE_REPARSE_POINT,
+                FILE_ATTRIBUTE_OFFLINE,
+                FILE_ATTRIBUTE_RECALL_ON_OPEN,
+                FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+                FILE_ATTRIBUTE_DEVICE,
+            ] {
+                assert!(
+                    WindowsPlatformScanner::enumerated_file_length([9; 16], attributes, 37)
+                        .is_none()
+                );
+            }
+            assert!(WindowsPlatformScanner::enumerated_file_length([0; 16], 0, 37).is_none());
+            assert!(WindowsPlatformScanner::enumerated_file_length([9; 16], 0, -1).is_none());
+        }
+
+        #[test]
+        fn current_file_lengths_match_metadata_and_cannot_use_an_older_batch() {
+            let root = TempDir::new("length-observation");
+            for file in 0..8 {
+                fs::write(root.0.join(format!("file-{file}")), vec![1u8; file + 11]).unwrap();
+            }
+            fs::create_dir(root.0.join("directory")).unwrap();
+            let scanner = scanner();
+            assert!(scanner.supports_file_length_observation());
+            let mut admission = scanner
+                .admit_root(&ScanRoot::new(&root.0).unwrap(), &CancellationToken::new())
+                .unwrap();
+            let mut previous = Vec::new();
+            let mut observed = std::collections::BTreeSet::new();
+            loop {
+                let batch = scanner
+                    .enumerate_children(
+                        &mut admission.directory,
+                        &CancellationToken::new(),
+                        limits(2),
+                    )
+                    .unwrap();
+                for old in &previous {
+                    assert!(
+                        scanner
+                            .observe_file_length(&admission.directory, old)
+                            .is_none()
+                    );
+                }
+                for child in &batch.entries {
+                    assert!(observed.insert(child.path.clone()));
+                    let metadata = fs::symlink_metadata(&child.path).unwrap();
+                    let hint = scanner.observe_file_length(&admission.directory, child);
+                    assert_eq!(hint.is_some(), metadata.is_file());
+                    if let Some(hint) = hint {
+                        assert_eq!(hint.logical_bytes, u128::from(metadata.len()));
+                    }
+                    let mut forged = child.clone();
+                    forged.path = root.0.join("different");
+                    assert!(
+                        scanner
+                            .observe_file_length(&admission.directory, &forged)
+                            .is_none()
+                    );
+                    let mut wrong_case = child.clone();
+                    wrong_case.file_name =
+                        NativeName::windows_utf16("FILE-0".encode_utf16().collect::<Vec<_>>());
+                    wrong_case.path = root.0.join("FILE-0");
+                    assert!(
+                        scanner
+                            .observe_file_length(&admission.directory, &wrong_case)
+                            .is_none()
+                    );
+                }
+                if batch.end_of_directory {
+                    break;
+                }
+                previous.extend(batch.entries);
+            }
+            let expected: std::collections::BTreeSet<_> = fs::read_dir(&root.0)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(observed, expected);
+            assert!(
+                scanner
+                    .enumerate_children(
+                        &mut admission.directory,
+                        &CancellationToken::new(),
+                        limits(2)
+                    )
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+            for path in observed {
+                let name = path.file_name().unwrap().encode_wide().collect::<Vec<_>>();
+                let child = DirectoryEntryRecord::from_parent_and_name(
+                    &root.0,
+                    NativeName::windows_utf16(name),
+                )
+                .unwrap();
+                assert!(
+                    scanner
+                        .observe_file_length(&admission.directory, &child)
+                        .is_none(),
+                    "an empty exhausted page clears the preceding batch"
+                );
+            }
         }
 
         #[test]
