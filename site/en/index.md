@@ -35,6 +35,8 @@ features:
 
 ## What works now
 
+In `junk --tui`, press `Enter` on a current directory candidate to inspect its read-only breakdown, then enter subdirectories and view files. Logical size and filesystem-reported allocation are shown separately. `Space` records up to 32 paths for review, `p` shows the full path, and `q` returns to candidates; the latest breakdown's list is printed on exit. This list does not authorize deletion or classify children as junk, and `d/Delete` cannot execute Trash inside the breakdown. Refresh historical rows first. Native listeners keep collecting changes while automatic refresh admission is held, then resume processing on return. Details reuse the existing background identity-bound scanner, boundaries, cancellation and resource limits. See the [CLI/TUI architecture](../../docs/architecture/cli-tui-and-plugins.md).
+
 | Capability | Current state |
 |---|---|
 | Linux directory scan | development-grade, read-only, degraded |

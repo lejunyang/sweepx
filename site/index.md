@@ -35,6 +35,8 @@ features:
 
 ## 现在能做什么
 
+`junk --tui` 可按 `Enter` 查看当前目录候选的只读细分，继续进入子目录及文件，分别查看逻辑大小与文件系统报告分配空间。`Space` 记录最多 32 个待核验路径，`p` 查看完整路径，`q` 返回候选；退出后打印最近一次细分清单。清单不授权删除，大小不建立垃圾分类，细分内 `d/Delete` 不执行回收。历史行先刷新；查看期间监听继续积累变更，自动刷新在返回后恢复。详情复用后台身份绑定扫描与原有边界、取消及额度。参见 [CLI/TUI 架构](../docs/architecture/cli-tui-and-plugins.md)。
+
 | 能力 | 当前状态 |
 |---|---|
 | Linux 目录扫描 | development-grade、read-only、degraded |

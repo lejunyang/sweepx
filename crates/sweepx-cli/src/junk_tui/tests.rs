@@ -7,6 +7,179 @@ use std::time::{Duration, Instant};
 // consume the production four-session allowance or inherit a closing worker from another test.
 static SESSION_FIXTURE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn directory_inspection_drills_native_children_without_promoting_project_trash() {
+    use sweepx_tui::{
+        BrowserAction, BrowserControl, BrowserModel, BrowserReducer, DetailRescanBrowserReducer,
+        DetailRescanProvider, DetailRescanState,
+    };
+    struct Shared(Arc<dyn DetailRescanProvider>);
+    impl DetailRescanProvider for Shared {
+        fn prepare_detail_rescan(&self) {
+            self.0.prepare_detail_rescan();
+        }
+        fn rescan_detail(
+            &self,
+            request: &sweepx_tui::DetailRescanRequest,
+        ) -> sweepx_tui::DetailRescanResult {
+            self.0.rescan_detail(request)
+        }
+        fn cancel_detail_rescan(&self) {
+            self.0.cancel_detail_rescan();
+        }
+    }
+    fn finish(reducer: &impl BrowserReducer, model: &mut BrowserModel) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            reducer.poll_background(model);
+            if matches!(
+                model.current_detail_rescan_state(),
+                Some(DetailRescanState::Refreshed { .. } | DetailRescanState::Stale { .. })
+            ) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!(
+            "inspection did not finish: {:?}",
+            model.current_detail_rescan_state()
+        );
+    }
+    let _gate = SESSION_FIXTURE_GATE.lock().unwrap();
+    let fixture = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    #[cfg(windows)]
+    let root = fixture.path().to_path_buf();
+    fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers=[]\n").unwrap();
+    fs::create_dir_all(root.join("target/debug/incremental")).unwrap();
+    fs::write(root.join("target/debug/incremental/payload"), b"12345").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("Cargo.toml"), root.join("target/link")).unwrap();
+    let mut provider =
+        Provider::new(JunkSession::start(JunkSessionRequest::new(vec![root.clone()])).unwrap());
+    complete(&mut provider);
+    let row = provider
+        .rows
+        .values()
+        .find(|row| row.row.candidate.rule_id == "rust.target")
+        .unwrap()
+        .clone();
+    assert!(!row.report_allows_trash());
+    let inspection = provider.inspect(&row.key).unwrap();
+    assert_eq!(
+        inspection.directory.identity,
+        row.row.candidate.source_entry.as_ref().unwrap().identity
+    );
+    let mut model = BrowserModel::from_progressive_inspection(
+        Locale::EnUs,
+        inspection.directory,
+        HumanSizeUnit::Bytes,
+        ScanSort::Path,
+    )
+    .unwrap();
+    let reducer = DetailRescanBrowserReducer::new(Shared(inspection.provider)).unwrap();
+    reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+    finish(&reducer, &mut model);
+    let expected: BTreeSet<_> = fs::read_dir(root.join("target"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let observed: BTreeSet<_> = model
+        .visible_rows()
+        .iter()
+        .map(|row| row.label().to_string())
+        .collect();
+    assert_eq!(observed, expected);
+    #[cfg(unix)]
+    assert!(
+        !model
+            .visible_rows()
+            .iter()
+            .find(|row| row.label() == "link")
+            .unwrap()
+            .can_enter()
+    );
+    assert_eq!(model.selected_row().unwrap().label(), "debug");
+    assert_eq!(
+        reducer.reduce(&mut model, BrowserAction::TrashSelected),
+        BrowserControl::Continue
+    );
+    reducer.reduce(&mut model, BrowserAction::ToggleReviewPath);
+    let review = model.review_paths().map(str::to_owned).collect::<Vec<_>>();
+    reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+    finish(&reducer, &mut model);
+    assert_eq!(model.selected_row().unwrap().label(), "incremental");
+    reducer.reduce(&mut model, BrowserAction::EnterDirectory);
+    finish(&reducer, &mut model);
+    let file = model
+        .visible_rows()
+        .iter()
+        .find(|row| row.label() == "payload")
+        .unwrap();
+    assert!(!file.can_enter());
+    assert_eq!(
+        file.entry().logical_bytes,
+        sweepx_platform::known_u128(u128::from(
+            fs::symlink_metadata(root.join("target/debug/incremental/payload"))
+                .unwrap()
+                .len()
+        ))
+    );
+    assert_eq!(
+        model.review_paths().collect::<Vec<_>>(),
+        review.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    reducer.reduce(&mut model, BrowserAction::ReturnToParent);
+    assert_eq!(
+        model.current_directory(),
+        Some(root.join("target/debug").to_str().unwrap())
+    );
+    drop(reducer);
+    assert!(
+        provider
+            .trash(std::slice::from_ref(&row.key))
+            .unwrap_err()
+            .contains("unverified")
+    );
+    provider.historical.insert(row.key.clone());
+    assert!(provider.inspect(&row.key).is_err());
+    provider.historical.clear();
+    let inspection = provider.inspect(&row.key).unwrap();
+    fs::rename(root.join("target"), root.join("old-target")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    let mut changed = BrowserModel::from_progressive_inspection(
+        Locale::EnUs,
+        inspection.directory,
+        HumanSizeUnit::Bytes,
+        ScanSort::Path,
+    )
+    .unwrap();
+    let reducer = DetailRescanBrowserReducer::new(Shared(inspection.provider)).unwrap();
+    reducer.reduce(&mut changed, BrowserAction::EnterDirectory);
+    finish(&reducer, &mut changed);
+    assert!(matches!(
+        changed.current_detail_rescan_state(),
+        Some(DetailRescanState::Stale {
+            failure: sweepx_tui::DetailRescanFailure::IdentityMismatch,
+            ..
+        })
+    ));
+    assert!(changed.visible_rows().is_empty());
+    drop(reducer);
+    assert_eq!(
+        fs::read(root.join("old-target/debug/incremental/payload")).unwrap(),
+        b"12345"
+    );
+    provider.close();
+    assert!(
+        provider
+            .session
+            .wait_for_worker_exit(Duration::from_secs(3))
+            .unwrap()
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn temporary_reports_keep_logical_bytes_and_refuse_generic_trash_then_refresh_all() {

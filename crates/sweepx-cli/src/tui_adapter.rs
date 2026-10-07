@@ -50,6 +50,21 @@ pub(crate) fn tui_detail_rescan_provider(summary: &ScanSummary) -> TuiDetailResc
     }
 }
 
+/// Seeds the detail allocator from one captured candidate without manufacturing a new scan root.
+pub(crate) fn tui_directory_detail_rescan_provider(
+    directory: &sweepx_model::ScannedEntry,
+) -> TuiDetailRescanProvider {
+    let summary = ScanSummary {
+        roots: vec![directory.clone()],
+        entries: Vec::new(),
+        aggregates: Vec::new(),
+        boundaries: Vec::new(),
+        progress: Vec::new(),
+        progress_retention: Default::default(),
+    };
+    tui_detail_rescan_provider(&summary)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn live_tui_detail_rescan_provider(
     summary: &ScanSummary,

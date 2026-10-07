@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -546,6 +546,8 @@ impl std::fmt::Display for BrowserResourceLimitKind {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum BrowserModelError {
+    #[error("inspection requires an identity-bound native directory")]
+    InvalidInspectionDirectory,
     #[error("browser resource limit exceeded for {kind}: limit={limit}, observed={observed}")]
     ResourceLimit {
         kind: BrowserResourceLimitKind,
@@ -653,6 +655,14 @@ struct LoadedLevel {
     rows: Vec<BrowserRow>,
 }
 
+/// The original scan root remains authority even when the presentation starts at a candidate.
+/// Review paths are display-only, bounded to 32 paths of 4096 bytes, and never become Trash input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectionState {
+    root_identity: ScanObjectIdentity,
+    review_paths: BTreeSet<String>,
+}
+
 /// A read-only hierarchy built entirely from one completed scan snapshot.
 ///
 /// It never enumerates or stats the filesystem. The initial level is a
@@ -679,6 +689,7 @@ pub struct BrowserModel {
     /// clock reading inside it would make two otherwise identical models compare unequal. The phase
     /// is supplied to the renderer instead, which also keeps painting a pure function of its inputs.
     show_path_detail: bool,
+    inspection: Option<InspectionState>,
 }
 
 impl BrowserModel {
@@ -789,20 +800,103 @@ impl BrowserModel {
         aggregates: Vec<DirectoryAggregate>,
         limits: BrowserLoadLimits,
     ) -> Result<BrowserModel, BrowserModelError> {
+        Self::from_parts_with_inspection(
+            locale, status, scan_id, roots, entries, aggregates, limits, None,
+        )
+    }
+
+    /// Opens a candidate subtree without rebasing its native identity or reopening display paths.
+    /// Only progressive, read-only inspection is available; Space records paths for later review.
+    pub fn from_progressive_inspection(
+        locale: Locale,
+        mut directory: ScannedEntry,
+        size_unit: HumanSizeUnit,
+        sort: ScanSort,
+    ) -> Result<Self, BrowserModelError> {
+        if directory.object_type != ObjectType::Directory {
+            return Err(BrowserModelError::InvalidInspectionDirectory);
+        }
+        let locator = directory
+            .executable_native_locator()
+            .map_err(|_| BrowserModelError::InvalidInspectionDirectory)?
+            .ok_or(BrowserModelError::InvalidInspectionDirectory)?;
+        let root_identity = ScanObjectIdentity {
+            entry_id: locator.scan_root.entry_id.clone(),
+            scan_root_id: locator.scan_root.entry_id.clone(),
+            parent_id: None,
+            platform_file_identity: locator.scan_root.platform_file_identity.clone(),
+            filesystem_object_domain_identity: locator
+                .scan_root
+                .filesystem_object_domain_identity
+                .clone(),
+            volume_or_mount_identity: locator.scan_root.volume_or_mount_identity.clone(),
+        };
+        mark_coverage_details_lost(&mut directory.coverage);
+        let scan_id = Some(directory.scan_id.to_string());
+        let mut model = Self::from_parts_with_inspection(
+            locale,
+            OutputStatus::Partial,
+            scan_id,
+            vec![directory],
+            Vec::new(),
+            Vec::new(),
+            BrowserLoadLimits::default(),
+            Some(InspectionState {
+                root_identity,
+                review_paths: BTreeSet::new(),
+            }),
+        )?;
+        model.size_unit = size_unit;
+        model.sort = sort;
+        model.progressive_navigation = true;
+        Ok(model)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts_with_inspection(
+        locale: Locale,
+        status: OutputStatus,
+        scan_id: Option<String>,
+        roots: Vec<ScannedEntry>,
+        entries: Vec<ScannedEntry>,
+        aggregates: Vec<DirectoryAggregate>,
+        limits: BrowserLoadLimits,
+        inspection: Option<InspectionState>,
+    ) -> Result<BrowserModel, BrowserModelError> {
         preflight_limits(&roots, &entries, &aggregates, limits)?;
         enforce_snapshot_scan_ids(scan_id.as_deref(), &roots, &entries, &aggregates)?;
+        if inspection.is_some() && roots.len() != 1 {
+            return Err(BrowserModelError::InvalidInspectionDirectory);
+        }
 
         let mut pending_nodes = Vec::with_capacity(roots.len() + entries.len());
         let mut id_to_index = HashMap::with_capacity(roots.len() + entries.len());
 
         for entry in roots {
             let identity = required_identity(&entry)?.clone();
-            if identity.parent_id.is_some() {
+            if let Some(state) = &inspection {
+                let locator = entry
+                    .executable_native_locator()
+                    .ok()
+                    .flatten()
+                    .ok_or(BrowserModelError::InvalidInspectionDirectory)?;
+                if identity.scan_root_id != state.root_identity.entry_id
+                    || locator.scan_root.platform_file_identity
+                        != state.root_identity.platform_file_identity
+                    || locator.scan_root.filesystem_object_domain_identity
+                        != state.root_identity.filesystem_object_domain_identity
+                    || locator.scan_root.volume_or_mount_identity
+                        != state.root_identity.volume_or_mount_identity
+                {
+                    return Err(BrowserModelError::InvalidInspectionDirectory);
+                }
+            }
+            if inspection.is_none() && identity.parent_id.is_some() {
                 return Err(BrowserModelError::RootEntryMustNotHaveParent {
                     entry_id: identity.entry_id.to_string(),
                 });
             }
-            if identity.entry_id != identity.scan_root_id {
+            if inspection.is_none() && identity.entry_id != identity.scan_root_id {
                 return Err(BrowserModelError::RootEntryMustReferenceSelf {
                     entry_id: identity.entry_id.to_string(),
                     root_id: identity.scan_root_id.to_string(),
@@ -854,17 +948,23 @@ impl BrowserModel {
                 roots.push(index);
                 continue;
             }
-            let root_index = id_to_index.get(&node.root_id).copied().ok_or_else(|| {
-                BrowserModelError::MissingRoot {
-                    entry_id: node.entry_id.to_string(),
-                    root_id: node.root_id.to_string(),
+            if let Some(state) = &inspection {
+                if node.root_id != state.root_identity.entry_id {
+                    return Err(BrowserModelError::InvalidInspectionDirectory);
                 }
-            })?;
-            if !pending_nodes[root_index].root {
-                return Err(BrowserModelError::MissingRoot {
-                    entry_id: node.entry_id.to_string(),
-                    root_id: node.root_id.to_string(),
-                });
+            } else {
+                let root_index = id_to_index.get(&node.root_id).copied().ok_or_else(|| {
+                    BrowserModelError::MissingRoot {
+                        entry_id: node.entry_id.to_string(),
+                        root_id: node.root_id.to_string(),
+                    }
+                })?;
+                if !pending_nodes[root_index].root {
+                    return Err(BrowserModelError::MissingRoot {
+                        entry_id: node.entry_id.to_string(),
+                        root_id: node.root_id.to_string(),
+                    });
+                }
             }
 
             let parent_id = node.parent_id.as_ref().expect("validated child has parent");
@@ -979,6 +1079,7 @@ impl BrowserModel {
             sort: ScanSort::Path,
             progressive_navigation: false,
             show_path_detail: false,
+            inspection,
         };
         model.sort_rows();
         model.reload_loaded_level();
@@ -1004,6 +1105,26 @@ impl BrowserModel {
 
     pub const fn path_detail_shown(&self) -> bool {
         self.show_path_detail
+    }
+
+    /// Display-only choices from an inspection view; no native execution permission is implied.
+    pub fn review_paths(&self) -> impl Iterator<Item = &str> {
+        self.inspection
+            .iter()
+            .flat_map(|state| state.review_paths.iter().map(String::as_str))
+    }
+
+    fn toggle_review_path(&mut self) {
+        let Some(path) = self.selected_row().map(|row| row.display_path().to_owned()) else {
+            return;
+        };
+        let Some(state) = &mut self.inspection else {
+            return;
+        };
+        if !state.review_paths.remove(&path) && path.len() <= 4096 && state.review_paths.len() < 32
+        {
+            state.review_paths.insert(path);
+        }
     }
 
     pub fn visible_rows(&self) -> &[BrowserRow] {
@@ -1224,14 +1345,17 @@ impl BrowserModel {
             return None;
         }
         let locator = directory.executable_native_locator().ok()??.clone();
-        let root =
-            self.nodes.iter().find(|node| {
+        let root_identity = if let Some(state) = &self.inspection {
+            &state.root_identity
+        } else {
+            let root = self.nodes.iter().find(|node| {
                 node.root
                     && node.entry.identity.as_ref().is_some_and(|identity| {
                         identity.entry_id == directory_identity.scan_root_id
                     })
             })?;
-        let root_identity = root.entry.validated_identity().ok()??;
+            root.entry.validated_identity().ok()??
+        };
         if !identity_is_known(root_identity) {
             return None;
         }
@@ -1443,7 +1567,7 @@ impl BrowserModel {
         }
         entries.extend(rows);
 
-        let mut rebuilt = Self::from_owned_scan_parts_with_limits(
+        let mut rebuilt = Self::from_parts_with_inspection(
             self.locale,
             self.status,
             self.scan_id.clone(),
@@ -1451,6 +1575,7 @@ impl BrowserModel {
             entries,
             aggregates,
             self.limits,
+            self.inspection.clone(),
         )
         .map_err(|error| match error {
             BrowserModelError::ResourceLimit { .. } => DetailRescanFailure::ResourceLimit,
@@ -1616,12 +1741,13 @@ impl BrowserModel {
 
     fn sort_rows(&mut self) {
         let sort = self.sort;
+        let allocated = self.inspection.is_some();
         let nodes = &self.nodes;
         for rows in &mut self.children_by_index {
-            rows.sort_by(|left, right| browser_node_order(nodes, *left, *right, sort));
+            rows.sort_by(|left, right| browser_node_order(nodes, *left, *right, sort, allocated));
         }
         self.roots
-            .sort_by(|left, right| browser_node_order(nodes, *left, *right, sort));
+            .sort_by(|left, right| browser_node_order(nodes, *left, *right, sort, allocated));
     }
 }
 
@@ -1630,12 +1756,13 @@ fn browser_node_order(
     left: usize,
     right: usize,
     sort: ScanSort,
+    allocated: bool,
 ) -> std::cmp::Ordering {
     let left_node = &nodes[left];
     let right_node = &nodes[right];
     if sort == ScanSort::Size {
-        let left_bytes = browser_node_bytes(left_node);
-        let right_bytes = browser_node_bytes(right_node);
+        let left_bytes = browser_node_bytes(left_node, allocated);
+        let right_bytes = browser_node_bytes(right_node, allocated);
         right_bytes.cmp(&left_bytes).then_with(|| {
             left_node
                 .entry
@@ -1650,12 +1777,18 @@ fn browser_node_order(
     }
 }
 
-fn browser_node_bytes(node: &BrowserNode) -> Option<u128> {
-    let value = node
-        .aggregate
-        .as_ref()
-        .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
-        .unwrap_or(&node.entry.reclaimable_estimate);
+fn browser_node_bytes(node: &BrowserNode, allocated: bool) -> Option<u128> {
+    let value = if allocated {
+        node.aggregate
+            .as_ref()
+            .map(|aggregate| &aggregate.filesystem_reported_allocated_bytes)
+            .unwrap_or(&node.entry.allocated_bytes)
+    } else {
+        node.aggregate
+            .as_ref()
+            .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
+            .unwrap_or(&node.entry.reclaimable_estimate)
+    };
     match value {
         sweepx_model::EvidenceValue::Known { value }
         | sweepx_model::EvidenceValue::LowerBound { value, .. } => Some(value.0),
@@ -2081,6 +2214,8 @@ pub enum BrowserAction {
     EnterDirectory,
     ReturnToParent,
     TrashSelected,
+    /// Records a display-only path for later review in a read-only candidate inspection.
+    ToggleReviewPath,
     /// Shows the selected row's full, untruncated path.
     ///
     /// The list is width-constrained by design, so a long path is either shortened or scrolling. This
@@ -2140,6 +2275,7 @@ impl BrowserKeyMapper for DefaultBrowserKeyMapper {
             }
             KeyCode::Delete | KeyCode::Char('d') => Some(BrowserAction::TrashSelected),
             KeyCode::Char('p') => Some(BrowserAction::TogglePathDetail),
+            KeyCode::Char(' ') => Some(BrowserAction::ToggleReviewPath),
             KeyCode::Char('q') => Some(BrowserAction::Quit),
             _ => None,
         }
@@ -2165,7 +2301,11 @@ impl BrowserReducer for ReadOnlyBrowserReducer {
             BrowserAction::EnterDirectory => model.enter_selected(),
             BrowserAction::ReturnToParent => model.return_to_parent(),
             BrowserAction::TogglePathDetail => model.toggle_path_detail(),
-            BrowserAction::TrashSelected => return BrowserControl::TrashSelected,
+            BrowserAction::ToggleReviewPath => model.toggle_review_path(),
+            BrowserAction::TrashSelected if model.inspection.is_none() => {
+                return BrowserControl::TrashSelected;
+            }
+            BrowserAction::TrashSelected => {}
             BrowserAction::Quit => return BrowserControl::Quit,
         }
         BrowserControl::Continue
@@ -2426,6 +2566,9 @@ where
 {
     fn reduce(&self, model: &mut BrowserModel, action: BrowserAction) -> BrowserControl {
         self.complete_or_expire(model);
+        if action == BrowserAction::TrashSelected && model.inspection.is_some() {
+            return BrowserControl::Continue;
+        }
         if matches!(action, BrowserAction::Quit | BrowserAction::TrashSelected) {
             self.cancel_background();
             return if action == BrowserAction::Quit {
@@ -2599,6 +2742,9 @@ impl Drop for UnixTerminationFlag {
 
 #[derive(Debug, Error)]
 pub enum BrowserError {
+    /// The supplied live directory lacks a valid bounded identity hierarchy.
+    #[error(transparent)]
+    Model(#[from] BrowserModelError),
     #[error("terminal I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("detail rescan worker capacity exhausted: limit={limit}")]
@@ -2855,7 +3001,11 @@ pub fn render_live_browser_at_phase(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(read_only_label(model.locale())),
+                    .title(if model.inspection.is_some() {
+                        inspection_label(model.locale())
+                    } else {
+                        read_only_label(model.locale())
+                    }),
             ),
         sections[3],
     );
@@ -2911,7 +3061,11 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
         TableCell::from(name_label(model.locale())),
         TableCell::from(type_label(model.locale())),
         TableCell::from(size_label(model.locale())),
-        TableCell::from(reclaimable_label(model.locale())),
+        TableCell::from(if model.inspection.is_some() {
+            allocated_label(model.locale())
+        } else {
+            reclaimable_label(model.locale())
+        }),
         TableCell::from(children_label(model.locale())),
         TableCell::from(coverage_header_label(model.locale())),
     ])
@@ -2927,13 +3081,29 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
             .unwrap_or_else(|| {
                 byte_value_label_with_unit(&row.entry().logical_bytes, model.size_unit)
             });
-        let reclaimable = aggregate
-            .map(|value| {
-                byte_value_label_with_unit(&value.potentially_reclaimable_bytes, model.size_unit)
-            })
-            .unwrap_or_else(|| {
-                byte_value_label_with_unit(&row.entry().reclaimable_estimate, model.size_unit)
-            });
+        let reclaimable = if model.inspection.is_some() {
+            aggregate
+                .map(|value| {
+                    byte_value_label_with_unit(
+                        &value.filesystem_reported_allocated_bytes,
+                        model.size_unit,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    byte_value_label_with_unit(&row.entry().allocated_bytes, model.size_unit)
+                })
+        } else {
+            aggregate
+                .map(|value| {
+                    byte_value_label_with_unit(
+                        &value.potentially_reclaimable_bytes,
+                        model.size_unit,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    byte_value_label_with_unit(&row.entry().reclaimable_estimate, model.size_unit)
+                })
+        };
         let children = aggregate
             .map(|value| count_value_label(&value.direct_child_count))
             .unwrap_or_else(|| "-".to_string());
@@ -2945,10 +3115,15 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
         };
         // Only the selected row scrolls. Animating every overflowing row at once would make the whole
         // list move while the user is trying to read one line of it.
-        let name = if selected {
-            marquee_window(row.label(), name_cells, phase)
+        let label = if model.review_paths().any(|path| path == row.display_path()) {
+            format!("● {}", row.label())
         } else {
-            truncate_with_ellipsis(row.label(), name_cells)
+            row.label().to_owned()
+        };
+        let name = if selected {
+            marquee_window(&label, name_cells, phase)
+        } else {
+            truncate_with_ellipsis(&label, name_cells)
         };
 
         Row::new([
@@ -3033,7 +3208,16 @@ fn browser_row_coverage_label(row: &BrowserRow) -> String {
 /// wrap, while the name column is the very thing that was too narrow. It is wrapped in an explicit
 /// marker so a path that itself ends in whitespace, or that is empty, still reads unambiguously.
 fn browser_footer_text(model: &BrowserModel) -> String {
-    let help = help_text(model.locale());
+    let help = if model.inspection.is_some() {
+        inspection_help(model.locale())
+    } else {
+        help_text(model.locale())
+    };
+    let help = if model.inspection.is_some() {
+        format!("{help} | {} / 32", model.review_paths().count())
+    } else {
+        help.to_owned()
+    };
     let detail = match model.current_detail_rescan_state() {
         Some(DetailRescanState::Stale { revision, failure }) => {
             format!(
@@ -3047,7 +3231,7 @@ fn browser_footer_text(model: &BrowserModel) -> String {
         Some(DetailRescanState::Pending { revision }) => {
             format!("{help} | detail: refreshing (revision {revision})")
         }
-        _ => help.to_string(),
+        _ => help,
     };
     if !model.path_detail_shown() {
         return detail;
@@ -3147,6 +3331,31 @@ fn read_only_label(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhCn => "扫描 + 回收站预览",
         Locale::EnUs => "Scan + Trash preview",
+    }
+}
+
+fn inspection_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => "只读细分 · 待核验清单",
+        Locale::EnUs => "Read-only breakdown · Review list",
+    }
+}
+
+fn inspection_help(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => {
+            "↑/↓ 选择  Enter/→ 进入  Esc/← 返回  Space 待核验(≤32)  p 完整路径  q 返回候选 · 清单不授权删除"
+        }
+        Locale::EnUs => {
+            "↑/↓ select  Enter/→ open  Esc/← back  Space review (≤32)  p full path  q back to candidates · review does not authorize deletion"
+        }
+    }
+}
+
+fn allocated_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhCn => "报告分配",
+        Locale::EnUs => "Allocated",
     }
 }
 
@@ -3528,6 +3737,130 @@ mod tests {
             vec![aggregate],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn inspection_review_is_bounded_and_never_emits_trash() {
+        let root = rescan_model(coverage()).nodes[0].entry.clone();
+        let inspection = BrowserModel::from_progressive_inspection(
+            Locale::EnUs,
+            root.clone(),
+            HumanSizeUnit::Bytes,
+            ScanSort::Path,
+        )
+        .unwrap();
+        let entries = (2..36)
+            .map(|ordinal| {
+                entry(
+                    &format!("/root/{ordinal:02}"),
+                    ObjectType::File,
+                    ordinal,
+                    1,
+                    Some(1),
+                )
+            })
+            .collect();
+        let mut model = BrowserModel::from_parts_with_inspection(
+            Locale::EnUs,
+            OutputStatus::Partial,
+            Some("scan-live".into()),
+            vec![root],
+            entries,
+            Vec::new(),
+            BrowserLoadLimits::default(),
+            inspection.inspection,
+        )
+        .unwrap();
+        ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::EnterDirectory);
+        for _ in 0..34 {
+            ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::ToggleReviewPath);
+            ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::MoveDown);
+        }
+        assert_eq!(model.review_paths().count(), 32);
+        assert_eq!(
+            ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::TrashSelected),
+            BrowserControl::Continue
+        );
+        model.set_selected(0);
+        ReadOnlyBrowserReducer.reduce(&mut model, BrowserAction::ToggleReviewPath);
+        assert_eq!(model.review_paths().count(), 31);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| render_live_browser(frame, frame.area(), &model))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("Allocated")
+                && screen.contains("Read-only breakdown")
+                && screen.contains("31 / 32")
+        );
+        assert!(!screen.contains("move to Trash"));
+        let mut unbound = model.nodes[0].entry.clone();
+        unbound.native_locator = None;
+        assert!(matches!(
+            BrowserModel::from_progressive_inspection(
+                Locale::EnUs,
+                unbound,
+                HumanSizeUnit::Bytes,
+                ScanSort::Path
+            ),
+            Err(BrowserModelError::InvalidInspectionDirectory)
+        ));
+    }
+
+    #[test]
+    fn inspection_size_order_uses_reported_allocation_and_keeps_unknown_last() {
+        let root = rescan_model(coverage()).nodes[0].entry.clone();
+        let inspection = BrowserModel::from_progressive_inspection(
+            Locale::EnUs,
+            root.clone(),
+            HumanSizeUnit::Bytes,
+            ScanSort::Size,
+        )
+        .unwrap();
+        let mut large = entry("/root/large", ObjectType::File, 2, 1, Some(1));
+        large.allocated_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(8192),
+        };
+        large.reclaimable_estimate = EvidenceValue::Known {
+            value: DecimalU128::ZERO,
+        };
+        let mut unknown = entry("/root/unknown", ObjectType::File, 4, 1, Some(1));
+        unknown.allocated_bytes = EvidenceValue::NotChecked {
+            reason: ReasonCode::NotRevalidated,
+        };
+        let mut model = BrowserModel::from_parts_with_inspection(
+            Locale::EnUs,
+            OutputStatus::Partial,
+            Some("scan-live".into()),
+            vec![root],
+            vec![
+                entry("/root/small", ObjectType::File, 3, 1, Some(1)),
+                large,
+                unknown,
+            ],
+            Vec::new(),
+            BrowserLoadLimits::default(),
+            inspection.inspection,
+        )
+        .unwrap();
+        model.sort = ScanSort::Size;
+        model.sort_rows();
+        model.enter_selected();
+        assert_eq!(
+            model
+                .visible_rows()
+                .iter()
+                .map(BrowserRow::label)
+                .collect::<Vec<_>>(),
+            ["large", "small", "unknown"]
+        );
     }
 
     fn refreshed_result(

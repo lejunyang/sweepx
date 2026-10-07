@@ -27,6 +27,9 @@ impl JunkRow for FixtureRow {
         "controlled rebuildable output"
     }
     fn context(&self) -> String {
+        if self.key == "verbose" {
+            return "Long rule context with current evidence and restrictions. ".repeat(32);
+        }
         "risk=R1 · classification=known_generated · confidence=medium".into()
     }
     fn logical_bytes(&self) -> &ByteValue {
@@ -41,6 +44,30 @@ impl JunkRow for FixtureRow {
     fn retained_bytes(&self) -> usize {
         self.cost
     }
+}
+
+#[test]
+fn action_result_stays_visible_above_verbose_rule_context() {
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    model.apply(JunkEvent::Candidate {
+        revision: 0,
+        current: true,
+        historical: false,
+        row: row("verbose", "/project/target"),
+    });
+    model.reorder();
+    model.diagnostic("Review list (deletion not authorized)\n/project/target/debug".into());
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| render_junk(frame, &model)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Review list (deletion not authorized)"));
+    assert!(screen.contains("/project/target/debug"));
 }
 fn row(key: &'static str, path: &'static str) -> Arc<dyn JunkRow> {
     Arc::new(FixtureRow {
@@ -340,8 +367,13 @@ struct Provider {
     confirmations: Vec<String>,
     dismissed: Vec<u64>,
     keepers: Vec<String>,
+    inspected: Vec<String>,
 }
 impl JunkProvider for Provider {
+    fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
+        self.inspected.push(key.into());
+        Err("controlled native directory unavailable".into())
+    }
     fn toggle_keeper(&mut self, key: &str) -> Result<(), String> {
         self.keepers.push(key.into());
         self.events.push_back(JunkEvent::Candidate {
@@ -426,6 +458,43 @@ impl JunkProvider for Provider {
     fn dismiss_quarantine(&mut self, operation: u64) {
         self.dismissed.push(operation);
     }
+}
+
+#[test]
+fn enter_inspects_only_the_cursor_and_keeps_report_only_guards() {
+    let mut provider = Provider {
+        events: initial(),
+        ..Default::default()
+    };
+    let mut input = Events(VecDeque::from([KeyCode::Enter, KeyCode::Char('q')]));
+    let mut model = JunkModel::new(Locale::EnUs, HumanSizeUnit::Bytes);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    assert_eq!(
+        run_junk_loop(
+            &mut terminal,
+            &mut model,
+            &mut input,
+            &mut provider,
+            &NeverTerminate
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(provider.inspected, ["a"]);
+    assert!(provider.trashed.is_empty());
+    assert!(model.diagnostic.contains("native directory unavailable"));
+    model.rows.get_mut("a").unwrap().historical = true;
+    let mut input = Events(VecDeque::from([KeyCode::Enter, KeyCode::Char('q')]));
+    run_junk_loop(
+        &mut terminal,
+        &mut model,
+        &mut input,
+        &mut provider,
+        &NeverTerminate,
+    )
+    .unwrap();
+    assert_eq!(provider.inspected.len(), 1);
+    assert!(model.diagnostic.contains("Refresh this candidate"));
 }
 
 struct TimedEvents {

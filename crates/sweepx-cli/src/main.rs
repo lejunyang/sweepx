@@ -241,6 +241,8 @@ enum Commands {
         /// current, complete directory candidates to Trash after native identity revalidation.
         /// Linux/macOS/Windows show historical caches first, then keep native change listeners alive.
         /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
+        /// Enter opens a read-only directory breakdown. Space there records up to 32 review paths;
+        /// q returns to candidates, and the latest review list is printed on exit without deleting.
         /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.
         /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.

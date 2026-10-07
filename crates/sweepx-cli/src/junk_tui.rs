@@ -14,7 +14,9 @@ use sweepx_core::junk::session::{
 };
 use sweepx_i18n::Locale;
 use sweepx_model::{ByteValue, HumanSizeUnit, ScanSort};
-use sweepx_tui::junk::{JunkEvent, JunkOutcome, JunkProvider, JunkRow, run_junk_browser};
+use sweepx_tui::junk::{
+    JunkEvent, JunkInspection, JunkOutcome, JunkProvider, JunkRow, run_junk_browser,
+};
 #[cfg(target_os = "linux")]
 mod quarantine;
 
@@ -526,6 +528,39 @@ impl Provider {
 }
 
 impl JunkProvider for Provider {
+    fn inspect(&mut self, key: &str) -> Result<JunkInspection, String> {
+        if self.busy || self.mutation_busy() || !self.pending.is_empty() {
+            return Err("complete the current scan or operation first".into());
+        }
+        let row = self.rows.get(key).ok_or("unknown candidate key")?;
+        if !row.current
+            || row.preview
+            || self.historical.contains(key)
+            || row.row.directory_aggregate().is_none()
+        {
+            return Err("refresh this directory candidate first".into());
+        }
+        let directory = row
+            .row
+            .candidate
+            .source_entry
+            .clone()
+            .ok_or("native directory unavailable")?;
+        // Atomically prevent a watcher revision racing the captured binding. Native notifications
+        // keep accumulating while the detail worker independently revalidates the original chain.
+        let pause = self
+            .session
+            .suspend_auto_refresh()
+            .map_err(|e| e.to_string())?;
+        let provider = super::tui_adapter::tui_directory_detail_rescan_provider(&directory);
+        Ok(JunkInspection {
+            directory,
+            provider: Arc::new(InspectionProvider {
+                inner: provider,
+                _pause: pause,
+            }),
+        })
+    }
     fn poll(&mut self) -> Option<JunkEvent> {
         if let Some(event) = self.pending.pop_front() {
             if self.pending.is_empty() {
@@ -740,6 +775,32 @@ impl JunkProvider for Provider {
                 self.auto_pause = None;
             }
         }
+    }
+}
+
+/// The lease survives a detached/non-cooperative detail worker; notifications are never discarded.
+struct InspectionProvider {
+    inner: super::tui_adapter::TuiDetailRescanProvider,
+    _pause: JunkAutoRefreshPause,
+}
+impl sweepx_tui::DetailRescanProvider for InspectionProvider {
+    fn prepare_detail_rescan(&self) {
+        self.inner.prepare_detail_rescan();
+    }
+    fn rescan_detail(
+        &self,
+        request: &sweepx_tui::DetailRescanRequest,
+    ) -> sweepx_tui::DetailRescanResult {
+        self.inner.rescan_detail(request)
+    }
+    fn cancel_detail_rescan(&self) {
+        self.inner.cancel_detail_rescan();
+    }
+    fn set_progress_sink(
+        &self,
+        sink: Option<std::sync::mpsc::SyncSender<sweepx_tui::DetailRescanProgress>>,
+    ) {
+        self.inner.set_progress_sink(sink);
     }
 }
 impl Drop for Provider {

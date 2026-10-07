@@ -32,6 +32,8 @@ pub enum ResultPresentation {
 }
 mod quarantine;
 use quarantine::QuarantineView;
+mod inspection;
+pub use inspection::JunkInspection;
 
 /// Shared presentation data; no display field can authorize filesystem operations.
 pub trait JunkRow: Send + Sync {
@@ -145,6 +147,11 @@ pub trait JunkProvider {
     fn prioritize(&mut self, key: &str);
     /// Begin a bounded, explicitly selected Trash batch on a worker.
     fn trash(&mut self, keys: &[String]) -> Result<(), String>;
+    /// Prepare an identity-bound directory inspection without filesystem work on this thread.
+    /// The returned provider owns any scan-admission lease needed while the modal is open.
+    fn inspect(&mut self, _key: &str) -> Result<JunkInspection, String> {
+        Err("directory inspection is unavailable for this analysis".into())
+    }
     /// Explicitly choose/clear the keeper for a duplicate group. No native work runs here.
     fn toggle_keeper(&mut self, _key: &str) -> Result<(), String> {
         Err("keeper selection is available only for duplicate groups".into())
@@ -193,6 +200,8 @@ pub struct JunkModel {
     dirty: bool,
     rejected: bool,
     quarantine: Option<QuarantineView>,
+    /// Latest modal's display-only choices; at most 32 bounded paths, never provider Trash keys.
+    review_paths: Vec<String>,
 }
 
 impl JunkModel {
@@ -220,6 +229,7 @@ impl JunkModel {
             dirty: false,
             rejected: false,
             quarantine: None,
+            review_paths: Vec::new(),
         }
     }
 
@@ -645,9 +655,15 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         Paragraph::new(format!(
             "{}\n{}\n{}\n{}",
             crate::live::sanitize_terminal_text(full_path),
+            // Action results must stay visible when a verbose rule context wraps beyond the pane.
+            model
+                .diagnostic
+                .lines()
+                .map(crate::live::sanitize_terminal_text)
+                .collect::<Vec<_>>()
+                .join("\n"),
             crate::live::sanitize_terminal_text(evidence),
-            crate::live::sanitize_terminal_text(&context),
-            crate::live::sanitize_terminal_text(&model.diagnostic)
+            crate::live::sanitize_terminal_text(&context)
         ))
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL)),
@@ -659,8 +675,8 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         model.text("↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 全量刷新 · c 取消 · d/Delete 回收所选文件 · q 退出", "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh all · c Cancel · d/Delete Trash selected files · q Quit")
     } else {
         model.text(
-        "↑↓ 移动 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新 · c 取消 · d/Delete 回收 · x 临时对象隔离 · q 退出",
-        "↑↓ Move · Space Select · a Select all (≤256) · u Clear · r/R Refresh · c Cancel · d/Delete Trash · x Quarantine temporary objects · q Quit",
+        "↑↓ 移动 · Enter 细分 · Space 选择 · a 全选(≤256) · u 清空 · r/R 刷新 · c 取消 · d/Delete 回收 · x 临时对象隔离 · q 退出",
+        "↑↓ Move · Enter Breakdown · Space Select · a Select all (≤256) · u Clear · r/R Refresh · c Cancel · d/Delete Trash · x Quarantine temporary objects · q Quit",
     )
     };
     frame.render_widget(
@@ -769,6 +785,54 @@ pub fn run_junk_loop<B: Backend, E: BrowserEventSource, P: JunkProvider, T: Term
                 }
             }
             KeyCode::Char('u') => model.marked.clear(),
+            KeyCode::Enter
+                if model.presentation == ResultPresentation::Junk
+                    && !model.busy
+                    && model.trash_pending.is_empty() =>
+            {
+                if let Some(key) = model.order.get(model.cursor).cloned() {
+                    let row = &model.rows[&key];
+                    if row.historical || !row.current {
+                        model.diagnostic(
+                            model
+                                .text(
+                                    "先刷新当前候选再查看细分",
+                                    "Refresh this candidate before opening its breakdown",
+                                )
+                                .into(),
+                        );
+                        continue;
+                    }
+                    match provider.inspect(&key) {
+                        Ok(inspection) => {
+                            let result = inspection::run(
+                                terminal,
+                                events,
+                                termination,
+                                model.locale,
+                                model.unit,
+                                model.sort,
+                                inspection,
+                            )?;
+                            if let crate::BrowserExit::Terminated { signal } = result.exit {
+                                return Ok(signal.map_or(130, |signal| 128 + signal));
+                            }
+                            model.review_paths = result.paths;
+                            if !model.review_paths.is_empty() {
+                                model.diagnostic(format!(
+                                    "{}\n{}",
+                                    model.text(
+                                        "待核验清单（未授权删除）",
+                                        "Review list (deletion not authorized)"
+                                    ),
+                                    model.review_paths.join("\n")
+                                ));
+                            }
+                        }
+                        Err(error) => model.diagnostic(error),
+                    }
+                }
+            }
             KeyCode::Char('p')
                 if model.presentation == ResultPresentation::Duplicates
                     && !model.busy
@@ -850,17 +914,30 @@ pub fn run_junk_browser<P: JunkProvider>(
         let mut guard = TerminalGuard::enter()?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         terminal.clear()?;
+        let mut model = JunkModel::new(locale, unit)
+            .with_sort(sort)
+            .with_presentation(provider.presentation());
         let result = run_junk_loop(
             &mut terminal,
-            &mut JunkModel::new(locale, unit)
-                .with_sort(sort)
-                .with_presentation(provider.presentation()),
+            &mut model,
             &mut CrosstermEventSource,
             &mut provider,
             &termination,
         );
         drop(terminal);
         guard.restore();
+        if !model.review_paths.is_empty() {
+            println!(
+                "{}",
+                model.text(
+                    "待核验清单（未授权删除；大小不代表可删除性）",
+                    "Review list (deletion not authorized; size does not establish disposability)"
+                )
+            );
+            for path in &model.review_paths {
+                println!("{}", crate::live::sanitize_terminal_text(path));
+            }
+        }
         result
     })();
     provider.close();
