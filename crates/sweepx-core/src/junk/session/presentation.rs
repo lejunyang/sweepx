@@ -2,6 +2,8 @@
 
 use super::*;
 use std::ops::Bound;
+#[cfg(test)]
+type PathObserver = Box<dyn FnMut(&Path) + Send>;
 
 /// Every reliably published key, including Base rows whose pending revision later gets cancelled.
 /// Only lossless observed paths and their directory-scope kind are retained. Limits reuse the caps;
@@ -12,6 +14,8 @@ pub(super) struct PresentationIndex {
     bytes: usize,
     #[cfg(test)]
     pub(super) after_base_sent: Option<Box<dyn FnMut(JunkCandidateKey) + Send>>,
+    #[cfg(test)]
+    pub(super) observe_path: Option<PathObserver>,
 }
 
 /// Independent temporary facts are observed only by full system revisions. A directory Selected

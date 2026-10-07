@@ -200,3 +200,43 @@ fn revision_cannot_overwrite_undelivered_terminal_and_resets_cancellation() {
     assert_eq!(job.revision, JunkSessionRevision(2));
     assert!(!job.cancel.is_cancelled());
 }
+
+#[test]
+fn operation_pause_admission_is_atomic_and_shared_clones_keep_it_held() {
+    let shared = Arc::new(Shared::new(JunkSessionLimits::default()));
+    assert!(matches!(
+        shared.suspend_auto_refresh(),
+        Err(JunkSessionControlError::Busy)
+    ));
+    let writer = Writer::new(
+        Arc::clone(&shared),
+        JunkSessionRevision(1),
+        shared.cancel_token(),
+    );
+    writer.finish(JunkSessionOutcome::Complete, true, 0);
+    assert!(
+        matches!(
+            shared.suspend_auto_refresh(),
+            Err(JunkSessionControlError::Busy)
+        ),
+        "undrained terminal must still block operation admission"
+    );
+    assert!(matches!(
+        shared.pop().unwrap().kind,
+        JunkSessionEventKind::Completed { .. }
+    ));
+    let pause = shared.suspend_auto_refresh().unwrap();
+    let worker_pause = pause.clone();
+    assert!(matches!(
+        shared.refresh(Vec::new()),
+        Err(JunkSessionControlError::Busy)
+    ));
+    drop(pause);
+    assert!(matches!(
+        shared.refresh(Vec::new()),
+        Err(JunkSessionControlError::Busy)
+    ));
+    drop(worker_pause);
+    assert_eq!(shared.refresh(Vec::new()).unwrap(), JunkSessionRevision(2));
+    shared.close();
+}

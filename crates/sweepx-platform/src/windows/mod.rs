@@ -1534,7 +1534,98 @@ mod backend {
         Io(io::Error),
     }
 
+    fn open_notification_directory(
+        directory: &WindowsDirectoryHandle,
+    ) -> Result<Admitted<OwnedHandle>, RootOpenError> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED, FILE_ID_128, FILE_ID_DESCRIPTOR,
+            FileIdType, OpenFileById,
+        };
+        let mut descriptor = FILE_ID_DESCRIPTOR {
+            dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: ExtendedFileIdType,
+            ..Default::default()
+        };
+        descriptor.Anonymous.ExtendedFileId = FILE_ID_128 {
+            Identifier: directory.identity.file_id,
+        };
+        let lease = HandleLease::acquire_io().map_err(RootOpenError::Io)?;
+        let open = |descriptor: &FILE_ID_DESCRIPTOR| unsafe {
+            // SAFETY: volume hint is retained, the descriptor selects its initialized union field,
+            // and no name, content read, privilege change or reparse traversal is requested.
+            OpenFileById(
+                directory.handle.as_raw_handle() as HANDLE,
+                descriptor,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                FILE_FLAG_BACKUP_SEMANTICS
+                    | FILE_FLAG_OPEN_REPARSE_POINT
+                    | FILE_FLAG_OPEN_NO_RECALL
+                    | FILE_FLAG_OVERLAPPED,
+            )
+        };
+        let mut handle = open(&descriptor);
+        if handle == INVALID_HANDLE_VALUE
+            && directory.identity.file_id[8..]
+                .iter()
+                .all(|byte| *byte == 0)
+        {
+            // NTFS may require the 64-bit FileId form. Only exactly representable IDs are retried;
+            // the reopened handle must still match all 128 bits and the captured volume below.
+            descriptor.Type = FileIdType;
+            descriptor.Anonymous.FileId = i64::from_le_bytes(
+                directory.identity.file_id[..8]
+                    .try_into()
+                    .expect("fixed ID length"),
+            );
+            handle = open(&descriptor);
+        }
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(RootOpenError::Io(io::Error::last_os_error()));
+        }
+        let handle = Admitted::new(
+            unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
+            lease,
+        );
+        let observed = WindowsPlatformScanner::reject_reparse_or_nondirectory(&handle)?;
+        if observed.file_id.VolumeSerialNumber != directory.identity.volume
+            || observed.file_id.FileId.Identifier != directory.identity.file_id
+        {
+            return Err(RootOpenError::Io(io::Error::other(
+                "notification root identity changed",
+            )));
+        }
+        Ok(handle)
+    }
+
     impl PlatformScanner for WindowsPlatformScanner {
+        fn monitor_directory(
+            &self,
+            directory: &Self::DirectoryHandle,
+            path: &Path,
+            root: bool,
+            monitor: &crate::change_monitor::ChangeMonitor,
+        ) {
+            if !root {
+                return;
+            }
+            // Open by captured full object ID using the pinned volume hint, without resolving
+            // a display pathname or depending on undocumented native '.' path normalization.
+            // Unsupported ID formats/filesystems refuse the listener and retain ordinary scans.
+            let result = open_notification_directory(directory);
+            match result {
+                Ok(handle) => {
+                    if let Err(error) = monitor.register_windows(handle, path) {
+                        monitor.report_unavailable(error);
+                    }
+                }
+                Err(error) => {
+                    monitor.report_unavailable(format!("notification root unavailable: {error:?}"))
+                }
+            }
+        }
         type DirectoryHandle = WindowsDirectoryHandle;
 
         fn platform_name(&self) -> &'static str {

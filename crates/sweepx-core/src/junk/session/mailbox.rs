@@ -16,6 +16,7 @@ pub(super) struct Mailbox {
     cancel: CancellationToken,
     idle: bool,
     exited: bool,
+    auto_pauses: usize,
 }
 
 pub(super) struct Shared {
@@ -41,6 +42,7 @@ impl Shared {
                 cancel: CancellationToken::new(),
                 idle: false,
                 exited: false,
+                auto_pauses: 0,
             }),
             available: Condvar::new(),
             space: Condvar::new(),
@@ -114,6 +116,7 @@ impl Shared {
             return Err(JunkSessionControlError::Closed);
         }
         if !state.idle
+            || state.auto_pauses > 0
             || state.job.is_some()
             || !state.queue.is_empty()
             || state.progress.is_some()
@@ -134,6 +137,7 @@ impl Shared {
         state.job = Some(Job {
             revision,
             selected: (!keys.is_empty()).then_some(keys),
+            paths: None,
             cancel: state.cancel.clone(),
         });
         state.idle = false;
@@ -154,6 +158,88 @@ impl Shared {
                 .wait(state)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+    pub fn suspend_auto_refresh(
+        self: &Arc<Self>,
+    ) -> Result<JunkAutoRefreshPause, JunkSessionControlError> {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(JunkSessionControlError::Closed);
+        }
+        if !state.idle
+            || state.job.is_some()
+            || !state.queue.is_empty()
+            || state.progress.is_some()
+            || state.statistics.is_some()
+            || state.terminal.is_some()
+        {
+            return Err(JunkSessionControlError::Busy);
+        }
+        if state.auto_pauses >= 4 {
+            return Err(JunkSessionControlError::ResourceLimit);
+        }
+        state.auto_pauses += 1;
+        Ok(JunkAutoRefreshPause {
+            _lease: Arc::new(AutoRefreshLease(Arc::clone(self))),
+        })
+    }
+    pub fn release_auto_pause(&self) {
+        let mut state = self.lock();
+        state.auto_pauses = state.auto_pauses.saturating_sub(1);
+        self.available.notify_all();
+    }
+    /// Timed worker wait permits native changes to trigger work while retaining the existing
+    /// mailbox admission barrier: no revision can overtake an undrained terminal or result.
+    pub fn next_job_timeout(&self, timeout: Duration) -> Option<Job> {
+        let mut state = self.lock();
+        if !state.closed && state.job.is_none() {
+            state = self
+                .available
+                .wait_timeout(state, timeout)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        state.job.take()
+    }
+
+    pub fn watch_job(
+        &self,
+        monitor: &sweepx_platform::change_monitor::ChangeMonitor,
+    ) -> Option<(Job, Option<String>)> {
+        let mut state = self.lock();
+        if state.closed
+            || !state.idle
+            || state.auto_pauses > 0
+            || state.job.is_some()
+            || !state.queue.is_empty()
+            || state.progress.is_some()
+            || state.statistics.is_some()
+            || state.terminal.is_some()
+            || state.cancel.is_cancelled()
+        {
+            return None;
+        }
+        let changes = monitor.drain_ready()?;
+        let scope_cost = changes.directories.iter().fold(512usize, |sum, path| {
+            sum.saturating_add(path.capacity())
+                .saturating_add(std::mem::size_of::<PathBuf>())
+        });
+        let full_scan = changes.full_scan
+            || changes.directories.len() > 256
+            || scope_cost > self.limits.max_event_bytes;
+        let revision = JunkSessionRevision(state.revision.0.checked_add(1)?);
+        state.revision = revision;
+        state.cancel = CancellationToken::new();
+        state.idle = false;
+        Some((
+            Job {
+                revision,
+                selected: None,
+                paths: (!full_scan).then_some(changes.directories),
+                cancel: state.cancel.clone(),
+            },
+            changes.unavailable,
+        ))
     }
     pub fn close(&self) {
         let mut state = self.lock();
@@ -352,6 +438,12 @@ fn event_cost(kind: &JunkSessionEventKind) -> usize {
         } => keys
             .len()
             .saturating_mul(std::mem::size_of::<JunkCandidateKey>()),
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::Directories(paths),
+        } => paths.iter().fold(
+            paths.len().saturating_mul(std::mem::size_of::<PathBuf>()),
+            |bytes, path| bytes.saturating_add(path.capacity()),
+        ),
         JunkSessionEventKind::Candidate { row, .. } => row.cost(),
         JunkSessionEventKind::Progress { path, .. } => path.capacity(),
         JunkSessionEventKind::DirectoryStatistics { path, aggregate } => path
@@ -364,9 +456,9 @@ fn event_cost(kind: &JunkSessionEventKind) -> usize {
             .capacity()
             .saturating_add(boundary.detail.capacity())
             .saturating_add(std::mem::size_of::<sweepx_platform::BoundaryRecord>()),
-        JunkSessionEventKind::Error(failure) | JunkSessionEventKind::CacheWarning(failure) => {
-            failure.detail.capacity()
-        }
+        JunkSessionEventKind::Error(failure)
+        | JunkSessionEventKind::CacheWarning(failure)
+        | JunkSessionEventKind::WatchWarning(failure) => failure.detail.capacity(),
         _ => 0,
     })
 }

@@ -30,7 +30,7 @@
 - 三平台垃圾 TUI 可以先展示历史结果。历史行不能作为当前事实或回收授权。
 - 当前垃圾结果每次都现场遍历目录、规则标记和候选。旧的整根候选回放已撤回；空事件历史不能证明整棵树没有刚发生的变化。
 - 默认三平台垃圾报告与 TUI 使用当前原生文件长度，关闭可选文件索引保留；macOS 还移除默认索引读写/FSEvents 查询。Linux 使用相对父描述符的 statx，Windows 使用当前目录批次。每文件逻辑累计不再复制祖先路径列表。普通 scan、大文件、重复内容与完整文件观察不走该捷径。
-- 独立 library `SubtreeCacheProvider` 仍可集中查询 FSEvents 历史并确认本批文件类型、长度。它是兼容的一次性查询，尚无持续订阅或事件触发局部重扫；`status --watch` 仍只是已有状态回放。三平台继续现场观察。
+- 独立 library `SubtreeCacheProvider` 仍可集中查询 FSEvents 历史并确认本批文件类型、长度。它是兼容的一次性查询；`junk --tui` 现在另有持续原生订阅与事件触发局部重扫，见[实现与验收](scanner-and-cache.md#live-directory-refresh)；`status --watch` 仍只是已有状态回放。三平台继续现场观察。
 - 历史首屏与选中刷新后的候选片段合并继续可用，未刷新的兄弟与祖先统计保持历史。`rootCacheHits=0` 有意保留；`rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，不能把移除索引工作解释成整根跳过。完整流程提速仍需配对测量。
 
 以下测量日期、构建、范围不同，不能直接互相比倍数。
@@ -122,3 +122,13 @@ Linux 垃圾扫描的合格普通文件改为一次相对保留父描述符的 n
 新增原生 scanner oracle 对照普通目录遍历与完整文件观察，覆盖改长、删除、新增、文件转目录和硬链接计数；Windows CI 的 native scan-stack 已增加 scanner crate。本机为 macOS，没有可运行的 Linux/Windows 宿主、虚拟机或模拟器，因此 Linux/Windows 原生行为、MSVC/provider 和冷热耗时均未实测；GNU 交叉检查只证明选定代码分支可以编译。前一轮 macOS 2.59 倍测量属于前一轮负载，不能声称本轮其他平台取得该加速。R2/R4 的完整平台与性能验收继续保留。
 
 本轮 macOS 工作区全 features 测试及最终 platform/scanner 测试通过，无显式 skip，4 个 opt-in 基准默认 ignored；工作区及最终受影响 crate 的全 target/features Clippy、Linux GNU/Windows GNU 工作区交叉 Clippy、格式、文档、41 个脚本测试及 CI YAML 检查通过。Linux 最终增加当前批次的非文件类型提示，减少目录/链接上多余的 statx 探测，未知类型仍现场查询；更新后重复 Linux 工作区交叉检查，未将编译结果升级为 native 运行资格。Windows 版基准脚本的默认二进制使用 `sweepx.exe`，可在实际宿主运行同一普通遍历 oracle 基准。
+
+## 2026-10-07 持续监听与局部刷新交付
+
+交互垃圾会话现将 macOS FSEvents、Linux inotify 和 Windows ReadDirectoryChangesW 接到原有局部分类扫描。它会发现新增候选、完整确认删除后撤下旧行，保留扫描期间再次写入的事件；无关兄弟不递归。根替换、通知溢出或丢失完整回退；永久监听失败显式停用自动刷新。`c` 暂停自动刷新，手动刷新恢复；Trash/隔离持有共享暂停 lease，关闭在 worker 上回收监听资源。未观察祖先仍历史，一次性垃圾报告仍完整扫描，没有跨进程 daemon 或整棵树缓存回放资格。范围与预算见[当前实现](scanner-and-cache.md#live-directory-refresh)。
+
+[2026-10-07 验证记录](live-directory-refresh-validation-2026-10-07.json)包括 macOS 真正的修改、扫描中再写入、删除、新建、根替换、取消/恢复和退出验收；逐文件数据与普通 read_dir/symlink_metadata 对照。Linux/Windows GNU 交叉检查覆盖实现和测试，尚未在两平台运行，因此不能当作原生事件或性能验收。独立 Linux 临时对象与新发现范围之外的系统根仍需全量刷新。
+
+同日在 arm64 macOS 26.5.2、Apple M2 Pro、Rust 1.98.0 release 上，以 16 个项目共 8,208 个构建文件、仅一个 target 目录变化作 5 组交替顺序配对。完整刷新观察 8,256 项，目录刷新观察 516 项，无关兄弟 payload 观察为 0；每组合并候选路径和逻辑字节都等于独立普通遍历。worker revision 中位数从 176.9 ms 降至 31.6 ms，减少 82.1%（约 5.59 倍）。计时含规则、遍历、格式/Git、替换及 mailbox 消费，不含通知投递、合并等待或夹具创建/清理；会话已有内存候选，未用持久 SweepX 缓存，OS cache 与宿主活动未控制。该局部刷新测量不能代表端到端事件延迟、其他平台、全量刷新或 p95/p99，也未满足完整发布性能矩阵。
+
+最终工作区 all-features 测试、受影响 crate/工作区 Clippy、platform 无 backend features 的 Clippy、Linux/Windows GNU 工作区交叉 Clippy、格式、文档检查与 41 个脚本测试通过。5 个 opt-in 基准在工作区默认 ignored，本轮目录刷新基准另外显式运行；无测试排除。首次整批 180 s 总时限在已通过相关原生测试后的 TUI 阶段耗尽，单独 TUI 95 项通过后，以覆盖已测阶段的 300 s 总预算串行重跑整批通过，未改断言或跳过测试。Linux/Windows 原生运行与 MSVC 缺口仍保留。

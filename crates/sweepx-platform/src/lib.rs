@@ -37,6 +37,8 @@ use sweepx_model::{
 };
 use thiserror::Error;
 
+/// Persistent, bounded advisory notifications for interactive scan sessions.
+pub mod change_monitor;
 /// Bounded, handle-relative content streams for explicit content analyses.
 pub mod content;
 /// Nonblocking native I/O admission shared by scanning and private storage.
@@ -1133,6 +1135,19 @@ pub trait PlatformScanner: Send + Sync {
         root: &ScanRoot,
         cancel: &CancellationToken,
     ) -> Result<RootAdmission<Self::DirectoryHandle>, PlatformError>;
+
+    /// Registers an admitted directory before traversal with a session's advisory listener.
+    /// Native backends use the retained handle where the OS permits it; no display-path reopen
+    /// may grant scan authority. Failure disables automatic refresh, not ordinary traversal.
+    fn monitor_directory(
+        &self,
+        _directory: &Self::DirectoryHandle,
+        _path: &Path,
+        _root: bool,
+        monitor: &change_monitor::ChangeMonitor,
+    ) {
+        monitor.report_unavailable("backend cannot register directory notifications");
+    }
 
     fn enumerate_children(
         &self,

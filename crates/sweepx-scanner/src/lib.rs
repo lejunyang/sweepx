@@ -1198,6 +1198,7 @@ impl ScanSink for CollectingScanSink<'_> {
 pub struct Scanner<P> {
     platform: P,
     options: ScannerOptions,
+    monitor: Option<Arc<sweepx_platform::change_monitor::ChangeMonitor>>,
 }
 
 #[derive(Debug)]
@@ -1637,7 +1638,21 @@ where
     P: PlatformScanner,
 {
     pub fn new(platform: P, options: ScannerOptions) -> Self {
-        Self { platform, options }
+        Self {
+            platform,
+            options,
+            monitor: None,
+        }
+    }
+
+    /// Attaches a session's advisory listener. Directories are registered from retained native
+    /// handles before enumeration; listener failure never weakens ordinary scan boundaries.
+    pub fn with_change_monitor(
+        mut self,
+        monitor: Arc<sweepx_platform::change_monitor::ChangeMonitor>,
+    ) -> Self {
+        self.monitor = Some(monitor);
+        self
     }
 
     pub fn scan(
@@ -2035,6 +2050,13 @@ where
             directory,
         } = admission;
         let root_path = root.path().to_path_buf();
+
+        if let Some(monitor) = &self.monitor
+            && monitor.is_available()
+        {
+            self.platform
+                .monitor_directory(&directory, &root_path, true, monitor);
+        }
 
         // Logical-length reuse has no current allocation or file identity observation to
         // deliver. File analyses request the ordinary backend inspection, never fabricated
@@ -2583,6 +2605,16 @@ where
                                 sink.push_entry(&root_path, scanned)?;
                                 if !descend {
                                     continue;
+                                }
+                                if let Some(monitor) = &self.monitor
+                                    && monitor.is_available()
+                                {
+                                    self.platform.monitor_directory(
+                                        &opened.handle,
+                                        &metadata.path,
+                                        false,
+                                        monitor,
+                                    );
                                 }
                                 directory_states
                                     .entry(metadata.path.clone())

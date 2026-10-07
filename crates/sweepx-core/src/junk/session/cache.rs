@@ -139,7 +139,8 @@ impl Worker {
             }
             Some(Some(paths)) => Some(paths),
             None => None,
-        };
+        }
+        .or_else(|| job.paths.clone());
         let mut budget = GroupingBudget::new(DEFAULT_GROUPING_BYTES);
         let prepared = RootScope::new(&self.scan_roots, &mut budget).and_then(|scope| {
             let sources = group_sources(&scope, &scanned.observed_roots, &mut budget, &job.cancel)?;
@@ -416,6 +417,11 @@ mod tests {
             current: Rows::new(),
             presentations: PresentationIndex::default(),
             scan_roots: vec![root.to_path_buf()],
+            monitor: None,
+            watch_disabled: false,
+            watch_warning: None,
+            watch_roots: Vec::new(),
+            watch_checked: std::time::Instant::now(),
         }
     }
 
@@ -450,6 +456,7 @@ mod tests {
         Job {
             revision: JunkSessionRevision(1),
             selected: None,
+            paths: None,
             cancel: CancellationToken::new(),
         }
     }

@@ -8,8 +8,9 @@
 //!
 //! FSEvents is a notification daemon delivered on a `CFRunLoop`, so a one-shot historical query
 //! means creating a stream, briefly spinning a run loop to drain it, and tearing everything down.
-//! All pointers are released and nothing outlives the function that created them. Failures always
-//! degrade to "rescan" in the caller. Completeness here describes the delivered historical
+//! That query releases its pointers before returning. The separate live listener owns a stream
+//! on its run-loop thread across revisions and tears it down before that thread exits. Failures
+//! request fresh scanning in the caller. Completeness here describes the delivered historical
 //! batch, not an atomic observation barrier or a guarantee that the tree is unchanged now.
 
 #![cfg(target_os = "macos")]
@@ -17,6 +18,196 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Starts one live stream on its owning run-loop thread. The cursor is captured before startup
+/// and traversal. A successful handshake proves installation, not an unchanged-tree barrier.
+pub(crate) fn start_live(
+    roots: &[std::path::PathBuf],
+    queue: std::sync::Arc<crate::change_monitor::ChangeQueue>,
+    stop: crate::CancellationToken,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    validate_query_roots(&roots.iter().map(|p| p.as_path()).collect::<Vec<_>>())?;
+    let roots = roots.to_vec();
+    let since = current_event_id();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let startup_stop = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("sweepx-fsevents-live".into())
+        .spawn(move || {
+            let _exit =
+                crate::change_monitor::ListenerExit(std::sync::Arc::clone(&queue), stop.clone());
+            let result = run_live(&roots, since, &queue, &stop, ready_tx);
+            if let Err(error) = result {
+                queue.fail(error);
+            }
+        })?;
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(thread),
+        Ok(Err(detail)) => {
+            startup_stop.cancel();
+            let _ = thread.join();
+            Err(std::io::Error::other(detail))
+        }
+        Err(error) => {
+            startup_stop.cancel();
+            Err(std::io::Error::other(format!(
+                "FSEvents startup handshake: {error}"
+            )))
+        }
+    }
+}
+
+fn run_live(
+    roots: &[std::path::PathBuf],
+    since: EventId,
+    queue: &crate::change_monitor::ChangeQueue,
+    stop: &crate::CancellationToken,
+    ready: std::sync::mpsc::SyncSender<Result<(), String>>,
+) -> std::io::Result<()> {
+    let _lease = match crate::native_handles::HandleLease::acquire_io() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+    };
+    let mut strings = Vec::with_capacity(roots.len());
+    for root in roots {
+        let bytes = root.as_os_str().as_encoded_bytes();
+        // SAFETY: validated UTF-8 roots and initialized slices; CF owns its copied strings.
+        let string = unsafe {
+            CFStringCreateWithBytes(
+                kCFAllocatorDefault,
+                bytes.as_ptr(),
+                bytes.len() as CFIndex,
+                CF_STRING_ENCODING_UTF8,
+                0,
+            )
+        };
+        if string.is_null() {
+            release_strings(&strings);
+            let _ = ready.send(Err("FSEvents path allocation failed".into()));
+            return Err(std::io::Error::other("FSEvents path allocation failed"));
+        }
+        strings.push(string);
+    }
+    let array = unsafe {
+        CFArrayCreate(
+            kCFAllocatorDefault,
+            strings.as_ptr(),
+            strings.len() as CFIndex,
+            &kCFTypeArrayCallBacks,
+        )
+    };
+    if array.is_null() {
+        release_strings(&strings);
+        let _ = ready.send(Err("FSEvents root array allocation failed".into()));
+        return Err(std::io::Error::other(
+            "FSEvents root array allocation failed",
+        ));
+    }
+    let mut context = FSEventStreamContext {
+        version: 0,
+        info: (queue as *const crate::change_monitor::ChangeQueue)
+            .cast_mut()
+            .cast(),
+        retain: None,
+        release: None,
+        copy_description: None,
+    };
+    // WatchRoot reports ancestor/root renames as gaps. No IgnoreSelf: our own modifications and
+    // delayed setup events must be retained. The stream survives all scan revisions in the session.
+    let stream = unsafe {
+        FSEventStreamCreate(
+            kCFAllocatorDefault,
+            live_callback,
+            &mut context,
+            array,
+            since,
+            0.1,
+            CREATE_FLAG_NO_DEFER | CREATE_FLAG_FILE_EVENTS | 0x4,
+        )
+    };
+    unsafe {
+        CFRelease(array);
+    }
+    release_strings(&strings);
+    if stream.is_null() {
+        let _ = ready.send(Err("FSEventStreamCreate returned null".into()));
+        return Err(std::io::Error::other("FSEventStreamCreate returned null"));
+    }
+    // SAFETY: native pointers stay on this thread; queue outlives invalidation and release.
+    unsafe {
+        FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    }
+    if unsafe { FSEventStreamStart(stream) } == 0 {
+        unsafe {
+            FSEventStreamInvalidate(stream);
+            FSEventStreamRelease(stream);
+        }
+        let _ = ready.send(Err("FSEventStreamStart failed".into()));
+        return Err(std::io::Error::other("FSEventStreamStart failed"));
+    }
+    let _ = ready.send(Ok(()));
+    while !stop.is_cancelled() {
+        unsafe {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1);
+        }
+    }
+    // Native callback ownership ends before returning and dropping its shared queue.
+    unsafe {
+        FSEventStreamStop(stream);
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
+    }
+    Ok(())
+}
+
+extern "C" fn live_callback(
+    _stream: ConstFSEventStreamRef,
+    info: *mut c_void,
+    count: usize,
+    event_paths: *mut c_void,
+    flags: *const u32,
+    ids: *const u64,
+) {
+    if info.is_null() {
+        return;
+    }
+    // SAFETY: run_live's borrowed queue stays alive until stream teardown on this same thread.
+    let queue = unsafe { &*info.cast::<crate::change_monitor::ChangeQueue>() };
+    if event_paths.is_null() || flags.is_null() || ids.is_null() {
+        queue.gap();
+        return;
+    }
+    let paths = event_paths as *const *const c_char;
+    for index in 0..count {
+        let (path, flags) = unsafe { (*paths.add(index), *flags.add(index)) };
+        if flags
+            & (FLAG_MUST_SCAN_SUBDIRS
+                | FLAG_USER_DROPPED
+                | FLAG_KERNEL_DROPPED
+                | FLAG_IDS_WRAPPED
+                | FLAG_ROOT_CHANGED
+                | FLAG_MOUNT
+                | FLAG_UNMOUNT)
+            != 0
+        {
+            queue.gap();
+        } else if flags & FLAG_HISTORY_DONE != 0 {
+            // HistoryDone is not a freshness barrier; keep the stream running for live delivery.
+        } else if path.is_null() {
+            queue.gap();
+        } else {
+            // SAFETY: FSEvents owns this terminated string during the callback. Non-UTF-8 paths
+            // cannot be represented by this framework contract and therefore force a full scan.
+            match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(path) => queue.changed_path(Path::new(path)),
+                Err(_) => queue.gap(),
+            }
+        }
+    }
+}
 
 /// FSEvents event identifier; per volume, monotonic, `u64`.
 pub type EventId = u64;

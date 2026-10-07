@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
 use sweepx_core::CancellationToken;
 use sweepx_core::junk::session::{
-    JunkCandidateKey, JunkSession, JunkSessionCandidate, JunkSessionCandidateState,
-    JunkSessionEventKind, JunkSessionOutcome, JunkSessionPhase, JunkSessionRequest,
-    JunkSessionScope,
+    JunkAutoRefreshPause, JunkCandidateKey, JunkSession, JunkSessionCandidate,
+    JunkSessionCandidateState, JunkSessionEventKind, JunkSessionOutcome, JunkSessionPhase,
+    JunkSessionRequest, JunkSessionScope,
 };
 use sweepx_i18n::Locale;
 use sweepx_model::{ByteValue, HumanSizeUnit, ScanSort};
@@ -42,6 +42,7 @@ pub(crate) fn run(
     if let Some(root) = cache_state_root {
         request.set_state_cache(root);
     }
+    request.watch = true;
     let session = match JunkSession::start(request) {
         Ok(session) => session,
         Err(error) => {
@@ -168,6 +169,7 @@ struct Provider {
     retained: usize,
     rejected: bool,
     trash: Option<Receiver<(String, Result<(), String>)>>,
+    auto_pause: Option<JunkAutoRefreshPause>,
     trash_cancel: CancellationToken,
     pending: VecDeque<JunkEvent>,
     closed: bool,
@@ -213,6 +215,7 @@ impl Provider {
             retained: 0,
             rejected: false,
             trash: None,
+            auto_pause: None,
             trash_cancel: CancellationToken::new(),
             pending: VecDeque::new(),
             closed: false,
@@ -353,6 +356,18 @@ impl Provider {
                 self.rejected = false;
                 let keys = match scope {
                     JunkSessionScope::All => None,
+                    JunkSessionScope::Directories(paths) => Some(
+                        self.rows
+                            .iter()
+                            .filter(|(_, row)| {
+                                row.row.directory_aggregate().is_some()
+                                    && row.row.observed_native_path().is_some_and(|path| {
+                                        paths.iter().any(|parent| path.starts_with(parent))
+                                    })
+                            })
+                            .map(|(key, _)| key.clone())
+                            .collect(),
+                    ),
                     JunkSessionScope::Selected(keys) => {
                         let paths: Vec<_> = keys
                             .iter()
@@ -438,7 +453,9 @@ impl Provider {
                     message: format!("{}: {}", boundary.path.display(), boundary.detail),
                 });
             }
-            JunkSessionEventKind::Error(error) | JunkSessionEventKind::CacheWarning(error) => {
+            JunkSessionEventKind::Error(error)
+            | JunkSessionEventKind::CacheWarning(error)
+            | JunkSessionEventKind::WatchWarning(error) => {
                 return Some(JunkEvent::Error {
                     revision,
                     message: format!("{}: {}", error.code, error.detail),
@@ -501,6 +518,7 @@ impl Provider {
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.trash = None;
+                self.auto_pause = None;
                 None
             }
         }
@@ -617,6 +635,11 @@ impl JunkProvider for Provider {
         }) {
             return Err("selection overlaps; select the ancestor or its descendants".into());
         }
+        let pause = self
+            .session
+            .suspend_auto_refresh()
+            .map_err(|error| error.to_string())?;
+        let native_pause = pause.clone();
         let permit = mutation_permit()?;
         let (sender, receiver) = sync_channel(1);
         self.trash_cancel = CancellationToken::new();
@@ -625,6 +648,7 @@ impl JunkProvider for Provider {
             .name("sweepx-junk-trash".into())
             .spawn(move || {
                 let _permit = permit;
+                let _pause = native_pause;
                 for row in &rows {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         crate::trash_command::trash_session_candidate(&row.row, &cancel)
@@ -637,6 +661,7 @@ impl JunkProvider for Provider {
             })
             .map_err(|error| error.to_string())?;
         self.trash = Some(receiver);
+        self.auto_pause = Some(pause);
         Ok(())
     }
     fn close(&mut self) {
@@ -645,6 +670,7 @@ impl JunkProvider for Provider {
             self.session.close();
             self.trash_cancel.cancel();
             self.trash = None;
+            self.auto_pause = None;
             self.rows.clear();
             self.historical.clear();
             self.pending = VecDeque::new();
@@ -677,15 +703,21 @@ impl JunkProvider for Provider {
             .quarantine_operation
             .checked_add(1)
             .ok_or("quarantine operation IDs exhausted")?;
+        let pause = self
+            .session
+            .suspend_auto_refresh()
+            .map_err(|error| error.to_string())?;
         let worker = quarantine::Worker::start(
             operation,
             rows,
             self.quarantine_base.clone(),
             self.complete,
+            pause.clone(),
         )?;
         self.quarantine_operation = operation;
         self.quarantine_keys = keys.to_vec();
         self.quarantine = Some(worker);
+        self.auto_pause = Some(pause);
         Ok(operation)
     }
     #[cfg(target_os = "linux")]
@@ -705,6 +737,7 @@ impl JunkProvider for Provider {
             if !worker.confirmed {
                 self.quarantine = None;
                 self.quarantine_keys.clear();
+                self.auto_pause = None;
             }
         }
     }

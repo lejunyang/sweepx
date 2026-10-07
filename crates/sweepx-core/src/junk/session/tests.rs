@@ -142,6 +142,11 @@ fn controlled_worker(root: &Path) -> Worker {
         current: Rows::new(),
         presentations: PresentationIndex::default(),
         scan_roots: Vec::new(),
+        monitor: None,
+        watch_disabled: false,
+        watch_warning: None,
+        watch_roots: Vec::new(),
+        watch_checked: std::time::Instant::now(),
     }
 }
 
@@ -150,10 +155,20 @@ fn controlled_revision(
     revision: u64,
     selected: Option<Vec<JunkCandidateKey>>,
 ) -> Vec<JunkSessionEvent> {
+    controlled_scope_revision(worker, revision, selected, None)
+}
+
+fn controlled_scope_revision(
+    worker: &mut Worker,
+    revision: u64,
+    selected: Option<Vec<JunkCandidateKey>>,
+    paths: Option<Vec<PathBuf>>,
+) -> Vec<JunkSessionEvent> {
     let shared = Arc::new(Shared::new(worker.request.limits));
     let job = Job {
         revision: JunkSessionRevision(revision),
         selected,
+        paths,
         cancel: shared.cancel_token(),
     };
     let session = JunkSession {
@@ -195,6 +210,7 @@ fn cancelled_published_base_is_removed_by_a_complete_native_refresh() {
     let job = Job {
         revision: JunkSessionRevision(1),
         selected: None,
+        paths: None,
         cancel: shared.cancel_token(),
     };
     let session = JunkSession {
@@ -628,6 +644,11 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
         current: Rows::new(),
         presentations: PresentationIndex::default(),
         scan_roots: Vec::new(),
+        monitor: None,
+        watch_disabled: false,
+        watch_warning: None,
+        watch_roots: Vec::new(),
+        watch_checked: std::time::Instant::now(),
     };
     let run = |worker: &mut Worker, revision, root: PathBuf| {
         // Inject only discovery inventory; native traversal, interpretation, cache publication
@@ -636,6 +657,7 @@ fn system_refresh_rediscovers_scope_and_restores_only_newly_discovered_history()
         let job = Job {
             revision: JunkSessionRevision(revision),
             selected: None,
+            paths: None,
             cancel: CancellationToken::new(),
         };
         let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
@@ -2259,6 +2281,7 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
     let job = Job {
         revision: JunkSessionRevision(1),
         selected: None,
+        paths: None,
         cancel: CancellationToken::new(),
     };
     let mut writer = Writer::new(Arc::clone(&shared), job.revision, job.cancel.clone());
@@ -2268,6 +2291,11 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
         current: Rows::new(),
         presentations: PresentationIndex::default(),
         scan_roots: Vec::new(),
+        monitor: None,
+        watch_disabled: false,
+        watch_warning: None,
+        watch_roots: Vec::new(),
+        watch_checked: std::time::Instant::now(),
     };
     worker
         .run_with_discovery(&job, &mut writer, |_| {
@@ -2321,4 +2349,438 @@ fn incomplete_tool_discovery_keeps_positive_rows_and_partial_terminal_state() {
     );
     assert_eq!(fs::read(target.join("payload")).unwrap(), b"positive-row");
     session.close();
+}
+
+#[test]
+fn changed_directory_scopes_find_new_candidates_and_remove_deleted_ones_without_sibling_walks() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let a = project(&root, "a", b"original");
+    let b = project(&root, "b", b"unrelated");
+    let mut worker = controlled_worker(&root);
+    let first = controlled_revision(&mut worker, 1, None);
+    let initial = current(&first);
+    let a_key = *initial
+        .iter()
+        .find(|(_, row)| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap()
+        .0;
+    let b_key = *initial
+        .iter()
+        .find(|(_, row)| row.observed_native_path().as_ref() == Some(&b))
+        .unwrap()
+        .0;
+    let b_scan = worker.current[&b_key]
+        .candidate
+        .source_entry
+        .as_ref()
+        .unwrap()
+        .scan_id
+        .clone();
+    let observed = Arc::new(Mutex::new(BTreeSet::new()));
+    let record = Arc::clone(&observed);
+    worker.presentations.observe_path = Some(Box::new(move |path| {
+        record.lock().unwrap().insert(path.to_path_buf());
+    }));
+    fs::write(a.join("payload"), vec![0; 4097]).unwrap();
+    let modified = controlled_scope_revision(&mut worker, 2, None, Some(vec![a.clone()]));
+    let oracle: u128 = fs::read_dir(&a)
+        .unwrap()
+        .map(|e| u128::from(fs::symlink_metadata(e.unwrap().path()).unwrap().len()))
+        .sum();
+    assert_eq!(
+        worker.current[&a_key].logical_bytes(),
+        &sweepx_platform::known_u128(oracle)
+    );
+    assert_eq!(
+        worker.current[&b_key]
+            .candidate
+            .source_entry
+            .as_ref()
+            .unwrap()
+            .scan_id,
+        b_scan
+    );
+    assert!(!modified.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Progress { path, .. } if path.starts_with(&b) && path != &b)));
+
+    assert!(observed.lock().unwrap().contains(&a.join("payload")));
+    assert!(
+        !observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.starts_with(&b) && path != &b),
+        "all native progress callbacks must omit sibling payloads"
+    );
+    fs::remove_dir_all(&a).unwrap();
+    let removed = controlled_scope_revision(&mut worker, 3, None, Some(vec![root.join("a")]));
+    assert!(
+        removed.iter().any(
+            |event| matches!(event.kind, JunkSessionEventKind::Removed { key } if key == a_key)
+        )
+    );
+    assert!(!worker.current.contains_key(&a_key));
+    fs::create_dir(&a).unwrap();
+    fs::write(a.join("new-payload"), b"new current bytes").unwrap();
+    let added = controlled_scope_revision(&mut worker, 4, None, Some(vec![root.join("a")]));
+    let rows = current(&added);
+    let row = rows
+        .values()
+        .find(|row| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap();
+    let oracle: u128 = fs::read_dir(&a)
+        .unwrap()
+        .map(|e| u128::from(fs::symlink_metadata(e.unwrap().path()).unwrap().len()))
+        .sum();
+    assert_eq!(row.logical_bytes(), &sweepx_platform::known_u128(oracle));
+    assert!(row.complete());
+    assert_eq!(
+        worker.current[&b_key]
+            .candidate
+            .source_entry
+            .as_ref()
+            .unwrap()
+            .scan_id,
+        b_scan
+    );
+}
+
+fn settle_live_watch(session: &JunkSession, mut revision: u64) -> u64 {
+    // Account for asynchronous fixture-creation events by draining every real revision until
+    // delivery is quiet. No production filter discards these events or advances a post-scan cursor.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut completed = true;
+
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "fixture notifications did not settle"
+        );
+        match session.next_event_timeout(Duration::from_secs(1)).unwrap() {
+            None if completed => return revision,
+            Some(event) => {
+                revision = event.revision.get();
+                completed = matches!(event.kind, JunkSessionEventKind::Completed { .. });
+                assert!(
+                    !matches!(event.kind, JunkSessionEventKind::WatchWarning(_)),
+                    "{event:?}"
+                );
+            }
+            None => {}
+        }
+    }
+}
+
+#[test]
+fn native_watch_refreshes_live_changes_and_releases_listeners_on_session_close() {
+    let _serial = SESSION_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture).join("observed");
+    fs::create_dir(&root).unwrap();
+    let a = project(&root, "a", b"original");
+    let b = project(&root, "b", b"unrelated");
+    let mut request = JunkSessionRequest::new(vec![root.clone()]);
+    request.watch = true;
+    request.limits.max_events = 1;
+    let session = JunkSession::start(request).unwrap();
+    let first = drain(&session, JunkSessionRevision(1));
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event.kind, JunkSessionEventKind::WatchWarning(_))),
+        "native listener unavailable: {first:?}"
+    );
+    let revision = settle_live_watch(&session, 1);
+    let expected = vec![0; 4097];
+    fs::write(a.join("payload"), &expected).unwrap();
+    fs::File::open(a.join("payload"))
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    let oracle_before: u128 = fs::read_dir(&a)
+        .unwrap()
+        .map(|e| u128::from(fs::symlink_metadata(e.unwrap().path()).unwrap().len()))
+        .sum();
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut racing_write = false;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "first watched revision did not finish"
+        );
+        if let Some(event) = session
+            .next_event_timeout(Duration::from_millis(100))
+            .unwrap()
+        {
+            assert_eq!(event.revision.get(), revision + 1);
+            if matches!(&event.kind, JunkSessionEventKind::Candidate { state: JunkSessionCandidateState::Base, row, .. } if row.observed_native_path().as_ref() == Some(&a))
+            {
+                // The aggregate has already been observed but this revision has not committed.
+                // A second write must remain pending, never hidden by a scan-end event drain.
+                fs::write(a.join("payload"), vec![0; 8193]).unwrap();
+                fs::File::open(a.join("payload"))
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+                racing_write = true;
+            }
+            let completed = matches!(event.kind, JunkSessionEventKind::Completed { .. });
+            events.push(event);
+            if completed {
+                break;
+            }
+        }
+    }
+    assert!(racing_write);
+    assert!(events.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Started { scope: JunkSessionScope::Directories(paths) } if paths.as_ref() == [a.clone()])));
+    assert!(!events.iter().any(|event| matches!(&event.kind, JunkSessionEventKind::Progress { path, .. } if path.starts_with(&b) && path != &b)));
+    let rows = current(&events);
+    let row = rows
+        .values()
+        .find(|row| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap();
+    assert_eq!(
+        row.logical_bytes(),
+        &sweepx_platform::known_u128(oracle_before)
+    );
+    assert!(row.complete());
+    assert!(matches!(
+        events.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    let second = drain(&session, JunkSessionRevision(revision + 2));
+    let second_rows = current(&second);
+    let second_row = second_rows
+        .values()
+        .find(|row| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap();
+    let oracle: u128 = fs::read_dir(&a)
+        .unwrap()
+        .map(|e| u128::from(fs::symlink_metadata(e.unwrap().path()).unwrap().len()))
+        .sum();
+    assert_eq!(
+        second_row.logical_bytes(),
+        &sweepx_platform::known_u128(oracle)
+    );
+    let old_key = *second_rows
+        .iter()
+        .find(|(_, row)| row.observed_native_path().as_ref() == Some(&a))
+        .unwrap()
+        .0;
+    let revision = settle_live_watch(&session, revision + 2);
+    fs::remove_dir_all(&a).unwrap();
+    let removed = drain(&session, JunkSessionRevision(revision + 1));
+    assert!(removed.iter().any(
+        |event| matches!(event.kind, JunkSessionEventKind::Removed { key } if key == old_key)
+    ));
+    assert!(matches!(
+        removed.last().unwrap().kind,
+        JunkSessionEventKind::Completed {
+            outcome: JunkSessionOutcome::Complete,
+            replaced: true,
+            ..
+        }
+    ));
+    let revision = settle_live_watch(&session, revision + 1);
+    fs::create_dir(&a).unwrap();
+    fs::write(a.join("new"), b"new native payload").unwrap();
+    let added = drain(&session, JunkSessionRevision(revision + 1));
+    assert!(
+        current(&added)
+            .values()
+            .any(|row| row.observed_native_path().as_ref() == Some(&a))
+    );
+    let revision = settle_live_watch(&session, revision + 1);
+    let pause = session.suspend_auto_refresh().unwrap();
+    let moved = root.with_file_name(format!(
+        "{}-moved",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(&root, &moved).unwrap();
+    fs::create_dir(&root).unwrap();
+    let replacement = project(&root, "replacement", b"replacement root bytes");
+    drop(pause);
+    let replaced = drain(&session, JunkSessionRevision(revision + 1));
+    assert!(matches!(
+        replaced[0].kind,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All
+        }
+    ));
+    assert!(
+        current(&replaced)
+            .values()
+            .any(|row| row.observed_native_path().as_ref() == Some(&replacement))
+    );
+    fs::remove_dir_all(moved).unwrap();
+    let revision = settle_live_watch(&session, revision + 1);
+    session.cancel();
+    fs::write(replacement.join("payload"), b"paused listener data").unwrap();
+    assert!(
+        session
+            .next_event_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_none()
+    );
+    let manual = session.refresh_all().unwrap();
+    assert_eq!(manual.get(), revision + 1);
+    let refreshed = drain(&session, manual);
+    assert!(matches!(
+        refreshed[0].kind,
+        JunkSessionEventKind::Started {
+            scope: JunkSessionScope::All
+        }
+    ));
+    session.close();
+    assert!(
+        session
+            .wait_for_worker_exit(Duration::from_secs(5))
+            .unwrap()
+    );
+    assert!(session.try_next_event().is_none());
+}
+
+#[test]
+#[ignore = "opt-in native warm revision benchmark; run with --release and SWEEPX_WATCH_BENCH_OUTPUT"]
+fn benchmark_changed_directory_revision_against_warm_full_revision() {
+    const PROJECTS: usize = 16;
+    const FILES: usize = 512;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture_root(&fixture);
+    let mut targets = Vec::new();
+    for project_index in 0..PROJECTS {
+        let target = project(&root, &format!("project-{project_index:03}"), b"payload");
+        for file_index in 0..FILES {
+            fs::write(
+                target.join(format!("file-{file_index:04}")),
+                vec![0; file_index % 257 + 1],
+            )
+            .unwrap();
+        }
+        targets.push(target);
+    }
+    let oracle = || {
+        targets
+            .iter()
+            .map(|path| {
+                let bytes: u128 = fs::read_dir(path)
+                    .unwrap()
+                    .map(|e| {
+                        let metadata = fs::symlink_metadata(e.unwrap().path()).unwrap();
+                        assert!(metadata.is_file());
+                        u128::from(metadata.len())
+                    })
+                    .sum();
+                (path.clone(), sweepx_platform::known_u128(bytes))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mut worker = controlled_worker(&root);
+    let initial = controlled_revision(&mut worker, 1, None);
+    assert_eq!(current(&initial).len(), PROJECTS);
+    let counts = Arc::new(Mutex::new((0usize, 0usize)));
+    let callback_counts = Arc::clone(&counts);
+    let unrelated = targets[1..].to_vec();
+    worker.presentations.observe_path = Some(Box::new(move |path| {
+        let mut counts = callback_counts.lock().unwrap();
+        counts.0 += 1;
+        if unrelated
+            .iter()
+            .any(|target| path.starts_with(target) && path != target)
+        {
+            counts.1 += 1;
+        }
+    }));
+    let mut revision = 1u64;
+    let mut samples = Vec::new();
+    for round in 0..5 {
+        fs::write(targets[0].join("file-0000"), vec![0; 4096 + round]).unwrap();
+        let expected = oracle();
+        let order = if round % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        let mut timings = serde_json::Map::new();
+        timings.insert("round".into(), serde_json::json!(round));
+        timings.insert(
+            "order".into(),
+            serde_json::json!(if order[0] { "local,full" } else { "full,local" }),
+        );
+        for local in order {
+            *counts.lock().unwrap() = (0, 0);
+            revision += 1;
+            let start = Instant::now();
+            let events = controlled_scope_revision(
+                &mut worker,
+                revision,
+                None,
+                local.then(|| vec![targets[0].clone()]),
+            );
+            let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
+            assert!(matches!(
+                events.last().unwrap().kind,
+                JunkSessionEventKind::Completed {
+                    outcome: JunkSessionOutcome::Complete,
+                    replaced: true,
+                    ..
+                }
+            ));
+            let observed: BTreeMap<_, _> = worker
+                .current
+                .values()
+                .map(|row| {
+                    (
+                        row.observed_native_path().unwrap(),
+                        row.logical_bytes().clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                observed, expected,
+                "merged scope must equal independent ordinary metadata"
+            );
+            let (entries, unrelated_entries) = *counts.lock().unwrap();
+            if local {
+                assert_eq!(unrelated_entries, 0);
+            } else {
+                assert_eq!(unrelated_entries, (PROJECTS - 1) * (FILES + 1));
+            }
+            let label = if local { "local" } else { "full" };
+            timings.insert(
+                format!("{label}Milliseconds"),
+                serde_json::json!(milliseconds),
+            );
+            timings.insert(
+                format!("{label}ObservedEntries"),
+                serde_json::json!(entries),
+            );
+            timings.insert(
+                format!("{label}UnrelatedPayloadEntries"),
+                serde_json::json!(unrelated_entries),
+            );
+        }
+        samples.push(timings);
+    }
+    let result = serde_json::json!({
+        "schema": "sweepx.changed-directory-revision.benchmark/v1",
+        "workload": {"projects": PROJECTS, "artifactFiles": PROJECTS * (FILES + 1), "changedDirectories": 1},
+        "phase": "worker revision including rules, traversal, formats, Git, replacement and mailbox consumption",
+        "build": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "cache": "retained session candidates; no persisted SweepX cache; OS cache uncontrolled",
+        "eventDeliveryAndDebounceIncluded": false,
+        "equivalence": "all merged candidate paths and logical bytes equal independent read_dir plus symlink_metadata on every pair",
+        "samples": samples,
+    });
+    if let Some(output) = std::env::var_os("SWEEPX_WATCH_BENCH_OUTPUT") {
+        fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
+    println!("{result}");
 }

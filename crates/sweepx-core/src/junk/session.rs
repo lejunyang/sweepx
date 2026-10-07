@@ -10,6 +10,7 @@ mod cache;
 mod linux_temp;
 mod mailbox;
 mod presentation;
+mod watch;
 
 use super::candidate::JunkCandidate;
 use super::git::{GitEvidenceLimits, GitEvidenceSession, native_path, native_root_path};
@@ -68,6 +69,9 @@ pub enum JunkSessionScope {
     All,
     /// Native candidate subtrees, identified by keys from this session.
     Selected(Arc<[JunkCandidateKey]>),
+    /// Advisory change scopes, including newly created or deleted candidates. Every directory
+    /// is freshly admitted and observed; these paths never supply native identity or authority.
+    Directories(Arc<[PathBuf]>),
 }
 
 /// Worker phase; traversal completion is not session completion.
@@ -75,7 +79,7 @@ pub enum JunkSessionScope {
 pub enum JunkSessionPhase {
     Rules,
     Discovery,
-    /// Historical preview reads and file-index change-history validation.
+    /// Bounded historical preview reads.
     Cache,
     /// Best-effort publication of freshly observed filesystem facts.
     CacheWrite,
@@ -290,6 +294,8 @@ pub enum JunkSessionEventKind {
     Error(JunkSessionFailure),
     /// Optional cache failure; fresh scan validity is unaffected.
     CacheWarning(JunkSessionFailure),
+    /// Persistent notifications are unavailable; fresh scans and manual refresh remain usable.
+    WatchWarning(JunkSessionFailure),
     /// Final event for the revision, delivered after every queued reliable observation.
     Completed {
         outcome: JunkSessionOutcome,
@@ -361,12 +367,17 @@ pub struct JunkSessionRequest {
     /// Optional host/portable platform rule IDs for system discovery; empty selects all rules.
     /// Narrowing discovery never makes historical rows current or relaxes clean guards.
     pub platform_rule_ids: Vec<String>,
-    /// Optional private Linux/macOS/Windows history directory; filesystem reuse requires macOS
-    /// history. Windows displays historical rows and scans fresh. All cache IO stays on the worker.
+    /// Optional private Linux/macOS/Windows history directory. Previews never become current
+    /// by replay; all cache I/O and fresh native observations stay on the worker.
     pub cache_dir: Option<PathBuf>,
     /// Explicit shared state scope for history writes. Must pair with `<root>/junk-cache`;
     /// None retains the standalone cache API and its local limits.
     pub cache_state_root: Option<PathBuf>,
+    /// Keep native notifications alive across revisions and refresh changed directory scopes.
+    /// Opt-in for API consumers; the interactive junk browser enables it. One-shot reports do not.
+    pub watch: bool,
+    /// Notification queue and native subscription bounds, independent of scan retention.
+    pub watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits,
     /// Storage, traversal and Git bounds.
     pub limits: JunkSessionLimits,
 }
@@ -381,6 +392,8 @@ impl JunkSessionRequest {
             platform_rule_ids: Vec::new(),
             cache_dir: None,
             cache_state_root: None,
+            watch: false,
+            watch_limits: sweepx_platform::change_monitor::ChangeMonitorLimits::default(),
             limits: JunkSessionLimits::default(),
         }
     }
@@ -425,6 +438,19 @@ pub enum JunkSessionControlError {
 /// Drop cancels and closes without blocking on an OS call or joining on the UI thread.
 pub struct JunkSession {
     shared: Arc<Shared>,
+}
+
+/// Holds scan admission while a separately authorized operation uses the completed view.
+/// Clones share one lease; native listeners keep collecting bounded changes for later refresh.
+#[derive(Clone)]
+pub struct JunkAutoRefreshPause {
+    _lease: Arc<AutoRefreshLease>,
+}
+struct AutoRefreshLease(Arc<Shared>);
+impl Drop for AutoRefreshLease {
+    fn drop(&mut self) {
+        self.0.release_auto_pause();
+    }
 }
 
 impl JunkSession {
@@ -493,10 +519,16 @@ impl JunkSession {
                     current: BTreeMap::new(),
                     presentations: PresentationIndex::default(),
                     scan_roots: Vec::new(),
+                    monitor: None,
+                    watch_disabled: false,
+                    watch_warning: None,
+                    watch_roots: Vec::new(),
+                    watch_checked: std::time::Instant::now(),
                 };
                 let mut job = Job {
                     revision: JunkSessionRevision(1),
                     selected: None,
+                    paths: None,
                     cancel: worker_shared.cancel_token(),
                 };
                 loop {
@@ -522,11 +554,12 @@ impl JunkSession {
                             writer.finish(JunkSessionOutcome::Failed, false, 0);
                         }
                     }
-                    let Some(next) = worker_shared.next_job() else {
+                    let Some(next) = worker.next_job(&worker_shared) else {
                         break;
                     };
                     job = next;
                 }
+                worker.stop_monitor();
             })?;
         Ok(Self { shared })
     }
@@ -547,6 +580,13 @@ impl JunkSession {
     /// Stops new native work. Drain reliable events through Completed, or close to discard them.
     pub fn cancel(&self) {
         self.shared.cancel_token().cancel();
+    }
+
+    /// Atomically refuses a pending/running revision or holds further scan admission. Drop the
+    /// returned shared lease after Trash/quarantine and its result reconciliation finish. This
+    /// schedules no mutation, grants no authority, and never discards delivered filesystem changes.
+    pub fn suspend_auto_refresh(&self) -> Result<JunkAutoRefreshPause, JunkSessionControlError> {
+        self.shared.suspend_auto_refresh()
     }
 
     /// Changes ordering only, for an already admitted directory or its admitted ancestor.
@@ -628,6 +668,7 @@ impl Drop for WorkerPermit {
 struct Job {
     revision: JunkSessionRevision,
     selected: Option<Vec<JunkCandidateKey>>,
+    paths: Option<Vec<PathBuf>>,
     cancel: CancellationToken,
 }
 type Rows = BTreeMap<JunkCandidateKey, Arc<JunkSessionCandidate>>;
@@ -641,6 +682,11 @@ struct Worker {
     // Last full discovery scope. Selected refresh preserves original native directory contexts;
     // full system refresh rediscovers roots rather than retaining stale environment answers.
     scan_roots: Vec<PathBuf>,
+    monitor: Option<Arc<sweepx_platform::change_monitor::ChangeMonitor>>,
+    watch_disabled: bool,
+    watch_warning: Option<String>,
+    watch_roots: Vec<watch::WatchRoot>,
+    watch_checked: std::time::Instant,
 }
 
 impl Worker {
@@ -668,7 +714,10 @@ impl Worker {
         writer.send(JunkSessionEventKind::Started {
             scope: match &job.selected {
                 Some(keys) => JunkSessionScope::Selected(keys.clone().into()),
-                None => JunkSessionScope::All,
+                None => match &job.paths {
+                    Some(paths) => JunkSessionScope::Directories(paths.clone().into()),
+                    None => JunkSessionScope::All,
+                },
             },
         })?;
         writer.phase(JunkSessionPhase::Rules)?;
@@ -727,7 +776,7 @@ impl Worker {
             writer.finish(JunkSessionOutcome::Cancelled, false, 0);
             return Ok(());
         }
-        if self.request.system && job.selected.is_none() {
+        if self.request.system && job.selected.is_none() && job.paths.is_none() {
             self.scan_roots = normalize_discovered_roots(discovered_roots)?;
             #[cfg(not(target_os = "linux"))]
             if self.scan_roots.is_empty() {
@@ -781,19 +830,21 @@ impl Worker {
                     })
                     .collect::<Result<Vec<_>, _>>()
             })
-            .transpose()?;
-        let roots = if let Some(rows) = &selected {
+            .transpose()?
+            .or_else(|| job.paths.clone());
+        self.prepare_monitor(job, writer)?;
+        if let Some(paths) = &paths {
             for (key, row) in &self.current {
                 if row.observed_native_path().is_some_and(|parent| {
-                    paths.as_ref().is_some_and(|paths| {
-                        paths
-                            .iter()
-                            .any(|path| path != &parent && path.starts_with(&parent))
-                    })
+                    paths
+                        .iter()
+                        .any(|path| path != &parent && path.starts_with(&parent))
                 }) {
                     writer.send(JunkSessionEventKind::Invalidated { key: *key })?;
                 }
             }
+        }
+        let roots = if let Some(rows) = &selected {
             validate_selected(rows, &job.cancel, self.request.limits.scan)?;
             let roots = rows
                 .iter()
@@ -813,7 +864,15 @@ impl Worker {
                 JunkSessionFailure::new("refresh_binding_unavailable", error.to_string())
             })?
         } else {
-            self.scan_roots.clone()
+            self.scan_roots
+                .iter()
+                .filter(|root| {
+                    paths
+                        .as_ref()
+                        .is_none_or(|paths| paths.iter().any(|path| path.starts_with(root)))
+                })
+                .cloned()
+                .collect()
         };
         let roots = roots
             .into_iter()
@@ -842,7 +901,7 @@ impl Worker {
             rules_digest,
             observed: 0,
         };
-        let scanner = Scanner::new(
+        let mut scanner = Scanner::new(
             HostPlatformScanner::new(),
             ScannerOptions {
                 scan_id: ScanId::new(format!("{}:{}", self.session_id, job.revision.0)),
@@ -854,6 +913,9 @@ impl Worker {
                 ..ScannerOptions::default()
             },
         );
+        if let Some(monitor) = &self.monitor {
+            scanner = scanner.with_change_monitor(Arc::clone(monitor));
+        }
         let classifier = service.with_platform(&platform.rules, &platform.evidence);
         let scanned = if let Some(paths) = &paths {
             scanner.scan_classified_subtrees_with_observer(
@@ -959,6 +1021,7 @@ impl Worker {
         #[cfg(target_os = "linux")]
         if self.request.system
             && job.selected.is_none()
+            && job.paths.is_none()
             && platform
                 .rules
                 .iter()
@@ -1036,6 +1099,10 @@ struct Observer<'a> {
 impl ClassifiedScanObserver for Observer<'_> {
     fn on_progress(&mut self, _: &Path, event: &ProgressEvent) {
         if let ProgressEvent::EntryObserved { path, .. } = event {
+            #[cfg(test)]
+            if let Some(observe) = &mut self.presentations.observe_path {
+                observe(path);
+            }
             self.observed = self.observed.saturating_add(1);
             self.writer.coalesce(JunkSessionEventKind::Progress {
                 observed_entries: self.observed,

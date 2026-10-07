@@ -930,6 +930,15 @@ mod backend {
     }
 
     impl PlatformScanner for MacosPlatformScanner {
+        fn monitor_directory(
+            &self,
+            _directory: &Self::DirectoryHandle,
+            _path: &Path,
+            _root: bool,
+            _monitor: &crate::change_monitor::ChangeMonitor,
+        ) {
+            // The one session stream is installed for all roots before traversal starts.
+        }
         type DirectoryHandle = OpenDirectory;
 
         fn platform_name(&self) -> &'static str {

@@ -675,3 +675,47 @@ fn bridge_refreshes_current_native_evidence_and_refuses_replaced_object_before_t
             .unwrap()
     );
 }
+
+#[test]
+fn changed_directory_scope_marks_existing_descendants_without_affecting_sibling_rows() {
+    let _session_guard = SESSION_FIXTURE_GATE.lock().unwrap();
+    let (_fixture, mut provider, rows) = adapter_fixture();
+    for row in &rows {
+        provider.translate_event(2, candidate_event(row, JunkSessionCandidateState::Current));
+    }
+    provider.historical.clear();
+    let path = rows[0].row.observed_native_path().unwrap();
+    let expected: BTreeSet<_> = provider
+        .rows
+        .iter()
+        .filter(|(_, row)| {
+            row.row
+                .observed_native_path()
+                .is_some_and(|p| p.starts_with(&path))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let event = provider
+        .translate_event(
+            3,
+            JunkSessionEventKind::Started {
+                scope: JunkSessionScope::Directories(vec![path].into()),
+            },
+        )
+        .unwrap();
+    let JunkEvent::Started {
+        keys: Some(keys), ..
+    } = event
+    else {
+        panic!("directory scope must carry existing affected keys");
+    };
+    assert_eq!(keys.into_iter().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(provider.historical, expected);
+    assert!(
+        provider
+            .rows
+            .keys()
+            .any(|key| !provider.historical.contains(key))
+    );
+    stop_adapter_fixture(&mut provider, &rows);
+}

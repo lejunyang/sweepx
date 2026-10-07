@@ -685,6 +685,17 @@ impl LinuxPlatformScanner {
 
 #[cfg(target_os = "linux")]
 impl PlatformScanner for LinuxPlatformScanner {
+    fn monitor_directory(
+        &self,
+        directory: &Self::DirectoryHandle,
+        path: &Path,
+        _root: bool,
+        monitor: &crate::change_monitor::ChangeMonitor,
+    ) {
+        if let Err(error) = monitor.register_fd(directory.fd.as_raw_fd(), path) {
+            monitor.report_unavailable(error);
+        }
+    }
     type DirectoryHandle = LinuxDirectoryHandle;
 
     fn platform_name(&self) -> &'static str {

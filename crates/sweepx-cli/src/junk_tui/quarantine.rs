@@ -30,6 +30,7 @@ impl Worker {
         rows: Vec<Arc<Row>>,
         base: Option<PathBuf>,
         complete: bool,
+        pause: JunkAutoRefreshPause,
     ) -> Result<Self, String> {
         // This is presentation/native-fact selection only. The worker performs independent
         // preview validation, and the original measurement must match even for equal-size swaps.
@@ -68,6 +69,7 @@ impl Worker {
         let (commands, receiver) = sync_channel::<String>(1);
         std::thread::Builder::new().name("sweepx-junk-quarantine".into()).spawn(move || {
             let _permit = permit;
+            let _pause = pause;
             let mut recovery = None;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<WorkerEvent, String> {
                 let preview = quarantine::preview_temp_clean(&inputs, base.as_deref(), complete, &worker_cancel)?;
@@ -228,6 +230,7 @@ impl Provider {
                 failed,
             }) => {
                 self.quarantine = None;
+                self.auto_pause = None;
                 self.confirmed_moves(&moved);
                 self.historical.extend(
                     self.quarantine_keys
@@ -246,6 +249,7 @@ impl Provider {
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
                 self.quarantine = None;
+                self.auto_pause = None;
                 self.historical.extend(
                     std::mem::take(&mut self.quarantine_keys)
                         .into_iter()

@@ -12,9 +12,9 @@
 
 普通 `junk` 报告和垃圾 TUI 使用当前 `getattrlistbulk` 批量枚举给出的普通文件类型、设备和逻辑长度，避免为每个文件重复检查父目录及构造完整文件条目。只有本批原生、no-follow、父名称绑定成立、同设备且长度非负的文件可以走 `observe_file_length`；缺失或旧批次事实回到完整检查。`.git` 继续完整观察，普通 scan、大文件、重复内容及要求文件事实的 observer 沿用原生文件身份与元数据路径。逻辑长度 payload 不提供分配大小、硬链接唯一性、可释放空间或执行授权。
 
-默认 macOS 垃圾入口关闭可选文件索引保留，不再读写该索引或查询 FSEvents；它仍重新遍历全部进入的目录、规则 marker 和候选。逻辑累计沿已有目录状态更新，不再为每文件复制祖先路径列表。候选历史仍可先展示，选中子树完整刷新后只将新候选片段合入原范围历史记录；未刷新兄弟与祖先统计保持历史，不取得本代事实资格。取消、partial 和缓存准入失败保留旧记录。
+默认 macOS 垃圾入口关闭可选文件索引保留，不再读写该索引或为它查询 FSEvents 历史；它仍重新遍历全部进入的目录、规则 marker 和候选。逻辑累计沿已有目录状态更新，不再为每文件复制祖先路径列表。候选历史仍可先展示，选中子树完整刷新后只将新候选片段合入原范围历史记录；未刷新兄弟与祖先统计保持历史，不取得本代事实资格。取消、partial 和缓存准入失败保留旧记录。
 
-独立 library `SubtreeCacheProvider` 继续提供兼容的有界文件索引验证：观察前捕获游标、集中查询历史并对每个复用文件确认当前原生类型和长度。FSEvents 是一次性历史查询，当前没有持续订阅或事件触发局部扫描。[Apple 的 FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)将事件列表视为辅助信息，并说明通知存在不确定延迟。HistoryDone 只结束已投递历史，不能将空列表升级为当前整树未变化的证明；固定等待或 flush 不提供额外的递归元数据覆盖合同。
+独立 library `SubtreeCacheProvider` 继续提供兼容的有界文件索引验证：观察前捕获游标、集中查询历史并对每个复用文件确认当前原生类型和长度。该兼容接口仍使用一次性 FSEvents 历史查询；交互会话另有持续监听与变更触发局部扫描，见下节。[Apple 的 FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)将事件列表视为辅助信息，并说明通知存在不确定延迟。HistoryDone 只结束已投递历史，不能将空列表升级为当前整树未变化的证明；固定等待或 flush 不提供额外的递归元数据覆盖合同。
 
 本次也检查了 APFS 的 `ATTR_CMNEXT_RECURSIVE_GENCOUNT`。[Apple 的 getattrlist 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2)将其限定为已标记 maintain-dir-stats 的目录，未标记返回零。2026-10-07 本机只读探针在现有根均返回零；仅在自建临时夹具启用标记后，嵌套写入、改长和名称变化使计数变化，但 chmod/xattr 与未 flush 的 mmap 写入没有立即改变根计数。[原生探针记录](macos-change-evidence-2026-10-07.json)保留方法、操作序列及环境对照。这是局部观测，不能证明所有权限、内容、挂载与 provider 字段；生产代码不改变用户目录的 APFS 标记，也不据此跳过树。
 
@@ -29,6 +29,18 @@ Linux 保留有界当前批次中的 `readdir` 非文件类型提示，只用它
 Windows 从当前 `NtQueryDirectoryFile(FileIdExtdDirectoryInformation)` 单条记录保存 `EndOfFile`，只有非目录、非 reparse、非设备、非 offline/recall、有效非零 file ID 和非负长度可以提供提示；reparse 包括卷 junction。当前枚举前仍验证保留父目录的对象、类型、卷和 provider 状态。名称按原始 UTF-16 精确匹配，下一批（包括耗尽后的空批次）清除旧提示，路径不能替代父句柄。长度报告不打开文件、不水合内容，也不证明文件 ACL 允许内容读取；完整观察及回收准入仍独立检查当前身份与权限。枚举仍是单条原生查询，此次将 64 KiB scratch 从逐项分配改为每个消费者批次复用一次，不在暂停目录句柄中永久保留。两平台的批次字节准入额外计入所保留的类型/长度提示、名称及身份。[Microsoft 结构合同](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_id_extd_dir_information)定义长度、属性与身份字段。来源访问日期：2026-10-07。
 
 两条路径仅提供当前逻辑长度；物理分配、硬链接唯一性和可释放空间保持 unknown，不建立完整文件身份、原子快照或执行授权。新增跨平台原生 oracle 测试分别与普通目录遍历及请求完整文件事实的扫描对照，覆盖改长、删除、新增、文件转目录和硬链接的逻辑累计；native backend 测试另查链接、缺字段、同设备不同 mount、失效身份、provider 与过期批次。Windows CI 的 native scan-stack 测试已包含 scanner crate，Linux 的工作区测试也会运行该 oracle。[本轮验证记录](portable-file-length-validation-2026-10-07.json)区分 macOS 已运行、GNU 交叉编译及 Linux/Windows 尚未运行的结果；前一轮 macOS 2.59 倍测量不能外推到其他平台。
+
+## 2026-10-07 补充：持续监听与变更目录刷新 {#live-directory-refresh}
+
+`junk --tui` 在 macOS、Linux、Windows 的会话存续期间默认持续监听文件系统变更，自动刷新受影响的目录及必要祖先，不进入无关兄弟子树。监听在遍历前安装；扫描期间的新事件留给下一轮，短时连续变更合并处理。新增或删除的候选也按目录范围发现/撤下，`.git` 内变更扩展到仓库范围。祖先旧总量保持历史，局部结果不宣称整根当前精确。通知丢失、溢出或根身份变化会完整重扫；监听失败提示 `watch_unavailable`，完成一次完整回退后停用自动刷新，手动刷新仍可用。`c` 取消并暂停自动刷新，`r/R` 重新观察后恢复；退出结束监听。回收与 Linux 隔离预览/执行原子持有扫描准入，监听继续积累变更，操作结束再刷新。只监听当前发现的目录根；独立 Linux 临时对象事实仍需全量刷新，新增范围之外的系统根需 `R` 重新发现。一次性 `junk`、普通 `scan`、大文件与重复内容视图不启动常驻监听；本轮没有跨进程后台服务或凭空的整树缓存命中。
+
+platform 的 `ChangeMonitor` 仅产生有界的 advisory 目录失效队列。macOS 只保留一个 FSEvents stream/run-loop worker，启用 FileEvents、NoDefer 与 WatchRoot，观察前捕获 cursor；HistoryDone 不结束持续订阅，也不证明树未变化。Linux 的一个 nonblocking inotify fd 在目录枚举前通过 `/proc/self/fd/<retained-fd>` 绑定已准入对象，故不重开用户路径或递归安装 symlink/mount 外的目录 watch；新增目录由父通知触发扫描后登记。按 descriptor/object 双索引复用登记，删除选择仍存在的父目录；未知 wd、移动映射、unmount 或 overflow 退回全量并重建实例。Windows 用保留根句柄作 volume hint，通过 OpenFileById 按完整对象 ID 获取独立异步句柄，再核对类型/volume/file ID，再启动 `ReadDirectoryChangesW` subtree 订阅。先重新发起通知请求再解析已完成的另一块缓冲；零字节或 ENUM_DIR 请求全量，两个 rename 名称均保留。不根据通知打开文件或水合内容。Windows API 不报告被监听目录自身的变更，因此三平台每秒只重新准入根并比较原生对象/filesystem/mount，发现根替换就完整重扫；该检查不枚举后代。
+
+默认待处理队列最多 256 个目录与 1 MiB 估算，祖先范围吞并后代；worker 可准入时，200 ms 安静窗口合并 burst，持续变化的一秒窗口也可触发调度；繁忙、暂停或未消费终态继续等待。Linux watch 登记另限 65,536 项/16 MiB 估算，Windows 最多 32 个根 worker，每根一个原生目录句柄、一个 event 和两块 32 KiB 缓冲；macOS stream、Linux fd、Windows 目录/event 都先申请共享原生 I/O 名额。框架/内核内部内存与线程栈不在应用保留估算内。安装失败或登记超限不会把当前扫描变成缺失文件；会话单独提示监听不可用并做一次完整回退。通知线程不等待 UI mailbox，只有既有扫描 worker 在上一轮可靠队列与终态消费完后才准入下一轮。操作暂停 lease 在同一 mailbox 锁下取得，克隆保留至 UI 结果处理与原生操作都结束；期间不会准入扫描，也不清空通知。关闭取消订阅，session worker 等待原生结束后释放工作线程名额；UI 不 join，Windows 原生取消完成仍可能阻塞 worker。
+
+变化路径只是本轮工作过滤器，所有 root、marker、目录 identity、边界、格式/Git 观察及完整替换都沿用现有扫描/分类实现。通知没有给历史文件长度、完整未变树、分配或清理建立新资格；目录局部扫描不更新未观察祖先的精确总量。网络、mmap、延迟投递、覆盖到旧 watch 上的新挂载、scope 外环境改变等不能由空通知封闭，仍保持手动完整刷新及执行前独立原生重验。磁盘历史行不因监听安静成为 current。
+
+实现合同来源为 [Apple FSEvents 指南](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html)、[Linux inotify 手册](https://man7.org/linux/man-pages/man7/inotify.7.html)、[Microsoft OpenFileById](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-openfilebyid) 和 [Microsoft ReadDirectoryChangesW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw)，访问日期：2026-10-07。[本轮验证与测量](live-directory-refresh-validation-2026-10-07.json)分别记录 macOS 实际事件验收、普通目录遍历 oracle、工作量/耗时与 Linux/Windows 原生运行缺口。
 
 ## 1. 目标、非目标与不变量
 

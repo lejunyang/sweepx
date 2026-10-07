@@ -417,10 +417,16 @@ fn cached_roots_without_observed_publication_sources_skip_optional_preparation()
         current: Rows::new(),
         presentations: PresentationIndex::default(),
         scan_roots: roots,
+        monitor: None,
+        watch_disabled: false,
+        watch_warning: None,
+        watch_roots: Vec::new(),
+        watch_checked: std::time::Instant::now(),
     };
     let job = Job {
         revision: JunkSessionRevision(1),
         selected: None,
+        paths: None,
         cancel: CancellationToken::new(),
     };
     let shared = Arc::new(Shared::new(limits));

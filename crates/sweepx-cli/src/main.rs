@@ -239,8 +239,9 @@ enum Commands {
     Junk {
         /// Open the live junk view for explicit directory roots or --system. Space selects; d moves selected
         /// current, complete directory candidates to Trash after native identity revalidation.
-        /// Linux/macOS/Windows show historical caches first; current results always traverse live.
-        /// macOS additionally validates file indexes. Only freshly verified rows can be moved.
+        /// Linux/macOS/Windows show historical caches first, then keep native change listeners alive.
+        /// Changes refresh affected directories; listener gaps trigger a full fresh scan.
+        /// Only freshly verified rows can be moved; c pauses automatic refresh until manual refresh.
         /// Dart and SvelteKit content-profile candidates remain report-only while ownership is unverified.
         /// On Linux, x previews selected temporary objects for quarantine with typed full-digest confirmation.
         #[arg(long, conflicts_with_all = ["timings", "trash", "clean_temp"])]
