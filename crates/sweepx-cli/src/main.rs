@@ -135,7 +135,7 @@ struct Cli {
     /// Unit used by human-readable byte columns. JSON always keeps exact bytes.
     #[arg(long, global = true, value_enum, default_value = "auto")]
     unit: UnitArg,
-    /// Sort human scan and TUI rows. Machine output keeps scanner order.
+    /// Sort scan rows by file size (largest first) or path; TUI updates the order while scanning.
     #[arg(long, global = true, value_enum, default_value = "size")]
     sort: SortArg,
     /// Re-run elevated to enable privileged read-only accelerators.
@@ -176,7 +176,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Scan {
-        /// Browse directories or show live --large-files/--duplicates results with explicit Trash selection.
+        /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
         #[arg(long)]
         tui: bool,
         /// Rank ordinary files by logical size; report-only unless explicitly selected in --tui.

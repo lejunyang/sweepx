@@ -1,0 +1,369 @@
+{
+  "host": "macOS-26.5.2-arm64-arm-64bit",
+  "date": "2026-10-11",
+  "build": "release Rust 1.98.0",
+  "root": "/Users/bytedance/Desktop/Projects/dev-flow",
+  "state": "no SweepX persistent cache; OS cache not flushed; sequential alternating runs",
+  "runs": [
+    {
+      "mode": "full",
+      "phase": "mode=full admission_ms=11.719 traversal_ms=29037.352 native_lengths=0 updates=208",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    },
+    {
+      "mode": "logical",
+      "phase": "mode=logical admission_ms=1.285 traversal_ms=1162.323 native_lengths=12895 updates=10",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    },
+    {
+      "mode": "full",
+      "phase": "mode=full admission_ms=3.383 traversal_ms=8774.566 native_lengths=0 updates=73",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    },
+    {
+      "mode": "logical",
+      "phase": "mode=logical admission_ms=0.393 traversal_ms=1059.233 native_lengths=12895 updates=9",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    },
+    {
+      "mode": "full",
+      "phase": "mode=full admission_ms=0.314 traversal_ms=9029.541 native_lengths=0 updates=75",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    },
+    {
+      "mode": "logical",
+      "phase": "mode=logical admission_ms=0.347 traversal_ms=895.447 native_lengths=12895 updates=8",
+      "result": "entries=Known { value: DecimalU128(15745) } logical=Known { value: DecimalU128(224451068) } coverage=Coverage { state: Complete, complete: true, incomplete_reasons: [], details_lost: false, provenance: LiveObservation { observed_at: \"1970-01-01T00:00:00Z\", method: MetadataNoFollow } }",
+      "rows": [
+        "/Users/bytedance/Desktop/Projects/dev-flow/.DS_Store Known { value: DecimalU128(6148) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.git Known { value: DecimalU128(9318973) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.gitignore Known { value: DecimalU128(343) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/.npmrc Known { value: DecimalU128(33) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/AGENTS.md Known { value: DecimalU128(7901) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/README.md Known { value: DecimalU128(797) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/dist Known { value: DecimalU128(1920393) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/node_modules Known { value: DecimalU128(170183004) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/package.json Known { value: DecimalU128(586) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/packages Known { value: DecimalU128(42810436) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-lock.yaml Known { value: DecimalU128(76655) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/pnpm-workspace.yaml Known { value: DecimalU128(90) }",
+        "/Users/bytedance/Desktop/Projects/dev-flow/studio-assets Known { value: DecimalU128(125709) }"
+      ]
+    }
+  ],
+  "oracle": {
+    "entries": 15745,
+    "bytes": 224451068,
+    "children": {
+      "pnpm-lock.yaml": 76655,
+      ".DS_Store": 6148,
+      ".npmrc": 33,
+      "README.md": 797,
+      ".gitignore": 343,
+      "package.json": 586,
+      "AGENTS.md": 7901,
+      "pnpm-workspace.yaml": 90,
+      "studio-assets": 125709,
+      "dist": 1920393,
+      "node_modules": 170183004,
+      "packages": 42810436,
+      ".git": 9318973
+    },
+    "elapsed_s": 0.8071267500054091
+  },
+  "schema": "sweepx.scan-usage.validation/v1",
+  "source_base": "715df47d184fb0bb4d804dd7c541d79e2f43d86b",
+  "measurement_notes": [
+    "Both modes are the same release example binary; --full keeps the previous full descendant observations.",
+    "Three sequential alternating runs per mode; OS cache was not flushed. No SweepX persisted cache is used.",
+    "Other validation and compilation ran on this host during this session. The first full pass took 29 seconds; no percentile or cold-cache claim is made.",
+    "The measured phase is recursive traversal, not total CLI startup, listing, terminal painting or state publication.",
+    "All six sorted direct-child results, root bytes and entry counts agree before timing comparison."
+  ],
+  "comparison": {
+    "full": {
+      "milliseconds": [
+        29037.352,
+        8774.566,
+        9029.541
+      ],
+      "median_ms": 9029.541
+    },
+    "logical": {
+      "milliseconds": [
+        1162.323,
+        1059.233,
+        895.447
+      ],
+      "median_ms": 1059.233
+    },
+    "median_speedup": 8.524603179848059
+  },
+  "size_contract": {
+    "files": "Current file data length. On macOS ATTR_FILE_DATALENGTH / stat size for ordinary data forks.",
+    "directories": "Sum observed ordinary-file lengths, once per directory entry, without following links or crossing admitted mount boundaries.",
+    "display": "Plain browser labels Size, waiting, scanned-so-far, complete and incomplete. Allocation/reclaim estimates remain separate machine facts.",
+    "limitations": [
+      "Not a qualification of every Finder Get Info case, including resource forks, provider-specific files or unit formatting.",
+      "No exact physical/reclaimable-space claim from lengths.",
+      "A live traversal is not an atomic filesystem snapshot."
+    ],
+    "references": [
+      "https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getattrlist.2.html",
+      "https://developer.apple.com/documentation/foundation/urlresourcekey"
+    ]
+  },
+  "terminal_checks": [
+    {
+      "binary": "target/release/sweepx",
+      "locale": "en-US",
+      "terminal_seconds": 1.1589204999618232,
+      "exit": 0,
+      "oracle_all_direct_rows_and_descending_order": "passed",
+      "final_count_and_root_total": "passed",
+      "current_path_changes": "passed",
+      "final_screen": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│SweepX | Finished | 15745 entries | 1.0s | 16401/s                                                                                                            │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Location──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│Scan roots > /Users/bytedance/Desktop/Projects/dev-flow | Total size: 224451068 B                                                                             │\n│Scanned: /Users/bytedance/Desktop/Projects/dev-flow/.git/logs/refs/remotes/origin/HEAD                                                                        │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Contents──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│Name                                                                                                           Type        Size             status            │\n│node_modules                                                                                                   directory   170183004 B      Complete          │\n│packages                                                                                                       directory   42810436 B       Complete          │\n│.git                                                                                                           directory   9318973 B        Complete          │\n│dist                                                                                                           directory   1920393 B        Complete          │\n│studio-assets                                                                                                  directory   125709 B         Complete          │\n│pnpm-lock.yaml                                                                                                 file        76655 B          Complete          │\n│AGENTS.md                                                                                                      file        7901 B           Complete          │\n│.DS_Store                                                                                                      file        6148 B           Complete          │\n│README.md                                                                                                      file        797 B            Complete          │\n│package.json                                                                                                   file        586 B            Complete          │\n│.gitignore                                                                                                     file        343 B            Complete          │\n│pnpm-workspace.yaml                                                                                            file        90 B             Complete          │\n│.npmrc                                                                                                         file        33 B             Complete          │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌Scan + Trash preview──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│↑/↓ select  Enter/→ open  Esc/Backspace/← back  p full path  d/Delete move to Trash  q/Ctrl-C quit | Size sums file bytes                                     │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+      "progress": [
+        {
+          "seconds": 0.3401895420392975,
+          "current_path_line": "│Scanning: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/apache-arrow@21.2.0/node_modules/apache-arrow/src/ipc                                 │"
+        },
+        {
+          "seconds": 0.3403031249763444,
+          "current_path_line": "│Scanning: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/apache-arrow@21.2.0/node_modules/apache-arrow/src/ipc                                 │"
+        },
+        {
+          "seconds": 0.440851749968715,
+          "current_path_line": "│Scanning: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/happy-dom@20.14.5/node_modules/happy-dom/lib/fetch/ResourceFetch.js                   │"
+        },
+        {
+          "seconds": 0.5437683750642464,
+          "current_path_line": "│Scanning: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/node_modules/@types/har-format                                                        │"
+        }
+      ]
+    },
+    {
+      "binary": "target/release/sweepx",
+      "locale": "zh-CN",
+      "terminal_seconds": 1.1510105000343174,
+      "exit": 0,
+      "oracle_all_direct_rows_and_descending_order": "passed",
+      "final_count_and_root_total": "passed",
+      "current_path_changes": "passed",
+      "final_screen": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│SweepX | 扫描结束 | 已扫描 15745 项 | 1.0 秒 | 16401 项/秒                                                                                                    │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌位置──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│扫描根目录 > /Users/bytedance/Desktop/Projects/dev-flow | 总大小: 224451068 B                                                                                 │\n│已扫描: /Users/bytedance/Desktop/Projects/dev-flow/.git/objects/info                                                                                          │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌内容──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│名称                                                                                                           类型        大小             状态              │\n│node_modules                                                                                                   directory   170183004 B      已完成            │\n│packages                                                                                                       directory   42810436 B       已完成            │\n│.git                                                                                                           directory   9318973 B        已完成            │\n│dist                                                                                                           directory   1920393 B        已完成            │\n│studio-assets                                                                                                  directory   125709 B         已完成            │\n│pnpm-lock.yaml                                                                                                 file        76655 B          已完成            │\n│AGENTS.md                                                                                                      file        7901 B           已完成            │\n│.DS_Store                                                                                                      file        6148 B           已完成            │\n│README.md                                                                                                      file        797 B            已完成            │\n│package.json                                                                                                   file        586 B            已完成            │\n│.gitignore                                                                                                     file        343 B            已完成            │\n│pnpm-workspace.yaml                                                                                            file        90 B             已完成            │\n│.npmrc                                                                                                         file        33 B             已完成            │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌扫描 + 回收站预览─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 大小按文件字节数累计                                       │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+      "progress": [
+        {
+          "seconds": 0.33515920804347843,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/apache-arrow@21.2.0/node_modules/apache-arrow/io/node                                 │"
+        },
+        {
+          "seconds": 0.33529824996367097,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/apache-arrow@21.2.0/node_modules/apache-arrow/io/node                                 │"
+        },
+        {
+          "seconds": 0.4373911670409143,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/happy-dom@20.14.5/node_modules/happy-dom/lib/nodes/svg-animate-element                │"
+        },
+        {
+          "seconds": 0.5384640420088544,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/json-schema-traverse@1.0.0/node_modules/json-schema-traverse                          │"
+        }
+      ]
+    },
+    {
+      "binary": "target/debug/sweepx",
+      "locale": "zh-CN",
+      "terminal_seconds": 1.2378897500457242,
+      "exit": 0,
+      "oracle_all_direct_rows_and_descending_order": "passed",
+      "final_count_and_root_total": "passed",
+      "current_path_changes": "passed",
+      "final_screen": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│SweepX | 扫描结束 | 已扫描 15745 项 | 1.0 秒 | 16384 项/秒                                                                                                    │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌位置──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│扫描根目录 > /Users/bytedance/Desktop/Projects/dev-flow | 总大小: 224451068 B                                                                                 │\n│已扫描: /Users/bytedance/Desktop/Projects/dev-flow/packages/trae-web-helper/runtime-skills/bytedance-lark-devops-browser                                      │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌内容──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│名称                                                                                                           类型        大小             状态              │\n│node_modules                                                                                                   directory   170183004 B      已完成            │\n│packages                                                                                                       directory   42810436 B       已完成            │\n│.git                                                                                                           directory   9318973 B        已完成            │\n│dist                                                                                                           directory   1920393 B        已完成            │\n│studio-assets                                                                                                  directory   125709 B         已完成            │\n│pnpm-lock.yaml                                                                                                 file        76655 B          已完成            │\n│AGENTS.md                                                                                                      file        7901 B           已完成            │\n│.DS_Store                                                                                                      file        6148 B           已完成            │\n│README.md                                                                                                      file        797 B            已完成            │\n│package.json                                                                                                   file        586 B            已完成            │\n│.gitignore                                                                                                     file        343 B            已完成            │\n│pnpm-workspace.yaml                                                                                            file        90 B             已完成            │\n│.npmrc                                                                                                         file        33 B             已完成            │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n│                                                                                                                                                              │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n┌扫描 + 回收站预览─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐\n│↑/↓ 选择  Enter/→ 进入目录  Esc/Backspace/← 返回  p 完整路径  d/Delete 移到回收站  q/Ctrl-C 退出 | 大小按文件字节数累计                                       │\n└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+      "progress": [
+        {
+          "seconds": 0.3972348340321332,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/rollup@4.63.1/node_modules/rollup                                                     │"
+        },
+        {
+          "seconds": 0.3973708340199664,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/rollup@4.63.1/node_modules/rollup                                                     │"
+        },
+        {
+          "seconds": 0.5022730419877917,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/happy-dom@20.14.5/node_modules/happy-dom/lib/nodes/html-legend-element                │"
+        },
+        {
+          "seconds": 0.6070315000833943,
+          "current_path_line": "│正在扫描: /Users/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm/@babel+helper-validator-identifier@7.29.7/node_modules                                │"
+        }
+      ]
+    }
+  ],
+  "ordinary_human_check": {
+    "exit": 4,
+    "status": "partial",
+    "root_bytes": 224451068,
+    "root_coverage": "complete",
+    "retained_entries": 12642,
+    "boundaries": 415,
+    "errors": 0,
+    "note": "Existing symlink boundaries and retained-entry byte budget still make the exported envelope partial; the root usage total matches the independent oracle. This work does not change that retention policy.",
+    "output_prefix": [
+      "命令: scan",
+      "语言: zh-CN",
+      "状态: partial",
+      "摘要: 根目录 1，条目 12642，目录汇总 2429，边界 415，错误 0",
+      "警告: scan.partial",
+      "路径                                                        类型                      大小  覆盖",
+      "----------------------------------------------------------------------------------------------------",
+      "/Users/bytedance/Desktop/Projects/dev-flow                directory      224451068 B  complete",
+      "/Users/bytedance/Desktop/Projects/dev-flow/node_modules   directory      170183004 B  complete",
+      "…/bytedance/Desktop/Projects/dev-flow/node_modules/.pnpm  directory      170163950 B  complete",
+      "/Users/bytedance/Desktop/Projects/dev-flow/packages       directory       42810436 B  complete",
+      "…ance/Desktop/Projects/dev-flow/packages/trae-web-helper  directory       38147133 B  complete",
+      "…p/Projects/dev-flow/node_modules/.pnpm/typescript@5.9.2  directory       23622869 B  complete",
+      "…v-flow/node_modules/.pnpm/typescript@5.9.2/node_modules  directory       23622869 B  complete"
+    ]
+  },
+  "validation": {
+    "toolchain": "Pinned and active Rust 1.98.0; desktop macOS arm64 runtime.",
+    "passed": [
+      "cargo fmt --all --check",
+      "git diff --check",
+      "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "scripts/cross-lint.sh x86_64-unknown-linux-gnu all",
+      "cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings",
+      "Affected scanner 101 tests, CLI 68 tests, core human-size tests and final TUI 102 tests.",
+      "cargo test --workspace --all-targets --all-features -- --test-threads=4 with exactly the three documented tool tests excluded. All later crates and integration tests completed.",
+      "Serial diagnostic tools::tests:: suite 18 passed; isolated inventory regression 1 passed, without source changes to these tests.",
+      "Final release and debug CLI builds."
+    ],
+    "failed": [
+      {
+        "command": "cargo test --workspace --all-targets --all-features -- --test-threads=4",
+        "core_result": "396 passed, 3 failed, 3 ignored; later crates were untested in this first run.",
+        "tests": [
+          "tools::tests::captures_complete_answer_and_exit_status",
+          "tools::tests::auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch",
+          "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence"
+        ],
+        "evidence": "\nfailures:\n\n---- tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence stdout ----\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 964.48625ms, launched_after: Some(2.107542ms), ready_after: Some(2.113625ms), first_stdout_after: Some(963.912959ms), stdout_bytes: 74, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\ncache probe Some(\"tool-a\"): elapsed=964.504042ms, successful=true, output_bytes=Some(74)\nprobe result=Some(TimedOut), diagnostics=ProbeDiagnostics { stage: Drain, elapsed: 2.02065075s, launched_after: Some(917.042µs), ready_after: Some(922.625µs), first_stdout_after: None, stdout_bytes: 0, stdout_eof: false, exit_status: None }\ncache probe Some(\"tool-b\"): elapsed=2.020696666s, successful=false, output_bytes=None\nrequired cache probe rejected: tool probe timed out\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 15.788833ms, launched_after: Some(1.455792ms), ready_after: Some(1.460417ms), first_stdout_after: Some(15.427792ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nprobe result=None, diagnostics=ProbeDiagnostics { stage: Complete, elapsed: 221.909958ms, launched_after: Some(2.794ms), ready_after: Some(2.797583ms), first_stdout_after: Some(221.463ms), stdout_bytes: 6, stdout_eof: true, exit_status: Some(ExitStatus(unix_wait_status(0))) }\nshared cache fixture retained at \"/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/.tmp9MUIEQ\"; installations=[ToolInstallation { tool: \"npm\", manager: \"fixture-manager\", manager_label: None, executable: \"/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/.tmp9MUIEQ/bin/tool-a\", tool_version: Some(\"9.0.0\"), runtime_version: None, cache: Some(\"/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/.tmp9MUIEQ/cache\"), cache_last_active_at: Some(\"2096-10-02T07:06:40Z\"), is_path_default: true }, ToolInstallation { tool: \"npm\", manager: \"fixture-manager\", manager_label: None, executable: \"/private/var/folders/yq/5lfh0s914cv950b3rk8xwv0w0000gn/T/.tmp9MUIEQ/bin/tool-b\", tool_version: Some(\"9.0.0\"), runtime_version: None, cache: None, cache_last_active_at: None, is_path_default: false }]; observations=266\n\nthread 'tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence' (72327244) panicked at crates/sweepx-core/src/tools/installations/tests.rs:490:5:\nassertion `left == right` failed\n  left: Some(ProbeUnavailable)\n right: None\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n---- tools::tests::captures_complete_answer_and_exit_status stdout ----\nprobe result=Some(TimedOut), diagnostics=ProbeDiagnostics { stage: Drain, elapsed: 304.982791ms, launched_after: Some(604.625µs), ready_after: Some(609.583µs), first_stdout_after: None, stdout_bytes: 0, stdout_eof: false, exit_status: None }\n\nthread 'tools::tests::captures_complete_answer_and_exit_status' (72327855) panicked at crates/sweepx-core/src/tools/mod.rs:1082:57:\ncalled `Result::unwrap()` on an `Err` value: TimedOut\n\n---- tools::tests::auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch stdout ----\nprobe result=Some(TimedOut), diagnostics=ProbeDiagnostics { stage: Drain, elapsed: 2.001003792s, launched_after: Some(2.540792ms), ready_after: Some(2.552875ms), first_stdout_after: None, stdout_bytes: 0, stdout_eof: false, exit_status: None }\n\nthread 'tools::tests::auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch' (72327644) panicked at crates/sweepx-core/src/tools/mod.rs:1382:18:\ncalled `Result::unwrap()` on an `Err` value: TimedOut\n\n\nfailures:\n    tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence\n    tools::tests::auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch\n    tools::tests::captures_complete_answer_and_exit_status\n\ntest result: FAILED. 396 passed; 3 failed; 3 ignored; 0 measured; 0 filtered out; finished in 68.43s\n\nerror: test failed, to rerun pass `-p sweepx-core --lib`\n",
+        "interpretation": "Child-process startup/output exceeded existing 300 ms and 2 s deadlines under concurrent host work. Serial diagnostics pass; this does not establish that the parallel failure is fixed."
+      }
+    ],
+    "skipped": [
+      "tools::tests::captures_complete_answer_and_exit_status",
+      "tools::tests::auto_reaping_policies_are_refused_in_isolated_children_before_any_tool_launch",
+      "tools::installations::tests::shared_cache_inventory_fits_one_enumeration_and_keeps_manager_precedence"
+    ],
+    "ignored": [
+      "core: three opt-in cache/watch benchmarks",
+      "platform: native macOS bulk timing benchmark",
+      "scanner: opt-in native cached deep-tree benchmark"
+    ],
+    "resolved_environment_blocks": [
+      {
+        "command": "sandboxed native FSEvents watch tests",
+        "error": "FSEventStreamStart failed",
+        "resolution": "Both native watch regressions passed outside sandbox, including the workspace remainder. No test or production code suppressed."
+      }
+    ],
+    "earlier_diagnostic_failure": {
+      "test": "trash_command::project_format_tests::recognized_project_format_is_refused_before_any_bulk_or_worker_trash",
+      "symptom": "Unknown project format instead of Recognized in an early concurrent run.",
+      "status": "Passed isolated and in both later workspace runs; production/test source unchanged. No assertion that this transient failure was fixed."
+    },
+    "unverified": [
+      "Linux and Windows runtime behavior; cross compilation/lint only.",
+      "Every Finder display convention, resource-fork or cloud-provider case.",
+      "Persistent whole-tree cache reuse acceleration; this slice measures current native facts."
+    ],
+    "cross_c_toolchain": "Temporary official Zig 0.15.2 under /private/tmp; Linux via repository cross-lint and Windows GNU through temporary compiler/archive wrappers."
+  },
+  "source_sha256": {
+    "crates/sweepx-cli/src/main.rs": "8b544cdf518cc9d86f717dd9f192c606f5d3e79a6ccbbfea88049682c4b3ec6e",
+    "crates/sweepx-cli/src/tui_adapter.rs": "5a03450ff17a85880a5e4251446ece42cd23a01ea4caab3b28a28f8097d43c81",
+    "crates/sweepx-core/src/lib.rs": "6fe4a31f0bcb2b771bfe9449da0407577aadfa78ae56ada648872e7b0f912a92",
+    "crates/sweepx-core/src/scan_output.rs": "d9bf4140fd87fdd7bffcef6c655bd131c61869aa176bd82d0e7a208cc65e961a",
+    "crates/sweepx-scanner/src/detail_rescan.rs": "9a29fd2e4abd2ed95f230eb7f16d0259492c455db4ae840c6bb721d61a1a50bc",
+    "crates/sweepx-scanner/src/detail_rescan/traversal_tests.rs": "918947cd986219217f9f0eee197ce6da3404d59c93ee91df73e4de382eb1fb14",
+    "crates/sweepx-scanner/src/lib.rs": "a3b5839d9e543c661062ffa636be1950def0d13eed555927a3c1b39f38d2c0b3",
+    "crates/sweepx-scanner/examples/detail-usage.rs": "1ddaaa20dcd18fa3ee105ac1eada6485a4a65271efe1f76f34fdc7d8b002e5c9",
+    "crates/sweepx-tui/src/live.rs": "601a3c5c98b95c49b03097101e9043ef47ebfd516ee6d7ef0336d58860ad629f"
+  }
+}

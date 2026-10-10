@@ -88,7 +88,7 @@ impl ScanOutput {
                 json!({
                     "displayPath": row.entry.display_path,
                     "objectType": row.entry.object_type,
-                    "reclaimableEstimate": row.bytes(),
+                    "logicalBytes": row.bytes(),
                     "coverage": { "state": row.coverage().state }
                 })
             })
@@ -224,8 +224,8 @@ struct Row<'a> {
 impl Row<'_> {
     fn bytes(&self) -> &ByteValue {
         self.aggregate
-            .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
-            .unwrap_or(&self.entry.reclaimable_estimate)
+            .map(|aggregate| &aggregate.apparent_logical_bytes)
+            .unwrap_or(&self.entry.logical_bytes)
     }
     fn coverage(&self) -> &Coverage {
         self.aggregate

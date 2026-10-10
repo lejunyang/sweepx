@@ -31,6 +31,7 @@ pub(crate) struct TuiDetailRescanProvider {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct LiveTuiDetailRescanProvider {
     scanner: DetailRescanner<HostPlatformScanner>,
+    logical_only: bool,
     ids: Mutex<DetailEntryIdAllocator>,
     cancel: Mutex<CancellationToken>,
     progress: Mutex<Option<std::sync::mpsc::SyncSender<TuiDetailRescanProgress>>>,
@@ -62,7 +63,13 @@ pub(crate) fn tui_directory_detail_rescan_provider(
         progress: Vec::new(),
         progress_retention: Default::default(),
     };
-    tui_detail_rescan_provider(&summary)
+    let mut provider = tui_detail_rescan_provider(&summary);
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    if let Some(live) = provider.live.as_mut() {
+        // Junk breakdown orders physical allocation and requires complete file facts.
+        live.logical_only = false;
+    }
+    provider
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -107,6 +114,7 @@ fn live_tui_detail_rescan_provider(
             HostPlatformScanner::new(),
             sweepx_platform::ScanResourceLimits::default(),
         ),
+        logical_only: true,
         ids: Mutex::new(ids),
         cancel: Mutex::new(CancellationToken::new()),
         progress: Mutex::new(None),
@@ -165,20 +173,37 @@ impl DetailRescanProvider for TuiDetailRescanProvider {
                 live.scanner
                     .rescan_direct_children(scanner_request, &mut ids, &cancel)
             } else if request.reason == DetailRescanReason::ProgressiveAggregate {
-                live.scanner
-                    .rescan_with_progress(scanner_request, &mut ids, &cancel, |progress| {
-                        let Some(sender) = live.progress.lock().ok().and_then(|slot| slot.clone())
-                        else {
-                            return;
-                        };
-                        // UI progress is lossy by design. A full queue means the terminal has a
-                        // newer-enough lower bound pending; the final result remains authoritative.
-                        let _ = sender.try_send(TuiDetailRescanProgress {
-                            binding: binding.clone(),
-                            row: progress.row,
-                            aggregate: progress.aggregate,
-                        });
-                    })
+                let on_progress = |progress: sweepx_scanner::DetailRescanProgress| {
+                    let Some(sender) = live.progress.lock().ok().and_then(|slot| slot.clone())
+                    else {
+                        return;
+                    };
+                    // Cumulative bounded snapshots tolerate lossy delivery without coupling the
+                    // filesystem worker to terminal painting; final results remain reliable.
+                    let _ = sender.try_send(TuiDetailRescanProgress {
+                        binding: request.binding.clone(),
+                        rows: progress.rows,
+                        aggregate: progress.aggregate,
+                        current_path: progress.current_path.to_string_lossy().into_owned(),
+                        elapsed_millis: progress.elapsed_millis,
+                        native_file_lengths: progress.native_file_lengths,
+                    });
+                };
+                if live.logical_only {
+                    live.scanner.rescan_logical_with_progress(
+                        scanner_request,
+                        &mut ids,
+                        &cancel,
+                        on_progress,
+                    )
+                } else {
+                    live.scanner.rescan_with_progress(
+                        scanner_request,
+                        &mut ids,
+                        &cancel,
+                        on_progress,
+                    )
+                }
             } else {
                 live.scanner.rescan(scanner_request, &mut ids, &cancel)
             };
@@ -407,6 +432,7 @@ mod tui_detail_rescan_provider_tests {
                     HostPlatformScanner::new(),
                     sweepx_platform::ScanResourceLimits::default(),
                 ),
+                logical_only: true,
                 ids: Mutex::new(ids),
                 cancel: Mutex::new(CancellationToken::new()),
                 progress: Mutex::new(None),

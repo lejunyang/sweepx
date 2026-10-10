@@ -133,8 +133,15 @@ pub struct RefreshedDetail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailRescanProgress {
     pub binding: DetailRescanBinding,
-    pub row: ScannedEntry,
+    /// Cumulative direct-directory lower bounds, resilient to skipped advisory updates.
+    pub rows: Vec<ScannedEntry>,
     pub aggregate: DirectoryAggregate,
+    /// Display-only current entry path.
+    pub current_path: String,
+    /// Elapsed traversal time in milliseconds.
+    pub elapsed_millis: u128,
+    /// Number of descendant files measured through qualified current native lengths.
+    pub native_file_lengths: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,6 +690,7 @@ pub struct BrowserModel {
     size_unit: HumanSizeUnit,
     sort: ScanSort,
     progressive_navigation: bool,
+    activity: Option<ScanActivity>,
     /// Whether the selected row's full path is currently pinned open.
     ///
     /// Marquee phase is deliberately *not* stored here: the model derives `PartialEq`/`Eq`, and a
@@ -690,6 +698,13 @@ pub struct BrowserModel {
     /// is supplied to the renderer instead, which also keeps painting a pure function of its inputs.
     show_path_detail: bool,
     inspection: Option<InspectionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanActivity {
+    current_path: String,
+    elapsed_millis: u128,
+    entries: u128,
 }
 
 impl BrowserModel {
@@ -1078,6 +1093,7 @@ impl BrowserModel {
             size_unit: HumanSizeUnit::Auto,
             sort: ScanSort::Path,
             progressive_navigation: false,
+            activity: None,
             show_path_detail: false,
             inspection,
         };
@@ -1213,6 +1229,7 @@ impl BrowserModel {
         };
 
         let previous_state = self.nodes[node_index].detail_rescan_state.clone();
+        self.activity = None;
         self.nodes[node_index].detail_rescan_state = DetailRescanState::Pending { revision };
         self.reload_loaded_level();
         Some(PendingDetailRescan {
@@ -1238,6 +1255,7 @@ impl BrowserModel {
             revision,
         )?;
         let previous_state = self.nodes[node_index].detail_rescan_state.clone();
+        self.activity = None;
         self.nodes[node_index].detail_rescan_state = DetailRescanState::Pending { revision };
         self.reload_loaded_level();
         Some(PendingDetailRescan {
@@ -1410,6 +1428,12 @@ impl BrowserModel {
         }
         validate_refreshed_target(request, &observed_root, &observed_directory)?;
         validate_detail_rows(request, &observed_directory, &rows, &aggregate)?;
+        if request.reason == DetailRescanReason::ProgressiveAggregate
+            && let Some(activity) = self.activity.as_mut()
+            && let Some(entries) = lower_bound_bytes(&aggregate.recursive_entry_count)
+        {
+            activity.entries = entries;
+        }
 
         // A targeted detail result contains only this directory's direct rows.
         // Conservatively mark any returned subdirectory's own detail as evicted;
@@ -1453,43 +1477,66 @@ impl BrowserModel {
         {
             return false;
         }
-        let Ok(Some(progress_identity)) = progress.row.validated_identity() else {
-            return false;
-        };
-        if progress.row.scan_id != pending.request.binding.source_scan_id
-            || progress_identity.parent_id.as_ref() != Some(&directory_identity.entry_id)
-            || progress.row.object_type != ObjectType::Directory
-            || progress.aggregate.coverage.complete
+        // Listing and recursive aggregation are separate live passes. The initial recursive
+        // snapshot can precede direct files already counted by the listing; monotonicity starts
+        // with the first accepted recursive snapshot, not the listing's partial total.
+        if progress.aggregate.coverage.complete
             || progress.aggregate.coverage.state == CoverageState::Complete
             || progress.aggregate.arithmetic_state != ArithmeticState::LowerBound
-            || !matches!(
-                progress.row.logical_bytes,
-                sweepx_model::EvidenceValue::LowerBound { .. }
-            )
+            || (self.activity.is_some()
+                && lower_bound_bytes(&progress.aggregate.apparent_logical_bytes)
+                    < self.nodes[pending.node_index]
+                        .aggregate
+                        .as_ref()
+                        .and_then(|aggregate| lower_bound_bytes(&aggregate.apparent_logical_bytes)))
+            || progress.rows.len() > pending.request.max_rows
         {
             return false;
         }
-        let Some(index) = self.children_by_index[pending.node_index]
-            .iter()
-            .copied()
-            .find(|index| progressive_row_matches(&self.nodes[*index].entry, &progress.row))
-        else {
-            return false;
-        };
-        if lower_bound_bytes(&progress.row.logical_bytes)
-            < lower_bound_bytes(&self.nodes[index].entry.logical_bytes)
-            || lower_bound_bytes(&progress.aggregate.apparent_logical_bytes)
-                < self.nodes[pending.node_index]
-                    .aggregate
-                    .as_ref()
-                    .and_then(|aggregate| lower_bound_bytes(&aggregate.apparent_logical_bytes))
-        {
-            return false;
+        // Validate the entire coalesced snapshot before changing visible rows. Bindings and
+        // native identity tuples, rather than advisory paths, establish which rows may advance.
+        let mut updates = Vec::with_capacity(progress.rows.len());
+        let mut seen = BTreeSet::new();
+        for row in progress.rows {
+            let Ok(Some(identity)) = row.validated_identity() else {
+                return false;
+            };
+            if row.scan_id != pending.request.binding.source_scan_id
+                || identity.parent_id.as_ref() != Some(&directory_identity.entry_id)
+                || row.object_type != ObjectType::Directory
+                || !matches!(
+                    row.logical_bytes,
+                    sweepx_model::EvidenceValue::LowerBound { .. }
+                )
+            {
+                return false;
+            }
+            let Some(index) = self.children_by_index[pending.node_index]
+                .iter()
+                .copied()
+                .find(|index| progressive_row_matches(&self.nodes[*index].entry, &row))
+            else {
+                return false;
+            };
+            if !seen.insert(index)
+                || lower_bound_bytes(&row.logical_bytes)
+                    < lower_bound_bytes(&self.nodes[index].entry.logical_bytes)
+            {
+                return false;
+            }
+            updates.push((index, row));
         }
-        self.nodes[index].entry.logical_bytes = progress.row.logical_bytes;
-        self.nodes[index].entry.allocated_bytes = progress.row.allocated_bytes;
-        self.nodes[index].entry.reclaimable_estimate = progress.row.reclaimable_estimate;
-        self.nodes[index].entry.coverage = progress.row.coverage;
+        for (index, row) in updates {
+            self.nodes[index].entry.logical_bytes = row.logical_bytes;
+            self.nodes[index].entry.allocated_bytes = row.allocated_bytes;
+            self.nodes[index].entry.reclaimable_estimate = row.reclaimable_estimate;
+            self.nodes[index].entry.coverage = row.coverage;
+        }
+        self.activity = Some(ScanActivity {
+            current_path: progress.current_path,
+            elapsed_millis: progress.elapsed_millis,
+            entries: lower_bound_bytes(&progress.aggregate.recursive_entry_count).unwrap_or(0),
+        });
         self.nodes[pending.node_index].aggregate = Some(progress.aggregate);
         self.sort_rows();
         self.reload_loaded_level();
@@ -1584,6 +1631,7 @@ impl BrowserModel {
         rebuilt.size_unit = self.size_unit;
         rebuilt.sort = self.sort;
         rebuilt.progressive_navigation = self.progressive_navigation;
+        rebuilt.activity = self.activity.clone();
         rebuilt.sort_rows();
 
         for node in &mut rebuilt.nodes {
@@ -1618,9 +1666,16 @@ impl BrowserModel {
             });
         }
         if self.progressive_navigation {
-            // The user is already inside the refreshed directory, so selection belongs to its
-            // newly arrived direct-child rows rather than to the directory row in its parent.
-            rebuilt.selected = 0;
+            // Refresh assigns new scan row IDs. Preserve focus only if the same native object
+            // remains a direct child, so reordering or replacement cannot select another file.
+            rebuilt.selected = self
+                .selected_row()
+                .and_then(|selected| {
+                    rebuilt.current_level_rows().iter().position(|index| {
+                        progressive_row_matches(selected.entry(), &rebuilt.nodes[*index].entry)
+                    })
+                })
+                .unwrap_or(0);
         } else {
             let target_id = request_entry_id(&observed_directory);
             rebuilt.selected = rebuilt
@@ -1684,6 +1739,7 @@ impl BrowserModel {
         let Some(level) = self.levels.pop() else {
             return;
         };
+        self.activity = None;
         self.selected = level.parent_selection;
         self.reload_loaded_level();
         self.clamp_selection();
@@ -1740,6 +1796,7 @@ impl BrowserModel {
     }
 
     fn sort_rows(&mut self) {
+        let selected = self.selected_node_index();
         let sort = self.sort;
         let allocated = self.inspection.is_some();
         let nodes = &self.nodes;
@@ -1748,6 +1805,14 @@ impl BrowserModel {
         }
         self.roots
             .sort_by(|left, right| browser_node_order(nodes, *left, *right, sort, allocated));
+        if let Some(selected) = selected {
+            let rows = self.levels.last().map_or(&self.roots, |level| {
+                &self.children_by_index[level.directory_index]
+            });
+            if let Some(position) = rows.iter().position(|index| *index == selected) {
+                self.selected = position;
+            }
+        }
     }
 }
 
@@ -1786,8 +1851,8 @@ fn browser_node_bytes(node: &BrowserNode, allocated: bool) -> Option<u128> {
     } else {
         node.aggregate
             .as_ref()
-            .map(|aggregate| &aggregate.potentially_reclaimable_bytes)
-            .unwrap_or(&node.entry.reclaimable_estimate)
+            .map(|aggregate| &aggregate.apparent_logical_bytes)
+            .unwrap_or(&node.entry.logical_bytes)
     };
     match value {
         sweepx_model::EvidenceValue::Known { value }
@@ -2954,34 +3019,117 @@ pub fn render_live_browser_at_phase(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(if model.progressive_navigation { 4 } else { 3 }),
             Constraint::Min(3),
             Constraint::Length(footer_height),
         ])
         .split(area);
 
-    let title = match model.scan_id() {
-        Some(scan_id) => {
-            let scan_id = sanitize_terminal_text(scan_id);
-            format!(
-                "SweepX | {}: {scan_id} | {}: {}",
-                scan_label(model.locale()),
+    let title = if model.progressive_navigation && model.inspection.is_none() {
+        let state = match model.current_detail_rescan_state() {
+            Some(DetailRescanState::Pending { .. }) => match model.locale {
+                Locale::ZhCn => "扫描中",
+                Locale::EnUs => "Scanning",
+            },
+            Some(DetailRescanState::Stale { .. }) => match model.locale {
+                Locale::ZhCn => "扫描失败",
+                Locale::EnUs => "Scan failed",
+            },
+            Some(DetailRescanState::Refreshed { .. }) => match model.locale {
+                Locale::ZhCn => "扫描结束",
+                Locale::EnUs => "Finished",
+            },
+            _ => match model.locale {
+                Locale::ZhCn => "选择目录",
+                Locale::EnUs => "Select a directory",
+            },
+        };
+        if let Some(activity) = &model.activity {
+            let seconds = activity.elapsed_millis as f64 / 1000.0;
+            let rate = activity.entries as f64 / seconds.max(0.001);
+            match model.locale {
+                Locale::ZhCn => format!(
+                    "SweepX | {state} | 已扫描 {} 项 | {seconds:.1} 秒 | {rate:.0} 项/秒",
+                    activity.entries
+                ),
+                Locale::EnUs => format!(
+                    "SweepX | {state} | {} entries | {seconds:.1}s | {rate:.0}/s",
+                    activity.entries
+                ),
+            }
+        } else {
+            format!("SweepX | {state}")
+        }
+    } else {
+        match model.scan_id() {
+            Some(scan_id) => {
+                let scan_id = sanitize_terminal_text(scan_id);
+                format!(
+                    "SweepX | {}: {scan_id} | {}: {}",
+                    scan_label(model.locale()),
+                    status_label(model.locale()),
+                    output_status_label(model.status())
+                )
+            }
+            None => format!(
+                "SweepX | {}: {}",
                 status_label(model.locale()),
                 output_status_label(model.status())
-            )
+            ),
         }
-        None => format!(
-            "SweepX | {}: {}",
-            status_label(model.locale()),
-            output_status_label(model.status())
-        ),
     };
     frame.render_widget(
         Paragraph::new(title).block(Block::default().borders(Borders::ALL)),
         sections[0],
     );
 
-    let breadcrumb = model.breadcrumbs().join(" > ");
+    let mut breadcrumb = model.breadcrumbs().join(" > ");
+    if model.progressive_navigation
+        && model.inspection.is_none()
+        && let Some(level) = model.levels.last()
+        && let Some(aggregate) = &model.nodes[level.directory_index].aggregate
+    {
+        let value = &aggregate.apparent_logical_bytes;
+        let caption = match (model.locale, value) {
+            (Locale::ZhCn, sweepx_model::EvidenceValue::Known { .. }) => "总大小",
+            (Locale::EnUs, sweepx_model::EvidenceValue::Known { .. }) => "Total size",
+            (Locale::ZhCn, _) => "已扫描大小",
+            (Locale::EnUs, _) => "Scanned size",
+        };
+        let size = match value {
+            sweepx_model::EvidenceValue::LowerBound { value, .. } => byte_value_label_with_unit(
+                &sweepx_model::EvidenceValue::Known { value: *value },
+                model.size_unit,
+            ),
+            _ => byte_value_label_with_unit(value, model.size_unit),
+        };
+        breadcrumb.push_str(&format!(" | {caption}: {size}"));
+    }
+    if model.progressive_navigation {
+        let pending = matches!(
+            model.current_detail_rescan_state(),
+            Some(DetailRescanState::Pending { .. })
+        );
+        if let Some(activity) = &model.activity {
+            let label = match (model.locale, pending) {
+                (Locale::ZhCn, true) => "正在扫描",
+                (Locale::ZhCn, false) => "已扫描",
+                (Locale::EnUs, true) => "Scanning",
+                (Locale::EnUs, false) => "Scanned",
+            };
+            let stats = format!("{label}: ");
+            let width =
+                usize::from(sections[1].width.saturating_sub(2)).saturating_sub(text_cells(&stats));
+            let path = marquee_window(
+                &sanitize_terminal_text(&activity.current_path),
+                width,
+                phase,
+            );
+            breadcrumb.push_str(&format!("\n{stats}{path}"));
+        } else if pending {
+            breadcrumb.push_str(&format!("\n{}", scanning_label(model.locale)));
+        }
+    }
     frame.render_widget(
         Paragraph::new(breadcrumb).block(
             Block::default()
@@ -3040,10 +3188,14 @@ const BROWSER_COLUMN_SPACING: u16 = 1;
 /// Resolved through the same layout the table uses - same constraints, same spacing, minus the block
 /// borders - so it matches what the widget will really do rather than an approximation of it.
 fn name_column_cells(area: Rect) -> usize {
+    column_name_cells(area, &BROWSER_COLUMNS)
+}
+
+fn column_name_cells(area: Rect, constraints: &[Constraint]) -> usize {
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(BROWSER_COLUMNS)
+        .constraints(constraints)
         .spacing(BROWSER_COLUMN_SPACING)
         .split(inner);
     usize::from(columns[0].width)
@@ -3057,21 +3209,45 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
         .saturating_sub(visible_count.saturating_sub(1));
     let end = (start + visible_count).min(rows.len());
 
-    let header = Row::new([
-        TableCell::from(name_label(model.locale())),
-        TableCell::from(type_label(model.locale())),
-        TableCell::from(size_label(model.locale())),
-        TableCell::from(if model.inspection.is_some() {
-            allocated_label(model.locale())
-        } else {
-            reclaimable_label(model.locale())
-        }),
-        TableCell::from(children_label(model.locale())),
-        TableCell::from(coverage_header_label(model.locale())),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
-
-    let name_cells = name_column_cells(area);
+    let simple = model.progressive_navigation && model.inspection.is_none();
+    let simple_columns = [
+        Constraint::Min(12),
+        Constraint::Length(11),
+        Constraint::Length(16),
+        Constraint::Length(18),
+    ];
+    let columns = if simple {
+        &simple_columns[..]
+    } else {
+        &BROWSER_COLUMNS[..]
+    };
+    let headers = if simple {
+        vec![
+            name_label(model.locale()),
+            type_label(model.locale()),
+            size_label(model.locale()),
+            status_label(model.locale()),
+        ]
+    } else {
+        vec![
+            name_label(model.locale()),
+            type_label(model.locale()),
+            size_label(model.locale()),
+            if model.inspection.is_some() {
+                allocated_label(model.locale())
+            } else {
+                reclaimable_label(model.locale())
+            },
+            children_label(model.locale()),
+            coverage_header_label(model.locale()),
+        ]
+    };
+    let header = Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD));
+    let name_cells = if simple {
+        column_name_cells(area, columns)
+    } else {
+        name_column_cells(area)
+    };
     let table_rows = rows[start..end].iter().enumerate().map(|(offset, row)| {
         let index = start + offset;
         let selected = index == model.selected_index();
@@ -3126,15 +3302,71 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
             truncate_with_ellipsis(&label, name_cells)
         };
 
-        Row::new([
-            TableCell::from(name),
-            TableCell::from(object_type_label(row.object_type().clone())),
-            TableCell::from(logical),
-            TableCell::from(reclaimable),
-            TableCell::from(children),
-            TableCell::from(coverage),
-        ])
-        .style(style)
+        let cells = if simple {
+            let value = aggregate
+                .map(|value| &value.apparent_logical_bytes)
+                .unwrap_or(&row.entry().logical_bytes);
+            let size = match value {
+                sweepx_model::EvidenceValue::LowerBound { value, .. } => {
+                    byte_value_label_with_unit(
+                        &sweepx_model::EvidenceValue::Known { value: *value },
+                        model.size_unit,
+                    )
+                }
+                sweepx_model::EvidenceValue::NotChecked { .. } => "—".into(),
+                _ => logical,
+            };
+            let status = match (value, row.detail_rescan_state().is_stale()) {
+                (_, true) => match model.locale {
+                    Locale::ZhCn => "扫描失败",
+                    Locale::EnUs => "Scan failed",
+                },
+                (sweepx_model::EvidenceValue::Known { .. }, _) => match model.locale {
+                    Locale::ZhCn => "已完成",
+                    Locale::EnUs => "Complete",
+                },
+                (sweepx_model::EvidenceValue::LowerBound { .. }, _) => {
+                    if matches!(
+                        model.current_detail_rescan_state(),
+                        Some(DetailRescanState::Pending { .. })
+                    ) {
+                        match model.locale {
+                            Locale::ZhCn => "已扫描大小",
+                            Locale::EnUs => "Scanned so far",
+                        }
+                    } else {
+                        match model.locale {
+                            Locale::ZhCn => "未完整扫描",
+                            Locale::EnUs => "Incomplete",
+                        }
+                    }
+                }
+                (sweepx_model::EvidenceValue::NotChecked { .. }, _) => match model.locale {
+                    Locale::ZhCn => "等待扫描",
+                    Locale::EnUs => "Waiting",
+                },
+                _ => match model.locale {
+                    Locale::ZhCn => "无法读取大小",
+                    Locale::EnUs => "Size unavailable",
+                },
+            };
+            vec![
+                TableCell::from(name),
+                TableCell::from(object_type_label(row.object_type().clone())),
+                TableCell::from(size),
+                TableCell::from(status),
+            ]
+        } else {
+            vec![
+                TableCell::from(name),
+                TableCell::from(object_type_label(row.object_type().clone())),
+                TableCell::from(logical),
+                TableCell::from(reclaimable),
+                TableCell::from(children),
+                TableCell::from(coverage),
+            ]
+        };
+        Row::new(cells).style(style)
     });
 
     let empty_title = if rows.is_empty() {
@@ -3154,7 +3386,7 @@ fn render_browser_rows(frame: &mut Frame<'_>, area: Rect, model: &BrowserModel, 
             model.max_level_rows(),
         )
     };
-    let table = Table::new(table_rows, BROWSER_COLUMNS)
+    let table = Table::new(table_rows, columns)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(empty_title));
     frame.render_widget(table, area);
@@ -3218,20 +3450,32 @@ fn browser_footer_text(model: &BrowserModel) -> String {
     } else {
         help.to_owned()
     };
-    let detail = match model.current_detail_rescan_state() {
-        Some(DetailRescanState::Stale { revision, failure }) => {
-            format!(
-                "{help} | detail: incomplete/stale ({}, revision {revision})",
-                failure.label()
-            )
+    let detail = if model.progressive_navigation && model.inspection.is_none() {
+        let state = match model.current_detail_rescan_state() {
+            Some(DetailRescanState::Pending { .. }) => scanning_label(model.locale()),
+            Some(DetailRescanState::Stale { failure, .. }) => failure.label(),
+            _ => match model.locale {
+                Locale::ZhCn => "大小按文件字节数累计",
+                Locale::EnUs => "Size sums file bytes",
+            },
+        };
+        format!("{help} | {state}")
+    } else {
+        match model.current_detail_rescan_state() {
+            Some(DetailRescanState::Stale { revision, failure }) => {
+                format!(
+                    "{help} | detail: incomplete/stale ({}, revision {revision})",
+                    failure.label()
+                )
+            }
+            Some(DetailRescanState::Refreshed { revision }) => {
+                format!("{help} | detail revision {revision}")
+            }
+            Some(DetailRescanState::Pending { revision }) => {
+                format!("{help} | detail: refreshing (revision {revision})")
+            }
+            _ => help,
         }
-        Some(DetailRescanState::Refreshed { revision }) => {
-            format!("{help} | detail revision {revision}")
-        }
-        Some(DetailRescanState::Pending { revision }) => {
-            format!("{help} | detail: refreshing (revision {revision})")
-        }
-        _ => help,
     };
     if !model.path_detail_shown() {
         return detail;
@@ -3936,8 +4180,11 @@ mod tests {
         aggregate.arithmetic_state = ArithmeticState::LowerBound;
         DetailRescanProgress {
             binding: request.binding.clone(),
-            row,
+            rows: vec![row],
             aggregate,
+            current_path: "/root/sub/deep.txt".into(),
+            elapsed_millis: 120,
+            native_file_lengths: 1,
         }
     }
 
@@ -4569,6 +4816,115 @@ mod tests {
             Some(DetailRescanState::Pending { .. })
         ));
         finish_background(&reducer, &mut model);
+    }
+
+    #[test]
+    fn logical_size_order_updates_siblings_and_preserves_focused_identity() {
+        let mut root = entry("/root", ObjectType::Directory, 1, 1, None);
+        attach_root_locator(&mut root);
+        let mut model = BrowserModel::from_progressive_roots(
+            Locale::EnUs,
+            OutputStatus::Ok,
+            Some("scan-live".into()),
+            vec![root],
+            Vec::new(),
+            HumanSizeUnit::Bytes,
+            ScanSort::Size,
+        )
+        .unwrap();
+        let listing = model.begin_detail_rescan().unwrap();
+        let first = entry("/root/a", ObjectType::Directory, 2, 1, Some(1));
+        let second = entry("/root/b", ObjectType::Directory, 3, 1, Some(1));
+        let mut file = entry("/root/file", ObjectType::File, 4, 1, Some(1));
+        file.logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(1024),
+        };
+        file.reclaimable_estimate = EvidenceValue::Unknown {
+            reason: ReasonCode::UnknownIdentity,
+        };
+        let result =
+            progressive_listing_result(&listing.request, vec![first.clone(), second.clone(), file]);
+        // Progressive navigation enters immediately, before the asynchronous listing returns.
+        model.enter_selected();
+        model.finish_detail_rescan(listing, result);
+        assert_eq!(model.visible_rows()[0].label(), "file");
+        let pending = model.begin_progressive_aggregate().unwrap();
+        // A recursive pass starts again at zero, and may visit subdirectories before the direct
+        // files counted by the earlier listing. That first valid snapshot must keep it alive.
+        model.nodes[pending.node_index]
+            .aggregate
+            .as_mut()
+            .unwrap()
+            .apparent_logical_bytes = EvidenceValue::Known {
+            value: DecimalU128::new(1_000_000),
+        };
+        // Only the latest cumulative snapshot is delivered. Earlier sibling updates were dropped.
+        let mut update = progressive_aggregate_progress(&pending.request, first.clone(), 2048);
+        let mut bigger = second;
+        bigger.logical_bytes = EvidenceValue::LowerBound {
+            value: DecimalU128::new(8192),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        };
+        bigger.reclaimable_estimate = EvidenceValue::Unknown {
+            reason: ReasonCode::UnknownIdentity,
+        };
+        update.rows[0].reclaimable_estimate = bigger.reclaimable_estimate.clone();
+        update.rows.push(bigger);
+        update.aggregate.apparent_logical_bytes = EvidenceValue::LowerBound {
+            value: DecimalU128::new(11264),
+            reason: ReasonCode::IncompleteStreamCoverage,
+        };
+        assert!(model.apply_detail_rescan_progress(&pending, update));
+        assert_eq!(
+            model
+                .visible_rows()
+                .iter()
+                .map(BrowserRow::label)
+                .collect::<Vec<_>>(),
+            ["b", "a", "file"]
+        );
+        assert_eq!(model.selected_row().unwrap().label(), "file");
+        assert_eq!(
+            model.activity.as_ref().unwrap().current_path,
+            "/root/sub/deep.txt"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 22)).unwrap();
+        terminal
+            .draw(|frame| render_live_browser(frame, frame.area(), &model))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Scanning:"));
+        assert!(screen.contains("Scanned so far"));
+        assert!(screen.contains("deep.txt"));
+        assert!(!screen.contains("Reclaimable"));
+        assert!(!screen.contains("details_lost"));
+        assert!(!screen.contains("revision"));
+        let rows = model
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry().clone())
+            .collect();
+        let DetailRescanResult::Refreshed(mut terminal) =
+            progressive_aggregate_result(&pending.request, rows)
+        else {
+            unreachable!()
+        };
+        terminal.aggregate.recursive_entry_count = EvidenceValue::Known {
+            value: DecimalU128::new(42),
+        };
+        // No final progress update is delivered. Reliable completion must supply the final count
+        // and preserve the user's selected file through the rebuilt row IDs.
+        model.finish_detail_rescan(pending, DetailRescanResult::Refreshed(terminal));
+        assert_eq!(model.activity.as_ref().unwrap().entries, 42);
+        assert_eq!(model.selected_row().unwrap().label(), "file");
+        model.return_to_parent();
+        assert!(model.activity.is_none());
     }
 
     #[test]

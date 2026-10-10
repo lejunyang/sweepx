@@ -3244,8 +3244,8 @@ fn render_human_scan_output_selected(
         }),
     }
     let headings = match context.locale() {
-        Locale::ZhCn => ("路径", "类型", "可回收", "覆盖"),
-        Locale::EnUs => ("Path", "Type", "Reclaimable", "Coverage"),
+        Locale::ZhCn => ("路径", "类型", "大小", "覆盖"),
+        Locale::EnUs => ("Path", "Type", "Size", "Coverage"),
     };
     lines.push(format!(
         "{:<56}  {:<10}  {:>14}  {}",
@@ -3267,9 +3267,8 @@ fn render_human_scan_output_selected(
             .and_then(Value::as_str)
             .and_then(|entry_id| aggregates.get(entry_id))
             .copied();
-        let reclaimable = aggregate
-            .and_then(|value| value.get("potentiallyReclaimableBytes"))
-            .or_else(|| item.get("reclaimableEstimate"))
+        let size = aggregate
+            .and_then(|value| value.get("apparentLogicalBytes"))
             .or_else(|| item.get("logicalBytes"))
             .map(|value| render_human_evidence_value(value, size_unit))
             .unwrap_or_else(|| "unknown".to_string());
@@ -3283,7 +3282,7 @@ fn render_human_scan_output_selected(
             "{:<56}  {:<10}  {:>14}  {}",
             truncate_display(&sanitize_terminal_text(path), 56),
             kind,
-            reclaimable,
+            size,
             coverage
         ));
     }
@@ -3301,8 +3300,8 @@ fn render_human_scan_output_selected(
         });
     }
     lines.push(match context.locale() {
-        Locale::ZhCn => "说明：>= 表示扫描不完整时已确认的下限，实际值只会更大；可回收是删除该对象后预计释放的独占磁盘占用，不是逻辑文件大小，也不承诺一定释放。".to_string(),
-        Locale::EnUs => ">= marks a lower bound from an incomplete scan. Reclaimable estimates exclusive allocated disk bytes that removal may release; it is not logical file size or a guarantee.".to_string(),
+        Locale::ZhCn => "说明：大小是文件的字节数，文件夹累计内部文件的大小；>= 表示尚未扫描完整的已知大小。".to_string(),
+        Locale::EnUs => "Size is the number of file bytes; folders sum the sizes of contained files. >= marks the observed size when coverage is incomplete.".to_string(),
     });
     lines.push(catalog.render(MessageKey::SafetyReadOnlyNotice, &MessageArgs::default()));
     duplicates::append_human_groups(
@@ -3330,8 +3329,7 @@ fn human_scan_item_bytes(item: &Value, aggregates: &BTreeMap<&str, &Value>) -> O
         .and_then(|entry_id| aggregates.get(entry_id))
         .copied();
     aggregate
-        .and_then(|value| value.get("potentiallyReclaimableBytes"))
-        .or_else(|| item.get("reclaimableEstimate"))
+        .and_then(|value| value.get("apparentLogicalBytes"))
         .or_else(|| item.get("logicalBytes"))
         .and_then(|value| value.get("value"))
         .and_then(Value::as_str)
@@ -6204,7 +6202,8 @@ mod tests {
                 "scanRootId": "scan-1:e:root"
             },
             "objectType": "directory",
-            "reclaimableEstimate": {"state": "known", "value": "0"},
+            "logicalBytes": {"state": "known", "value": "0"},
+            "reclaimableEstimate": {"state": "unknown", "reason": "unknown_identity"},
             "coverage": {"state": "incomplete"}
         });
         output.data = json!({
@@ -6213,7 +6212,8 @@ mod tests {
             "aggregates": [{
                 "scanEntryId": "scan-1:e:1",
                 "directoryIdentity": "scan-1:e:1",
-                "potentiallyReclaimableBytes": {"state": "known", "value": "4096"},
+                "apparentLogicalBytes": {"state": "known", "value": "4096"},
+                "potentiallyReclaimableBytes": {"state": "unknown", "reason": "unknown_identity"},
                 "coverage": {"state": "complete"}
             }]
         });
@@ -6243,6 +6243,8 @@ mod tests {
         assert_eq!(rendered.matches("/tmp/root").count(), 1);
         assert!(rendered.contains("Status: partial"));
         assert!(rendered.contains("4.0 KiB"));
+        assert!(rendered.contains("Size"));
+        assert!(!rendered.contains("Reclaimable"));
         assert!(rendered.contains("complete"));
         assert!(rendered.contains(
             "Summary: 1 roots, 1 entries, 1 directory aggregates, 2 boundaries, 3 errors"
@@ -6271,13 +6273,15 @@ mod tests {
             "entries": [{
                 "displayPath": "/tmp/root",
                 "objectType": "directory",
-                "reclaimableEstimate": {"state": "known", "value": "0"},
+                "logicalBytes": {"state": "known", "value": "0"},
+                "reclaimableEstimate": {"state": "unknown", "reason": "unknown_identity"},
                 "coverage": {"state": "incomplete"}
             }],
             "aggregates": [{
                 "scanEntryId": "scan-1:e:1",
                 "directoryIdentity": "scan-1:e:1",
-                "potentiallyReclaimableBytes": {"state": "known", "value": "4096"},
+                "apparentLogicalBytes": {"state": "known", "value": "4096"},
+                "potentiallyReclaimableBytes": {"state": "unknown", "reason": "unknown_identity"},
                 "coverage": {"state": "complete"}
             }]
         });

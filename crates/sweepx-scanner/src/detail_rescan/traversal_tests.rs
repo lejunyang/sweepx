@@ -16,6 +16,7 @@ struct Probe {
     peak: AtomicUsize,
     roots: AtomicUsize,
     denied: AtomicUsize,
+    native_lengths: AtomicUsize,
     #[cfg(unix)]
     directories: BTreeSet<(u64, u64)>,
     #[cfg(unix)]
@@ -163,6 +164,15 @@ impl PlatformScanner for ProbedPlatform {
                 admission,
             )
             .map(|entry| self.observed(entry))
+    }
+    fn observe_file_length(
+        &self,
+        parent: &Handle,
+        child: &DirectoryEntryRecord,
+    ) -> Option<sweepx_platform::CachedFileEntry> {
+        let file = self.native.observe_file_length(&parent.native, child)?;
+        self.probe.native_lengths.fetch_add(1, Ordering::SeqCst);
+        Some(file)
     }
     fn is_same_mount(
         &self,
@@ -387,13 +397,13 @@ fn wide_native_detail_is_complete_with_three_capabilities_and_independent_totals
     }
     for (_, update) in updates {
         assert!(!update.aggregate.coverage.complete);
-        assert!(!update.row.coverage.complete);
-        assert!(
-            result
+        assert!(update.rows.iter().all(|row| !row.coverage.complete));
+        assert!(result.rows.iter().any(|row| {
+            update
                 .rows
                 .iter()
-                .any(|row| row.identity == update.row.identity)
-        );
+                .any(|changed| row.identity == changed.identity)
+        }));
     }
     for row in &result.rows {
         if row.object_type == ObjectType::Directory {
@@ -454,4 +464,103 @@ fn native_detail_refusal_cancellation_and_invalid_batch_release_all_capabilities
         }
         released(&probe);
     }
+}
+
+#[test]
+fn logical_usage_matches_independent_walk_after_mutations_and_does_not_invent_allocation() {
+    let (_temp, root) = fixture();
+    for directory in ["first/deep", "second/deep"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    fs::write(root.join("direct"), b"123").unwrap();
+    fs::write(root.join("first/deep/file"), b"12345").unwrap();
+    fs::hard_link(root.join("first/deep/file"), root.join("second/deep/link")).unwrap();
+    fs::write(root.join("second/deep/removed"), b"old").unwrap();
+    let (scan_id, source) = source(&root);
+    // The new traversal must observe mutations rather than replay source-scan totals.
+    fs::write(root.join("first/deep/file"), b"123456789").unwrap();
+    fs::remove_file(root.join("second/deep/removed")).unwrap();
+    fs::write(root.join("second/deep/added"), b"1234").unwrap();
+    let mut oracle = Oracle::default();
+    oracle.walk(&root, true);
+    let probe = oracle.probe();
+    let scanner = DetailRescanner::new(ProbedPlatform::new(Arc::clone(&probe)), limits());
+    let mut updates = Vec::new();
+    let fast = scanner
+        .rescan_logical_with_progress(
+            request(&scan_id, &source),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+            |update| updates.push(update),
+        )
+        .unwrap();
+    let full = scanner
+        .rescan_with_progress(
+            request(&scan_id, &source),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .unwrap();
+    assert!(fast.aggregate.coverage.complete);
+    assert_eq!(
+        fast.aggregate.apparent_logical_bytes,
+        known_u128(oracle.logical)
+    );
+    assert_eq!(
+        fast.aggregate.recursive_entry_count,
+        known_count(oracle.entries)
+    );
+    assert_eq!(
+        fast.aggregate.apparent_logical_bytes,
+        full.aggregate.apparent_logical_bytes
+    );
+    assert_eq!(
+        fast.aggregate.recursive_entry_count,
+        full.aggregate.recursive_entry_count
+    );
+    assert_eq!(probe.native_lengths.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        fast.aggregate.unique_logical_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert!(matches!(
+        fast.aggregate.filesystem_reported_allocated_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    assert!(matches!(
+        fast.aggregate.potentially_reclaimable_bytes,
+        EvidenceValue::Unknown { .. }
+    ));
+    let update = updates.last().unwrap();
+    assert_eq!(update.native_file_lengths, 3);
+    assert_eq!(update.rows.len(), 2);
+    assert!(update.current_path.starts_with(&root));
+    for row in &fast.rows {
+        assert!(row.validated_identity().unwrap().is_some());
+        assert!(row.executable_native_locator().unwrap().is_some());
+        if row.object_type == ObjectType::Directory {
+            let mut child_oracle = Oracle::default();
+            child_oracle.walk(Path::new(&row.display_path), true);
+            assert_eq!(row.logical_bytes, known_u128(child_oracle.logical));
+        }
+    }
+    released(&probe);
+}
+
+#[test]
+fn logical_usage_honors_cancellation_in_final_progress_callback() {
+    let (_temp, root) = fixture();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/file"), b"123").unwrap();
+    let (scan_id, source) = source(&root);
+    let cancel = CancellationToken::new();
+    let result = DetailRescanner::new(HostPlatformScanner::new(), limits())
+        .rescan_logical_with_progress(
+            request(&scan_id, &source),
+            &mut DetailEntryIdAllocator::new(scan_id.clone()).unwrap(),
+            &cancel,
+            |_| cancel.cancel(),
+        );
+    assert_eq!(result, Err(DetailRescanError::Cancelled));
 }

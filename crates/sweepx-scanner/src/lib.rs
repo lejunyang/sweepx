@@ -7,8 +7,8 @@ pub use acceleration::{
     read_accelerated_preview,
 };
 pub use detail_rescan::{
-    DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanRequest,
-    DetailRescanResult, DetailRescanner, FileContentError, FileContentRequest,
+    DETAIL_SCAN_MIN_ORDINAL, DetailEntryIdAllocator, DetailRescanError, DetailRescanProgress,
+    DetailRescanRequest, DetailRescanResult, DetailRescanner, FileContentError, FileContentRequest,
 };
 pub use locator_reader::{
     CargoConfigMemberObservation, CargoConfigMemberPresenceObservation, CargoConfigPairConsistency,

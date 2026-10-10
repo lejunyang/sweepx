@@ -42,6 +42,10 @@ The protocol can now express one exact capability/platform tuple and its evidenc
 
 These records remain a fail-closed qualification-registry substrate; a `degraded` preview is not `qualified`. `fixture_conformance_only`, `fake`, `stale`, `incomplete`, `placeholder`, or `mismatched` evidence can never qualify mutation. A cell could become `qualified` later only if current `real_os_qualification` evidence completely matches its exact tuple. There is still no general plan/approval UI; the Permanent adapter covers only bounded regular-file/real-directory trees on Linux.
 
+Plain `scan` shows file size in bytes reported by the system and sums ordinary-file sizes for directories. Size order is descending file size, rather than estimated reclaimable space. `scan --tui` shows the current path, entry count, elapsed time and rate; directory sizes and row order update continuously while keeping the focused file selected. Rows distinguish waiting, scanned-so-far, complete and incomplete. Omitting retained descendant rows does not mean their sizes were omitted. Junk allocation breakdowns keep their existing allocation-based presentation.
+
+Deep files in the ordinary browser use existing current native length observations: macOS bulk directory attributes, Linux handle-relative statx and Windows current directory records. Direct visible rows and directories retain full native identity checks; unqualified files fall back to full inspection. Persistent previews remain historical, and quiet change notifications do not establish an unchanged tree. This acceleration uses current system facts, not a whole-tree cache hit. Machine fields and evidence states remain unchanged.
+
 ## Independent large-file ranking
 
 ```bash

@@ -6,6 +6,16 @@
 
 本文沿用上游研究的证据标签：已证事实表示上游一手资料直接支持；推导表示由事实导出的限制；产品设计表示 SweepX 选择；待实测表示发布前必须在真实平台验证、失败时保守降级的假设。平台 adapter 可以增加能力，不能降低共同下限：ordinary-user、metadata-only、no-follow、same-mount/volume、errors-visible。
 
+## 2026-10-11 补充：普通目录浏览的大小与进度
+
+普通 human scan 与目录 TUI 默认按文件字节数（目录使用 `apparent_logical_bytes`）排序，摆脱 allocation/reclaimability unknown 导致的路径排序。普通 TUI 使用名称、类型、大小、状态四列；完整、未完成的累计值与无法读取仍不同。内部和 JSON 保留逻辑长度、分配、可释放估计的独立字段；垃圾占用详情仍按分配排序，不复用逻辑长度代替其完整文件事实。
+
+`rescan_logical_with_progress` 与既有 identity-bound detail traversal 共用根/lineage 准入、DFS、批次验证、目录句柄上限、取消与结果发布。直接列表项和目录仍完整检查，只有不保留为可操作行的深层普通文件可用 `observe_file_length`，并验证返回的 path/native name 与当前 child token 一致。返回 None/不一致则回完整检查。系统接口自行限定当前批次、类型、设备/provider/挂载资格；不读取旧缓存，也不从空 FSEvents 推导整树命中。贡献 cheap length 的聚合只建立文件大小；unique、allocated、reclaimable 置 unknown。完整观察 API 保留给垃圾详情与其他需要完整事实的调用者。
+
+约 120 ms 发出有界的累计直接子目录快照，最后可提前 flush；一个非阻塞进度槽之外，可靠的最终结果独立交付。旧的单子目录更新可能在丢帧后让已经完成的兄弟一直停在零，新快照包含已观察的兄弟。TUI 先验证整个快照的 binding、原生身份和单调大小，再一次排序并保持焦点 node。浅层列表与递归统计是两次当前观察，首个递归总量可能小于先前列表统计；单调性从首个有效递归快照开始，避免误拒绝进度造成超时。最终条目数来自可靠结果，焦点按原生对象重新匹配；返回上层会清除其他目录的活动信息。当前路径只是显示文本，不能成为执行权限。进度同时携带耗时、已观察计数和当前原生快速长度计数，供 UI 与只读诊断使用。默认 30 秒为无进度超时，非协作 worker 仍有 quarantine 上限。
+
+可复用只读诊断入口：`cargo run --release -p sweepx-scanner --example detail-usage -- /absolute/root`；追加 `--full` 比较完整深层文件元数据。输出区分 admission 和 traversal，列出所有直接子项总量及真实 coverage；没有系统缓存清空或完整 Finder 显示口径资格的承诺。[本机测量与验证](scan-usage-validation-2026-10-11.json)保留同构建、重复次数、普通目录遍历 oracle、终端验收以及平台运行缺口。
+
 ## 当前实现补充（2026-10-07） {#macos-live-file-length}
 
 本节说明当前 macOS 垃圾入口，后文的 v1 设计预算与未来资格要求不应被视为已实现或已测性能。补充来源访问日期：2026-10-07。

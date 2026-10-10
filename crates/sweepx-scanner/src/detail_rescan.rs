@@ -123,13 +123,21 @@ pub struct DetailRescanResult {
 
 /// One lower-bound update produced while a recursive detail rescan is still running.
 ///
-/// Only the visible direct-child row whose subtree advanced is copied. The enclosing aggregate
-/// lets the frontend update the active directory without retaining descendant rows. Neither value
-/// is complete evidence until the terminal [`DetailRescanResult`] arrives.
+/// Cumulative direct-directory rows keep earlier siblings visible when advisory updates are
+/// dropped. The enclosing aggregate updates the active directory without retaining descendants.
+/// Neither value is complete evidence until the terminal [`DetailRescanResult`] arrives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailRescanProgress {
-    pub row: ScannedEntry,
+    /// Cumulative direct-directory snapshots. Carry earlier siblings as well so a dropped UI
+    /// update cannot leave a completed sibling at zero until the whole root finishes.
+    pub rows: Vec<ScannedEntry>,
     pub aggregate: DirectoryAggregate,
+    /// Advisory path of the latest visited entry; never execution authority.
+    pub current_path: PathBuf,
+    /// Time spent in this directory traversal, excluding root/lineage admission.
+    pub elapsed_millis: u128,
+    /// Files whose lengths were obtained through the platform's current native fast path.
+    pub native_file_lengths: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -155,6 +163,7 @@ pub enum DetailRescanError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetTraversal {
     Recursive,
+    RecursiveLogical,
     DirectPartial,
     DirectStrict,
 }
@@ -311,6 +320,48 @@ where
     where
         F: FnMut(DetailRescanProgress),
     {
+        self.rescan_progress(
+            request,
+            ids,
+            cancel,
+            TargetTraversal::Recursive,
+            &mut on_progress,
+        )
+    }
+
+    /// Measures recursive logical usage using current native lengths for unretained descendants.
+    ///
+    /// Direct rows and directories retain full no-follow identity/mount observations. Only deep
+    /// ordinary files may use the platform's qualified current length; missing facts fall back to
+    /// full inspection. Allocation, uniqueness and reclaimability become unknown when such a
+    /// length contributes. No historical cache or descendant execution authority is produced.
+    pub fn rescan_logical_with_progress<F>(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+        mut on_progress: F,
+    ) -> Result<DetailRescanResult, DetailRescanError>
+    where
+        F: FnMut(DetailRescanProgress),
+    {
+        self.rescan_progress(
+            request,
+            ids,
+            cancel,
+            TargetTraversal::RecursiveLogical,
+            &mut on_progress,
+        )
+    }
+
+    fn rescan_progress(
+        &self,
+        request: DetailRescanRequest<'_>,
+        ids: &mut DetailEntryIdAllocator,
+        cancel: &CancellationToken,
+        mode: TargetTraversal,
+        on_progress: &mut dyn FnMut(DetailRescanProgress),
+    ) -> Result<DetailRescanResult, DetailRescanError> {
         self.validate_request(&request, ids)?;
         if cancel.is_cancelled() {
             return Err(DetailRescanError::Cancelled);
@@ -319,14 +370,8 @@ where
         let reopened = self.reopen_target(&request, cancel)?;
         let observed_root = reopened.observed_root.clone();
         let observed_directory = reopened.observed_directory.clone();
-        let (rows, aggregate) = self.scan_target_directory(
-            &request,
-            reopened,
-            ids,
-            cancel,
-            TargetTraversal::Recursive,
-            Some(&mut on_progress),
-        )?;
+        let (rows, aggregate) =
+            self.scan_target_directory(&request, reopened, ids, cancel, mode, Some(on_progress))?;
 
         Ok(DetailRescanResult {
             observed_root,
@@ -590,7 +635,10 @@ where
         mode: TargetTraversal,
         mut on_progress: Option<&mut dyn FnMut(DetailRescanProgress)>,
     ) -> Result<(Vec<ScannedEntry>, DirectoryAggregate), DetailRescanError> {
-        let recursive = mode == TargetTraversal::Recursive;
+        let recursive = matches!(
+            mode,
+            TargetTraversal::Recursive | TargetTraversal::RecursiveLogical
+        );
         let strict = mode == TargetTraversal::DirectStrict;
         let ReopenedTarget {
             root_metadata,
@@ -605,8 +653,11 @@ where
         let mut rows = Vec::new();
         let mut aggregate = TargetAggregateState::new();
         let mut progress_clock = RecursiveProgressClock {
+            started: Instant::now(),
             last_emit: Instant::now(),
             changed: None,
+            current_path: target_metadata.path.clone(),
+            native_file_lengths: 0,
         };
         // Keep one accumulator per direct child directory. Descendants are never retained as
         // rows, but their bytes roll up into the visible child so the TUI can show useful sizes
@@ -743,6 +794,7 @@ where
                                     request,
                                     on_progress: &mut on_progress,
                                     clock: &mut progress_clock,
+                                    logical_only: mode == TargetTraversal::RecursiveLogical,
                                 };
                                 self.scan_nested_directories(
                                     &root_metadata,
@@ -871,16 +923,16 @@ where
             }
         }
 
-        // Coalesce across direct subtrees too. Intermediate updates may omit small completed
-        // siblings; the terminal result contains every final row. Flush one last advisory row
+        // Coalesce across direct subtrees too. Cumulative updates retain completed siblings;
+        // the terminal result contains every final row. Flush one last advisory snapshot
         // before the cancellation/publication gate, without cloning the hard-link ledgers.
-        if recursive && let Some(changed) = progress_clock.changed.take() {
+        if recursive && progress_clock.changed.take().is_some() {
             emit_recursive_progress(
                 &rows,
                 &aggregate,
                 &direct_directory_aggregates,
                 request,
-                &changed,
+                &progress_clock,
                 &mut on_progress,
             );
         }
@@ -990,15 +1042,28 @@ where
                 frame.end_of_directory = batch.end_of_directory;
             }
             if let Some(child) = frame.pending.pop_front() {
-                let walked = inspect_bound_child_with_mount_identity_and_directory_admission(
-                    &self.platform,
-                    &current.handle,
-                    &current.path,
-                    &child,
-                    cancel,
-                    detail_directory_admission(self.limits.max_frontier_entries, retained),
-                )
-                .map_err(map_platform_error)?;
+                child
+                    .validate_for_parent(&current.path)
+                    .map_err(|_| DetailRescanError::InvalidRequest)?;
+                progress.clock.current_path = child.path.clone();
+                let walked = if progress.logical_only
+                    && let Some(file) = self.platform.observe_file_length(&current.handle, &child)
+                    && file.path == child.path
+                    && file.file_name == child.file_name
+                {
+                    progress.clock.native_file_lengths += 1;
+                    WalkEntry::CachedFile(file)
+                } else {
+                    inspect_bound_child_with_mount_identity_and_directory_admission(
+                        &self.platform,
+                        &current.handle,
+                        &current.path,
+                        &child,
+                        cancel,
+                        detail_directory_admission(self.limits.max_frontier_entries, retained),
+                    )
+                    .map_err(map_platform_error)?
+                };
                 let entry_id = ids.allocate()?;
                 aggregates.target.note_entry()?;
                 let direct = aggregates
@@ -1060,22 +1125,23 @@ where
                         aggregates.target.mark_incomplete(error.reason.clone());
                         direct.mark_incomplete(error.reason);
                     }
-                    WalkEntry::CachedFile(_) => {
-                        return Err(DetailRescanError::IdentityMismatch);
+                    WalkEntry::CachedFile(file) => {
+                        aggregates.target.note_logical_file(file.logical_bytes);
+                        direct.note_logical_file(file.logical_bytes);
                     }
                 }
                 progress.clock.changed = Some(current.direct_child_id.clone());
             }
             let finished = frame.pending.is_empty() && frame.end_of_directory && descend.is_none();
             if progress.clock.last_emit.elapsed() >= DETAIL_PROGRESS_INTERVAL
-                && let Some(changed) = progress.clock.changed.take()
+                && progress.clock.changed.take().is_some()
             {
                 emit_recursive_progress(
                     progress.rows,
                     aggregates.target,
                     aggregates.direct,
                     progress.request,
-                    &changed,
+                    progress.clock,
                     progress.on_progress,
                 );
                 progress.clock.last_emit = Instant::now();
@@ -1091,11 +1157,15 @@ where
 }
 
 struct RecursiveProgressClock {
+    started: Instant,
+    current_path: PathBuf,
+    native_file_lengths: u128,
     last_emit: Instant,
     changed: Option<ScanEntryId>,
 }
 
 struct RecursiveProgressContext<'a, 'request, 'callback> {
+    logical_only: bool,
     rows: &'a [ScannedEntry],
     request: &'a DetailRescanRequest<'request>,
     on_progress: &'a mut Option<&'callback mut dyn FnMut(DetailRescanProgress)>,
@@ -1112,38 +1182,31 @@ fn emit_recursive_progress(
     aggregate: &TargetAggregateState,
     direct_directory_aggregates: &std::collections::BTreeMap<ScanEntryId, TargetAggregateState>,
     request: &DetailRescanRequest<'_>,
-    direct_child_id: &ScanEntryId,
+    clock: &RecursiveProgressClock,
     on_progress: &mut Option<&mut dyn FnMut(DetailRescanProgress)>,
 ) {
     let Some(on_progress) = on_progress.as_deref_mut() else {
         return;
     };
-    let Some(mut row) = rows
+    let rows = rows
         .iter()
-        .find(|row| {
-            row.identity
-                .as_ref()
-                .is_some_and(|identity| &identity.entry_id == direct_child_id)
+        .filter_map(|row| {
+            let id = &row.identity.as_ref()?.entry_id;
+            let state = direct_directory_aggregates.get(id)?;
+            let child = state.finish(request.source_scan_id, id, request.revision, false);
+            let mut row = row.clone();
+            row.logical_bytes = child.apparent_logical_bytes;
+            row.allocated_bytes = child.filesystem_reported_allocated_bytes;
+            row.reclaimable_estimate = child.potentially_reclaimable_bytes;
+            row.coverage = child.coverage;
+            Some(row)
         })
-        .cloned()
-    else {
-        return;
-    };
-    let Some(state) = direct_directory_aggregates.get(direct_child_id) else {
-        return;
-    };
-    let child = state.finish(
-        request.source_scan_id,
-        direct_child_id,
-        request.revision,
-        false,
-    );
-    row.logical_bytes = child.apparent_logical_bytes;
-    row.allocated_bytes = child.filesystem_reported_allocated_bytes;
-    row.reclaimable_estimate = child.potentially_reclaimable_bytes;
-    row.coverage = child.coverage;
+        .collect();
     on_progress(DetailRescanProgress {
-        row,
+        rows,
+        current_path: clock.current_path.clone(),
+        elapsed_millis: clock.started.elapsed().as_millis(),
+        native_file_lengths: clock.native_file_lengths,
         aggregate: aggregate.finish(
             request.source_scan_id,
             &request.source_directory_identity.entry_id,
@@ -1296,6 +1359,22 @@ impl TargetAggregateState {
                 };
             }
         }
+    }
+
+    fn note_logical_file(&mut self, bytes: u128) {
+        self.apparent_logical_bytes
+            .add(&sweepx_platform::known_u128(bytes));
+        // Current logical length is sufficient for apparent usage only. Do not infer physical
+        // allocation, hard-link uniqueness or reclaimable bytes from the cheap observation.
+        self.unique_logical_bytes = EvidenceAccumulator::Unknown {
+            reason: ReasonCode::UnknownIdentity,
+        };
+        self.allocated_bytes = EvidenceAccumulator::Unknown {
+            reason: ReasonCode::UnknownIdentity,
+        };
+        self.reclaimable_bytes = EvidenceAccumulator::Unknown {
+            reason: ReasonCode::UnknownIdentity,
+        };
     }
 
     fn mark_incomplete(&mut self, reason: ReasonCode) {
@@ -1644,7 +1723,7 @@ mod tests {
             .unwrap();
         assert_eq!(nested_row.logical_bytes, known_u128(6));
         assert!(!progress.is_empty());
-        let nested_progress = &progress.last().unwrap().row;
+        let nested_progress = &progress.last().unwrap().rows[0];
         assert_eq!(nested_progress.native_basename, test_native_name("nested"));
         assert!(matches!(
             nested_progress.logical_bytes,
