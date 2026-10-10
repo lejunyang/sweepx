@@ -201,9 +201,9 @@ pub(crate) fn run(
         println!(
             "{}",
             if locale == Locale::ZhCn {
-                "项目引用仅覆盖下列搜索范围；逻辑大小和链接数不代表实际可释放空间："
+                "项目引用仅覆盖下列搜索范围；文件大小和链接数不代表实际可释放空间："
             } else {
-                "Project references cover these search roots only; logical size and link counts do not prove freed space:"
+                "Project references cover these search roots only; file size and link counts do not prove freed space:"
             }
         );
         for p in &report.project_roots {

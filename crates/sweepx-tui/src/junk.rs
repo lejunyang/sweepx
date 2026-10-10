@@ -646,7 +646,7 @@ pub fn render_junk(frame: &mut Frame<'_>, model: &JunkModel) {
         } else {
             model.text("分析", "Analysis")
         },
-        model.text("逻辑大小", "Logical size"),
+        model.text("大小", "Size"),
         model.text("状态", "State"),
     ]))
     .row_highlight_style(Style::default().bg(Color::DarkGray))

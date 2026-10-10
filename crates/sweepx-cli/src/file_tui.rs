@@ -137,12 +137,12 @@ impl JunkRow for Row {
             (Locale::ZhCn, true) => {
                 "完整 SHA-256 相同且原生对象不同；按 p 选择保留者。内容相同不代表可丢弃。"
             }
-            (Locale::ZhCn, false) => "按逻辑大小排名；大小不能证明是垃圾或实际可释放空间。",
+            (Locale::ZhCn, false) => "按大小排名；大小不能证明是垃圾或实际可释放空间。",
             (Locale::EnUs, true) => {
                 "Full SHA-256; different native objects; choose a keeper with p. Content equality does not establish disposability."
             }
             (Locale::EnUs, false) => {
-                "Logical-size ranking; size does not establish disposability or reclaimable space."
+                "Size ranking; size does not establish disposability or reclaimable space."
             }
         }
     }

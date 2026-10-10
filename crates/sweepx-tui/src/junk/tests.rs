@@ -1203,7 +1203,8 @@ fn renderer_preserves_lower_bounds_unknowns_and_locale() {
         }
         rendered.push('\n');
     }
-    assert!(rendered.contains("逻辑大小"), "{rendered:?}");
+    assert!(rendered.contains("大小"), "{rendered:?}");
+    assert!(!rendered.contains("逻辑"), "{rendered:?}");
     assert!(rendered.contains("未报告"));
     assert!(rendered.contains(">= 17"));
     assert!(rendered.contains("历史/不完整"));

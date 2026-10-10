@@ -432,8 +432,8 @@ fn large_file_scan_reports_independent_ranked_metadata_in_both_locales() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         text.contains("Large files (report-only")
-            && text.contains("Logical")
-            && text.contains("Allocated")
+            && text.contains("Size")
+            && text.contains("On disk")
             && text.contains("Large files are not junk")
     );
     assert_eq!(fs::read(root.join("largest")).unwrap(), vec![b'x'; 37]);

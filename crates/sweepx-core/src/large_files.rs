@@ -365,16 +365,16 @@ pub(super) fn append_human_ranking(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let headings = match locale {
-        Locale::ZhCn => ("路径", "逻辑大小", "分配大小"),
-        Locale::EnUs => ("Path", "Logical", "Allocated"),
+        Locale::ZhCn => ("路径", "大小", "占用空间"),
+        Locale::EnUs => ("Path", "Size", "On disk"),
     };
     lines.push(match locale {
         Locale::ZhCn => format!(
-            "大文件榜单（仅报告，按逻辑大小降序）；覆盖{}。",
+            "大文件榜单（仅报告，按大小降序）；覆盖{}。",
             if complete { "完整" } else { "不完整" }
         ),
         Locale::EnUs => format!(
-            "Large files (report-only, descending logical size); coverage {}.",
+            "Large files (report-only, descending size); coverage {}.",
             if complete { "complete" } else { "incomplete" }
         ),
     });
@@ -406,8 +406,8 @@ pub(super) fn append_human_ranking(
         ));
     }
     lines.push(match locale {
-        Locale::ZhCn => format!("已观察 {} 个普通文件，{} 个达到阈值，{} 个逻辑大小不确定；保留 {} 行，显示 {} 行。大文件不是垃圾；硬链接路径可能指向同一内容，分配大小不证明可回收空间。", report["observedFiles"].as_str().unwrap_or("?"), report["qualifyingFiles"].as_str().unwrap_or("?"), report["unknownLogicalFiles"].as_str().unwrap_or("?"), files.len(), files.len().min(max_rows)),
-        Locale::EnUs => format!("Observed {} regular files; {} meet the threshold; {} have uncertain logical lengths. Retained {} rows; displayed {}. Large files are not junk; hard-link paths can alias the same content, and allocation does not prove reclaimable space.", report["observedFiles"].as_str().unwrap_or("?"), report["qualifyingFiles"].as_str().unwrap_or("?"), report["unknownLogicalFiles"].as_str().unwrap_or("?"), files.len(), files.len().min(max_rows)),
+        Locale::ZhCn => format!("已观察 {} 个普通文件，{} 个达到阈值，{} 个无法读取大小；保留 {} 行，显示 {} 行。大文件不是垃圾；硬链接路径可能指向同一内容，占用空间不证明清理后实际释放量。", report["observedFiles"].as_str().unwrap_or("?"), report["qualifyingFiles"].as_str().unwrap_or("?"), report["unknownLogicalFiles"].as_str().unwrap_or("?"), files.len(), files.len().min(max_rows)),
+        Locale::EnUs => format!("Observed {} regular files; {} meet the threshold; {} have unavailable file sizes. Retained {} rows; displayed {}. Large files are not junk; hard-link paths can alias the same content, and allocation does not prove reclaimable space.", report["observedFiles"].as_str().unwrap_or("?"), report["qualifyingFiles"].as_str().unwrap_or("?"), report["unknownLogicalFiles"].as_str().unwrap_or("?"), files.len(), files.len().min(max_rows)),
     });
 }
 

@@ -58,12 +58,12 @@ pub fn build_explanation_from_candidate(candidate: &Candidate) -> Result<Explana
 
     clauses.extend(value_clause(
         "logical_bytes",
-        "Logical bytes",
+        "Size in bytes",
         &candidate.logical_bytes,
     ));
     clauses.extend(value_clause(
         "allocated_bytes",
-        "Allocated bytes",
+        "On-disk bytes",
         &candidate.allocated_bytes,
     ));
     clauses.extend(value_clause(

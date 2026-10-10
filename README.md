@@ -38,7 +38,7 @@ Chrome 基础模型可用 `sweepx browser-model` 查看版本；`--trash` 在 Ch
 
 pnpm/osdk 现支持[缓存逐项查看与清理](site/cli.md#pnpm-store--osdk-cache)：`pnpm-store --root /absolute/store/v11 --project-root /absolute/projects --tui` 展示包版本、文件链接数、引用项目及项目总大小；整库清理已禁用。选中包仅回收独占、单链接内容，共享文件保留。`osdk-cache` 分开列出模型和下载缓存；模型须用独立的 `--remove-models` 管理操作，下载缓存可进入回收站。引用只覆盖指定范围，单链接不代表未使用。
 
-浏览器网站数据可用 `sweepx site-storage` 按域名查看；支持默认位置的 CacheStorage、IndexedDB 和现代 WebStorage。共享数据库及 HTTP 缓存只统计整体大小，逻辑大小不代表可释放空间。程序现已[内置 Chrome/Edge 扩展及本地通信组件](integrations/chromium-cleanup/README.md)：`sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension` 导出，`register --browser chrome --bundle /absolute/SweepX-Browser-Extension` 注册；首次需在浏览器加载扩展。扩展现有网站存储工作台，支持占用概览、搜索排序、分区明细和独立清理确认；也可不连接 SweepX，直接输入精确域名或 HTTP(S) origin 清理，大小显示未知。连接本地组件用于磁盘占用清单；待确认请求区分无请求、过期、目标不匹配和读取错误。清除没有回收站，不能按单个 bucket 删除；用户已在 Edge 展示实际域名明细，实际删除仍待验收。本地更新可用 `bundle --output /absolute/SweepX-Browser-Extension --update` 写回同一目录，再重新加载扩展并重新打开工作台；路径不变时无需重新注册通信组件，未提供商店自动更新。旧 `--trash-origin` / `--browse` 继续拒绝直接文件清理。详见 [CLI 说明](site/cli.md#browser-extension)。
+浏览器网站数据可用 `sweepx site-storage` 按域名查看；支持默认位置的 CacheStorage、IndexedDB 和现代 WebStorage。共享数据库及 HTTP 缓存只统计整体大小，文件大小不代表可释放空间。程序现已[内置 Chrome/Edge 扩展及本地通信组件](integrations/chromium-cleanup/README.md)：`sweepx browser-extension bundle --output /absolute/SweepX-Browser-Extension` 导出，`register --browser chrome --bundle /absolute/SweepX-Browser-Extension` 注册；首次需在浏览器加载扩展。扩展现有网站存储工作台，支持占用概览、搜索排序、分区明细和独立清理确认；也可不连接 SweepX，直接输入精确域名或 HTTP(S) origin 清理，大小显示未知。连接本地组件用于磁盘占用清单；待确认请求区分无请求、过期、目标不匹配和读取错误。清除没有回收站，不能按单个 bucket 删除；用户已在 Edge 展示实际域名明细，实际删除仍待验收。本地更新可用 `bundle --output /absolute/SweepX-Browser-Extension --update` 写回同一目录，再重新加载扩展并重新打开工作台；路径不变时无需重新注册通信组件，未提供商店自动更新。旧 `--trash-origin` / `--browse` 继续拒绝直接文件清理。详见 [CLI 说明](site/cli.md#browser-extension)。
 
 ## 安装
 
@@ -137,7 +137,7 @@ cargo run -p sweepx-cli -- junk --system --clean-temp
 
 规则加载、类型校验与纯评估已合并到 `sweepx-catalog`，分别保留 `schema` / `vm` 模块，减少内部包依赖。 平台契约和三个实现统一到 `sweepx-platform::{linux,macos,windows}`；仅需契约的调用方可不启用后端。
 
-分类扫描的目录行、marker、覆盖信息与可选文件索引共用字节预算。默认 macOS 垃圾扫描关闭可选文件索引保留，逻辑长度逐批累加时不再为每个文件复制祖先路径列表。预算紧张时先丢弃可重建索引；若分类证据仍无法保留，报告标记 partial，并在 human 输出说明可能遗漏。内置规则只保留实际需要的项目 marker。
+分类扫描的目录行、marker、覆盖信息与可选文件索引共用字节预算。默认 macOS 垃圾扫描关闭可选文件索引保留，文件长度逐批累加时不再为每个文件复制祖先路径列表。预算紧张时先丢弃可重建索引；若分类证据仍无法保留，报告标记 partial，并在 human 输出说明可能遗漏。内置规则只保留实际需要的项目 marker。
 
 进度日志也有保留上限；仅截断进度不会把完整扫描变成 partial。错误计数、取消和真实资源不足独立保留，现场会话继续收到可靠错误与终态。
 
@@ -148,13 +148,13 @@ Linux 临时对象的隔离预览与执行已独立为 core 服务，CLI 负责�
 `junk --system --rule RULE_ID` 可重复指定类别，普通报告和 TUI 均适用；未选择的类别不在本次扫描范围内。规则 ID 必须适用于当前平台。默认 `--system` 仍扫描全部支持类别，原生受保护目录调用可能等待系统响应。npm 默认目录在 Unix 为 `~/.npm`，Windows 为 `%LOCALAPPDATA%/npm-cache`；只报告具备 `content-v2` 和 `index-v5` 目录的 `_cacache` 下载缓存，保留 `_npx` 与自定义同级内容。工具回答不可用时，活动保持 unknown。pnpm 的 256 分片识别允许普通 `.DS_Store` 元数据文件，其他额外条目仍拒绝。
 
 
-[项目产物细分约定](docs/architecture/project-artifact-details-2026-10-07.md)：`junk --details ROOT` 可查看嵌套规则：Rust 增量缓存、依赖与测试产物、构建脚本输出、编译指纹、示例程序及常规 `--target` 构建分组；Python `.venv`/`venv` 和 Vite `.vite/deps` 另外核验当前、有界的格式签名。Rust 子项要求普通 `.cargo-lock`、原生 debug/release 父目录和常规 target 祖先链；目标分组还需编译器信息与 cache-tag 文件。不解析自定义 profile/build 路径。这些规则均只报告，恢复所需输入、夹杂的个人文件和进程活动仍未验证。TUI 显示中文/英文类别，并保留只读目录细分。JSON 增加 `entryId`、`parentCandidateEntryId`、`detailsIncluded`、`topLevelCandidateCount`、`sizeSummaryScope`；ID 只用于本次扫描的分组，不授权操作。子项字节已包含在上层目录中，汇总只计不重叠的上层候选；分配/逻辑占用不证明实际可释放空间。`--details` 与清理选项冲突。
+[项目产物细分约定](docs/architecture/project-artifact-details-2026-10-07.md)：`junk --details ROOT` 可查看嵌套规则：Rust 增量缓存、依赖与测试产物、构建脚本输出、编译指纹、示例程序及常规 `--target` 构建分组；Python `.venv`/`venv` 和 Vite `.vite/deps` 另外核验当前、有界的格式签名。Rust 子项要求普通 `.cargo-lock`、原生 debug/release 父目录和常规 target 祖先链；目标分组还需编译器信息与 cache-tag 文件。不解析自定义 profile/build 路径。这些规则均只报告，恢复所需输入、夹杂的个人文件和进程活动仍未验证。TUI 显示中文/英文类别，并保留只读目录细分。JSON 增加 `entryId`、`parentCandidateEntryId`、`detailsIncluded`、`topLevelCandidateCount`、`sizeSummaryScope`；ID 只用于本次扫描的分组，不授权操作。子项字节已包含在上层目录中，汇总只计不重叠的上层候选；文件大小与占用空间都不证明实际可释放空间。`--details` 与清理选项冲突。
 
-Linux/macOS/Windows 的普通 `junk` 报告与垃圾 TUI 使用当前原生文件长度观测：Linux 用相对保留父目录的 no-follow `statx` 核对类型、长度、设备和 mount ID；macOS 使用本次 `getattrlistbulk`；Windows 使用当前目录枚举批次的在线普通文件长度，排除 reparse、offline/recall、设备项与无效身份。垃圾入口省去完整文件条目和可选文件索引，macOS 默认不查询 FSEvents。目录、规则 marker 与候选仍现场遍历，缺失或不合格事实回到普通检查；分配大小、硬链接唯一性与可释放空间保持 unknown。普通 `scan`、大文件、重复内容及要求完整文件事实的调用方沿用完整原生观察。可用 `junk --timings` 查看实际阶段耗时；稳定字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 仍为 0。可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
+Linux/macOS/Windows 的普通 `junk` 报告与垃圾 TUI 使用当前原生文件长度观测：Linux 用相对保留父目录的 no-follow `statx` 核对类型、长度、设备和 mount ID；macOS 使用本次 `getattrlistbulk`；Windows 使用当前目录枚举批次的在线普通文件长度，排除 reparse、offline/recall、设备项与无效身份。垃圾入口省去完整文件条目和可选文件索引，macOS 默认不查询 FSEvents。目录、规则 marker 与候选仍现场遍历，缺失或不合格事实回到普通检查；分配大小、硬链接唯一性与可释放空间保持 unknown。普通 `scan` 的导出、大文件、重复内容及要求完整文件事实的调用方沿用完整原生观察；普通目录 TUI 的深层文件使用相同的当前长度接口。可用 `junk --timings` 查看实际阶段耗时；稳定字段 `rootCacheValidation`、`subtreeCacheValidation` 保留为接近零的阶段边界，`rootCacheHits` 仍为 0。可复现测量与剩余任务见 [设计审视](docs/architecture/design-review-2026-10-01.md)。
 
 普通扫描详情共享 128 MiB 保留估算，包含原生祖先身份链和容器开销；超限明确截断详情，保留已累计的递归统计及独立大文件观察。该额度不是全进程 RSS 上限。目录句柄 frontier 默认 128，宽目录延后同级目录并优先深入子树，为共享原生 I/O 额度保留余量。
 
-`scan --large-files --min-file-bytes 104857600 --top-files 100 ROOT...` 在同一次元数据遍历中输出独立大文件榜单。默认阈值 100 MiB、最多 100 行保留结果；阈值包含等于，排序按逻辑大小降序，分配大小单独显示，未知不当作零。human 大文件表最多显示 40 行，JSON 的 `data.largeFiles` 保留全部 top-K、计数和覆盖缺口；普通扫描列表截断不会漏掉后半段的大文件。只观察普通文件，不读内容、不沿链接越界，也不把大小变成垃圾或删除授权。加上 `--tui` 可动态浏览榜单并显式选择文件移到回收站；大小本身不提供回收依据。
+`scan --large-files --min-file-bytes 104857600 --top-files 100 ROOT...` 在同一次元数据遍历中输出独立大文件榜单。默认阈值 100 MiB、最多 100 行保留结果；阈值包含等于，排序按文件大小降序，占用空间单独显示，未知不当作零。human 大文件表最多显示 40 行，JSON 的 `data.largeFiles` 保留全部 top-K、计数和覆盖缺口；普通扫描列表截断不会漏掉后半段的大文件。只观察普通文件，不读内容、不沿链接越界，也不把大小变成垃圾或删除授权。加上 `--tui` 可动态浏览榜单并显式选择文件移到回收站；大小本身不提供回收依据。
 
 `scan --duplicates --min-duplicate-bytes 1024 ROOT...` 显式读取本地普通文件，先按大小及头尾采样筛选，再计算完整 SHA-256 并复验原生身份、大小和变化指纹。硬链接别名排除；采样相同不作为重复证明。默认最多保留 20,000 个对象、扣除 8 GiB 内容范围预算，内容阶段合作期限 30 秒；可用 `--duplicate-max-files`、`--duplicate-read-bytes`、`--duplicate-deadline-ms` 调整。失败读取仍扣预算，云占位/不支持的 provider、变化和资源不足保持明确缺口并返回 partial。JSON 的 `data.duplicates` 保留完整组、计数及不完整原因，human 最多显示 40 个文件路径；未启用时普通 scan 不增加此字段。结果不选择保留者、不证明可丢弃或可回收空间；与 `--large-files` 互斥。加上 `--tui` 可动态查看内容组，按 `p` 为每组明确选择保留者，选择其他副本后按 `d` 回收；整个扫描必须完整结束，后台会按原预算重读内容并复验保留者/所选文件，变化或未知则拒绝，不自动选择或永久删除。`r/R` 全量刷新、`c` 取消，刷新清除保留者选择。
 
@@ -168,7 +168,7 @@ macOS 垃圾扫描的多根缓存发布共用一次归属分组，普通报告�
 
 `junk --tui` 在 macOS、Linux、Windows 的会话存续期间默认持续监听文件系统变更，自动刷新受影响的目录及必要祖先，不进入无关兄弟子树。监听在遍历前安装；扫描期间的新事件留给下一轮，短时连续变更合并处理。新增或删除的候选也按目录范围发现/撤下，`.git` 内变更扩展到仓库范围。祖先旧总量保持历史，局部结果不宣称整根当前精确。通知丢失、溢出或根身份变化会完整重扫；监听失败提示 `watch_unavailable`，完成一次完整回退后停用自动刷新，手动刷新仍可用。`c` 取消并暂停自动刷新，`r/R` 重新观察后恢复；退出结束监听。回收与 Linux 隔离预览/执行原子持有扫描准入，监听继续积累变更，操作结束再刷新。只监听当前发现的目录根；独立 Linux 临时对象事实仍需全量刷新，新增范围之外的系统根需 `R` 重新发现。一次性 `junk`、普通 `scan`、大文件与重复内容视图不启动常驻监听；本轮没有跨进程后台服务或凭空的整树缓存命中。
 
-候选解释完成且工作线程空闲后，`junk --tui` 的 `Enter` 打开只读目录细分；例如从 `target` 进入 `debug`、`incremental`，继续查看文件。当前层先列出，子目录大小由同一个后台详情扫描器回填；逻辑大小与文件系统报告分配空间分开显示，未知及下限保持明确。细分保留原扫描根及完整原生身份链，不沿链接或越过卷边界；身份变化则标记 stale。`Space` 记下最多 32 个待核验路径，`p` 查看完整路径，`q` 返回候选；退出 TUI 后打印最近一次细分的清单。清单只供讨论，不是执行计划、垃圾分类或删除授权，不累计释放量，细分内 `d/Delete` 不触发回收。查看期间暂缓自动刷新准入，监听继续积累事件，退出细分后恢复处理。历史行需先刷新；Linux 独立临时对象仍走隔离流程。
+候选解释完成且工作线程空闲后，`junk --tui` 的 `Enter` 打开只读目录细分；例如从 `target` 进入 `debug`、`incremental`，继续查看文件。当前层先列出，子目录大小由同一个后台详情扫描器回填；大小与占用空间分开显示，未知及下限保持明确。细分保留原扫描根及完整原生身份链，不沿链接或越过卷边界；身份变化则标记 stale。`Space` 记下最多 32 个待核验路径，`p` 查看完整路径，`q` 返回候选；退出 TUI 后打印最近一次细分的清单。清单只供讨论，不是执行计划、垃圾分类或删除授权，不累计释放量，细分内 `d/Delete` 不触发回收。查看期间暂缓自动刷新准入，监听继续积累事件，退出细分后恢复处理。历史行需先刷新；Linux 独立临时对象仍走隔离流程。
 
 扫描因取消或资源缺口未完成范围观察时保留已显示的候选；后续完整刷新会移除该范围内不再匹配的行，包括先前取消时留下的基础候选。缓存预览和未完成解释的基础行没有局部刷新绑定，按 `r` 会重扫全部根；已解释的目录行仍可局部刷新。会话的呈现索引和 CLI 私有结果表各自限制为最多 16,384 行及 64 MiB 保留估算，跨失败/取消刷新累计，不随新一轮扫描重置；拒收新行或更新时保留相应旧证据并停止本轮，视图不完整且不能回收；已由完整观察确认失效的行仍会撤下。这些额度与扫描候选、事件队列及界面预算独立，不是进程 RSS 上限。
 

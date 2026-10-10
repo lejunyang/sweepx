@@ -167,7 +167,7 @@ fn display_plan(preview: &TempCleanPreview) -> Result<String, String> {
     for item in &plan.candidates {
         let path = serde_json::to_string(&item.path).map_err(|error| error.to_string())?;
         let row = format!(
-            "\n{path} [{}]\n  logical={} allocated={} entries={}\n  device={} inode={} ownerUid={} ownerGid={} mode={:o}\n  modified={}.{:09} changed={}.{:09}\n  recursiveAccess={}.{:09} recursiveActivity={}.{:09}\n",
+            "\n{path} [{}]\n  sizeBytes={} onDiskBytes={} entries={}\n  device={} inode={} ownerUid={} ownerGid={} mode={:o}\n  modified={}.{:09} changed={}.{:09}\n  recursiveAccess={}.{:09} recursiveActivity={}.{:09}\n",
             item.inode_type,
             item.logical_bytes,
             item.allocated_bytes,

@@ -8,7 +8,7 @@
 
 ## 2026-10-11 补充：普通目录浏览的大小与进度
 
-普通 human scan 与目录 TUI 默认按文件字节数（目录使用 `apparent_logical_bytes`）排序，摆脱 allocation/reclaimability unknown 导致的路径排序。普通 TUI 使用名称、类型、大小、状态四列；完整、未完成的累计值与无法读取仍不同。内部和 JSON 保留逻辑长度、分配、可释放估计的独立字段；垃圾占用详情仍按分配排序，不复用逻辑长度代替其完整文件事实。
+普通 human scan 与目录 TUI 默认按文件字节数（目录使用 `apparent_logical_bytes`）排序，摆脱 allocation/reclaimability unknown 导致的路径排序。普通 TUI 使用名称、类型、大小、状态四列；垃圾 TUI、大文件榜单、回收结果和网站存储也使用“大小 / Size”，磁盘分配量展示为“占用空间 / On disk”。human junk 的既有候选度量逐行标注大小或占用空间，汇总不再称作可释放量；完整、未完成的累计值与无法读取仍不同。内部和 JSON 保留逻辑长度、分配、可释放估计的独立字段；垃圾占用详情仍按分配排序，不复用逻辑长度代替其完整文件事实。
 
 `rescan_logical_with_progress` 与既有 identity-bound detail traversal 共用根/lineage 准入、DFS、批次验证、目录句柄上限、取消与结果发布。直接列表项和目录仍完整检查，只有不保留为可操作行的深层普通文件可用 `observe_file_length`，并验证返回的 path/native name 与当前 child token 一致。返回 None/不一致则回完整检查。系统接口自行限定当前批次、类型、设备/provider/挂载资格；不读取旧缓存，也不从空 FSEvents 推导整树命中。贡献 cheap length 的聚合只建立文件大小；unique、allocated、reclaimable 置 unknown。完整观察 API 保留给垃圾详情与其他需要完整事实的调用者。
 
@@ -253,7 +253,7 @@ macOS 的 Full Disk Access 不是 root，也不是完整 coverage 证明；sandb
 3. reclaimable_estimate 是带 confidence 的候选估计，可以 unknown。它不能由前两者简单复制。
 4. 动作后的 caller-visible free-space delta 属于删除/审计层的事后观测，不是扫描值；Windows caller available、Linux f_bavail 与 macOS important-usage capacity 也不能横向当成同一口径。
 
-null/Unknown 与 Known(0) 不同。对外使用 logical size、filesystem-reported allocated size、potentially reclaimable、scan incomplete、unknown；不得使用 exact disk usage、will free、unused 或 safe to delete。
+null/Unknown 与 Known(0) 不同。用户界面使用“大小 / Size”、“占用空间 / On disk”及明确的扫描状态；技术和 JSON 字段继续区分 logical size、filesystem-reported allocated size 与 potentially reclaimable；不得使用 exact disk usage、will free、unused 或 safe to delete。
 
 ### 5.2 sparse、compression 与共享 extent
 

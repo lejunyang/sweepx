@@ -875,7 +875,7 @@ fn measure_tree(
                     logical = logical
                         .checked_add(u128::from(metadata.len()))
                         .ok_or_else(|| {
-                            InspectError::Incomplete("logical size total overflowed".into())
+                            InspectError::Incomplete("file size total overflowed".into())
                         })?;
                     if metadata.nlink() > 1 {
                         hardlinks

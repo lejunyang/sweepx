@@ -291,7 +291,7 @@ fn print_bulk_intent(
         Locale::ZhCn => {
             println!("移到系统回收站");
             println!("  候选：{count} 个；跳过（覆盖或项目执行证据不足）：{skipped} 个");
-            println!("  已统计逻辑大小：{total} 字节");
+            println!("  已统计大小：{total} 字节");
             println!("  模式：系统回收站；可恢复；不永久删除；无需再确认");
             for item in items {
                 println!("    {} [{}]", item.path, item.rule_id);
@@ -302,7 +302,7 @@ fn print_bulk_intent(
             println!(
                 "  candidates: {count}; skipped (incomplete coverage or project execution evidence): {skipped}"
             );
-            println!("  accounted logical size: {total} bytes");
+            println!("  accounted size: {total} bytes");
             println!(
                 "  mode: operating-system Trash; recoverable; never permanent; no further prompt"
             );

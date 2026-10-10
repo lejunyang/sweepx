@@ -3598,8 +3598,8 @@ fn inspection_help(locale: Locale) -> &'static str {
 
 fn allocated_label(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhCn => "报告分配",
-        Locale::EnUs => "Allocated",
+        Locale::ZhCn => "占用空间",
+        Locale::EnUs => "On disk",
     }
 }
 
@@ -4041,7 +4041,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            screen.contains("Allocated")
+            screen.contains("On disk")
                 && screen.contains("Read-only breakdown")
                 && screen.contains("31 / 32")
         );

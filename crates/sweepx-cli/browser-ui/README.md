@@ -31,7 +31,7 @@ a native host, or invokes the actual browsingData API. The preview entry and fix
 are **not exported** in the extension bundle. HTTP preview verification is separate
 from installation and actual browser-managed removal acceptance.
 
-The presentation model preserves unknown/lower-bound logical sizes and unfamiliar
+The presentation model preserves unknown/lower-bound file sizes and unfamiliar
 partition keys. Domain and storage-detail pages create at most 50 rows each, while
 totals include the bounded complete inventory. Scan responses remain staged until
 completion. Language and target preferences use a small, optional localStorage value;

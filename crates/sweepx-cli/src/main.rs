@@ -179,13 +179,13 @@ enum Commands {
         /// Browse directories with live paths and file sizes, or show --large-files/--duplicates results.
         #[arg(long)]
         tui: bool,
-        /// Rank ordinary files by logical size; report-only unless explicitly selected in --tui.
+        /// Rank ordinary files by size; report-only unless explicitly selected in --tui.
         #[arg(long)]
         large_files: bool,
         /// Read local content for SHA-256 groups; --tui requires choosing a keeper before Trash.
         #[arg(long, conflicts_with = "large_files")]
         duplicates: bool,
-        /// Inclusive logical-byte threshold for --duplicates (default 1 KiB).
+        /// Inclusive file-size threshold in bytes for --duplicates (default 1 KiB).
         #[arg(long, requires = "duplicates", default_value_t = 1024)]
         min_duplicate_bytes: u128,
         /// Total attempted content-range bytes; failed reads remain charged (default 8 GiB).
@@ -197,7 +197,7 @@ enum Commands {
         /// Cooperative content-phase deadline in milliseconds (default 30000, maximum 300000).
         #[arg(long, requires = "duplicates", default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=300000))]
         duplicate_deadline_ms: u64,
-        /// Inclusive exact logical-byte threshold for --large-files (default 100 MiB).
+        /// Inclusive exact file-size threshold in bytes for --large-files (default 100 MiB).
         #[arg(long, requires = "large_files", default_value_t = 100 * 1024 * 1024)]
         min_file_bytes: u128,
         /// Retain the largest K file paths; ties follow native observation order.
@@ -341,7 +341,7 @@ enum Commands {
     OsdkCache(managed_cache::Arguments),
     /// Report Chromium site data by domain, preserving each full storage key and bucket.
     /// Native scans cover default macOS/Linux/Windows profile locations. Shared databases remain
-    /// unattributed; byte totals are logical and do not establish disposable or reclaimable space.
+    /// unattributed; totals sum file bytes and do not establish disposable or reclaimable space.
     SiteStorage {
         /// Restrict discovery to a browser/channel label, e.g. edge or chrome on macOS/Linux.
         #[arg(long)]
@@ -1766,8 +1766,14 @@ fn run_junk_scan(
                 (_, false, true) => String::new(),
             };
             println!(
-                "{risk:<4} {:>12}  {rule:<18} {path}{git_note}{format_note}{context_note}{execution_note}",
+                "{risk:<4} {:>12} {size_kind:<8} {rule:<18} {path}{git_note}{format_note}{context_note}{execution_note}",
                 junk_size_label(&candidate.reclaimable, size_unit),
+                size_kind = match (context.locale(), candidate.size_is_logical) {
+                    (sweepx_i18n::Locale::ZhCn, true) => "大小",
+                    (sweepx_i18n::Locale::ZhCn, false) => "占用空间",
+                    (sweepx_i18n::Locale::EnUs, true) => "Size",
+                    (sweepx_i18n::Locale::EnUs, false) => "On disk",
+                },
                 risk = candidate.risk,
                 rule = candidate.rule_id,
                 path = candidate.path,
@@ -1818,7 +1824,7 @@ fn run_junk_scan(
             "{}",
             match (context.locale(), clean.enabled) {
                 (sweepx_i18n::Locale::ZhCn, true) => format!(
-                    "汇总：{} 个候选，已统计可回收 {}{}；{} 项为下限或未知；尚未移动，下一步将展示精确确认计划。",
+                    "汇总：{} 个候选，已统计候选大小 {}{}；{} 项为下限或未知；尚未移动，下一步将展示精确确认计划。",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
                     known_reclaimable
@@ -1827,7 +1833,7 @@ fn run_junk_scan(
                     incomplete_size_count,
                 ),
                 (sweepx_i18n::Locale::EnUs, true) => format!(
-                    "Summary: {} candidates, {}{} accounted reclaimable; {} lower-bound or unknown sizes; nothing has moved yet, and an exact confirmation plan follows.",
+                    "Summary: {} candidates, {}{} accounted candidate size; {} lower-bound or unknown sizes; nothing has moved yet, and an exact confirmation plan follows.",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
                     known_reclaimable
@@ -1836,7 +1842,7 @@ fn run_junk_scan(
                     incomplete_size_count,
                 ),
                 (sweepx_i18n::Locale::ZhCn, false) => format!(
-                    "汇总：{} 个候选，已统计可回收 {}{}；{} 项为下限或未知；没有执行删除。",
+                    "汇总：{} 个候选，已统计候选大小 {}{}；{} 项为下限或未知；没有执行删除。",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
                     known_reclaimable
@@ -1845,7 +1851,7 @@ fn run_junk_scan(
                     incomplete_size_count,
                 ),
                 (sweepx_i18n::Locale::EnUs, false) => format!(
-                    "Summary: {} candidates, {}{} accounted reclaimable; {} lower-bound or unknown sizes; nothing was deleted.",
+                    "Summary: {} candidates, {}{} accounted candidate size; {} lower-bound or unknown sizes; nothing was deleted.",
                     candidates.len(),
                     if incomplete_size_count > 0 { ">= " } else { "" },
                     known_reclaimable
@@ -1853,6 +1859,15 @@ fn run_junk_scan(
                         .unwrap_or_else(|| "unknown".to_string()),
                     incomplete_size_count,
                 ),
+            }
+        );
+        println!(
+            "{}",
+            match context.locale() {
+                sweepx_i18n::Locale::ZhCn =>
+                    "大小按文件字节数累计；占用空间由文件系统报告。候选大小不代表清理后实际释放量。",
+                sweepx_i18n::Locale::EnUs =>
+                    "Size sums file bytes; on-disk space is reported by the filesystem. Candidate size is not the amount cleanup will free.",
             }
         );
         if clean.details {

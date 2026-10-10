@@ -90,9 +90,9 @@ pub(crate) fn run(
         println!(
             "{}",
             if zh {
-                "域名汇总（逻辑大小；网站数据不自动视为垃圾）："
+                "域名汇总（文件大小；网站数据不自动视为垃圾）："
             } else {
-                "Domains (logical size; site data is not automatically junk):"
+                "Domains (file size; site data is not automatically junk):"
             }
         );
         for row in output["domains"].as_array().into_iter().flatten() {

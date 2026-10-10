@@ -344,7 +344,7 @@ scan_timestamp, scan_root, scanner_version, errors[]
 - metadata/content 访问在每个 cloud provider 上都不会触发 hydration；
 - 一个与 Explorer/Finder、`du`、`df`、quota、purgeable 与删除后 free-space 同时一致的单一大小。
 
-因此对外文案应使用：`logical size`、`filesystem-reported allocated size`、`potentially reclaimable`、`observed open at <time>`、`scan incomplete`、`unknown`。除非有更强的领域规则与执行后测量，不应写 `exact disk usage`、`will free`、`unused`、`safe to delete` 或 `guaranteed unrecoverable`。
+这些技术证据区分 `logical size`、`filesystem-reported allocated size`、`potentially reclaimable`、`observed open at <time>`、`scan incomplete`、`unknown`。当前用户界面以“大小 / Size”表示文件字节数，“占用空间 / On disk”表示系统报告的分配量；内部和机器字段保留各自的口径。除非有更强的领域规则与执行后测量，不应写 `exact disk usage`、`will free`、`unused`、`safe to delete` 或 `guaranteed unrecoverable`。
 
 ## 最终保守策略
 
